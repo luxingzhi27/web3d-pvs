@@ -557,3 +557,35 @@ node scripts/benchmark_m9_spatial_index.mjs --samples 128 --far 2000 \
 
 当前结论是：分页格式和后退相机口径已修正，候选集合审计通过，但动态候选特征拼接存在额外成本，尚未达到默认接入条件。默认前端继续使用
 `pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best`；分页资产仅作为后续局部页大小、候选缓冲复用和移动端实测的实验入口。
+
+## 8.8 三次有效主体 GLB smoke（2026-08-02）
+
+### 执行方式
+
+本轮保留了一次错误入口的失败记录 `run1.json`：直接访问 `https://www.liteweb3d.com/?scene=hkust-v3` 得到 404，未观测到 viewer 初始化，因此不纳入性能统计。随后使用当前本地前端启动 Parcel，只把
+`glbResourcesBaseUrl` 查询参数指向 `https://www.liteweb3d.com/data/hkust-v3/`，分别在端口 34361、34362、34363 执行三次独立 headless Chrome smoke。原始 JSON/JSONL 和汇总文件位于：
+
+```text
+neural_instance_culling/benchmark/out/m9_remote_hkust_smoke_20260802/run2.json
+neural_instance_culling/benchmark/out/m9_remote_hkust_smoke_20260802/run3.json
+neural_instance_culling/benchmark/out/m9_remote_hkust_smoke_20260802/run4.json
+neural_instance_culling/benchmark/out/m9_remote_hkust_smoke_20260802/summary.json
+```
+
+汇总由 `slm2viewer/scripts/summarize_m9_runtime_runs.mjs` 生成，只把同时满足 Cold-0、Worker WebGPU、无运行时错误、实例级证据和视锥刷新证据的运行计入分布。
+
+### 结果
+
+| 指标 | p50 | p95 | p99 | 样本数 |
+|---|---:|---:|---:|---:|
+| 首次预测耗时（ms） | 338.0 | 349.2 | 350.2 | 3 |
+| 推理总耗时（ms） | 1507.1 | 1607.2 | 1616.1 | 3 |
+| WebGPU 推理（ms） | 1495.8 | 1597.4 | 1606.4 | 3 |
+| 后处理（ms） | 9.6 | 11.1 | 11.3 | 3 |
+| 候选 AABB 查询（ms） | 4.2 | 7.9 | 8.2 | 3 |
+
+三次运行均观测到 5,959 个后退相机候选、5,087 个原始预测实例和 4,928 个最终实例；真实相机 FOV 为 `60°`，模型/后退相机 FOV 为 `66°`。三次均满足：首个目标 GLB 请求发生在首轮预测完成之后、`worker-webgpu` 为最终后端、实例级显示证据存在、真实相机移动后独立视锥刷新被调用、`renderOutsideRaw=0`、页面/加载/请求错误为 0。每次只对有限抽样的 GLB 响应检查 `glTF` 魔数，未将未抽样响应当作完整资源内容证明。
+
+### 质量判断
+
+M9 的有效主体资源和实例级正确性子门得到三次重复证据；该结果仍不是完整漫游的规模 benchmark。三次运行来自同一固定初始姿态、服务器 headless Chrome，适配器不是移动设备硬件证据，且候选规模没有覆盖分桶。因此 M9 的移动端性能门和多轨迹 p95 门保持未通过，不能把 `1.6 s` 量级的桌面 smoke 外推为移动端结论。

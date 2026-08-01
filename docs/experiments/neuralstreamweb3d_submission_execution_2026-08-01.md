@@ -210,3 +210,29 @@ M4 队列脚本原先把等待中的外部训练任务写成固定进程号。�
 ### 质量判断
 
 该变更保留为正式实验基础设施修复。它不改变数据、模型、损失、阈值或评测口径，也不改变当前 M4 的科学结果；后续矩阵运行不再依赖本机历史进程号。
+
+## 2026-08-02 M9 三次有效主体资源 smoke
+
+### 目的与命令
+
+本地前端直接访问远端站点根路径时得到 404，第一次复测没有初始化 viewer，已作为排除记录保留。随后按照 M9 文档的正确入口，启动本地 Parcel，并通过 `glbResourcesBaseUrl` 指向已部署的 HKUST 主体 GLB，执行三次独立 headless Chrome 观测。原始报告位于 `neural_instance_culling/benchmark/out/m9_remote_hkust_smoke_20260802/`，汇总由 `slm2viewer/scripts/summarize_m9_runtime_runs.mjs` 生成。
+
+每次命令的核心参数为：
+
+```bash
+node slm2viewer/scripts/benchmark_webgpu_runtime.mjs \
+  --start-server --scene hkust-v3 --port <34361|34362|34363> \
+  --url 'http://127.0.0.1:<port>/?scene=hkust-v3&glbResourcesBaseUrl=https%3A%2F%2Fwww.liteweb3d.com%2Fdata%2Fhkust-v3%2F' \
+  --duration-ms 30000 --settle-ms 10000 --wait-for prediction \
+  --executable-path /usr/bin/google-chrome
+```
+
+### 结果与判断
+
+- 三次均为 `completed-observation`，最终后端为 `worker-webgpu`，页面、加载和请求错误均为 0。
+- Cold-0 三次通过：首个目标 GLB 请求均发生在首轮预测完成之后。
+- 三次均观测到实例级显示、真实相机移动后的独立视锥刷新和 `renderOutsideRaw=0`；FOV 观测为真实 `60°`、模型/后退 `66°`。
+- 推理总耗时 p50/p95/p99 为 `1507.1/1607.2/1616.1 ms`；WebGPU 推理 p50/p95/p99 为 `1495.8/1597.4/1606.4 ms`。
+- 三次候选数均为 `5,959`，原始预测实例均为 `5,087`，最终实例均为 `4,928`。
+
+该结果使 M9 的有效主体资源、实例级过滤和 Cold-0 顺序子门获得重复证据，但仍不是多轨迹、候选规模分桶或移动设备 benchmark。服务器 headless Chrome/SwiftShader 的耗时不进入移动端性能表，M9 总门继续保持未通过。
