@@ -376,7 +376,7 @@ agg precision `0.0911073`，平均预测 `11,481.48`、平均候选 `11,481.53`�
 Metropolis 方向数据集按原始构件粒度包含 `41,298` 个实例，训练时上下文证据会把当前 pose 的目标实例和
 证据来源同时展开。`retry2` 使用两 pose 批次，在第一个 epoch 中触发 `torch.OutOfMemoryError`，当时
 可见显存不足约 `2.61 GiB`；这不是通过减少候选、修改 GT 或替换点云缓存解决的问题。新队列配置仅将
-批处理改为逐 pose，并降低离线特征导出峰值；如果 retry3 仍失败，将保留日志并把 M11 少样本适配降级为
+批处理和冻结 test 评测均改为默认逐 pose，并降低离线特征导出峰值；如果 retry3 仍失败，将保留日志并把 M11 少样本适配降级为
 “资源边界未建立”，不伪造跨场景收益。
 
 移动端目前没有实体 Android 设备、ADB 和可核验的硬件 WebGPU 适配器，因此 M10 仍只保留测试方案和
@@ -393,3 +393,9 @@ Wi-Fi/受控 4G、三条轨迹、每条件至少 30 次有效运行、p50/p95/p9
 新增 `neural_instance_culling/benchmark/run_m8_formal_trajectory_replay.sh`，按 runner 粒度拆成
 当前级联和独立排序两组，分别使用 `current-cascade` 与 `independent-utility`，并在相同轨迹、成本索引和
 预算下运行。新结果使用 `m8_formal_*_20260802_retry1` 命名，避免覆盖旧失败目录和历史 `w042` replay。
+
+回放已完成。固定离线条件下，HKUST 当前级联的最终弱效用召回为 `0.8749 ± 0.0153`，独立 RankNet 为
+`0.8542 ± 0.0175`；Metropolis 当前级联为 `0.9059 ± 0.0170`，独立 RankNet 为 `0.6700 ± 0.0227`。
+20 MiB 工作点的对应弱效用召回为 HKUST `0.1982/0.1948`、Metropolis `0.3004/0.1509`（当前级联/RankNet）。
+这些数字来自三条确定性离线轨迹的均值和样本标准差，不是移动设备或真实网络测量；M8 仍保留 No-Go，
+因为缺少多种子 paired bootstrap、真实 4G/Wi-Fi trace、图像效用和硬件解码/上传成本。

@@ -131,7 +131,7 @@ calibration 后，在 GPU 3 上依次运行 1%、5%、10% 三个独立输出目�
 stderr 保留为显存边界证据，没有复用其不完整输出。
 
 为解决这个与场景规模相关的运行资源问题，队列默认追加 `retry3` 后缀，使用单 pose 训练批次、
-`feature-export-batch-size=128`、可选 AMP（默认开启）和 `expandable_segments:True`。这些参数只改变
+`feature-export-batch-size=128`、冻结 test 默认单 pose、可选 AMP（默认开启）和 `expandable_segments:True`。这些参数只改变
 训练的显存占用和批处理方式，不截断候选、不补入 GT、也不改变 validation/calibration/test 的数据
 语义；retry3 完成前不记录任何少样本指标。
 

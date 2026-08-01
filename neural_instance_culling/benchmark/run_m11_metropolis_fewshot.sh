@@ -22,6 +22,7 @@ POSE_SET_BATCH_SIZE="${SLM_M11_FEWSHOT_POSE_SET_BATCH_SIZE:-1}"
 FEATURE_EXPORT_BATCH_SIZE="${SLM_M11_FEWSHOT_FEATURE_EXPORT_BATCH_SIZE:-128}"
 USE_AMP="${SLM_M11_FEWSHOT_AMP:-1}"
 CUDA_ALLOC_CONF="${SLM_M11_FEWSHOT_CUDA_ALLOC_CONF:-expandable_segments:True}"
+EVAL_POSES_PER_BATCH="${SLM_M11_FEWSHOT_EVAL_POSES_PER_BATCH:-1}"
 
 TRAIN_MEMORY_ARGS=(
   --pose-set-batch-size "$POSE_SET_BATCH_SIZE"
@@ -94,7 +95,7 @@ run_fraction() {
       neural_instance_culling/benchmark/evaluate_frozen_test.py evaluate \
       --models "$experiment" --manifest "$manifest" --dataset-dir "$DATASET" \
       --runtime-meta "$RUNTIME_META" --glb-index "$GLB_INDEX" --glb-root "$GLB_ROOT" \
-      --output-dir "$test_out" --poses-per-batch 4 --device cuda \
+      --output-dir "$test_out" --poses-per-batch "$EVAL_POSES_PER_BATCH" --device cuda \
       >"$BENCH_ROOT/${experiment}_test_stdout.log" 2>"$BENCH_ROOT/${experiment}_test_stderr.log"
   else
     printf '[m11-fewshot] no safe calibration workpoint for %s; continuing\n' "$experiment"
