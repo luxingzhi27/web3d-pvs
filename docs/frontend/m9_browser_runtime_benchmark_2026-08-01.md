@@ -498,3 +498,39 @@ node scripts/benchmark_m9_spatial_index.mjs --samples 128 --far 2000 \
 ### 当前结论与风险
 
 本轮证明空间索引不会漏掉或新增候选实例，候选元数据也已经能被前端和审计工具读取。它没有证明当前默认远裁剪面下索引一定比全量 AABB 扫描更快；在真实 HKUST 配置中，本轮观测实际走的是全量扫描。后续若要继续优化，应先减少候选查询的空间范围或采用更适合视锥形状的层次结构，再以相同集合哈希、候选耗时和最终画面结果重新验收。
+
+## 8.7 空间特征分页实验（2026-08-01）
+
+### 变更目的
+
+验证是否可以将固定实例特征从单个全场景二进制表改成按空间页懒加载，从而降低首次进入局部场景时的网络读取量。该实验不改变默认前端模型，也不把页联合包围盒当作最终候选判定：页命中后仍须逐实例执行精确 AABB 视锥测试。
+
+### 实现与导出
+
+- `export_directional_occlusion_proxy_frontend.py` 新增 `--spatial-pages` 导出模式；
+- 全局模型权重单独写入 `instance_pvs_model_weights.bin`；
+- `page_directory.json` 记录页联合 AABB、实例编号范围和文件大小；
+- 每页二进制按“实例编号 + FP32 AABB + FP16 固定特征”排列；
+- Worker 只加载当前 `viewcell-back-camera` 命中的页，并以 binding 3 上传当前候选行；完整特征表默认路径仍使用原有 bind group 布局。
+
+导出时显式固定了 `modelInputFovYDeg=66`、`predictionCameraMode=viewcell-back-camera`、`pvsBackOffsetM=3.464101552963257`，避免实验资产误回到 active-camera 口径。
+
+### 离线审计结果
+
+| 项目 | 结果 |
+|---|---:|
+| 实例 / 空间页 | 18,831 / 45 |
+| 页面候选集合与完整 AABB 扫描差异 | 0/128 pose |
+| 分页静态模型权重 | 361,860 bytes |
+| 首批命中页字节数 | 9,849,252 bytes |
+| 全部页字节数 | 13,785,552 bytes |
+| 页目录 | 20,455 bytes |
+
+审计文件为 `docs/evaluation/m9_spatial_feature_page_audit_2026-08-01.json`；它只证明候选集合语义，不证明神经输出数值或移动端性能。
+
+### 浏览器 smoke 与结论
+
+在同一 `autoCamera=1` 固定姿态下，分页和完整特征表两条路径均进入 `worker-webgpu`，候选数均为 18,831，模型可见实例数均为 18,830，GLB 数均为 3,272。分页路径完整推理约 4.36 秒，完整特征表路径约 2.62 秒；该姿态覆盖几乎整个 HKUST 场景，且本地没有主体 GLB，因此这不是最终性能结论。
+
+当前结论是：分页格式和后退相机口径已修正，候选集合审计通过，但动态候选特征拼接存在额外成本，尚未达到默认接入条件。默认前端继续使用
+`pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best`；分页资产仅作为后续局部页大小、候选缓冲复用和移动端实测的实验入口。

@@ -1,6 +1,6 @@
 # NeuralStreamWeb3D 导出、打包与部署资产
 
-更新时间：2026-07-31
+更新时间：2026-08-01
 
 本文说明训练 checkpoint 如何变成浏览器运行资产，以及场景元数据、神经模型和主体 GLB 如何分别发布。
 
@@ -37,7 +37,9 @@ directional-occlusion-proxy-scheduler-v1
 - `workpoint` 与前端的阈值意图一致；
 - `frontendRenderFovYDeg=60`、`modelInputFovYDeg=66` 和后退相机模式与训练数据一致。
 
-阈值选择统一使用 `--workpoint primaryWeightedPrecision`：严格筛选 `weighted recall > 0.99`，再选择 `pose precision` 最高者。当前 HKUST FOV66 导出资产阈值约为 `0.64`，完整 test split 的 pose precision 为 `0.816`、pose recall 为 `0.868`、weighted recall 为 `0.990071`；Metropolis 当前工作点阈值约为 `0.64`。`bestF1` 和普通 recall 工作点只能作为显式诊断，不得作为默认导出阈值。
+阈值选择统一使用 `--workpoint primaryWeightedPrecision`：严格筛选 `weighted recall > 0.99`，再选择 `pose precision` 最高者。当前默认 HKUST 强模型
+`pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best` 的阈值为约 `0.02`，校准点 weighted recall 为 `0.9930808`，bootstrap 单侧
+95% 下界为 `0.9909417`。旧的 `w042` 资产仍可能记录约 `0.64` 的诊断工作点，但它不是当前默认模型，不能把两个 checkpoint 的阈值混写。
 
 ## 2. 前端部署包和主体 GLB
 
@@ -85,6 +87,28 @@ npm run package:scene-glb -- --scene ifcbench_fantasy_metropolis_instanced_v2
 5. 场景元数据和主体 GLB 目录。
 
 单场景包会过滤掉另一个场景的元数据和神经模型。模型二进制在当前包中约为 HKUST 13.8MB、Metropolis 29.9MB，不能把这类大小写成一个固定的“系统模型大小”。
+
+## 3.1 空间特征分页实验资产
+
+导出器也支持显式的实验分页格式：
+
+```bash
+conda run --no-capture-output -n slm_pvs python -u neural_instance_culling/model/export_directional_occlusion_proxy_frontend.py \
+  --checkpoint <checkpoint>/best.pt \
+  --runtime-features <checkpoint>/instance_runtime_features_fp16.bin \
+  --feature-meta <checkpoint>/instance_features_meta.json \
+  --runtime-meta hkust-v3/assets/runtimeVisibilityMeta.json \
+  --eval-summary <checkpoint>/calibration_ready_summary.json \
+  --output-dir slm2viewer/assets/neural_instance_culling/<paged-model> \
+  --prediction-camera-mode viewcell-back-camera \
+  --pvs-back-offset-m 3.464101552963257 \
+  --spatial-pages
+```
+
+该模式的 `instance_pvs_model_weights.bin` 只保存模型权重；`spatial_pages/page_directory.json` 保存每页的联合 AABB、实例数和文件路径，
+页二进制保存实例编号、FP32 AABB 和 FP16 固定特征。分页页选择必须与模型元数据中的 `modelInputFovYDeg=66`、
+`predictionCameraMode=viewcell-back-camera` 和 `pvsBackOffsetM=3.464101552963257` 一致。当前 HKUST M9 实验资产为 45 页，完整页资源约 13.79MB，
+但它的动态候选特征缓冲桌面 smoke 比完整特征表更慢，未接入默认场景，也不应写入正式部署包。
 
 ## 4. 混淆和预压缩
 

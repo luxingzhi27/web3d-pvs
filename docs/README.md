@@ -39,12 +39,13 @@
 31. M5 真实浏览器实例级 Color-ID 渲染 smoke：`evaluation/m5_image_pipeline_smoke_2026-08-01.md`
 32. M7 独立 RankNet 下载排序器和调度对照：`experiments/m7_unified_download_scheduling_2026-08-01.md`
 33. M6 真实三角形 HZB 生成与 validation/calibration 执行：`experiments/m6_triangle_hzb_baseline_2026-08-01.md`
+34. M9 空间特征分页格式、候选集合审计与运行时边界：`evaluation/m9_spatial_feature_page_audit_2026-08-01.json`、`frontend/m9_browser_runtime_benchmark_2026-08-01.md`
 
 ## 当前场景
 
 | 场景 | 路由 | 实例数 | GLB 数 | 运行模型 |
 |---|---|---:|---:|---|
-| HKUST v3 | `?scene=hkust-v3` | 18,831 | 3,273 | `pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best` |
+| HKUST v3 | `?scene=hkust-v3` | 18,831 | 3,273 | `pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best` |
 | IFCBench Fantasy Metropolis 实例化 v2 | `?scene=ifcbench_fantasy_metropolis_instanced_v2` | 41,298 | 3,669 | `pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40_best` |
 
 当前主线只使用一套相机口径：前端真实渲染垂直视场角为 60°，模型采样、后退候选相机和运行时推理垂直视场角为 66°（60° × 1.1）。运行时不读取历史数据中的候选视场角字段。

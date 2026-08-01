@@ -236,7 +236,8 @@ function classifyResourceUrl(rawUrl, overrideRegex = null) {
   }
   if (targetGlb) return 'target-glb';
   if (/\.glb(?:[?#]|$)/i.test(lower)) return 'scene-proxy-or-other-glb';
-  if (/instance_pvs_assets.*\.bin(?:[?#]|$)/i.test(lower)) return 'neural-weight';
+  if (/instance_pvs_(?:assets|model_weights).*\.bin(?:[?#]|$)/i.test(lower)) return 'neural-weight';
+  if (/\/spatial_pages\/page_\d+\.bin(?:[?#]|$)/i.test(lower)) return 'spatial-feature-page';
   if (/runtimevisibilitymeta\.json(?:[?#]|$)/i.test(lower)) return 'runtime-visibility-meta';
   if (/glbindex\.json(?:[?#]|$)/i.test(lower)) return 'glb-index';
   if (/sceneweb\.json(?:[?#]|$)/i.test(lower)) return 'scene-web';
@@ -319,7 +320,8 @@ function makeBrowserInitScript(maxEvents) {
     const isGeometry = /\\/scene_glbs\\//i.test(lower) || /\\/glb\\/(?:lod\\d+|raw)\\//i.test(lower) || /\\/sub_[^/]+\\.glb(?:[?#]|$)/i.test(lower);
     if (/\\.glb(?:[?#]|$)/i.test(lower) && isGeometry && !isProxy) return 'target-glb';
     if (/\\.glb(?:[?#]|$)/i.test(lower)) return 'scene-proxy-or-other-glb';
-    if (/instance_pvs_assets.*\\.bin(?:[?#]|$)/i.test(lower)) return 'neural-weight';
+    if (/instance_pvs_(?:assets|model_weights).*\\.bin(?:[?#]|$)/i.test(lower)) return 'neural-weight';
+    if (/\\/spatial_pages\\/page_\\d+\\.bin(?:[?#]|$)/i.test(lower)) return 'spatial-feature-page';
     if (/runtimevisibilitymeta\\.json(?:[?#]|$)/i.test(lower)) return 'runtime-visibility-meta';
     if (/glbindex\\.json(?:[?#]|$)/i.test(lower)) return 'glb-index';
     if (/sceneweb\\.json(?:[?#]|$)/i.test(lower)) return 'scene-web';
@@ -651,6 +653,10 @@ function compactCandidateSelection(value) {
     queryCellCount: numberOrNull(value.queryCellCount),
     indexedInstanceCount: numberOrNull(value.indexedInstanceCount),
     overflowInstanceCount: numberOrNull(value.overflowInstanceCount),
+    pageCount: numberOrNull(value.pageCount),
+    loadedPageCount: numberOrNull(value.loadedPageCount),
+    loadedInstanceCount: numberOrNull(value.loadedInstanceCount),
+    pageBytesFetched: numberOrNull(value.pageBytesFetched),
   };
 }
 
@@ -870,6 +876,14 @@ async function probePageState(page, report, label) {
     const renderSetBefore = renderComponentIds();
     const activeBefore = frustumDigest(loader.activeCamera);
     const backBefore = frustumDigest(loader.backCamera);
+    const cameraSnapshot = (camera) => camera ? {
+      position: [camera.position.x, camera.position.y, camera.position.z],
+      quaternion: [camera.quaternion.x, camera.quaternion.y, camera.quaternion.z, camera.quaternion.w],
+      fov: Number(camera.fov),
+      aspect: Number(camera.aspect),
+      near: Number(camera.near),
+      far: Number(camera.far),
+    } : null;
     let activeAfter = null;
     let cameraRestored = true;
     let renderRefreshAfterActiveMove = null;
@@ -941,6 +955,8 @@ async function probePageState(page, report, label) {
       frustum: {
         filterEnabled: Boolean(loader.runtimeFrustumFilterEnabled),
         filterSource: loader.runtimeFrustumFilterSource || null,
+        activeCamera: cameraSnapshot(loader.activeCamera),
+        backCamera: cameraSnapshot(loader.backCamera),
         activeBefore: activeBefore ? digestIds(activeBefore) : null,
         activeAfterSmallMove: activeAfter ? digestIds(activeAfter) : null,
         activeChangedForSmallMove: Boolean(activeBefore && activeAfter && (
@@ -959,6 +975,8 @@ async function probePageState(page, report, label) {
           !renderRefreshAfterActiveMove.error && renderRefreshAfterActiveMove.skippedByGate === false),
         renderStatsBefore,
         backBefore: backBefore ? digestIds(backBefore) : null,
+        rawPrediction: digestIds(raw),
+        renderPrediction: digestIds(render),
         cameraRestored,
         renderRefreshStats: loader.lastRenderRefreshStats || null,
         renderVisibilityStats: loader.renderVisibilitySystem?.lastStats || null,

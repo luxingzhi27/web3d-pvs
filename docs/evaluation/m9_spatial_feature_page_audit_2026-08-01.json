@@ -1,0 +1,55 @@
+{
+  "schemaVersion": "m9-spatial-feature-page-audit-v1",
+  "status": "pass",
+  "modelMeta": "assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_spatial_pages_m9/instance_model_meta.json",
+  "runtimeMeta": "assets/scenes/hkust-v3/runtimeVisibilityMeta.json",
+  "poseDataset": "../neural_instance_culling/dataset/out/pose_csr_hkust_v3_spatial_raw_subpose_aabb_fov66_v1",
+  "configuration": {
+    "modelInputFovYDeg": 66,
+    "frontendRenderFovYDeg": 60,
+    "predictionCameraMode": "viewcell-back-camera",
+    "pvsBackOffsetM": 3.464101552963257,
+    "cameraFarM": 2000,
+    "poseRowsAvailable": 7999,
+    "sampledPoseCount": 128,
+    "numInstances": 18831,
+    "pageCount": 45,
+    "runtimeFeatureDim": 352
+  },
+  "candidateSet": {
+    "mismatches": 0,
+    "firstMismatches": [],
+    "fullScan": {
+      "count": 128,
+      "p50": 1623.5,
+      "p95": 18394.8,
+      "min": 9,
+      "max": 18831,
+      "mean": 4950.6171875
+    },
+    "pageQuery": {
+      "count": 128,
+      "p50": 1623.5,
+      "p95": 18394.8,
+      "min": 9,
+      "max": 18831,
+      "mean": 4950.6171875
+    },
+    "exactEqual": true
+  },
+  "pages": {
+    "selectedPageCount": {
+      "count": 128,
+      "p50": 20,
+      "p95": 43.64999999999999,
+      "min": 4,
+      "max": 45,
+      "mean": 21.5859375
+    },
+    "uniquePagesLoaded": 45,
+    "initialPageBytes": 9849252,
+    "cumulativePageBytes": 13785552,
+    "directoryBytes": 20455,
+    "staticAssetBytes": 361860
+  }
+}

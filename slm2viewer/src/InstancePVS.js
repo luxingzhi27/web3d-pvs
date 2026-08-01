@@ -62,6 +62,24 @@ function halfToFloat(value) {
   return sign * (1 + mantissa / 1024) * 2 ** (exponent - 15);
 }
 
+const FLOAT32_BITS = new Uint32Array(1);
+const FLOAT32_VALUE = new Float32Array(FLOAT32_BITS.buffer);
+
+function floatToHalf(value) {
+  FLOAT32_VALUE[0] = Number(value);
+  const bits = FLOAT32_BITS[0];
+  const sign = (bits >>> 16) & 0x8000;
+  const exponent = ((bits >>> 23) & 0xff) - 127 + 15;
+  const mantissa = bits & 0x7fffff;
+  if (exponent <= 0) {
+    if (exponent < -10) return sign;
+    const shifted = (mantissa | 0x800000) >> (1 - exponent);
+    return sign | ((shifted + 0x1000) >> 13);
+  }
+  if (exponent >= 31) return sign | (mantissa ? 0x7e00 : 0x7c00);
+  return sign | (exponent << 10) | ((mantissa + 0x1000) >> 13);
+}
+
 function normalizeArray3(value, fallback = [0, 0, -1]) {
   const x = Number(value?.[0] ?? fallback[0]);
   const y = Number(value?.[1] ?? fallback[1]);
@@ -163,6 +181,8 @@ export class InstancePVS {
     this.spatialAabbIndex = null;
     this.lastCandidateSelection = null;
     this._spatialScratchBox = new Box3();
+    this.spatialFeaturePages = null;
+    this.spatialPageLoadSerial = 0;
     this.instanceToGlobalGlb = [];
     this.instanceToGlobalGlbArray = null;
     // Some exported feature tables use compact local rows while the renderer
@@ -188,6 +208,7 @@ export class InstancePVS {
     this.uniformBuffer = null;
     this.weightBuffer = null;
     this.candidateBuffer = null;
+    this.candidateFeatureBuffer = null;
     this.neighborBuffer = null;
     this.instanceToGlbBuffer = null;
     this.outputBuffer = null;
@@ -238,7 +259,9 @@ export class InstancePVS {
     this.instanceToGlobalGlb = this.meta.instanceToGlobalGlb || [];
     this.instanceToGlobalGlbArray = this._buildInstanceToGlbArray();
     this._validateRuntimeLayout();
-    if (this._isV3Runtime() || this._isDirectionalOcclusionProxyRuntime() || this._isUtilityDynamicPoolRuntime()) {
+    if (this._isSpatialFeaturePageRuntime()) {
+      await this._initSpatialFeaturePages();
+    } else if (this._isV3Runtime() || this._isDirectionalOcclusionProxyRuntime() || this._isUtilityDynamicPoolRuntime()) {
       this._buildV3AabbCacheFromAsset(assetBuffer);
       this._rebuildSpatialAabbIndex();
     }
@@ -319,6 +342,10 @@ export class InstancePVS {
     return this.meta && this.meta.runtimeSchema === 'directional-occlusion-proxy-scheduler-v1';
   }
 
+  _isSpatialFeaturePageRuntime() {
+    return this._isDirectionalOcclusionProxyRuntime() && this.meta?.usesSpatialFeaturePages === true;
+  }
+
   _usesV3Attention() {
     return this._isV3Runtime()
       && Number(this.meta.attentionDim ?? 0) > 0
@@ -333,6 +360,173 @@ export class InstancePVS {
 
   _hasModelDownloadPriority() {
     return this.meta?.outputsDownloadPriority === true || this.meta?.outputsGlbPriority === true;
+  }
+
+  async _initSpatialFeaturePages() {
+    const directoryFile = this.meta?.spatialPageDirectory;
+    if (!directoryFile) throw new Error('Spatial feature page runtime has no spatialPageDirectory.');
+    const directory = await this._fetchJson(`${this.assetBaseUrl}/${directoryFile}`);
+    if (directory?.schema !== 'directional-occlusion-proxy-spatial-pages-v1') {
+      throw new Error(`Unsupported spatial feature page schema: ${directory?.schema || 'missing'}`);
+    }
+    const count = Number(this.meta?.numInstances || directory.numInstances || 0);
+    const featureDim = Number(this.meta?.runtimeFeatureDim || directory.runtimeFeatureDim || 0);
+    if (!Number.isInteger(count) || count <= 0 || !Number.isInteger(featureDim) || featureDim <= 0) {
+      throw new Error(`Invalid spatial page dimensions: instances=${count}, featureDim=${featureDim}`);
+    }
+    const pages = new Map();
+    for (const raw of directory.pages || []) {
+      const pageId = Number(raw.pageId);
+      const min = raw.bounds?.min?.map(Number);
+      const max = raw.bounds?.max?.map(Number);
+      if (!Number.isInteger(pageId) || !Array.isArray(min) || min.length !== 3 || !Array.isArray(max) || max.length !== 3) {
+        throw new Error(`Invalid spatial page directory row: ${JSON.stringify(raw)}`);
+      }
+      if (!raw.file || !Number.isInteger(Number(raw.count)) || Number(raw.count) <= 0) {
+        throw new Error(`Spatial page ${pageId} has invalid file/count metadata.`);
+      }
+      pages.set(pageId, {
+        pageId,
+        file: String(raw.file),
+        count: Number(raw.count),
+        bounds: new Box3(new Vector3(min[0], min[1], min[2]), new Vector3(max[0], max[1], max[2])),
+        loaded: false,
+        lastUsed: 0,
+        ids: null,
+        aabbs: null,
+        featuresHalf: null,
+      });
+    }
+    if (pages.size !== Number(directory.pageCount || pages.size)) {
+      throw new Error(`Spatial page count mismatch: directory=${directory.pageCount}, parsed=${pages.size}`);
+    }
+    this.spatialFeaturePages = {
+      directory,
+      pages,
+      featureDim,
+      rowHalfCount: featureDim + 6,
+      loadedInstanceIds: new Set(),
+      instanceRows: new Map(),
+      pageFetches: new Map(),
+      loadedPageCount: 0,
+      pageBytesFetched: 0,
+    };
+    // A page runtime never constructs a full AABB/feature table at startup.
+    // The sparse array is only the exact cache for pages already requested by
+    // the current or previous back-camera regions.
+    this.instanceBoxes = new Array(count);
+    this.instanceWorldAabbs = null;
+  }
+
+  async _loadSpatialFeaturePage(page) {
+    if (page.loaded) return page;
+    const state = this.spatialFeaturePages;
+    if (state.pageFetches.has(page.pageId)) return state.pageFetches.get(page.pageId);
+    const request = (async () => {
+      const response = await fetch(this._versionedUrl(`${this.assetBaseUrl}/${page.file}`), { cache: 'force-cache' });
+      if (!response.ok) throw new Error(`Failed to load spatial feature page ${page.file}: ${response.status}`);
+      const buffer = await response.arrayBuffer();
+      const view = new DataView(buffer);
+      if (buffer.byteLength < 28 || String.fromCharCode(...new Uint8Array(buffer, 0, 4)) !== 'NSPF') {
+        throw new Error(`Invalid spatial feature page magic: ${page.file}`);
+      }
+      const version = view.getUint32(4, true);
+      const count = view.getUint32(8, true);
+      const featureDim = view.getUint32(12, true);
+      const aabbByteWidth = view.getUint32(16, true);
+      if (version !== 2 || count !== page.count || featureDim !== state.featureDim || aabbByteWidth !== 4) {
+        throw new Error(`Spatial page header mismatch for ${page.file}`);
+      }
+      const idsOffset = 28;
+      const aabbOffset = idsOffset + count * 4;
+      const featureOffset = aabbOffset + count * 6 * aabbByteWidth;
+      const expectedBytes = featureOffset + count * featureDim * 2;
+      if (expectedBytes !== buffer.byteLength) {
+        throw new Error(`Spatial page byte size mismatch for ${page.file}: expected=${expectedBytes}, got=${buffer.byteLength}`);
+      }
+      page.ids = new Uint32Array(buffer, idsOffset, count).slice();
+      page.aabbs = new Float32Array(buffer, aabbOffset, count * 6).slice();
+      page.featuresHalf = new Uint16Array(buffer, featureOffset, count * featureDim).slice();
+      page.loaded = true;
+      page.lastUsed = ++this.spatialPageLoadSerial;
+      state.loadedPageCount += 1;
+      state.pageBytesFetched += buffer.byteLength;
+      for (let row = 0; row < count; row += 1) {
+        const localId = Number(page.ids[row]);
+        if (!Number.isInteger(localId) || localId < 0 || localId >= this.instanceBoxes.length) {
+          throw new Error(`Spatial page ${page.file} contains invalid instance id ${localId}`);
+        }
+        const aabbBase = row * 6;
+        const min = [
+          page.aabbs[aabbBase],
+          page.aabbs[aabbBase + 1],
+          page.aabbs[aabbBase + 2],
+        ];
+        const max = [
+          page.aabbs[aabbBase + 3],
+          page.aabbs[aabbBase + 4],
+          page.aabbs[aabbBase + 5],
+        ];
+        if (![...min, ...max].every(Number.isFinite)) throw new Error(`Non-finite AABB in spatial page ${page.file}`);
+        this.instanceBoxes[localId] = new Box3(
+          new Vector3(min[0], min[1], min[2]),
+          new Vector3(max[0], max[1], max[2]),
+        );
+        state.loadedInstanceIds.add(localId);
+        state.instanceRows.set(localId, { page, row });
+      }
+      return page;
+    })().catch((error) => {
+      state.pageFetches.delete(page.pageId);
+      throw error;
+    });
+    state.pageFetches.set(page.pageId, request);
+    return request;
+  }
+
+  async _ensureSpatialPagesForCamera(camera) {
+    const state = this.spatialFeaturePages;
+    if (!state || !camera) return;
+    const candidateCamera = camera.clone();
+    candidateCamera.fov = MODEL_INPUT_FOV_Y_DEG;
+    candidateCamera.updateProjectionMatrix();
+    candidateCamera.updateMatrixWorld(true);
+    const frustum = new Frustum().setFromProjectionMatrix(
+      new Matrix4().multiplyMatrices(candidateCamera.projectionMatrix, candidateCamera.matrixWorldInverse),
+    );
+    const selected = [];
+    for (const page of state.pages.values()) {
+      if (frustum.intersectsBox(page.bounds)) selected.push(page);
+    }
+    await Promise.all(selected.map((page) => this._loadSpatialFeaturePage(page)));
+    for (const page of selected) page.lastUsed = ++this.spatialPageLoadSerial;
+    this.lastCandidateSelection = {
+      source: 'spatial_feature_pages',
+      pageCount: selected.length,
+      loadedPageCount: state.loadedPageCount,
+      pageBytesFetched: state.pageBytesFetched,
+      candidateCount: 0,
+    };
+  }
+
+  _buildSpatialPageCandidateData(candidateIds) {
+    const state = this.spatialFeaturePages;
+    if (!state) throw new Error('Spatial page state is not initialized.');
+    const halfRows = new Uint16Array(candidateIds.length * state.rowHalfCount);
+    for (let index = 0; index < candidateIds.length; index += 1) {
+      const localId = Number(candidateIds[index]);
+      const rowInfo = state.instanceRows.get(localId);
+      if (!rowInfo || !rowInfo.page.loaded) throw new Error(`Missing loaded spatial feature row for instance ${localId}`);
+      const destination = index * state.rowHalfCount;
+      const aabbSource = rowInfo.row * 6;
+      for (let offset = 0; offset < 6; offset += 1) {
+        halfRows[destination + offset] = floatToHalf(rowInfo.page.aabbs[aabbSource + offset]);
+      }
+      const featureSource = rowInfo.row * state.featureDim;
+      halfRows.set(rowInfo.page.featuresHalf.subarray(featureSource, featureSource + state.featureDim), destination + 6);
+    }
+    if ((halfRows.length & 1) !== 0) throw new Error('Spatial page candidate rows must contain an even number of fp16 values.');
+    return new Uint32Array(halfRows.buffer);
   }
 
   _decodePackedVisibility(word) {
@@ -358,6 +552,7 @@ export class InstancePVS {
       return 0;
     }
     this.runtimeMeta = runtimeMeta;
+    if (this._isSpatialFeaturePageRuntime()) return 0;
     const cache = this._buildInstanceBoxCache(runtimeMeta);
     this.instanceBoxes = cache.boxes;
     if (cache.aabbs) this.instanceWorldAabbs = cache.aabbs;
@@ -369,7 +564,6 @@ export class InstancePVS {
     if (this.meta.usesRuntimeTriplane) throw new Error('InstancePVS runtime must not require Triplane assets.');
     if (this._isDirectionalOcclusionProxyRuntime()) {
       const required = [
-        'runtime_features', 'instance_world_aabbs',
         'ray_proxy_gate_w0', 'ray_proxy_gate_b0', 'ray_proxy_gate_w1', 'ray_proxy_gate_b1',
         'ray_runtime_gate_w', 'ray_runtime_gate_b',
         'mlp_vis_cam_inter_w', 'mlp_vis_cam_inter_b', 'mlp_vis_inst_inter_w', 'mlp_vis_inst_inter_b',
@@ -378,6 +572,9 @@ export class InstancePVS {
         'utility_w0', 'utility_b0', 'utility_w1', 'utility_b1', 'utility_w2', 'utility_b2',
         'download_w0', 'download_b0', 'download_w1', 'download_b1',
       ];
+      if (!this._isSpatialFeaturePageRuntime()) {
+        required.unshift('runtime_features', 'instance_world_aabbs');
+      }
       for (const name of required) this._offset(name);
       return;
     }
@@ -609,9 +806,44 @@ export class InstancePVS {
     this.instanceBoxes = boxes;
   }
 
+  _frustumCandidateIdsFromSpatialPages(camera) {
+    const state = this.spatialFeaturePages;
+    if (!state || !camera) {
+      const ids = [];
+      this.lastCandidateSelection = {
+        source: 'spatial_feature_pages_waiting_for_camera',
+        candidateCount: 0,
+      };
+      return ids;
+    }
+    const candidateCamera = camera.clone();
+    candidateCamera.fov = MODEL_INPUT_FOV_Y_DEG;
+    candidateCamera.updateProjectionMatrix();
+    candidateCamera.updateMatrixWorld(true);
+    const frustum = new Frustum().setFromProjectionMatrix(
+      new Matrix4().multiplyMatrices(candidateCamera.projectionMatrix, candidateCamera.matrixWorldInverse),
+    );
+    const ids = [];
+    for (const localId of state.loadedInstanceIds) {
+      const box = this.instanceBoxes[localId];
+      if (box && frustum.intersectsBox(box)) ids.push(localId);
+    }
+    ids.sort((a, b) => a - b);
+    this.lastCandidateSelection = {
+      source: 'spatial_feature_pages',
+      pageCount: Array.from(state.pages.values()).filter((page) => page.loaded).length,
+      loadedPageCount: state.loadedPageCount,
+      pageBytesFetched: state.pageBytesFetched,
+      loadedInstanceCount: state.loadedInstanceIds.size,
+      candidateCount: ids.length,
+    };
+    return ids;
+  }
+
   _frustumCandidateIds(camera) {
     // CPU 候选过滤：先用实例 AABB 去掉明显不在视野附近的实例。
     // 神经网络只负责遮挡可见性，不负责基础视锥裁剪。
+    if (this._isSpatialFeaturePageRuntime()) return this._frustumCandidateIdsFromSpatialPages(camera);
     if (!camera || this.instanceBoxes.length === 0) {
       const ids = Array.from({ length: this.meta.numInstances }, (_v, i) => i);
       this.lastCandidateSelection = { source: 'all_instances_no_aabb_cache', candidateCount: ids.length };
@@ -883,7 +1115,16 @@ export class InstancePVS {
     const candidateBytes = this.capacity * 4;
     const neighborBytes = this.capacity * Math.max(1, Number(this.meta.occluderK ?? 1)) * 4;
     const outputBytes = this.capacity * this._outputValueWords() * 4;
+    const pageRowBytes = this._isSpatialFeaturePageRuntime()
+      ? this.capacity * (Number(this.spatialFeaturePages?.rowHalfCount || 0) * 2)
+      : 0;
     this.candidateBuffer = this.device.createBuffer({ size: candidateBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    this.candidateFeatureBuffer = this._isSpatialFeaturePageRuntime()
+      ? this.device.createBuffer({
+        size: Math.max(4, pageRowBytes),
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      })
+      : null;
     this.neighborBuffer = this._isV3Runtime()
       ? this.device.createBuffer({ size: neighborBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST })
       : null;
@@ -904,6 +1145,9 @@ export class InstancePVS {
         { binding: 0, resource: { buffer: this.uniformBuffer } },
         { binding: 1, resource: { buffer: this.weightBuffer } },
         { binding: 2, resource: { buffer: this.candidateBuffer } },
+        ...(this._isSpatialFeaturePageRuntime()
+          ? [{ binding: 3, resource: { buffer: this.candidateFeatureBuffer } }]
+          : []),
         { binding: 4, resource: { buffer: this.outputBuffer } },
       ];
     } else {
@@ -945,6 +1189,10 @@ export class InstancePVS {
     ]);
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniform);
     this.device.queue.writeBuffer(this.candidateBuffer, 0, new Uint32Array(candidateIds));
+    if (this._isSpatialFeaturePageRuntime()) {
+      const candidateData = this._buildSpatialPageCandidateData(candidateIds);
+      this.device.queue.writeBuffer(this.candidateFeatureBuffer, 0, candidateData);
+    }
     if (this._isV3Runtime()) {
       const empty = neighborIndices || new Uint32Array(candidateIds.length * Math.max(1, Number(this.meta.occluderK ?? 1))).fill(0xffffffff);
       this.device.queue.writeBuffer(this.neighborBuffer, 0, empty);
@@ -1000,6 +1248,9 @@ export class InstancePVS {
       : (cameraOrPosition && cameraOrPosition.projectionMatrix ? cameraOrPosition : legacyOptions.camera);
     const cameraPos = renderCamera?.position || legacyOptions.position || cameraOrPosition;
     const candidateStart = performance.now();
+    if (this._isSpatialFeaturePageRuntime()) {
+      await this._ensureSpatialPagesForCamera(renderCamera);
+    }
     let candidateIds = (legacyOptions.candidateIds || this._frustumCandidateIds(renderCamera)).slice().sort((a, b) => a - b);
     let candidateEnd = performance.now();
     const cameraNorm = normalizePoint(cameraPos, this.cameraBounds);
@@ -1491,6 +1742,7 @@ ${usesAttention ? `  var q: array<f32, ${attentionDim}>;
 
   _buildShaderDirectionalOcclusionProxy() {
     const meta = this.meta;
+    const pageMode = this._isSpatialFeaturePageRuntime();
     const offsets = Object.fromEntries([...this.layout.entries()].map(([name, item]) => [name, item.floatOffset]));
     const runtimeDim = Number(meta.runtimeFeatureDim || 352);
     const geoDim = Number(meta.geoDim || 96);
@@ -1515,6 +1767,35 @@ ${usesAttention ? `  var q: array<f32, ${attentionDim}>;
     const inhibitionInputDim = queryDim + cameraDim;
     const utilityInputDim = queryDim + 1;
     const downloadInputDim = queryDim + 2;
+    const pageBinding = pageMode
+      ? '@group(0) @binding(3) var<storage, read> candidate_feature_data: array<u32>;'
+      : '';
+    const pageConstants = pageMode
+      ? `const CANDIDATE_AABB_HALF: u32 = 6u;
+const CANDIDATE_ROW_HALF: u32 = ${Number(this.spatialFeaturePages?.rowHalfCount || (runtimeDim + 6))}u;`
+      : '';
+    const pageAccess = pageMode
+      ? `
+fn candidate_w(index: u32) -> f32 {
+  let pair = unpack2x16float(candidate_feature_data[index >> 1u]);
+  return select(pair.x, pair.y, (index & 1u) == 1u);
+}
+
+fn runtime_value(_inst_id: u32, candidate_index: u32, offset: u32) -> f32 {
+  return candidate_w(candidate_index * CANDIDATE_ROW_HALF + CANDIDATE_AABB_HALF + offset);
+}
+
+fn aabb_value(_inst_id: u32, candidate_index: u32, offset: u32) -> f32 {
+  return candidate_w(candidate_index * CANDIDATE_ROW_HALF + offset);
+}`
+      : `
+fn runtime_value(inst_id: u32, _candidate_index: u32, offset: u32) -> f32 {
+  return w(OFFSET_RUNTIME + safe_inst_id(inst_id) * RUNTIME_DIM + offset);
+}
+
+fn aabb_value(inst_id: u32, _candidate_index: u32, offset: u32) -> f32 {
+  return w(OFFSET_AABBS + safe_inst_id(inst_id) * 6u + offset);
+}`;
 
     return `
 struct Uniforms {
@@ -1533,6 +1814,7 @@ struct QueryFeatures {
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var<storage, read> weights: array<u32>;
 @group(0) @binding(2) var<storage, read> candidate_ids: array<u32>;
+${pageBinding}
 @group(0) @binding(4) var<storage, read_write> output_values: array<u32>;
 
 const PI: f32 = 3.141592653589793;
@@ -1562,8 +1844,8 @@ const SCENE_X: f32 = ${Number(sceneSize[0]).toFixed(8)};
 const SCENE_Y: f32 = ${Number(sceneSize[1]).toFixed(8)};
 const SCENE_Z: f32 = ${Number(sceneSize[2]).toFixed(8)};
 
-const OFFSET_RUNTIME: u32 = ${offsets.runtime_features}u;
-const OFFSET_AABBS: u32 = ${offsets.instance_world_aabbs}u;
+${pageMode ? '' : `const OFFSET_RUNTIME: u32 = ${offsets.runtime_features}u;
+const OFFSET_AABBS: u32 = ${offsets.instance_world_aabbs}u;`}
 const OFFSET_PROXY_GATE_W0: u32 = ${offsets.ray_proxy_gate_w0}u;
 const OFFSET_PROXY_GATE_B0: u32 = ${offsets.ray_proxy_gate_b0}u;
 const OFFSET_PROXY_GATE_W1: u32 = ${offsets.ray_proxy_gate_w1}u;
@@ -1613,17 +1895,18 @@ fn safe_inst_id(inst_id: u32) -> u32 {
   return min(inst_id, NUM_INSTANCES - 1u);
 }
 
-fn bounds_center(inst_id: u32) -> vec3<f32> {
-  let base = OFFSET_AABBS + safe_inst_id(inst_id) * 6u;
-  let bmin = vec3<f32>(w(base + 0u), w(base + 1u), w(base + 2u));
-  let bmax = vec3<f32>(w(base + 3u), w(base + 4u), w(base + 5u));
+${pageConstants}
+${pageAccess}
+
+fn bounds_center(inst_id: u32, candidate_index: u32) -> vec3<f32> {
+  let bmin = vec3<f32>(aabb_value(inst_id, candidate_index, 0u), aabb_value(inst_id, candidate_index, 1u), aabb_value(inst_id, candidate_index, 2u));
+  let bmax = vec3<f32>(aabb_value(inst_id, candidate_index, 3u), aabb_value(inst_id, candidate_index, 4u), aabb_value(inst_id, candidate_index, 5u));
   return (bmin + bmax) * 0.5;
 }
 
-fn bounds_size(inst_id: u32) -> vec3<f32> {
-  let base = OFFSET_AABBS + safe_inst_id(inst_id) * 6u;
-  let bmin = vec3<f32>(w(base + 0u), w(base + 1u), w(base + 2u));
-  let bmax = vec3<f32>(w(base + 3u), w(base + 4u), w(base + 5u));
+fn bounds_size(inst_id: u32, candidate_index: u32) -> vec3<f32> {
+  let bmin = vec3<f32>(aabb_value(inst_id, candidate_index, 0u), aabb_value(inst_id, candidate_index, 1u), aabb_value(inst_id, candidate_index, 2u));
+  let bmax = vec3<f32>(aabb_value(inst_id, candidate_index, 3u), aabb_value(inst_id, candidate_index, 4u), aabb_value(inst_id, candidate_index, 5u));
   return max(bmax - bmin, vec3<f32>(0.0001));
 }
 
@@ -1641,10 +1924,10 @@ fn camera_basis() -> mat3x3<f32> {
   return mat3x3<f32>(forward, right, up);
 }
 
-fn make_query(inst_id: u32) -> QueryFeatures {
+fn make_query(inst_id: u32, candidate_index: u32) -> QueryFeatures {
   var out: QueryFeatures;
-  let center = bounds_center(inst_id);
-  let size = bounds_size(inst_id);
+  let center = bounds_center(inst_id, candidate_index);
+  let size = bounds_size(inst_id, candidate_index);
   let delta = center - uniforms.camera_world_pad.xyz;
   let dist = max(length(delta), 0.0001);
   let ray_dir = delta / dist;
@@ -1745,19 +2028,18 @@ fn make_query(inst_id: u32) -> QueryFeatures {
     denom = denom + exp(gate_logits[o] - max_gate);
   }
 
-  let runtime_base = OFFSET_RUNTIME + safe_inst_id(inst_id) * RUNTIME_DIM;
   for (var i = 0u; i < GEO_DIM; i = i + 1u) {
-    out.query[i] = w(runtime_base + i);
+    out.query[i] = runtime_value(inst_id, candidate_index, i);
   }
   for (var i = 0u; i < CONTEXT_DIM; i = i + 1u) {
-    out.query[GEO_DIM + i] = w(runtime_base + GEO_DIM + i);
+    out.query[GEO_DIM + i] = runtime_value(inst_id, candidate_index, GEO_DIM + i);
   }
   for (var p = 0u; p < PROXY_DIM; p = p + 1u) {
     var selected = 0.0;
     if (denom > 0.0) {
       for (var cell = 0u; cell < PROXY_CELLS; cell = cell + 1u) {
         let soft = exp(gate_logits[cell] - max_gate) / denom;
-        selected = selected + soft * w(runtime_base + GEO_DIM + CONTEXT_DIM + cell * PROXY_DIM + p);
+        selected = selected + soft * runtime_value(inst_id, candidate_index, GEO_DIM + CONTEXT_DIM + cell * PROXY_DIM + p);
       }
     }
     out.query[GEO_DIM + CONTEXT_DIM + p] = selected;
@@ -1885,7 +2167,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (idx >= count) { return; }
   let inst_id = safe_inst_id(candidate_ids[idx]);
   let threshold = uniforms.camera_threshold.w;
-  let query = make_query(inst_id);
+  let query = make_query(inst_id, idx);
   let base_logit = visibility_logit(query);
   let final_logit = base_logit - inhibition_value(query);
   let final_prob = sigmoid(final_logit);

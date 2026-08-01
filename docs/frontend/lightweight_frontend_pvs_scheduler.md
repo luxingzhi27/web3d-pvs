@@ -14,14 +14,14 @@ Date: 2026-07-31
 当前前端神经剔除资产：
 
 ```text
-slm2viewer/public/assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best
+slm2viewer/public/assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best
 slm2viewer/public/assets/neural_instance_culling/pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40_best
 ```
 
 运行时模型名：
 
 ```text
-pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best
+pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best
 ```
 
 前端默认路径：
@@ -90,8 +90,8 @@ npm run package:deploy
 `package_deploy.mjs` 当前把 HKUST 和 IFCBench Metropolis 实例化 v2 的运行资产打入 `public_deploy`：
 
 ```text
-assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best/instance_model_meta.json
-assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best/instance_pvs_assets.bin
+assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best/instance_model_meta.json
+assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best/instance_pvs_assets.bin
 assets/neural_instance_culling/pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40_best/instance_model_meta.json
 assets/neural_instance_culling/pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40_best/instance_pvs_assets.bin
 ```
@@ -117,5 +117,5 @@ Metropolis 的 `sceneWeb.json`、`glbIndex.json`、`runtimeVisibilityMeta.json` 
 
 | 场景 | 路由参数 | 运行模型 |
 |---|---|---|
-| HKUST | `?scene=hkust-v3` | `pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best` |
+| HKUST | `?scene=hkust-v3` | `pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best` |
 | IFCBench Metropolis | `?scene=ifcbench_fantasy_metropolis_instanced_v2` | `pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40_best` |
