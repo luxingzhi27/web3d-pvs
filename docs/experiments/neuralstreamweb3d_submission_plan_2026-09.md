@@ -936,3 +936,23 @@ Three.js 光栅化，输出线性视深 level-0，并在浏览器中逐级进行
 
 另有 `run_formal_m4_validation_evaluations.sh` 收尾会话入口，负责在矩阵完成后锁定同一 validation
 候选并生成逐 pose 配对 bootstrap；它的输出不会打开 test split。
+
+### 21.13 M6 三角形 HZB 与 M7 独立 RankNet 收尾（2026-08-01）
+
+M6 已完成两场景完整 validation/calibration 的三角形 HZB 缓存和查询：HKUST 覆盖 3,273 个 GLB、1,354
+个 pose，缓存约 266 MB；Metropolis 覆盖 3,669 个 GLB、4,464 个 pose，缓存约 878 MB。两套缓存的
+level-0 都是 256x144，查询 FOV 为 66°，前端真实渲染 FOV 为 60°，Chrome 构建后端记录为
+headless SwiftShader/WebGL。两个场景都没有满足 `weighted recall > 0.99` 的阈值，因此 M6 只通过
+“完整几何 warm-cache 基线可复现”子门，总门仍未通过；详细数值见
+`m6_triangle_hzb_baseline_2026-08-01.md`。
+
+M7 已完成独立 RankNet 下载排序器的 HKUST/Metropolis 训练和完整 validation/calibration 评测，分别
+遍历 664/690 与 2,088/2,376 个 pose，严格使用保存候选集合和本地 GLB 字节。HKUST 的最佳 validation
+RankNet loss 为 `0.0435587`，Metropolis 为 `0.2489221`。在独立排序器的弱效用教师下，HKUST 20 MiB
+预算的 utility recall 为 `0.8794`（validation），Metropolis 为 `0.8311`；这些结果只证明字节预算
+曲线可复现，不能代替可见性安全指标，也不能证明联合级联优于现有后处理。M7 总门仍等待主线模型、
+冷/温轨迹、真实解码时间和 paired 调度结果。
+
+本轮 benchmark 回归已达到 33 项单元测试全部通过，visual utility/trajectory self-test、Python 编译、
+Node 语法检查和差异检查均通过。正式主线训练、M0 frozen test、M3/M4 消融仍由持久会话继续执行，
+本节不把中间 checkpoint 写入投稿主表。
