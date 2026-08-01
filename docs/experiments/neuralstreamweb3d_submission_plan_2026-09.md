@@ -918,3 +918,10 @@ Three.js 光栅化，输出线性视深 level-0，并在浏览器中逐级进行
 完整 HKUST/Metropolis validation/calibration、三角形 HZB 与标准深度渲染的同位姿校验、真实 GPU
 后端和性能计时仍未完成；因此 M6 总门仍保持未通过。详细记录见
 `docs/experiments/m6_triangle_hzb_baseline_2026-08-01.md`。
+
+### 21.11 M3 正式收尾自动化（2026-08-01）
+
+新增 `neural_instance_culling/benchmark/run_formal_m3_interventions.sh` 和对应执行记录。该脚本等待正式训练产生无 test 结果的
+`calibration_ready_summary.json`，并等待 M0 one-shot test 完成后，在完整 validation split 上运行全部代理/上下文推理期干预。
+每个变体使用同一候选 CSR、同一 calibration 阈值和同一 pose 计划，保存逐 pose 指标、logit/门控诊断和 10,000 次配对 bootstrap。
+它不覆盖已有输出，也不打开 test split。正式指标产生前，M3 仍标记为“未执行正式版本”。
