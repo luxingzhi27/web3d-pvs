@@ -70,3 +70,33 @@ HKUST 和 Metropolis 的实例数、GLB 映射、场景边界和离线特征表�
 - 零/少样本跨场景迁移：未执行。
 
 本记录只描述协议和已核验资源，不把正在运行的证据生成或后续计划当成结果。
+
+## 跨场景零样本执行入口（2026-08-02）
+
+为避免把源场景的实例编号、场景缓冲区或固定特征误当成可迁移知识，新增
+`neural_instance_culling/benchmark/evaluate_cross_scene_transfer.py`。该入口的迁移边界固定为：
+
+1. 只复制源 checkpoint 中形状完全一致的可学习参数；`AABB`、实例到 GLB 映射、方向证据、场景范围和所有场景规模缓冲区均在目标场景重新建立；
+2. 使用源点云编码器和查询头，对目标场景自己的 GLB 点云、实例 AABB 和训练方向证据离线生成固定实例特征表；浏览器和评测运行时不执行点云编码或图传播；
+3. 只在目标场景 calibration split 选择阈值，并记录点估计和 view-cell bootstrap 下界；目标 test 不参与阈值选择；
+4. 只有存在满足安全规则的目标 calibration 工作点时，才写入不可变冻结清单并对完整 test split 执行一次评测；没有安全工作点时只输出 `no_safe_target_calibration_workpoint`，不产生伪造 test 结果。
+
+推荐运行形式为：
+
+```bash
+conda run --no-capture-output -n slm_pvs python -u \
+  neural_instance_culling/benchmark/evaluate_cross_scene_transfer.py \
+  --source-checkpoint <source-best.pt> \
+  --target-dataset-dir <target-pose-csr> \
+  --target-evidence-dir <target-directional-evidence> \
+  --target-glb-points <target-glb-points.bin> \
+  --target-runtime-meta <target-runtimeVisibilityMeta.json> \
+  --output-dir neural_instance_culling/model/out/m11_transfer_<source>_to_<target> \
+  > transfer_stdout.log 2> transfer_stderr.log
+```
+
+输出目录至少包含目标固定特征表、`instance_features_meta.json`、
+`calibration_ready_summary.json`；若安全工作点存在，还包含
+`frozen_test_manifest.json` 和 `summary.json`。本入口已经完成静态编译检查，但截至本记录更新时尚未
+运行实际跨场景 test；不能把入口存在解释为跨场景泛化成立。少样本适配仍需在该零样本执行完成后按
+预注册的 1%、5% 和 10% 训练视点另行实现和评测。
