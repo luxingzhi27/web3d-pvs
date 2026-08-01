@@ -31,6 +31,6 @@ tmux new-session -d -s formal_m3_followup \
 ## 当前结论
 
 - 目标：已登记。
-- 代码：已实现并通过 shell 静态检查前的 Python 入口自检；完整运行待正式 checkpoint。
+- 代码：已实现并通过 shell 静态检查和 Python 入口自检；`formal_m3_followup` tmux 会话已启动，当前等待正式 checkpoint 和 M0 one-shot 结果。
 - 指标：未生成，不能宣称代理有效或无效。
 - 是否保留为主线：待正式干预和三种子重训练结果决定。
