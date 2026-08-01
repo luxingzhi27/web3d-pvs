@@ -41,8 +41,12 @@ run_scene() {
   mkdir -p "$log_dir"
 
   wait_for_ready "$output_dir" "$label"
+  if [[ -f "$manifest" && -f "$test_dir/summary.json" ]]; then
+    printf '[formal-followup] %s already completed; keeping immutable output: %s\n' "$label" "$test_dir/summary.json"
+    return 0
+  fi
   if [[ -e "$manifest" || -e "$test_dir" ]]; then
-    printf '[formal-followup] refusing to overwrite existing frozen output for %s: %s\n' "$label" "$protocol_dir" >&2
+    printf '[formal-followup] refusing to reuse incomplete frozen output for %s: %s\n' "$label" "$protocol_dir" >&2
     return 1
   fi
 
@@ -81,7 +85,7 @@ run_scene "HKUST" "0" \
   "neural_instance_culling/model/out/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_hkust_spatial_fov66_seed20260801_protocolfix_retry2" &
 hkust_pid=$!
 
-run_scene "Metropolis" "2" \
+run_scene "Metropolis" "3" \
   "neural_instance_culling/dataset/out/pose_csr_metropolis_spatial_dense_subpose_union_fov66_v2" \
   "ifcbench_fantasy_metropolis_instanced_v2/assets/runtimeVisibilityMeta.json" \
   "ifcbench_fantasy_metropolis_instanced_v2/assets/glbIndex.json" \
@@ -90,6 +94,11 @@ run_scene "Metropolis" "2" \
   "neural_instance_culling/model/out/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_metropolis_spatial_fov66_seed20260801_protocolfix_bs1_gpu2" &
 metropolis_pid=$!
 
-wait "$hkust_pid"
-wait "$metropolis_pid"
+status=0
+wait "$hkust_pid" || status=1
+wait "$metropolis_pid" || status=1
+if (( status != 0 )); then
+  printf '[formal-followup] one or more registered scenes failed; inspect per-scene logs\n' >&2
+  exit "$status"
+fi
 printf '[formal-followup] all registered scenes completed\n'

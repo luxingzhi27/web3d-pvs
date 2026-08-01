@@ -90,6 +90,15 @@ HKUST 训练完成后首次执行冻结测试时，入口在真正遍历 test po
 该结果通过 HKUST 的 M0 冻结测试门，但不能代表 Metropolis 或跨场景泛化结论；后续仍需
 完成 Metropolis 的同口径冻结 test、M4 多种子消融和 M5 完整图像评价。
 
+## 收尾脚本可靠性修复
+
+首次自动跟进过程中，HKUST 的冻结入口错误会使带 `set -e` 的并行脚本提前退出，导致 Metropolis
+虽然仍在训练，却没有继续进入 M0。现已修复 `run_formal_training_followup.sh`：已完成且包含
+`summary.json` 的场景会被明确跳过；不完整输出会拒绝复用；两个场景的后台任务都会等待并汇总
+退出状态，不再因单个场景失败而静默跳过另一个场景。Metropolis 的冻结评测槽改用 GPU 3，避免
+与 M3/M4 的已登记 GPU 槽冲突。修复后的持久会话为 `formal_m0_followup_retry`，其日志持续写入
+`neural_instance_culling/benchmark/out/formal_m0_followup_retry.log`。
+
 ## 保留决定与风险
 
 保留为当前主线协议代码和回归测试。剩余风险是正式训练进程启动时可能使用旧版源码；其输出必须按实际日志和 artifact provenance 审计，不能把本次新增测试追溯应用到已经运行的进程。
