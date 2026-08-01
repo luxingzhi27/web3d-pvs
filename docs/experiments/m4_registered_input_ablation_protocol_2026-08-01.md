@@ -68,3 +68,30 @@ git diff --check: passed
 ## 质量门与解释边界
 
 M4 的主比较以 `geometry + context + ray` 为代理增量母基线，按相同 calibration 安全工作点比较 useful cull、bad cull、weighted recall、普通集合指标和图像/下载指标。方向代理只有在三种子 paired bootstrap 的安全工作点上达到投稿计划规定的 useful cull 或同效用字节收益，并且区间不跨零时，才能升级为独立论文贡献；否则将其降级为固定场景表征中的辅助分支，不通过命名或阈值调整掩盖失败。
+
+## 2026-08-01 正式矩阵启动记录
+
+在 GPU1 上启动第一个正式矩阵成员，使用与当前 HKUST 主线相同的空间数据、证据目录、点云缓存、FP32 和
+40 epoch 训练协议：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 conda run --no-capture-output -n slm_pvs \
+  python -u neural_instance_culling/model/train_directional_occlusion_proxy_encoder.py \
+  --dataset-dir neural_instance_culling/dataset/out/pose_csr_hkust_v3_spatial_raw_subpose_aabb_fov66_v1 \
+  --evidence-dir neural_instance_culling/dataset/out/directional_occlusion_evidence_hkust_v3_spatial_raw_fov66_v1 \
+  --glb-points neural_instance_culling/dataset/out/glb_points_v3_formal_hkust_fov66.bin \
+  --runtime-meta hkust-v3/assets/runtimeVisibilityMeta.json \
+  --glb-index hkust-v3/assets/glbIndex.json \
+  --glb-root hkust-v3/assets \
+  --output-dir neural_instance_culling/model/out/pvs_m4_ablation_aabb_ray_rvl_strong_v2_hkust_spatial_fov66_seed20260801_full40 \
+  --experiment-name pvs_m4_ablation_aabb_ray_rvl_strong_v2_hkust_spatial_fov66_seed20260801_full40 \
+  --epochs 40 --steps-per-epoch 900 --pose-set-batch-size 2 --eval-every 2 \
+  --loss-profile rvl_strong_v2 --runtime-feature-ablation geo_context_proxy_zero \
+  --target-weighted-recall 0.99 --calibration-point-floor 0.9925 --calibration-lcb-floor 0.99 \
+  --calibration-bootstrap-replicates 10000 --seed 20260801 --device cuda --skip-final-test \
+  > neural_instance_culling/model/out/pvs_m4_ablation_aabb_ray_rvl_strong_v2_hkust_spatial_fov66_seed20260801_full40/train_stdout.log \
+  2> neural_instance_culling/model/out/pvs_m4_ablation_aabb_ray_rvl_strong_v2_hkust_spatial_fov66_seed20260801_full40/train_stderr.log
+```
+
+启动时尚无指标结论；必须等待 `calibration_ready_summary.json` 和 `best.pt` 生成后，才可把该成员纳入
+M4 比较。其余变体和随机种子仍需使用不同的稳定输出目录，不能复用该目录或把中间 checkpoint 当成正式结果。
