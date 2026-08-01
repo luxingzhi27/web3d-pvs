@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <title>Model Viewer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <link rel="canonical" href="https://gltf-viewer.donmccurdy.com/">
+  <link rel="shortcut icon" href="assets/favicon.ico">
+  <link rel="stylesheet" href="style.css">
+  <script src="src/app.js"></script>
+</head>
+<body>
+  <!-- Trajectory Collection Overlay -->
+  <div id="trajectory-overlay" class="trajectory-overlay" style="display: none;">
+    <div class="trajectory-modal">
+      <h2>Campus Roaming Data Collection</h2>
+      <p>Roaming will start from a random pre-configured location by default.</p>
+      
+      <p>Movement controls are disabled until you start.</p>
+      
+      <div style="margin: 20px 0; background: rgba(255,255,255,0.1); padding: 10px; border-radius: 8px; text-align: left;">
+          <label style="cursor: pointer; display: flex; align-items: center; gap: 10px; font-size: 14px;">
+              <input type="checkbox" id="full-load-toggle-overlay" style="width: 20px; height: 20px; cursor: pointer;">
+              Enable Full Assets Load (Bypass Culling)
+          </label>
+          <p style="font-size: 12px; margin: 5px 0 0 30px; opacity: 0.8;">If checked, the entire scene will load once. If unchecked, assets load as you roam.</p>
+      </div>
+
+      <button id="start-trajectory-btn" class="trajectory-btn">Start Roaming</button>
+    </div>
+  </div>
+
+  <!-- Trajectory HUD -->
+  <div id="trajectory-hud" class="trajectory-hud" style="display: none;">
+    <div class="hud-top">
+        <div class="hud-content">
+          <span class="hud-label">Time Elapsed: </span>
+          <span id="trajectory-timer" class="hud-timer">00:00</span>
+        </div>
+        <button id="stop-trajectory-btn" class="stop-btn">Stop</button>
+    </div>
+    <div class="hud-bottom">
+        <label style="cursor: pointer; display: flex; align-items: center; gap: 5px;">
+            <input type="checkbox" id="full-load-toggle-hud" style="width: 20px; height: 20px; cursor: pointer;">
+            Enable Full Assets Load (Bypass Culling)
+        </label>
+        <label style="cursor: pointer; display: flex; align-items: center; gap: 5px; margin-top: 10px; color:#ffcc00;">
+            <input type="checkbox" id="neural-pvs-toggle-hud" style="width: 20px; height: 20px; cursor: pointer;">
+            Enable Instance Neural Culling
+        </label>
+        <label style="cursor: pointer; display: flex; align-items: center; gap: 5px; margin-top: 10px; color:#ff8a65;">
+            <input type="checkbox" id="neural-debug-nocache-toggle-hud" style="width: 20px; height: 20px; cursor: pointer;">
+            Neural Debug (No Cache)
+        </label>
+        <div class="neural-delay-control">
+            <div class="neural-delay-header">
+                <span>Neural Render Hide Delay</span>
+                <span id="neural-render-delay-value-hud">500 ms</span>
+            </div>
+            <input
+                type="range"
+                id="neural-render-delay-slider-hud"
+                min="0"
+                max="3000"
+                step="50"
+                value="500"
+            >
+        </div>
+    </div>
+  </div>
+
+  <main class="wrap">
+  </main>
+</body>

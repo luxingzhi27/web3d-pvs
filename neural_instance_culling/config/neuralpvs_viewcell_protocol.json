@@ -1,0 +1,19 @@
+{
+  "schema": "neuralpvs-viewcell-fov-protocol-v2",
+  "reference": "NeuralPVS arXiv:2509.24677v1 Sections 3.2 and 4.3",
+  "renderFovYDeg": 60.0,
+  "modelFovYDeg": 66.0,
+  "modelFovScale": 1.1,
+  "defaultAspect": 1.0,
+  "geometryBufferResolution": [2048, 2048],
+  "renderResolution": [1024, 1024],
+  "nearM": 0.3,
+  "farM": 1000.0,
+  "groundTruthPositionsPerViewcell": 1000,
+  "backOffsetFormula": "r / tan(renderFovYDeg / 2)",
+  "semantics": {
+    "renderFov": "前端真实画面使用的垂直视场角",
+    "modelFov": "模型训练、后退候选相机和运行时推理使用的垂直视场角；等于真实相机视场角乘以 1.1",
+    "backOffset": "代表查询相机沿主视线反向后退的距离；r 使用 view-cell 的保守横向半径"
+  }
+}

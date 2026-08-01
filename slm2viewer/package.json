@@ -1,0 +1,63 @@
+{
+  "private": true,
+  "version": "1.5.1",
+  "description": "NeuralStreamWeb3D instance-level PVS viewer and WebGPU scheduler.",
+  "author": "Don McCurdy <dm@donmccurdy.com> (https://www.donmccurdy.com)",
+  "license": "MIT",
+  "main": "public/app.js",
+  "type": "module",
+  "browserslist": [
+    ">1%",
+    "not dead"
+  ],
+  "staticFiles": {
+    "staticPath": [
+      {
+        "staticPath": "assets",
+        "staticOutDir": "assets"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node ./scripts/build_parcel.mjs",
+    "package:deploy": "npm run build && node ./scripts/package_deploy.mjs",
+    "package:deploy:direct": "npm run build && node ./scripts/package_deploy.mjs --asset-mode=direct",
+    "package:deploy:proxy": "npm run build && node ./scripts/package_deploy.mjs --asset-mode=proxy",
+    "package:deploy:hkust-liteweb3d": "node ./scripts/package_hkust_liteweb3d_deploy.mjs",
+    "package:scene-glb": "node ./scripts/package_scene_glb.mjs",
+    "test": "node ./scripts/test_current.mjs",
+    "test:m9": "node ./scripts/test_m9_frontend.mjs",
+    "caddy:script": "echo scripts/install_caddy_site.sh",
+    "nginx:script": "echo scripts/install_nginx_site.sh",
+    "verify:deploy-assets": "echo scripts/verify_deploy_assets.sh",
+    "build:registry": "curl https://raw.githack.com/KhronosGroup/glTF-Generator-Registry/main/registry.json -o lib/gltf-generator-registry.json",
+    "dev": "parcel index.html --port 3000",
+    "deploy": "npm run build && vercel --local-config vercel.json --prod",
+    "postversion": "git push && git push --tags"
+  },
+  "dependencies": {
+    "@monogrid/gainmap-js": "^3.0.6",
+    "dat.gui": "^0.7.9",
+    "deasync": "^0.1.30",
+    "glob-to-regexp": "^0.4.1",
+    "glsl-blend-soft-light": "^1.0.5",
+    "glsl-film-grain": "^1.0.4",
+    "gltf-validator": "^2.0.0-dev.3.5",
+    "handlebars": "^4.7.6",
+    "n8ao": "^1.9.2",
+    "onnxruntime-web": "^1.24.3",
+    "postprocessing": "^6.36.3",
+    "query-string": "^7.1.1",
+    "sequential-promise-map": "^1.2.0",
+    "three": "^0.183.2",
+    "three-loader-3dtiles": "^1.2.7"
+  },
+  "devDependencies": {
+    "glslify-bundle": "^5.1.1",
+    "glslify-deps": "^1.3.2",
+    "javascript-obfuscator": "^5.4.2",
+    "node-fetch": "^3.2.3",
+    "parcel-bundler": "^1.12.4",
+    "parcel-plugin-static-files-copy": "^2.5.0"
+  }
+}

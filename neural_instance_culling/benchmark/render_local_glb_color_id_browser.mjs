@@ -1,0 +1,1168 @@
+#!/usr/bin/env node
+/*
+ * Render and validate the component-ID manifest used by the M5 image pipeline.
+ *
+ * The browser path binds component IDs and visibility masks to each loaded
+ * InstancedMesh.  --validate-only is intentionally dependency and Chrome
+ * independent; --synthetic-render-smoke exercises the shader without GLB
+ * loading.  The manifest still remains non-formal until the full benchmark is
+ * reviewed on the real scene split.
+ */
+
+import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const REPO_ROOT = path.resolve(__dirname, '..', '..');
+const SLM2_ROOT = path.join(REPO_ROOT, 'slm2viewer');
+const INSTANCE_RENDER_MANIFEST_SCHEMA = 'local-true-component-id-render-manifest-v2';
+const INSTANCE_RENDER_BATCH_MANIFEST_SCHEMA = 'local-true-component-id-render-batch-manifest-v1';
+const INSTANCE_BINDING_SCHEMA = 'component-instance-binding-preflight-v1';
+const INSTANCE_ID_ENCODING = 'componentGlobalId + 1, RGB24, 0 background';
+const RENDER_FOV_Y_DEG = 60;
+const MODEL_INPUT_FOV_Y_DEG = 66;
+
+function parseArgs(argv) {
+  const args = {
+    manifest: null,
+    outputDir: null,
+    chromeExe: process.env.CHROME_EXE || null,
+    port: 0,
+    timeoutMs: 30 * 60 * 1000,
+    validateOnly: false,
+    syntheticRenderSmoke: false,
+  };
+  for (let i = 2; i < argv.length; i += 1) {
+    const key = argv[i];
+    if (!key.startsWith('--')) continue;
+    if (key === '--validate-only') {
+      args.validateOnly = true;
+      continue;
+    }
+    if (key === '--synthetic-render-smoke') {
+      args.syntheticRenderSmoke = true;
+      continue;
+    }
+    const value = argv[i + 1];
+    i += 1;
+    if (key === '--manifest') args.manifest = path.resolve(value);
+    else if (key === '--output-dir') args.outputDir = path.resolve(value);
+    else if (key === '--chrome-exe') args.chromeExe = path.resolve(value);
+    else if (key === '--port') args.port = Number(value);
+    else if (key === '--timeout-ms') args.timeoutMs = Number(value);
+  }
+  if (!args.manifest) throw new Error('--manifest is required');
+  if (!args.outputDir) throw new Error('--output-dir is required');
+  return args;
+}
+
+function validateInstanceRenderManifest(manifest) {
+  if (!manifest || manifest.schema !== INSTANCE_RENDER_MANIFEST_SCHEMA) {
+    throw new Error(
+      `refusing non-instance render manifest; expected ${INSTANCE_RENDER_MANIFEST_SCHEMA}`,
+    );
+  }
+  if (manifest.idEncoding !== INSTANCE_ID_ENCODING) {
+    throw new Error('manifest must encode componentGlobalId, not globalGlbId');
+  }
+  if (Number(manifest.renderFovYDeg) !== RENDER_FOV_Y_DEG) {
+    throw new Error(`M5 render FOV must be exactly ${RENDER_FOV_Y_DEG} degrees`);
+  }
+  if (manifest.formalImageEvaluationReady !== false) {
+    throw new Error('component browser renderer is not marked formal-ready');
+  }
+  if (Number(manifest.modelInputFovYDeg) !== MODEL_INPUT_FOV_Y_DEG) {
+    throw new Error(`M5 model-input FOV must be exactly ${MODEL_INPUT_FOV_Y_DEG} degrees`);
+  }
+  const bindings = manifest.instanceBindings;
+  if (!bindings || bindings.schema !== INSTANCE_BINDING_SCHEMA) {
+    throw new Error(`manifest.instanceBindings must use ${INSTANCE_BINDING_SCHEMA}`);
+  }
+  const componentToBinding = bindings.componentToBinding || {};
+  if (!Array.isArray(manifest.selectedGlbs) || manifest.selectedGlbs.some((value) => !Number.isInteger(Number(value)) || Number(value) < 0)) {
+    throw new Error('manifest.selectedGlbs must be a list of non-negative integers');
+  }
+  const selected = new Set(manifest.selectedGlbs.map((value) => Number(value)));
+  const byGlb = bindings.byGlobalGlbId || {};
+  const bindingGlbs = new Set(Object.keys(byGlb).map((value) => Number(value)));
+  if (selected.size !== bindingGlbs.size || [...bindingGlbs].some((value) => !selected.has(value))) {
+    throw new Error('selectedGlbs must be the complete GLB inventory, not a predicted subset');
+  }
+  for (const [componentId, binding] of Object.entries(componentToBinding)) {
+    const numericComponentId = Number(componentId);
+    const globalGlbId = Number(binding.globalGlbId);
+    const instanceIndex = Number(binding.instanceIndex);
+    if (!Number.isInteger(numericComponentId) || numericComponentId < 0 ||
+        !Number.isInteger(globalGlbId) || globalGlbId < 0 ||
+        !Number.isInteger(instanceIndex) || instanceIndex < 0) {
+      throw new Error(`invalid component binding for ${componentId}`);
+    }
+    if (!byGlb[String(globalGlbId)]) {
+      throw new Error(`component ${componentId} references missing GLB ${globalGlbId}`);
+    }
+    if (!selected.has(globalGlbId)) {
+      throw new Error(`component ${componentId} references an unselected GLB ${globalGlbId}`);
+    }
+    const glbBinding = byGlb[String(globalGlbId)];
+    const componentIds = glbBinding.componentGlobalIds || [];
+    if (instanceIndex >= componentIds.length || Number(componentIds[instanceIndex]) !== numericComponentId) {
+      throw new Error(`component ${componentId} does not match GLB ${globalGlbId} instance slot ${instanceIndex}`);
+    }
+  }
+  if (!manifest.reference || manifest.reference.mode !== 'full_scene_renderable_instances' ||
+      manifest.reference.idSource !== 'componentGlobalId') {
+    throw new Error('manifest reference must be a full component-ID scene render');
+  }
+  if (!manifest.prediction || manifest.prediction.field !== 'predictionComponentIds') {
+    throw new Error('manifest prediction field must be predictionComponentIds');
+  }
+  if (manifest.syntheticComponentIdSmoke) {
+    const smoke = manifest.syntheticComponentIdSmoke;
+    for (const field of ['referenceComponentIds', 'predictionComponentIds']) {
+      if (!Array.isArray(smoke[field])) throw new Error(`synthetic smoke is missing ${field}`);
+      for (const componentId of smoke[field]) {
+        if (!Number.isInteger(Number(componentId)) || Number(componentId) < 0 ||
+            !componentToBinding[String(Number(componentId))]) {
+          throw new Error(`synthetic smoke contains unknown componentGlobalId ${componentId}`);
+        }
+      }
+    }
+  }
+  const samples = manifest.samples || [];
+  for (let index = 0; index < samples.length; index += 1) {
+    const sample = samples[index];
+    if (Object.prototype.hasOwnProperty.call(sample, 'referenceGlbs') ||
+        Object.prototype.hasOwnProperty.call(sample, 'testGlbs') ||
+        Object.prototype.hasOwnProperty.call(sample, 'predictionGlbIds')) {
+      throw new Error(`sample ${index} still contains GLB-level image IDs`);
+    }
+    if (!Array.isArray(sample.predictionComponentIds)) {
+      throw new Error(`sample ${index} is missing predictionComponentIds`);
+    }
+    if (Number(sample.renderFovYDeg) !== RENDER_FOV_Y_DEG) {
+      throw new Error(`sample ${index} does not use the 60 degree render camera`);
+    }
+    if (Number(sample.modelInputFovYDeg) !== MODEL_INPUT_FOV_Y_DEG) {
+      throw new Error(`sample ${index} does not use the 66 degree model-input camera`);
+    }
+    for (const componentId of sample.predictionComponentIds) {
+      if (!Number.isInteger(Number(componentId)) || Number(componentId) < 0 ||
+          !componentToBinding[String(Number(componentId))]) {
+        throw new Error(`sample ${index} contains unknown componentGlobalId ${componentId}`);
+      }
+    }
+  }
+  return {
+    schema: 'component-id-render-schema-validation-v1',
+    manifestSchema: manifest.schema,
+    idEncoding: manifest.idEncoding,
+    renderFovYDeg: RENDER_FOV_Y_DEG,
+    selectedGlbCount: selected.size,
+    componentBindingCount: Object.keys(componentToBinding).length,
+    sampleCount: samples.length,
+    formalImageEvaluationReady: false,
+    browserInstanceReorderImplemented: false,
+  };
+}
+
+function validateInstanceRenderBatchManifest(manifest) {
+  if (!manifest || manifest.schema !== INSTANCE_RENDER_BATCH_MANIFEST_SCHEMA) {
+    throw new Error(
+      `refusing non-batch instance render manifest; expected ${INSTANCE_RENDER_BATCH_MANIFEST_SCHEMA}`,
+    );
+  }
+  if (!Array.isArray(manifest.batches) || manifest.batches.length === 0) {
+    throw new Error('batch manifest must contain a non-empty batches list');
+  }
+  const batchIds = new Set();
+  const sampleIds = new Set();
+  const flattened = [];
+  for (let batchIndex = 0; batchIndex < manifest.batches.length; batchIndex += 1) {
+    const batch = manifest.batches[batchIndex];
+    const batchId = String(batch && batch.batchId ? batch.batchId : '');
+    if (!batchId) throw new Error(`batch ${batchIndex} is missing batchId`);
+    if (batchIds.has(batchId)) throw new Error(`duplicate batchId: ${batchId}`);
+    batchIds.add(batchId);
+    if (!Array.isArray(batch.samples) || batch.samples.length === 0) {
+      throw new Error(`batch ${batchId} must contain a non-empty samples list`);
+    }
+    for (let sampleIndex = 0; sampleIndex < batch.samples.length; sampleIndex += 1) {
+      const sample = batch.samples[sampleIndex];
+      const sampleId = String(sample && sample.sampleId ? sample.sampleId : '');
+      if (!sampleId) throw new Error(`batch ${batchId} sample ${sampleIndex} is missing sampleId`);
+      if (sampleIds.has(sampleId)) throw new Error(`duplicate sampleId across batches: ${sampleId}`);
+      sampleIds.add(sampleId);
+      flattened.push(sample);
+    }
+  }
+  const legacy = { ...manifest, schema: INSTANCE_RENDER_MANIFEST_SCHEMA, samples: flattened };
+  const validation = validateInstanceRenderManifest(legacy);
+  return {
+    ...validation,
+    schema: 'component-id-render-batch-schema-validation-v1',
+    manifestSchema: manifest.schema,
+    batchCount: manifest.batches.length,
+    sampleCount: flattened.length,
+  };
+}
+
+function findChrome(explicit) {
+  const candidates = [
+    explicit,
+    process.env.CHROME_EXE,
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/snap/bin/chromium',
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  throw new Error('Chrome/Edge executable not found. Pass --chrome-exe or set CHROME_EXE.');
+}
+
+function assertRendererDependencies() {
+  const required = [
+    'three/build/three.module.js',
+    'three/examples/jsm/loaders/GLTFLoader.js',
+    'three/examples/jsm/loaders/DRACOLoader.js',
+    'three/examples/jsm/libs/meshopt_decoder.module.js',
+    'three/examples/jsm/libs/draco/gltf/draco_decoder.wasm',
+  ];
+  const missing = required
+    .map((rel) => path.join(SLM2_ROOT, 'node_modules', rel))
+    .filter((file) => !fs.existsSync(file));
+  if (missing.length > 0) {
+    throw new Error(
+      'Missing true GLB renderer dependencies under slm2viewer/node_modules. ' +
+      'Run `npm ci` in slm2viewer before using --image-renderer true_glb. Missing: ' +
+      missing.map((file) => path.relative(REPO_ROOT, file)).join(', ')
+    );
+  }
+}
+
+function contentType(file) {
+  const ext = path.extname(file).toLowerCase();
+  if (ext === '.js' || ext === '.mjs') return 'text/javascript; charset=utf-8';
+  if (ext === '.json') return 'application/json; charset=utf-8';
+  if (ext === '.wasm') return 'application/wasm';
+  if (ext === '.glb') return 'model/gltf-binary';
+  if (ext === '.png') return 'image/png';
+  if (ext === '.html') return 'text/html; charset=utf-8';
+  return 'application/octet-stream';
+}
+
+function safeJoin(root, rel) {
+  const resolved = path.resolve(root, rel.replace(/^[/\\]+/, ''));
+  const rootResolved = path.resolve(root);
+  if (resolved !== rootResolved && !resolved.startsWith(rootResolved + path.sep)) {
+    throw new Error(`Path escapes root: ${rel}`);
+  }
+  return resolved;
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+function writeJson(res, value, status = 200) {
+  const text = JSON.stringify(value);
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+  });
+  res.end(text);
+}
+
+function rendererHtml() {
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Local GLB Color-ID Renderer</title>
+  <style>html,body{margin:0;background:#111;color:#ddd;font:12px Consolas,monospace}#status{padding:8px;white-space:pre-wrap}</style>
+</head>
+<body>
+  <div id="status">booting</div>
+  <script type="importmap">
+    {"imports":{"three":"/node_modules/three/build/three.module.js","three/addons/":"/node_modules/three/examples/jsm/"}}
+  </script>
+  <script type="module" src="/renderer.js"></script>
+</body>
+</html>`;
+}
+
+function syntheticRendererJs() {
+  return `
+import * as THREE from 'three';
+
+const statusEl = document.getElementById('status');
+function status(message) {
+  statusEl.textContent = message;
+  console.log('[component-id-smoke]', message);
+  fetch('/log', { method: 'POST', body: message }).catch(() => {});
+}
+
+function makeComponentIdMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: {},
+    vertexShader: [
+      'attribute float componentId;',
+      'varying float vComponentId;',
+      'void main() {',
+      '  vComponentId = componentId;',
+      '  gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);',
+      '}',
+    ].join('\\n'),
+    fragmentShader: [
+      'uniform float maskEnabled;',
+      'varying float vComponentId;',
+      'void main() {',
+      '  float encoded = vComponentId + 1.0;',
+      '  float red = mod(encoded, 256.0);',
+      '  float green = mod(floor(encoded / 256.0), 256.0);',
+      '  float blue = mod(floor(encoded / 65536.0), 256.0);',
+      '  gl_FragColor = vec4(vec3(red, green, blue) / 255.0, 1.0);',
+      '}',
+    ].join('\\n'),
+    depthTest: true,
+    depthWrite: true,
+    toneMapped: false,
+  });
+}
+
+function makeInstancedComponentMesh(componentIds, positions) {
+  if (componentIds.length !== positions.length) throw new Error('synthetic component/position count mismatch');
+  const geometry = new THREE.BoxGeometry(1.2, 1.2, 1.2);
+  geometry.setAttribute(
+    'componentId',
+    new THREE.InstancedBufferAttribute(new Float32Array(componentIds), 1),
+  );
+  const mesh = new THREE.InstancedMesh(geometry, makeComponentIdMaterial(), positions.length);
+  const matrix = new THREE.Matrix4();
+  for (let index = 0; index < positions.length; index += 1) {
+    matrix.makeTranslation(positions[index][0], positions[index][1], positions[index][2]);
+    mesh.setMatrixAt(index, matrix);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+  mesh.frustumCulled = false;
+  return mesh;
+}
+
+function decodePixels(rgba) {
+  const ids = new Uint32Array(rgba.length / 4);
+  for (let index = 0, pixel = 0; index < rgba.length; index += 4, pixel += 1) {
+    ids[pixel] = rgba[index + 3] === 0
+      ? 0
+      : (rgba[index] | (rgba[index + 1] << 8) | (rgba[index + 2] << 16));
+  }
+  return ids;
+}
+
+function compareIdBuffers(reference, prediction) {
+  let validReferencePixels = 0;
+  let errorPixels = 0;
+  let missPixels = 0;
+  let wrongInstancePixels = 0;
+  let extraPixels = 0;
+  const diff = new Uint8Array(reference.length);
+  for (let index = 0; index < reference.length; index += 1) {
+    const referenceId = reference[index];
+    const predictionId = prediction[index];
+    if (referenceId !== 0) {
+      validReferencePixels += 1;
+      if (referenceId !== predictionId) {
+        errorPixels += 1;
+        if (predictionId === 0) {
+          missPixels += 1;
+          diff[index] = 1;
+        } else {
+          wrongInstancePixels += 1;
+          diff[index] = 2;
+        }
+      }
+    } else if (predictionId !== 0) {
+      extraPixels += 1;
+      diff[index] = 3;
+    }
+  }
+  return {
+    metrics: {
+      totalPixels: reference.length,
+      validReferencePixels,
+      errorPixels,
+      missPixels,
+      wrongInstancePixels,
+      extraPixels,
+      PER: errorPixels / Math.max(1, validReferencePixels),
+      missPixelRate: missPixels / Math.max(1, validReferencePixels),
+      wrongInstancePixelRate: wrongInstancePixels / Math.max(1, validReferencePixels),
+      extraPixelRateOverImage: extraPixels / Math.max(1, reference.length),
+    },
+    diff,
+  };
+}
+
+async function postBuffer(name, typedArray) {
+  await fetch('/buffer?name=' + encodeURIComponent(name), { method: 'POST', body: typedArray.buffer });
+}
+
+async function main() {
+  const manifest = await (await fetch('/manifest', { cache: 'no-store' })).json();
+  const smoke = manifest.syntheticComponentIdSmoke;
+  if (!smoke) throw new Error('manifest.syntheticComponentIdSmoke is required');
+  const width = 160;
+  const height = 90;
+  const referencePositions = [[-1.25, 0, 0], [1.25, 0, 0]];
+  const predictionPositions = [[-1.25, 0, 0]];
+  if (smoke.referenceComponentIds.length !== 2 || smoke.predictionComponentIds.length !== 1) {
+    throw new Error('synthetic smoke expects two reference and one prediction component');
+  }
+  const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true, preserveDrawingBuffer: false, powerPreference: 'high-performance' });
+  renderer.setSize(width, height, false);
+  renderer.setPixelRatio(1);
+  renderer.setClearColor(0x000000, 0);
+  renderer.toneMapping = THREE.NoToneMapping;
+  document.body.appendChild(renderer.domElement);
+  const target = new THREE.WebGLRenderTarget(width, height, { depthBuffer: true, stencilBuffer: false });
+  if (target.texture && 'colorSpace' in target.texture && THREE.NoColorSpace !== undefined) target.texture.colorSpace = THREE.NoColorSpace;
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 100.0);
+  camera.position.set(0, 0, 7);
+  camera.lookAt(0, 0, 0);
+  const referenceMesh = makeInstancedComponentMesh(smoke.referenceComponentIds, referencePositions);
+  const predictionMesh = makeInstancedComponentMesh(smoke.predictionComponentIds, predictionPositions);
+  scene.add(referenceMesh);
+  scene.add(predictionMesh);
+  const pixels = new Uint8Array(width * height * 4);
+  const renderMesh = async (activeMesh) => {
+    referenceMesh.visible = activeMesh === referenceMesh;
+    predictionMesh.visible = activeMesh === predictionMesh;
+    renderer.setRenderTarget(target);
+    renderer.clear(true, true, true);
+    renderer.render(scene, camera);
+    renderer.readRenderTargetPixels(target, 0, 0, width, height, pixels);
+    return decodePixels(pixels);
+  };
+  status('rendering component-ID reference');
+  const reference = await renderMesh(referenceMesh);
+  status('rendering component-ID prediction');
+  const prediction = await renderMesh(predictionMesh);
+  const { metrics, diff } = compareIdBuffers(reference, prediction);
+  const referenceValues = new Set(reference);
+  const predictionValues = new Set(prediction);
+  if (!referenceValues.has(Number(smoke.referenceComponentIds[0]) + 1) ||
+      !referenceValues.has(Number(smoke.referenceComponentIds[1]) + 1)) {
+    throw new Error('reference ID buffer did not contain both component IDs');
+  }
+  if (predictionValues.has(Number(smoke.referenceComponentIds[1]) + 1) || metrics.missPixels <= 0) {
+    throw new Error('prediction ID buffer did not produce the expected component miss');
+  }
+  await postBuffer('synthetic_reference_component_id_u32.bin', reference);
+  await postBuffer('synthetic_prediction_component_id_u32.bin', prediction);
+  await postBuffer('synthetic_diff_mask_u8.bin', diff);
+  await fetch('/done', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      schema: 'component-id-browser-render-smoke-v1',
+      status: 'rendered',
+      formalImageEvaluationReady: false,
+      browserInstanceReorderImplemented: false,
+      synthetic: true,
+      renderFovYDeg: 60,
+      width,
+      height,
+      referenceComponentIds: smoke.referenceComponentIds,
+      predictionComponentIds: smoke.predictionComponentIds,
+      imageMetrics: metrics,
+      maskSemantics: { miss: 1, wrong: 2, extra: 3 },
+    }),
+  });
+}
+
+main().catch(async (error) => {
+  await fetch('/done', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ schema: 'component-id-browser-render-smoke-v1', status: 'failed', formalImageEvaluationReady: false, error: String(error && error.stack ? error.stack : error) }),
+  }).catch(() => {});
+});
+`;
+}
+
+function rendererJs() {
+  return `
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+
+const RENDER_FOV_Y_DEG = 60;
+const statusEl = document.getElementById('status');
+function status(message) {
+  statusEl.textContent = message;
+  console.log('[true-glb-render]', message);
+  fetch('/log', { method: 'POST', body: message }).catch(() => {});
+}
+
+function makeInstancedIdMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: { maskEnabled: { value: 0.0 } },
+    vertexShader: [
+      'attribute float componentId;',
+      'attribute float componentVisible;',
+      'varying float vComponentId;',
+      'varying float vComponentVisible;',
+      'void main() {',
+      '  vComponentId = componentId;',
+      '  vComponentVisible = componentVisible;',
+      '  gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);',
+      '}',
+    ].join('\\n'),
+    fragmentShader: [
+      'uniform float maskEnabled;',
+      'varying float vComponentId;',
+      'varying float vComponentVisible;',
+      'void main() {',
+      '  if (maskEnabled > 0.5 && vComponentVisible < 0.5) discard;',
+      '  float encoded = vComponentId + 1.0;',
+      '  float red = mod(encoded, 256.0);',
+      '  float green = mod(floor(encoded / 256.0), 256.0);',
+      '  float blue = mod(floor(encoded / 65536.0), 256.0);',
+      '  gl_FragColor = vec4(vec3(red, green, blue) / 255.0, 1.0);',
+      '}',
+    ].join('\\n'),
+    depthTest: true,
+    depthWrite: true,
+    toneMapped: false,
+  });
+}
+
+function makeStaticIdMaterial(componentId) {
+  return new THREE.ShaderMaterial({
+    uniforms: { componentId: { value: Number(componentId) }, componentVisible: { value: 0.0 }, maskEnabled: { value: 0.0 } },
+    vertexShader: [
+      'uniform float componentId;',
+      'uniform float componentVisible;',
+      'varying float vComponentId;',
+      'varying float vComponentVisible;',
+      'void main() {',
+      '  vComponentId = componentId;',
+      '  vComponentVisible = componentVisible;',
+      '  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);',
+      '}',
+    ].join('\\n'),
+    fragmentShader: [
+      'uniform float maskEnabled;',
+      'varying float vComponentId;',
+      'varying float vComponentVisible;',
+      'void main() {',
+      '  if (maskEnabled > 0.5 && vComponentVisible < 0.5) discard;',
+      '  float encoded = vComponentId + 1.0;',
+      '  float red = mod(encoded, 256.0);',
+      '  float green = mod(floor(encoded / 256.0), 256.0);',
+      '  float blue = mod(floor(encoded / 65536.0), 256.0);',
+      '  gl_FragColor = vec4(vec3(red, green, blue) / 255.0, 1.0);',
+      '}',
+    ].join('\\n'),
+    depthTest: true,
+    depthWrite: true,
+    toneMapped: false,
+  });
+}
+
+function decodePixels(rgba) {
+  const out = new Uint32Array(rgba.length / 4);
+  for (let i = 0, j = 0; i < rgba.length; i += 4, j += 1) {
+    out[j] = rgba[i + 3] === 0 ? 0 : (rgba[i] | (rgba[i + 1] << 8) | (rgba[i + 2] << 16));
+  }
+  return out;
+}
+
+function computeMetrics(reference, test) {
+  let valid = 0, background = 0, error = 0, miss = 0, wrong = 0, extra = 0;
+  const contributors = new Map();
+  for (let i = 0; i < reference.length; i += 1) {
+    const r = reference[i];
+    const t = test[i];
+    if (r !== 0) {
+      valid += 1;
+      if (t !== r) {
+        error += 1;
+        contributors.set(r - 1, (contributors.get(r - 1) || 0) + 1);
+        if (t === 0) miss += 1;
+        else wrong += 1;
+      }
+    } else {
+      background += 1;
+      if (t !== 0) extra += 1;
+    }
+  }
+  const total = reference.length;
+  return {
+    metrics: {
+      totalPixels: total,
+      validReferencePixels: valid,
+      backgroundReferencePixels: background,
+      errorPixels: error,
+      missPixels: miss,
+      wrongInstancePixels: wrong,
+      extraPixels: extra,
+      PER: error / Math.max(1, valid),
+      missPixelRate: miss / Math.max(1, valid),
+      wrongInstancePixelRate: wrong / Math.max(1, valid),
+      extraPixelRateOverImage: extra / Math.max(1, total),
+    },
+    contributors,
+  };
+}
+
+function diffMask(reference, test) {
+  const out = new Uint8Array(reference.length);
+  for (let i = 0; i < reference.length; i += 1) {
+    const r = reference[i], t = test[i];
+    if (r !== 0 && t === 0) out[i] = 1;
+    else if (r !== 0 && t !== 0 && r !== t) out[i] = 2;
+    else if (r === 0 && t !== 0) out[i] = 3;
+  }
+  return out;
+}
+
+function hashRgb(ids) {
+  const out = new Uint8ClampedArray(ids.length * 4);
+  for (let i = 0; i < ids.length; i += 1) {
+    const id = ids[i];
+    out[i * 4 + 0] = id === 0 ? 0 : ((id * 37 + 17) & 255);
+    out[i * 4 + 1] = id === 0 ? 0 : ((id * 67 + 29) & 255);
+    out[i * 4 + 2] = id === 0 ? 0 : ((id * 97 + 53) & 255);
+    out[i * 4 + 3] = 255;
+  }
+  return out;
+}
+
+function diffRgb(diff) {
+  const out = new Uint8ClampedArray(diff.length * 4);
+  for (let i = 0; i < diff.length; i += 1) {
+    const v = diff[i];
+    if (v === 1) { out[i*4] = 220; out[i*4+1] = 40; out[i*4+2] = 40; }
+    else if (v === 2) { out[i*4] = 240; out[i*4+1] = 180; out[i*4+2] = 30; }
+    else if (v === 3) { out[i*4] = 40; out[i*4+1] = 110; out[i*4+2] = 230; }
+    out[i * 4 + 3] = 255;
+  }
+  return out;
+}
+
+async function postBuffer(url, typedArray) {
+  await fetch(url, { method: 'POST', body: typedArray.buffer });
+}
+
+async function postPreview(name, reference, test, diff, width, height) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width * 3;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  ctx.putImageData(new ImageData(hashRgb(reference), width, height), 0, 0);
+  ctx.putImageData(new ImageData(hashRgb(test), width, height), width, 0);
+  ctx.putImageData(new ImageData(diffRgb(diff), width, height), width * 2, 0);
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+  await fetch('/preview?name=' + encodeURIComponent(name), { method: 'POST', body: blob });
+}
+
+function setCamera(camera, sample) {
+  if (Number(sample.renderFovYDeg) !== RENDER_FOV_Y_DEG) {
+    throw new Error('render camera FOV must be exactly 60 degrees');
+  }
+  camera.fov = RENDER_FOV_Y_DEG;
+  camera.aspect = Number(sample.aspect || 16 / 9);
+  camera.near = 0.05;
+  camera.far = 20000;
+  camera.updateProjectionMatrix();
+  const p = sample.cameraPosition;
+  const f = sample.cameraForward;
+  camera.position.set(p[0], p[1], p[2]);
+  camera.up.set(0, 1, 0);
+  camera.lookAt(p[0] + f[0], p[1] + f[1], p[2] + f[2]);
+}
+
+function setVisibilityMaskEnabled(groups, enabled) {
+  const value = enabled ? 1.0 : 0.0;
+  for (const group of groups.values()) {
+    for (const entry of group.instanced) {
+      if (entry.material.uniforms.maskEnabled.value !== value) {
+        entry.material.uniforms.maskEnabled.value = value;
+      }
+    }
+    for (const entry of group.staticMeshes) {
+      if (entry.material.uniforms.maskEnabled.value !== value) {
+        entry.material.uniforms.maskEnabled.value = value;
+      }
+    }
+  }
+}
+
+function setComponentVisibility(slot, value, dirtyAttributes) {
+  if (slot.kind === 'instanced') {
+    if (slot.entry.visibleAttribute.array[slot.instanceIndex] !== value) {
+      slot.entry.visibleAttribute.array[slot.instanceIndex] = value;
+      dirtyAttributes.add(slot.entry.visibleAttribute);
+    }
+  } else if (slot.entry.material.uniforms.componentVisible.value !== value) {
+    slot.entry.material.uniforms.componentVisible.value = value;
+  }
+}
+
+function setPredictionComponents(componentSlots, previousVisible, visibleIds) {
+  const nextVisible = new Set((visibleIds || []).map((value) => Number(value)));
+  const dirtyAttributes = new Set();
+  for (const componentId of previousVisible) {
+    if (!nextVisible.has(componentId)) {
+      const slot = componentSlots.get(componentId);
+      if (slot) setComponentVisibility(slot, 0.0, dirtyAttributes);
+    }
+  }
+  for (const componentId of nextVisible) {
+    if (!previousVisible.has(componentId)) {
+      const slot = componentSlots.get(componentId);
+      if (slot) setComponentVisibility(slot, 1.0, dirtyAttributes);
+    }
+  }
+  for (const attribute of dirtyAttributes) attribute.needsUpdate = true;
+  return nextVisible;
+}
+
+function renderIds(renderer, scene, camera, target, pixels, width, height) {
+  renderer.setRenderTarget(target);
+  renderer.clear(true, true, true);
+  renderer.render(scene, camera);
+  renderer.readRenderTargetPixels(target, 0, 0, width, height, pixels);
+  return decodePixels(pixels);
+}
+
+async function main() {
+  const pageStarted = performance.now();
+  const manifest = await (await fetch('/manifest', { cache: 'no-store' })).json();
+  const glbIndex = await (await fetch('/glb-index', { cache: 'no-store' })).json();
+  const entriesById = new Map((glbIndex.entries || []).map((entry) => [Number(entry.globalId), entry]));
+  const width = Number(manifest.width);
+  const height = Number(manifest.height);
+  const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true, preserveDrawingBuffer: false, powerPreference: 'high-performance' });
+  renderer.setSize(width, height, false);
+  renderer.setPixelRatio(1);
+  renderer.setClearColor(0x000000, 0);
+  renderer.toneMapping = THREE.NoToneMapping;
+  document.body.appendChild(renderer.domElement);
+  const target = new THREE.WebGLRenderTarget(width, height, {
+    format: THREE.RGBAFormat,
+    type: THREE.UnsignedByteType,
+    depthBuffer: true,
+    stencilBuffer: false,
+  });
+  if (target.texture && 'colorSpace' in target.texture && THREE.NoColorSpace !== undefined) {
+    target.texture.colorSpace = THREE.NoColorSpace;
+  }
+  const pixels = new Uint8Array(width * height * 4);
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(60, width / height, 0.05, 20000);
+  const dracoLoader = new DRACOLoader().setDecoderPath('/node_modules/three/examples/jsm/libs/draco/gltf/');
+  const loader = new GLTFLoader().setDRACOLoader(dracoLoader).setMeshoptDecoder(MeshoptDecoder);
+  const groups = new Map();
+  const componentSlots = new Map();
+  const selected = manifest.selectedGlbs || [];
+  const loadStarted = performance.now();
+  for (let i = 0; i < selected.length; i += 1) {
+    const gid = Number(selected[i]);
+    const entry = entriesById.get(gid);
+    if (!entry) throw new Error('glbIndex is missing selected GLB ' + gid);
+    const binding = (manifest.instanceBindings.byGlobalGlbId || {})[String(gid)];
+    if (!binding) throw new Error('manifest is missing instance binding for GLB ' + gid);
+    const url = '/assets/' + entry.path.replace(/\\\\/g, '/');
+    try {
+      const gltf = await loader.loadAsync(url);
+      const group = { scene: gltf.scene, instanced: [], staticMeshes: [] };
+      let meshCount = 0;
+      gltf.scene.traverse((object) => {
+        object.frustumCulled = false;
+        if (object.isInstancedMesh) {
+          meshCount += 1;
+          if (meshCount > 1) throw new Error('GLB contains more than one mesh node: ' + url);
+          if (object.count !== binding.componentGlobalIds.length) {
+            throw new Error('GLB instance count does not match manifest: ' + url);
+          }
+          const componentIds = binding.componentGlobalIds.map((value) => Number(value));
+          object.geometry.setAttribute(
+            'componentId',
+            new THREE.InstancedBufferAttribute(new Float32Array(componentIds), 1),
+          );
+          const visibleAttribute = new THREE.InstancedBufferAttribute(
+            new Float32Array(componentIds.length).fill(0),
+            1,
+          );
+          visibleAttribute.setUsage(THREE.DynamicDrawUsage);
+          object.geometry.setAttribute('componentVisible', visibleAttribute);
+          const material = makeInstancedIdMaterial();
+          object.material = material;
+          const entry = { object, componentIds, visibleAttribute, material };
+          group.instanced.push(entry);
+          for (let instanceIndex = 0; instanceIndex < componentIds.length; instanceIndex += 1) {
+            componentSlots.set(componentIds[instanceIndex], {
+              kind: 'instanced', entry, instanceIndex,
+            });
+          }
+        } else if (object.isMesh) {
+          meshCount += 1;
+          if (meshCount > 1) throw new Error('GLB contains more than one mesh node: ' + url);
+          if (binding.componentGlobalIds.length !== 1) {
+            throw new Error('non-instanced GLB must bind exactly one component: ' + url);
+          }
+          const componentId = Number(binding.componentGlobalIds[0]);
+          const material = makeStaticIdMaterial(componentId);
+          object.material = material;
+          const entry = { object, componentId, material };
+          group.staticMeshes.push(entry);
+          componentSlots.set(componentId, { kind: 'static', entry, instanceIndex: 0 });
+        }
+      });
+      if (meshCount !== 1 && binding.renderable) throw new Error('renderable GLB has no supported mesh: ' + url);
+      gltf.scene.visible = true;
+      scene.add(gltf.scene);
+      groups.set(gid, group);
+    } catch (error) {
+      throw new Error('failed to load/bind ' + url + ': ' + String(error && error.message ? error.message : error));
+    }
+    if ((i + 1) % 50 === 0 || i + 1 === selected.length) status('loaded ' + (i + 1) + '/' + selected.length + ' GLBs');
+  }
+
+  const loadFinished = performance.now();
+  const batches = Array.isArray(manifest.batches)
+    ? manifest.batches
+    : [{ batchId: 'default', samples: manifest.samples || [] }];
+  const samples = [];
+  for (const batch of batches) {
+    for (const sample of batch.samples || []) samples.push({ ...sample, batchId: String(batch.batchId || 'default') });
+  }
+
+  const totals = { totalPixels: 0, validReferencePixels: 0, backgroundReferencePixels: 0, errorPixels: 0, missPixels: 0, wrongInstancePixels: 0, extraPixels: 0 };
+  const top = new Map();
+  let selfConsistencyPER = null;
+  const sampleRows = [];
+  const batchTotals = new Map(batches.map((batch) => [String(batch.batchId || 'default'), {
+    totalPixels: 0, validReferencePixels: 0, backgroundReferencePixels: 0,
+    errorPixels: 0, missPixels: 0, wrongInstancePixels: 0, extraPixels: 0,
+  }]));
+  const started = performance.now();
+  let activePrediction = new Set();
+  for (let i = 0; i < samples.length; i += 1) {
+    const sample = samples[i];
+    const batchId = String(sample.batchId || 'default');
+    setCamera(camera, sample);
+    const referenceMaskStarted = performance.now();
+    setVisibilityMaskEnabled(groups, false);
+    const referenceMaskMs = performance.now() - referenceMaskStarted;
+    const referenceStarted = performance.now();
+    const reference = renderIds(renderer, scene, camera, target, pixels, width, height);
+    const referenceRenderMs = performance.now() - referenceStarted;
+    const visibilityStarted = performance.now();
+    activePrediction = setPredictionComponents(componentSlots, activePrediction, sample.predictionComponentIds);
+    const visibilityUpdateMs = performance.now() - visibilityStarted;
+    const predictionMaskStarted = performance.now();
+    setVisibilityMaskEnabled(groups, true);
+    const predictionMaskMs = performance.now() - predictionMaskStarted;
+    const predictionStarted = performance.now();
+    const test = renderIds(renderer, scene, camera, target, pixels, width, height);
+    const predictionRenderMs = performance.now() - predictionStarted;
+    const { metrics, contributors } = computeMetrics(reference, test);
+    for (const key of Object.keys(totals)) totals[key] += metrics[key] || 0;
+    const batchAggregate = batchTotals.get(batchId);
+    if (!batchAggregate) throw new Error('missing batch accumulator for ' + batchId);
+    for (const key of Object.keys(batchAggregate)) batchAggregate[key] += metrics[key] || 0;
+    for (const [gid, pixels] of contributors.entries()) top.set(gid, (top.get(gid) || 0) + pixels);
+    const diff = diffMask(reference, test);
+    if (manifest.saveIdBuffers || i < manifest.previewSamples) {
+      await postBuffer('/buffer?name=' + encodeURIComponent(sample.sampleId + '_reference_u32.bin'), reference);
+      await postBuffer('/buffer?name=' + encodeURIComponent(sample.sampleId + '_test_u32.bin'), test);
+      await postBuffer('/buffer?name=' + encodeURIComponent(sample.sampleId + '_diff_u8.bin'), diff);
+    }
+    if (i < manifest.previewSamples) await postPreview(sample.sampleId + '_preview.png', reference, test, diff, width, height);
+    if (i === 0) {
+      const self = computeMetrics(reference, reference).metrics;
+      selfConsistencyPER = self.PER;
+    }
+    sampleRows.push({
+      ...sample,
+      batchId,
+      imageMetrics: metrics,
+      timing: {
+        referenceMaskMs,
+        referenceRenderMs,
+        visibilityUpdateMs,
+        predictionMaskMs,
+        predictionRenderMs,
+      },
+    });
+    if ((i + 1) % 16 === 0 || i + 1 === samples.length) {
+      status('rendered ' + (i + 1) + '/' + samples.length + ' samples in ' + ((performance.now() - started) / 1000).toFixed(1) + 's');
+    }
+  }
+  const valid = Math.max(1, totals.validReferencePixels);
+  const total = Math.max(1, totals.totalPixels);
+  const topMissedComponents = Array.from(top.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 50)
+    .map(([componentGlobalId, missPixels]) => {
+      const binding = (manifest.instanceBindings.componentToBinding || {})[String(componentGlobalId)] || {};
+      const glbEntry = entriesById.get(Number(binding.globalGlbId)) || {};
+      return { componentGlobalId, globalGlbId: Number(binding.globalGlbId), missPixels, path: glbEntry.path || '' };
+    });
+  const batchSummaries = batches.map((batch) => {
+    const batchId = String(batch.batchId || 'default');
+    const aggregate = batchTotals.get(batchId);
+    const validPixels = Math.max(1, aggregate.validReferencePixels);
+    const totalPixels = Math.max(1, aggregate.totalPixels);
+    return {
+      batchId,
+      sampleCount: (batch.samples || []).length,
+      imageMetrics: {
+        schema: 'color-id-per-v1-aggregate',
+        ...aggregate,
+        PER: aggregate.errorPixels / validPixels,
+        missPixelRate: aggregate.missPixels / validPixels,
+        wrongInstancePixelRate: aggregate.wrongInstancePixels / validPixels,
+        extraPixelRateOverImage: aggregate.extraPixels / totalPixels,
+        evaluatedSubposeCount: (batch.samples || []).length,
+        renderFailedSubposeCount: 0,
+        missingGlbSubposeCount: 0,
+      },
+    };
+  });
+  const renderElapsedMs = performance.now() - started;
+  const assetReuse = {
+    schema: 'm5-browser-asset-reuse-v1',
+    browserPageCount: 1,
+    glbLoadPasses: 1,
+    selectedGlbCount: selected.length,
+    loadedGlbCount: groups.size,
+    glbLoaderCalls: selected.length,
+    sampleCount: samples.length,
+    batchCount: batches.length,
+    loadElapsedMs: loadFinished - loadStarted,
+    renderElapsedMs,
+    totalPageElapsedMs: performance.now() - pageStarted,
+    reloadsPerPoseWithinPage: 0,
+    reuseScope: 'all batches and samples in this manifest share the loaded scene and browser page',
+    note: 'A separate Node/Chrome invocation creates a new page and repeats the full GLB load pass.',
+  };
+  const summary = {
+    schema: 'local-true-component-id-browser-summary-v3',
+    renderer: navigator.userAgent,
+    renderStatus: 'rendered_component_id_buffers',
+    componentIdShaderImplemented: true,
+    browserInstanceReorderImplemented: false,
+    formalImageEvaluationReady: false,
+    renderFovYDeg: 60,
+    selectedGlbCount: selected.length,
+    sampleCount: samples.length,
+    batchCount: batches.length,
+    loadedGlbCount: groups.size,
+    width,
+    height,
+    elapsedMs: renderElapsedMs,
+    loadElapsedMs: loadFinished - loadStarted,
+    totalPageElapsedMs: performance.now() - pageStarted,
+    assetReuse,
+    batchSummaries,
+    selfConsistencyPER,
+    imageMetrics: {
+      schema: 'color-id-per-v1-aggregate',
+      ...totals,
+      PER: totals.errorPixels / valid,
+      missPixelRate: totals.missPixels / valid,
+      wrongInstancePixelRate: totals.wrongInstancePixels / valid,
+      extraPixelRateOverImage: totals.extraPixels / total,
+      evaluatedSubposeCount: samples.length,
+      renderFailedSubposeCount: 0,
+      missingGlbSubposeCount: 0,
+    },
+    topMissedComponents,
+  };
+  await fetch('/sample-results', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sampleRows) });
+  await fetch('/done', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(summary) });
+}
+
+main().catch(async (error) => {
+  await fetch('/done', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ schema: 'local-true-component-id-browser-summary-v2', renderStatus: 'failed', formalImageEvaluationReady: false, error: String(error && error.stack ? error.stack : error) }),
+  }).catch(() => {});
+});
+`;
+}
+
+async function main() {
+  const args = parseArgs(process.argv);
+  fs.mkdirSync(args.outputDir, { recursive: true });
+  fs.mkdirSync(path.join(args.outputDir, 'samples'), { recursive: true });
+  fs.mkdirSync(path.join(args.outputDir, 'previews'), { recursive: true });
+  for (const dir of ['samples', 'previews']) {
+    for (const file of fs.readdirSync(path.join(args.outputDir, dir))) {
+      fs.rmSync(path.join(args.outputDir, dir, file), { force: true });
+    }
+  }
+  const manifest = JSON.parse(fs.readFileSync(args.manifest, 'utf8'));
+  const isBatchManifest = manifest.schema === INSTANCE_RENDER_BATCH_MANIFEST_SCHEMA;
+  const validation = isBatchManifest
+    ? validateInstanceRenderBatchManifest(manifest)
+    : validateInstanceRenderManifest(manifest);
+  if (args.validateOnly) {
+    const summary = {
+      schema: isBatchManifest
+        ? 'component-id-render-batch-schema-validation-summary-v1'
+        : 'component-id-render-schema-validation-summary-v1',
+      status: 'schema_validated_not_rendered',
+      formalImageEvaluationReady: false,
+      browserInstanceReorderImplemented: false,
+      imageMetrics: null,
+      validation,
+      manifest: args.manifest,
+    };
+    fs.writeFileSync(path.join(args.outputDir, 'render_summary.json'), JSON.stringify(summary, null, 2), 'utf8');
+    console.log(JSON.stringify(summary, null, 2));
+    return;
+  }
+  if (args.syntheticRenderSmoke && !manifest.syntheticComponentIdSmoke) {
+    throw new Error('--synthetic-render-smoke requires manifest.syntheticComponentIdSmoke');
+  }
+  const glbRoot = path.resolve(manifest.glbRoot);
+  const glbIndexPath = path.resolve(manifest.glbIndex);
+  const chromeExe = findChrome(args.chromeExe);
+  assertRendererDependencies();
+  let doneResolve;
+  let doneReject;
+  const donePromise = new Promise((resolve, reject) => {
+    doneResolve = resolve;
+    doneReject = reject;
+  });
+  const logs = [];
+  const server = http.createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url, 'http://127.0.0.1');
+      if (req.method === 'GET' && url.pathname === '/') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(rendererHtml());
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/renderer.js') {
+        res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(args.syntheticRenderSmoke ? syntheticRendererJs() : rendererJs());
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/manifest') return writeJson(res, manifest);
+      if (req.method === 'GET' && url.pathname === '/glb-index') {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        fs.createReadStream(glbIndexPath).pipe(res);
+        return;
+      }
+      if (req.method === 'GET' && url.pathname.startsWith('/node_modules/')) {
+        const file = safeJoin(path.join(SLM2_ROOT, 'node_modules'), url.pathname.slice('/node_modules/'.length));
+        if (!fs.existsSync(file)) throw new Error(`missing node module file ${file}`);
+        res.writeHead(200, { 'Content-Type': contentType(file), 'Cache-Control': 'public, max-age=3600' });
+        fs.createReadStream(file).pipe(res);
+        return;
+      }
+      if (req.method === 'GET' && url.pathname.startsWith('/assets/')) {
+        const file = safeJoin(glbRoot, url.pathname.slice('/assets/'.length));
+        if (!fs.existsSync(file)) throw new Error(`missing GLB asset ${file}`);
+        res.writeHead(200, { 'Content-Type': contentType(file), 'Cache-Control': 'public, max-age=3600' });
+        fs.createReadStream(file).pipe(res);
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/buffer') {
+        const name = path.basename(url.searchParams.get('name') || 'buffer.bin');
+        const body = await readBody(req);
+        fs.writeFileSync(path.join(args.outputDir, 'samples', name), body);
+        return writeJson(res, { ok: true });
+      }
+      if (req.method === 'POST' && url.pathname === '/preview') {
+        const name = path.basename(url.searchParams.get('name') || 'preview.png');
+        const body = await readBody(req);
+        fs.writeFileSync(path.join(args.outputDir, 'previews', name), body);
+        return writeJson(res, { ok: true });
+      }
+      if (req.method === 'POST' && url.pathname === '/sample-results') {
+        const body = await readBody(req);
+        fs.writeFileSync(path.join(args.outputDir, 'sample_image_metrics.json'), body);
+        return writeJson(res, { ok: true });
+      }
+      if (req.method === 'POST' && url.pathname === '/log') {
+        const body = (await readBody(req)).toString('utf8');
+        logs.push({ time: new Date().toISOString(), message: body });
+        console.log('[browser]', body);
+        return writeJson(res, { ok: true });
+      }
+      if (req.method === 'POST' && url.pathname === '/done') {
+        const body = JSON.parse((await readBody(req)).toString('utf8'));
+        fs.writeFileSync(path.join(args.outputDir, 'render_summary.json'), JSON.stringify(body, null, 2), 'utf8');
+        fs.writeFileSync(path.join(args.outputDir, 'browser_logs.json'), JSON.stringify(logs, null, 2), 'utf8');
+        if (body.error) doneReject(new Error(body.error));
+        else doneResolve(body);
+        return writeJson(res, { ok: true });
+      }
+      writeJson(res, { error: 'not found' }, 404);
+    } catch (error) {
+      writeJson(res, { error: String(error && error.message ? error.message : error) }, 500);
+    }
+  });
+  await new Promise((resolve) => server.listen(args.port, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pvs-color-id-chrome-'));
+  const chromeArgs = [
+    '--headless=new',
+    '--no-first-run',
+    '--disable-background-networking',
+    '--disable-extensions',
+    '--hide-scrollbars',
+    '--mute-audio',
+    '--enable-webgl',
+    '--ignore-gpu-blocklist',
+    `--user-data-dir=${userDataDir}`,
+    `http://127.0.0.1:${port}/`,
+  ];
+  console.log(`[true-glb-render] launching ${chromeExe}`);
+  const chrome = spawn(chromeExe, chromeArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+  chrome.stdout.on('data', (chunk) => process.stdout.write(chunk));
+  chrome.stderr.on('data', (chunk) => process.stderr.write(chunk));
+  const timer = setTimeout(() => doneReject(new Error(`renderer timeout after ${args.timeoutMs} ms`)), args.timeoutMs);
+  try {
+    await donePromise;
+    clearTimeout(timer);
+  } finally {
+    chrome.kill();
+    server.close();
+    try {
+      fs.rmSync(userDataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+    } catch (error) {
+      console.warn(`[true-glb-render] could not remove temporary Chrome profile ${userDataDir}: ${error && error.message ? error.message : error}`);
+    }
+  }
+}
+
+main().catch((error) => {
+  console.error(error && error.stack ? error.stack : error);
+  process.exit(1);
+});

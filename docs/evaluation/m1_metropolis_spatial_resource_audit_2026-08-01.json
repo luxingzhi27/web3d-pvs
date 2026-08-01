@@ -1,0 +1,159 @@
+{
+  "schema": "pvs-resource-audit-v1",
+  "datasetDir": "neural_instance_culling/dataset/out/pose_csr_metropolis_viewcell_colorid_fov66_raw_subpose_v2",
+  "datasetMeta": {
+    "schema": "viewcell-csr-color-id-fov66-v2",
+    "experiment": "pose_csr_metropolis_viewcell_colorid_fov66_raw_subpose_v2",
+    "sourceSampler": "three_color_id",
+    "runtimeMeta": "ifcbench_fantasy_metropolis_source/assets/runtimeVisibilityMeta.json",
+    "viewcellCount": 27252,
+    "poseCount": 27252,
+    "numInstances": 41298,
+    "poseStrideBytes": 64,
+    "mvpStrideBytes": 64,
+    "visibleCount": 25991985,
+    "candidateCount": 272275134,
+    "candidateSemantics": "Union of full AABB candidates computed independently for every successful subpose; no GT positive union",
+    "candidateVisibleUnionAllowed": false,
+    "cameraSemantics": "camera_world is the canonical viewcell plan center; candidates are the union over dense subpose positions",
+    "gtSemantics": "visible_ids are unioned Three.js color-id visible component ids over all same-direction subposes in the viewcell",
+    "visibleWeightSemantics": "Three.js color-id screen coverage in parts per million, max-pooled over subposes",
+    "visibleWeightDtype": "float32",
+    "modelInputFovYDeg": 66,
+    "frontendRenderFovYDeg": 60,
+    "cameraBounds": {
+      "min": [
+        -332.5630798339844,
+        -5.539156436920166,
+        -71.47697448730469
+      ],
+      "max": [
+        290.75640869140625,
+        83.54228973388672,
+        574.3831787109375
+      ],
+      "center": [
+        -20.903335571289062,
+        39.00156784057617,
+        251.45309448242188
+      ],
+      "size": [
+        623.3194580078125,
+        89.0814437866211,
+        645.860107421875
+      ]
+    },
+    "splitIds": {
+      "train": 0,
+      "val": 1,
+      "test": 2,
+      "unknown": 255
+    },
+    "categoryIds": {
+      "street_gap": 0,
+      "near_building": 1,
+      "plaza": 2,
+      "perimeter": 3,
+      "sky": 4,
+      "far": 5,
+      "unknown": 255
+    },
+    "categoryCounts": {
+      "street_gap": 22464,
+      "near_building": 3456,
+      "sky": 972,
+      "far": 360
+    },
+    "splitCounts": {
+      "train": 21830,
+      "val": 2712,
+      "test": 2710
+    },
+    "stats": {
+      "rawRows": 109008,
+      "viewcellCount": 27252,
+      "candidateMissVisible": 0,
+      "candidateMissVisibleViewcells": 0,
+      "candidateVisibleUnionAdded": 0,
+      "visibleSubsetFailures": 0,
+      "emptyCandidate": 203,
+      "emptyVisible": 299,
+      "totalCandidateRefs": 272275134,
+      "maxCandidate": 41243,
+      "subposeCount": 109008,
+      "successSubposeCount": 109008,
+      "avgCandidate": 9991.01475121092,
+      "avgVisible": 953.764310876266,
+      "avgSubposesPerViewcell": 4,
+      "avgSuccessfulSubposesPerViewcell": 4,
+      "subposeGroupsPerSourceViewcell": 1,
+      "viewcellGeometrySubposeCount": 109008,
+      "rawCandidateRefs": 272275134,
+      "rawCandidateMax": 41243
+    },
+    "files": {
+      "poses": "poses.bin",
+      "mvp": "mvp.bin",
+      "visibleOffsets": "visible_offsets.bin",
+      "visibleIds": "visible_ids.bin",
+      "visibleWeights": "visible_weights.bin",
+      "visibleHitCounts": "visible_hit_counts.bin",
+      "candidateOffsets": "candidate_offsets.bin",
+      "candidateIds": "candidate_ids.bin",
+      "frustumOffsets": "frustum_offsets.bin",
+      "frustumIds": "frustum_ids.bin",
+      "viewcellCenters": "viewcell_centers.bin",
+      "subposeOffsets": "subpose_offsets.bin",
+      "subposeCameraPos": "subpose_camera_pos.bin",
+      "rawCandidateIds": "raw_candidate_ids.bin",
+      "rawCandidateOffsets": "raw_candidate_offsets.bin"
+    },
+    "viewcellGeometrySemantics": "viewcell_centers are canonical plan centers; subpose_camera_pos stores every successful dense subpose position",
+    "viewcellGeometryReconciledFrom": "neural_instance_culling/sampler/out/ifcbench_fantasy_metropolis_instanced_v2/viewcell_colorid_k4",
+    "viewcellGeometryRawFileCount": 64,
+    "viewcellGeometrySubposeCount": 109008,
+    "rawCandidateFile": "raw_candidate_ids.bin",
+    "rawCandidateOffsets": "raw_candidate_offsets.bin",
+    "rawCandidateSemantics": "AABB candidate union computed independently for every successful subpose before any visible-positive union"
+  },
+  "runtimeMeta": {
+    "path": "ifcbench_fantasy_metropolis_instanced_v2/assets/runtimeVisibilityMeta.json",
+    "sha256": "da486e5b7bfb3d89143d7bbca200509daebd52b3dfe81ecb1f78d1649fd811c4",
+    "instanceCount": 41298,
+    "runtimeGlbCount": 3669,
+    "source": "ifcbench_fantasy_metropolis_instanced_v2"
+  },
+  "candidateAudit": {
+    "poseCount": 27252,
+    "visibleRefCount": 25991985,
+    "candidateFilesPresent": true,
+    "candidateMissVisible": 0,
+    "candidateMissPoseCount": 0,
+    "candidateAndFrustumSameInode": false,
+    "candidateSemantics": "Union of full AABB candidates computed independently for every successful subpose; no GT positive union",
+    "candidateRawIndependentlyAvailable": true,
+    "candidateIncludesForcedVisiblePositives": false
+  },
+  "pointCacheAudit": {
+    "path": "neural_instance_culling/dataset/out/glb_points_v3_formal_metropolis_fov66.bin",
+    "metaPath": "neural_instance_culling/dataset/out/glb_points_v3_formal_metropolis_fov66_meta.json",
+    "runtimeGlbCount": 3669,
+    "pointCacheRowCount": 3669,
+    "rowCountMatchesRuntimeGlbs": true,
+    "decoded": 3669,
+    "failed": 0,
+    "fallback": 0,
+    "pointsPerGlb": 1024,
+    "hashMatchCount": 3669,
+    "hashComparedCount": 3669
+  },
+  "checks": {
+    "visibleIdsWithinRuntimeInstances": true,
+    "candidateContainsVisibleWithoutForcedUnion": true,
+    "pointCacheRowsMatchRuntimeGlbs": true,
+    "pointCacheHasNoDecodeFailure": true,
+    "pointCacheHasNoFallback": true,
+    "pointCacheHashesMatchGlbIndex": true
+  },
+  "status": "pass"
+}

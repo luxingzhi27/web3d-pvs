@@ -1,0 +1,74 @@
+{
+  "lbs": null,
+  "scenes": {
+    "default_config": {
+      "cameraPostion": [
+        0,
+        20,
+        -100
+      ],
+      "cameraTarget": [
+        0,
+        0,
+        0
+      ],
+      "loaderConfig": {
+        "resourcesBaseUrl": "./assets/scenes/hkust-v3",
+        "resourcesWS": "",
+        "rcServerAddress": "",
+        "schedulingStrategy": "auto",
+        "glbResourcesBaseUrl": "./scene_glbs/hkust-v3"
+      }
+    },
+    "hkust-v3": {
+      "cameraPostion": [
+        -270.24,
+        34.15,
+        239.56
+      ],
+      "cameraTarget": [
+        -267.18,
+        33.19,
+        235.52
+      ],
+      "loaderConfig": {
+        "resourcesBaseUrl": "./assets/scenes/hkust-v3",
+        "schedulingStrategy": "auto",
+        "glbResourcesBaseUrl": "./scene_glbs/hkust-v3",
+        "resourcesWS": "",
+        "rcServerAddress": ""
+      }
+    },
+    "ifcbench_fantasy_metropolis_instanced_v2": {
+      "cameraPostion": [
+        -20.85,
+        90,
+        560
+      ],
+      "cameraTarget": [
+        -20.85,
+        11.4,
+        251.09
+      ],
+      "cameraNearPlane": 0.01,
+      "cameraFarPlane": 1600,
+      "groundPlane": {
+        "enabled": true,
+        "color": "#6f756d",
+        "gridColor": "#aeb5a8",
+        "gridCenterColor": "#d4dccd",
+        "opacity": 0.72,
+        "sizeMultiplier": 1.25,
+        "yOffset": -0.04,
+        "gridDivisions": 128
+      },
+      "loaderConfig": {
+        "resourcesBaseUrl": "./assets/scenes/ifcbench_fantasy_metropolis_instanced_v2",
+        "glbResourcesBaseUrl": "./scene_glbs/ifcbench_fantasy_metropolis_instanced_v2",
+        "resourcesWS": "",
+        "rcServerAddress": "",
+        "schedulingStrategy": "auto"
+      }
+    }
+  }
+}

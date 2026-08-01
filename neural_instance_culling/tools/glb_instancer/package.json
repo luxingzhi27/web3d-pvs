@@ -1,0 +1,12 @@
+{
+  "name": "slm-glb-instancer",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Geometry-analysis tool that builds SLM-style instancing from component GLBs or a monolithic GLB.",
+  "scripts": {
+    "analyze": "node src/cli.mjs --analyze-only",
+    "build": "node src/cli.mjs",
+    "test": "node test/smoke.mjs && node test/sub_glb_smoke.mjs"
+  }
+}

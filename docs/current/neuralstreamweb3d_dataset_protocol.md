@@ -1,0 +1,149 @@
+# NeuralStreamWeb3D 数据集与采样协议
+
+更新时间：2026-07-31
+
+本文定义当前训练数据如何从场景资产生成，以及每个二进制文件的语义。核心目标是让采样语义和 NeuralPVS 的 view-cell 思路一致：一个 view-cell 固定相机朝向和视场，在局部空间盒内随机生成多个位置不同但方向相同的子相机，最终可见集合取这些子相机结果的并集。
+
+## 1. 相机口径
+
+新的统一 Color-ID 主线采用三种明确口径：
+
+- **采样相机**：用于实际光栅化采样，垂直视场角 66°；
+- **模型后退相机**：前端预测所使用的后退相机，垂直视场角 66°，与采样口径一致；
+- **真实渲染相机**：浏览器实际显示画面，垂直视场角 60°。
+
+后退相机可以沿当前视线反向移动指定距离，并使用 66° 模型视场角覆盖位置扰动带来的潜在可见实例。模型学习的是后退相机候选上的保守可见性；真实 60° 视锥负责最终实例级安全过滤。候选相机的视场角由当前协议统一给出，不从旧数据记录中回读。
+
+采样宽高默认 512×288，宽高比会写入每条 pose。代码不应只根据垂直视场角推导横向视场角而忽略 aspect；数据构建同时保存 `tan_x` 和 `tan_y`，候选 AABB 计算也使用这两个量。
+
+## 2. View-cell 与 subpose
+
+一个代表性相机行描述一个 view-cell 中心、前向方向、FOV、aspect、类别和数据集划分。`build_neuralpvs_viewcell_pose_plan.mjs` 为每个 view-cell 生成 K 个 subpose：
+
+1. 保持中心相机的前向方向、yaw、pitch、FOV 和 aspect 不变；
+2. 根据前向、右向和上向构成相机局部基；
+3. 在相机对齐盒中独立随机采样右向、前向和上向偏移；
+4. 第一个 subpose 保留 view-cell 中心，便于保留代表点；
+5. 每个 subpose 写出独立世界坐标，但共用 `viewcell_id` 和方向信息。
+
+不同场景使用不同 view-cell 尺寸：HKUST 默认半尺寸约为右向 4m、前向 4m、上向 1.5m；IFCBench Metropolis 默认约为 2.5m、2.5m、1m。实际使用时可以通过命令行覆盖，不能把一个场景的 cell 尺寸直接套到另一个场景。
+
+采样计划中的类别用于保证空间分布覆盖，包括街道缝隙、建筑近旁、广场、外围、天空俯视和远景等。采样点需要在场景空隙或可行走区域，避免大面积落在实体模型内部；如果需要建筑内部采样，必须在实验说明中单独声明。
+
+## 3. Color-ID 光栅化
+
+当前没有把 rvcServer 作为所有场景的必要依赖。Three.js Color-ID 采样器为每个实例分配可解码颜色，在离屏画布上使用 GPU 或 CPU 后端进行光栅化。读取颜色缓冲后，统计每个实例出现的像素数，并将结果写入 JSONL。
+
+每条原始采样记录通常包含：
+
+- `pose_index`、`viewcell_id`、`subpose_id`；
+- `camera_pos`、`camera_forward`、`fov_y`、`aspect`；
+- `visible_component_ids`；
+- `component_weights`，即屏幕覆盖率的 parts-per-million；
+- 可选的错误、渲染耗时和类别信息。
+
+Color-ID 的权重可以用于视觉重要性监督，但它不是深度缓冲，也不能表达实例之间的遮挡深度。当前方向遮挡证据由后续离线几何投影步骤构建，而不是从 Color-ID 颜色计数直接推断。
+
+采样脚本支持按 pose plan 分片并行执行，每个分片独立写 JSONL、stdout 和 stderr 日志。运行前要确保不同分片的 `pose_index` 不重叠，运行后要检查每个分片行数与计划范围一致。
+
+## 4. 从 subpose 聚合到 view-cell
+
+`build_rvc_viewcell_pose_csr.py` 负责把同一 view-cell 的多个 subpose 聚合成一个训练 pose。它的行为是：
+
+1. 丢弃标记为采样失败的 subpose；
+2. 要求成功 subpose 数达到 `min_success_subposes`；
+3. 对所有成功 subpose 的可见实例编号取并集；
+4. 对同一实例的权重取最大值，命中次数单独保存；
+5. 以成功 subpose 位置集合生成候选 AABB 并集；
+6. 正式模式不补入可见正样本；如果可见并集不属于候选并集，直接使数据构建失败，并保存漏正样本诊断。只有显式的探索性开关才允许补入；
+7. 保存 view-cell 中心作为模型查询相机。
+
+因此，候选集合不是“中心相机一次视锥的候选”，而是所有位置扰动 subpose 的候选并集；可见集合也不是某个 subpose 的可见集合，而是整个 view-cell 内潜在可见集合的并集。正式数据必须直接证明 `visible_ids ⊆ candidate_ids`，不能用标签补入制造这个关系；这样训练标签与 NeuralPVS 的 from-region PVS 语义一致，也能把候选生成错误暴露出来。
+
+脚本支持将一个源 view-cell 划分为 4 个空间子组。划分时按 subpose 相对中心在右向和前向的正负侧分配象限，从而减少一个 cell 过大造成的过度并集；只有在数据量和候选规模需要时才启用，不能把它解释为新的相机扰动语义。
+
+## 5. 候选集合的计算
+
+对每个 subpose，候选计算使用实例 AABB 与相机视锥的保守相交测试。对 AABB 中心和半尺寸投影到相机前向、右向、上向后，检查：
+
+- 前向深度加包围半径是否超过 near；
+- 水平中心距离减水平半径是否落在水平视锥范围内；
+- 垂直中心距离减垂直半径是否落在垂直视锥范围内。
+
+多个 subpose 的候选 ID 合并去重。正式候选文件由 AABB 算法独立产生，数据契约要求：
+
+```text
+visible_ids ⊆ candidate_ids
+```
+
+如果不满足，正式构建直接失败并记录 `candidateMissVisible`；训练/评测批构造器也会拒绝继续。历史数据可以通过 `--allow-candidate-visible-union` 进行探索性复现，但必须把它标为非正式结果。这样 AABB、相机口径、实例编号映射或颜色采样坐标的错误不会被候选补丁隐藏。
+
+## 6. Pose CSR 二进制格式
+
+CSR（压缩稀疏行）用一个 offsets 数组描述每个 pose 的连续 ID 区间。当前数据目录包括：
+
+| 文件 | 类型 | 语义 |
+|---|---|---|
+| `poses.bin` | 固定 64 字节结构 | 归一化相机位置、世界相机位置、前向、`tan_x/tan_y`、split、类别 |
+| `mvp.bin` | float32[pose,16] | 与查询相机一致的保守投影矩阵 |
+| `visible_offsets.bin` | uint64 | 每个 pose 的可见 ID 起止位置 |
+| `visible_ids.bin` | uint32 | pose 级 GT 可见实例编号 |
+| `visible_weights.bin` | float32 | 与 `visible_ids` 对齐的权重 |
+| `visible_hit_counts.bin` | uint16 | 一个实例在多少个成功 subpose 中命中 |
+| `candidate_offsets.bin` | uint64 | 每个 pose 的候选 ID 起止位置 |
+| `candidate_ids.bin` | uint32 | 后退/子 pose AABB 候选实例编号 |
+| `frustum_offsets.bin` | uint64 | 当前与 candidate offsets 对齐的兼容字段 |
+| `frustum_ids.bin` | uint32 | 当前与 candidate IDs 对齐的兼容字段 |
+| `dataset_meta.json` | JSON | schema、相机口径、统计、原始候选语义、文件语义和 split |
+
+`visible_weights` 必须在报告中说明来源：Color-ID 数据是屏幕覆盖率 parts-per-million；历史 rvcServer 数据是 `component_weights`，只能按可见重要性权重解释，不能宣称为严格像素覆盖率。
+
+## 7. 训练数据与运行时资源的一致性
+
+训练前由 `current_pvs_utils.validate_training_resources` 检查：
+
+- 数据集元数据、pose、visible 和 candidate 文件存在；
+- visible/candidate ID 不越过运行时实例数量；
+- 如果 candidate offsets 存在，则逐 pose 检查 visible 是否为 candidate 子集；
+- 点云缓存的实例行数覆盖运行时实例数；
+- 运行时元数据的 AABB 和实例到 GLB 映射可读；
+- 遮挡证据的方向单元、深度层和来源数量有效。
+
+改变 view-cell 半尺寸、subpose 数量、相机 FOV、aspect 或后退距离后必须重建数据集。只修改前端 FOV 或训练参数而继续复用旧候选集合，会使候选安全边界和模型输入语义不一致。
+
+## 8. 当前数据集的状态边界
+
+仓库中的 Pose CSR 数据统一按当前相机协议解释：
+
+| 数据集 | 采样来源 | 模型/采样 FOV | 前端真实 FOV | 权重语义 |
+|---|---|---|---|---|
+| `pose_csr_hkust_v3_viewcell_colorid_fov66` | Three.js Color-ID | 66° Y | 60° Y | 屏幕覆盖率 parts-per-million |
+| `ifcbench_fantasy_metropolis_instanced_v2_viewcell_colorid_k4` | Three.js Color-ID | 66° Y | 60° Y | 屏幕覆盖率 parts-per-million |
+
+`build_color_id_pose_csr.py` 是“每条 JSONL 记录一个 pose”的打包器，不会自动把 subpose 聚合成 view-cell；需要 NeuralPVS view-cell 并集时必须使用 `build_rvc_viewcell_pose_csr.py`。名称中的 `rvc` 是历史命名，脚本也可以读取 Color-ID 原始记录，实际数据来源以 `sourceSampler` 和 `dataset_meta.json` 为准。
+
+## 9. 推荐复现顺序
+
+以下是当前 Linux/conda 口径的最小流程，具体场景路径按 `docs/current/current_instance_pvs_versions.md` 替换：
+
+```bash
+conda run -n slm_pvs node neural_instance_culling/sampler/build_neuralpvs_viewcell_pose_plan.mjs \
+  --input neural_instance_culling/sampler/out/<scene>/representative_pose_plan.jsonl \
+  --output neural_instance_culling/sampler/out/<scene>/viewcell_pose_plan.jsonl \
+  --scene <scene> --subposes-per-viewcell 16 --fov-y 66
+
+conda run -n slm_pvs node neural_instance_culling/sampler/run_scene_viewcell_colorid_sampling.mjs \
+  --scene <scene> --assets-dir <scene>/assets \
+  --pose-plan neural_instance_culling/sampler/out/<scene>/viewcell_pose_plan.jsonl \
+  --output-dir neural_instance_culling/sampler/out/<scene>/color_id \
+  --parallel 4 --shards 16 --fov-y 66
+
+conda run -n slm_pvs python neural_instance_culling/dataset/build_color_id_pose_csr.py \
+  --samples neural_instance_culling/sampler/out/<scene>/color_id \
+  --output-dir neural_instance_culling/dataset/out/<scene>_viewcell_colorid \
+  --runtime-meta <scene>/assets/runtimeVisibilityMeta.json
+```
+
+对于需要把原始 subpose 聚合成 view-cell 的流程，使用 `build_rvc_viewcell_pose_csr.py`，并在输出元数据中确认 `rawRows`、`viewcellCount`、`successSubposeCount`、`avgCandidate`、`avgVisible` 和 `candidateMissVisible`。正式训练和 benchmark 只能引用明确命名的输出目录，不能直接读取 sampler 的临时 JSONL。
+
+重建任何场景时，采样和模型输入都必须使用 66°，真实前端保持 60°；不能从旧 Pose CSR 行中恢复另一套 FOV。

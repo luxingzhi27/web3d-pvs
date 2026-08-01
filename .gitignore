@@ -1,0 +1,330 @@
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Local agent / machine state
+.codex/
+.agents/
+.claude/
+**/.claude/
+**/.git/
+
+# Python caches and environments
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+ENV/
+conda-env/
+
+# Node / frontend build artifacts
+node_modules/
+.parcel-cache/
+.cache/
+.vite/
+.next/
+**/.parcel-cache/
+**/.vite/
+**/.next/
+dist/
+build/
+coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Logs and temporary runtime files
+*.log
+*.err
+*.out
+*.pid
+tmp/
+temp/
+.tmp/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.jks
+**/.ssh/
+
+# Python packaging
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# ML checkpoints, model exports, and large generated binaries.
+# This repository tracks generators, source code, documentation, and small
+# configuration files. Keep generated artifacts local or publish them through
+# a dedicated artifact store; do not force-add them to the source repository.
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.onnx.data
+*.safetensors
+*.safetensors.index.json
+*.pb
+*.tflite
+*.engine
+*.trt
+*.weights
+*.index
+*.npz
+*.npy
+*.bin
+*.pkl
+*.pickle
+*.data
+*.raw
+*.jsonl
+*.parquet
+*.feather
+*.h5
+*.hdf5
+*.mat
+*.arrow
+*.msgpack
+*.lmdb
+*.zarr
+*.rvc
+*.csv
+*.tsv
+
+# Compressed / packaged generated artifacts
+*.7z
+*.zip
+*.tar
+*.tar.gz
+*.tar.zst
+*.tgz
+*.gz
+*.br
+*.bz2
+*.xz
+*.lz4
+*.zst
+*.whl
+*.deb
+*.rpm
+*.msi
+*.dmg
+*.appimage
+*.iso
+*.img
+*.xz.part
+
+# Local deployment bundles and profiling dumps
+**/deploy/
+**/deploy_bundle/
+**/deploy_bundle*/
+**/frontend_export/
+**/frontend_exports/
+**/model_export/
+**/model_exports/
+**/runtime_dumps/
+**/webgpu_profiles/
+**/profiling/
+
+# Other dataset/source containers
+*.ifc
+*.ifczip
+*.sqlite
+*.sqlite3
+*.db
+
+# Native binaries / debug symbols
+*.exe
+*.dll
+*.so
+*.dylib
+*.pdb
+*.wasm
+*.dSYM/
+
+# Other generated native / interchange assets
+*.dae
+*.abc
+*.usdz
+*.usd
+*.usdc
+*.usda
+*.b3dm
+*.i3dm
+*.cmpt
+*.ktx2
+*.basis
+*.meshopt
+*.drc
+*.draco
+
+# Media and capture artifacts
+*.mp4
+*.webm
+*.mov
+*.avi
+*.wav
+*.mp3
+*.ttf
+*.otf
+*.bak
+*.backup
+*.dump
+*.core
+
+# 3D / render assets that are generated or downloaded locally
+*.glb
+*.gltf
+*.obj
+*.fbx
+*.ply
+*.stl
+*.pcd
+*.xyz
+*.e57
+*.las
+*.laz
+*.hdr
+
+# Neural culling generated outputs
+neural_instance_culling/model/out/
+neural_instance_culling/benchmark/out/
+neural_instance_culling/dataset/out/
+neural_instance_culling/benchmark/**/out/
+neural_instance_culling/sampler/out/
+neural_instance_culling/**/__pycache__/
+neural_instance_culling/**/outputs/
+neural_instance_culling/**/runs/
+neural_instance_culling/tools/**/out/
+neural_instance_culling/**/checkpoints/
+neural_instance_culling/**/cache/
+neural_instance_culling/**/artifacts/
+
+# Generic generated experiment data. Source files and documentation remain tracked.
+**/out/
+**/outputs/
+**/runs/
+**/checkpoints/
+**/artifacts/
+**/cache/
+**/logs/
+**/raw/
+**/samples/
+**/captures/
+
+# Browser profiling and test artifacts
+**/playwright-report/
+**/test-results/
+**/trace.zip
+**/screenshots/
+**/captures/
+**/exports/
+*.map
+
+# Local runtime manifests and generated reports that can grow without notice.
+**/runtime_logs/
+**/runtime_reports/
+**/generated/
+**/generated_assets/
+
+# Local experiment exports and dataset manifests that are regenerated from
+# the tracked scripts. Small hand-written configuration JSON remains tracked.
+**/dataset_manifest.json
+**/split_manifest.json
+**/pose_index*.json
+**/trajectory*.jsonl
+**/sampling_plan*.json
+**/sampling_plan*.jsonl
+
+# Legacy / external training artifacts
+neuralPVS/checkpoints/
+neuralPVS/checkpoints_backup_*/
+
+# Downloaded scene assets and generated frontend neural assets
+hkust-v3/assets/
+ifcbench_fantasy_metropolis_instanced_v2/assets/
+ifcbench_fantasy_metropolis_source/assets/
+ifcbench_fantasy_metropolis_source/**/*.ifc
+slm2viewer/assets/models/
+slm2viewer/assets/neural_culling/
+slm2viewer/assets/neural_instance_culling/
+slm2viewer/assets/environment/
+slm2viewer/assets/ort/
+slm2viewer/assets/scenes/
+slm2viewer/public/
+slm2viewer/public_deploy/
+slm2viewer/public_deploy*/
+
+# Scene manifests and generated frontend runtime payloads
+**/runtimeVisibilityMeta.json
+**/glbIndex.json
+**/sceneWeb.json
+**/instance_*_features_*.json
+**/model_meta.json
+**/eval_summary.json
+**/train_history.json
+**/train_metrics.jsonl
+**/benchmark_*.json
+
+# Browser / sampler generated files
+three_visibility_sampler/out/
+three_visibility_sampler/dist/
+three_visibility_sampler/.cache/
+
+# Local CSR/view-cell plans and browser capture dumps
+**/pose_plan*.json
+**/samples_*.json
+**/viewcell_*.json
+**/*_candidate_ids.bin
+**/*_visible_ids.bin
+**/*_visible_weights.bin
+**/capture_*.json
+**/screenshots/
+
+# Keep repository commits source-oriented. Large generated files must stay in
+# local artifact storage even when they use an uncommon extension.
+**/artifact_store/
+**/artifact_store*/
+**/large_files/
+**/large_files*/
+
+# Local deployment archives and generated bundles
+deploy/
+deployments/
+*.manifest.json
+*.sha256
+
+# Other local scene/data roots. Keep the generators, manifests intended for
+# source control, and documentation tracked; keep downloaded/generated payloads
+# out of Git even when a scene uses an uncommon file extension.
+city/assets/
+qingsheng2_bounding_boxes/assets/
+huayi/assets/
+**/raw_data/
+**/raw_dataset/
+**/dataset_cache/
+**/scene_cache/
+
+# Local browser/server state that is not part of the source tree.
+**/.local/
+**/.runtime/
+**/server_logs/
