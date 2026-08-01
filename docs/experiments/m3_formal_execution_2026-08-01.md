@@ -12,11 +12,34 @@ M3 用同一个正式 checkpoint 做推理期干预，判断固定方向遮挡�
 
 ## 结果状态
 
-本记录创建时两个正式训练仍未完成，尚无正式 M3 数值。脚本运行日志和 JSON 指标将在以下目录生成：
+HKUST 正式 checkpoint 已完成 M3；Metropolis 仍等待正式 calibration-ready checkpoint。HKUST
+输出目录为：
 
 ```text
-neural_instance_culling/benchmark/out/m3_formal_<experiment>_validation/
+neural_instance_culling/benchmark/out/m3_formal_pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_hkust_spatial_fov66_seed20260801_protocolfix_retry2_validation/
 ```
+
+本次使用 calibration 冻结阈值 `0.02`，在完整 validation 的 `664` 个 pose 上执行九种干预，
+每个变体共享同一候选集合，并运行 `10,000` 次 paired bootstrap。代表性逐 pose 结果如下：
+
+| 变体 | Pose precision | Pose recall | Weighted recall | Useful cull | Bad cull | 平均预测 |
+|---|---:|---:|---:|---:|---:|---:|
+| baseline | 0.446219 | 0.904137 | 0.991802 | 0.877723 | 0.009547 | 221.73 |
+| proxy zero | 0.440359 | 0.897835 | 0.991601 | 0.876430 | 0.010033 | 247.27 |
+| proxy random | 0.492361 | 0.869254 | 0.988547 | 0.887352 | 0.011891 | 223.14 |
+| direction mean | 0.491488 | 0.879813 | 0.990159 | 0.885368 | 0.010646 | 202.82 |
+| direction roll | 0.454790 | 0.903501 | 0.991779 | 0.878660 | 0.009524 | 212.11 |
+| proxy cross-instance permutation | 0.470260 | 0.870182 | 0.988557 | 0.885671 | 0.011796 | 221.45 |
+| context zero | 0.170041 | 0.934004 | 0.987467 | 0.729636 | 0.003626 | 286.07 |
+| context cross-instance permutation | 0.512473 | 0.556397 | 0.763175 | 0.896647 | 0.024688 | 208.66 |
+| context + proxy zero | 0.158226 | 0.951072 | 0.991636 | 0.720109 | 0.003419 | 331.30 |
+
+相对于 `proxy_zero`，baseline 的 useful-cull 配对差为 `-0.001293`（95% CI
+`[-0.002912, 0.000235]`），weighted-recall 差为 `-0.000202`（95% CI
+`[-0.000988, 0.001003]`）；但 baseline precision、recall 和 F1 均有统计上的改善。
+这说明代理分支在当前模型中被实际读取，清零会改变输出，但尚未证明它在安全工作点上带来
+稳定的 useful-cull 增益，也没有达到预注册的 2 个百分点门槛。随机代理和跨实例置换的
+weighted recall 降到约 `0.98855`，因此不能视作保持安全约束的等价替代。
 
 当前只能引用旧模型的探索性干预结果，不能作为正式模型证据。正式路线判断仍遵循投稿计划：相对于 `geometry + context + ray`，只有在安全工作点下 useful cull 提升至少 2 个百分点，或同一图像效用下字节减少至少 10%，且三种子 paired bootstrap 不跨零时，才保留“方向代理具有独立贡献”的主张；否则转为路线 B 并删除该主张。
 
@@ -30,7 +53,7 @@ tmux new-session -d -s formal_m3_followup \
 
 ## 当前结论
 
-- 目标：已登记。
-- 代码：已实现并通过 shell 静态检查和 Python 入口自检；`formal_m3_followup` tmux 会话已启动，当前等待正式 checkpoint 和 M0 one-shot 结果。
-- 指标：未生成，不能宣称代理有效或无效。
-- 是否保留为主线：待正式干预和三种子重训练结果决定。
+- 目标：已登记并完成 HKUST 单种子正式干预；Metropolis 和三种子重训练仍待完成。
+- 代码：正式 runner、候选配对校验和 bootstrap 结果均已生成。
+- 指标：HKUST 已生成；方向代理存在可观测影响，但当前单种子结果未满足路线 A 的独立 useful-cull 准入条件。
+- 是否保留为主线：暂不把“方向代理独立贡献”写入主张；等待 M4 三种子结果，若仍不达门槛则转路线 B。

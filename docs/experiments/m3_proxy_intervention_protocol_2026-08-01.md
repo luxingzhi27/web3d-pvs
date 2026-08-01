@@ -1,7 +1,7 @@
 # M3：方向遮挡代理推理期干预协议
 
 日期：2026-08-01  
-状态：M3 runner 已完成审计和 v2 实现，静态检查与合成 fixture 已通过；正式 checkpoint 干预尚未运行。
+状态：M3 runner 已完成审计和 v2 实现，静态检查与合成 fixture 已通过；HKUST 正式 checkpoint 干预已完成，Metropolis 和三随机种子重训练仍待执行。
 
 ## 目的
 
@@ -76,7 +76,7 @@ conda run -n slm_pvs python \
   --device cuda
 ```
 
-正式执行前必须确认 `eval_summary.json` 的协议为 `frozen_calibration_one_shot_test`，并记录 checkpoint、数据集、特征表和 runtime meta 的 SHA-256。输出的 `interventionManifest` 记录每个干预的种子、特征布局以及跨实例置换的 SHA-256；`posePlan` 记录固定 pose 计划和候选语义。当前尚无正式 checkpoint 结果，因此本文件只记录协议、实现审计和 fixture 证据，不宣称代理有效。
+正式执行前必须确认 `eval_summary.json` 的协议为 `frozen_calibration_one_shot_test`，并记录 checkpoint、数据集、特征表和 runtime meta 的 SHA-256。输出的 `interventionManifest` 记录每个干预的种子、特征布局以及跨实例置换的 SHA-256；`posePlan` 记录固定 pose 计划和候选语义。HKUST 的正式输出记录在 `m3_formal_execution_2026-08-01.md`；Metropolis 仍未形成正式结果，三随机种子路线判定也未完成。
 
 ## 2026-08-01 实现审计与验证记录
 
@@ -98,7 +98,7 @@ py_compile: passed
 --self-test: passed
 ```
 
-fixture 已验证全部九个输出变体、两个跨实例置换的非恒等性、方向均值/移位、context zero、weighted recall、accuracy、门控熵归一化以及别名规范化。正式 checkpoint 运行、三随机种子干预和路线 A/B 判定仍待 M0-M2 正式模型证据完成后执行。
+fixture 已验证全部九个输出变体、两个跨实例置换的非恒等性、方向均值/移位、context zero、weighted recall、accuracy、门控熵归一化以及别名规范化。HKUST 正式 checkpoint 运行已完成；Metropolis、三随机种子干预和路线 A/B 判定仍待完成。
 
 ## 2026-08-01 探索性运行记录（不进入正式主表）
 
