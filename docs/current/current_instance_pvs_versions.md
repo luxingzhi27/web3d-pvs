@@ -6,7 +6,7 @@
 
 | 名称 | 输入 | 输出 | 当前用途 |
 |---|---|---|---|
-| `pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best` | FOV66 后退相机扩展候选、固定离线上下文/遮挡代理特征、当前相机到实例的视线查询特征 | 实例可见性分数、实例可见集合、GLB 下载优先级 | HKUST 当前前端默认运行模型 |
+| `pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best` | FOV66 后退相机扩展候选、固定离线上下文/遮挡代理特征、当前相机到实例的视线查询特征 | 实例可见性分数、实例可见集合、GLB 下载优先级 | HKUST 当前前端默认运行模型 |
 | `pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40_best` | 41298 个实例的固定离线特征、3669 个实例化 GLB 映射、后退相机 ray-space 查询 | 实例可见性与原型 GLB 下载优先级 | metropolis 当前部署模型 |
 
 场景粒度和资产粒度如下：
@@ -19,8 +19,7 @@
 ## 保留训练输出
 
 ```text
-neural_instance_culling/model/out/pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66
-neural_instance_culling/model/out/pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best_eval
+neural_instance_culling/model/out/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_hkust_spatial_fov66_seed20260801_protocolfix_retry2
 neural_instance_culling/model/out/pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40
 ```
 
@@ -44,15 +43,19 @@ neural_instance_culling/dataset/out/ifcbench_fantasy_metropolis_instanced_v2_glb
 ## 前端运行资产
 
 ```text
-slm2viewer/public/assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best
+slm2viewer/public/assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best
 slm2viewer/public/assets/neural_instance_culling/pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40_best
-slm2viewer/assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best
+slm2viewer/assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best
 slm2viewer/assets/neural_instance_culling/pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40_best
-slm2viewer/public_deploy/assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best
+slm2viewer/public_deploy/assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best
 slm2viewer/public_deploy/assets/neural_instance_culling/pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40_best
 ```
 
-2026-07-31 已重新导出两套运行资产，元数据显式绑定当前数据集，并按 weighted-safe precision 规则更新阈值；模型二进制权重未改变。Metropolis 的运行元数据不再引用已删除的 `ifcbench_fantasy_metropolis_v1` 数据集路径，训练期资源清单也不再随运行元数据展开。
+2026-08-01 HKUST 已导出正式空间训练模型 `rvl_strong_v2_full40_best`。其阈值来自
+`calibration_ready_summary.json` 的冻结校准工作点 `0.02`，校准 weighted recall 为
+`0.9930808`，bootstrap 单侧 95% 下界为 `0.9909417`；导出器不会在 test 上重新扫描阈值。
+Metropolis 仍等待当前正式训练结束，不能提前替换其旧运行资产。Metropolis 的运行元数据不再引用已删除的
+`ifcbench_fantasy_metropolis_v1` 数据集路径，训练期资源清单也不再随运行元数据展开。
 
 当前混淆多场景发布目录：
 
@@ -70,7 +73,7 @@ slm2viewer/public_deploy
 
 ```text
 baseline_aabb_hzb（显示名：baseline_aabb_depth_proxy）
-pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best
+pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best
 pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40_best
 ```
 
@@ -92,10 +95,8 @@ pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full
 当前统一协议使用 66° 采样/模型相机和 60° 真实渲染相机。两个场景的运行时元数据均遵循这一
 口径，候选 FOV 不再从数据记录中回读。
 
-HKUST 当前点云特征元数据记录 3,273 行，而运行时实例数为 18,831；模型实现当前按实例编号
-读取点云行，因而该历史输出与当前训练资源校验存在索引语义风险。重新训练 HKUST 前必须重新
-生成按实例对齐的点云表，或明确实现并验证按 `instance_to_glb` 读取原型点云。详细说明见
-`docs/current/neuralstreamweb3d_model_pipeline.md`。
+HKUST 旧 `w042` 资产的点云特征元数据曾记录 3,273 个 GLB 原型，而运行时实例数为 18,831，不能继续作为当前主线证据。
+当前 `rvl_strong_v2` 训练输出已按实例运行特征表导出，并通过正式资源审计；旧资产仅作为历史复现实验保留。
 
 完整的系统边界、模型、数据集、前端和部署说明见：
 
@@ -119,4 +120,6 @@ HKUST 当前点云特征元数据记录 3,273 行，而运行时实例数为 18,
 
 代码层面，训练、benchmark、运行时阈值读取和前端导出共享同一个安全筛选函数。没有合格工作点时不会覆盖旧 `best.pt`，也不会把摘要中的 `bestF1` 或其他不安全工作点回退成默认阈值；手动不安全阈值仅用于显式诊断。
 
-HKUST FOV66 当前完整 test split 的主工作点为阈值 `0.64`：pose precision `0.8156`、pose recall `0.8680`、weighted recall `0.990071`、useful cull `0.87897`。阈值 `0.01` 的普通 recall `0.9552` 仅作为高召回诊断点保留。
+旧 HKUST `w042` 的 test 校准工作点 `0.64` 仅作为 exploratory 历史结果保留。
+当前正式 `rvl_strong_v2` 的默认前端阈值为校准冻结值 `0.02`；正式 frozen test 和图像质量门仍按 M0/M5
+收尾结果更新，不能用旧 `0.64` 代替。

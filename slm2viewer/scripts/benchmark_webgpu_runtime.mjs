@@ -29,7 +29,7 @@ const MAX_TARGET_GLB_BODY_PROBES = 8;
 const MAX_TARGET_GLB_BODY_PROBE_BYTES = 8 * 1024 * 1024;
 
 const MODEL_BY_SCENE = Object.freeze({
-  'hkust-v3': 'pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best',
+  'hkust-v3': 'pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best',
   'ifcbench_fantasy_metropolis_instanced_v2':
     'pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40_best',
 });

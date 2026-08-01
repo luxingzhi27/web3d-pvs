@@ -57,7 +57,7 @@
 
 | 场景 | 实例数 | GLB 数 | 模型目录 |
 |---|---:|---:|---|
-| HKUST v3 | 18,831 | 3,273 | `pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best` |
+| HKUST v3 | 18,831 | 3,273 | `pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best` |
 | IFCBench Fantasy Metropolis 实例化 v2 | 41,298 | 3,669 | `pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40_best` |
 
 场景源资产与前端运行资产分离。源场景目录保留构件 GLB、场景树和转换信息；前端部署目录只携带场景元数据、代理几何、神经运行资产和配置，体量较大的 GLB 本体使用独立的场景包或远端地址提供。

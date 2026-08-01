@@ -17,7 +17,7 @@ const requireFile = (relativePath) => {
 };
 
 const modelByScene = {
-  'hkust-v3': 'pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best',
+  'hkust-v3': 'pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best',
   'ifcbench_fantasy_metropolis_instanced_v2':
     'pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40_best',
 };

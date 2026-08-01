@@ -93,6 +93,50 @@ def compact_feature_meta(feature_meta: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def normalize_threshold_payload(payload: dict[str, Any], source: Path) -> tuple[dict[str, Any], str]:
+    """Normalize formal calibration records without doing a new threshold scan.
+
+    Current formal training deliberately stops before test and writes
+    ``calibration_ready_summary.json``.  The older exporter only understood
+    ``eval_summary.json`` and would therefore either fail to export the
+    formal checkpoint or fall back to an unsafe default.  A pre-test record is
+    already a frozen calibration decision, so the exporter must validate that
+    decision and reuse it verbatim.
+    """
+    protocol = str(payload.get("protocol", ""))
+    if protocol == "calibration_ready_pre_test":
+        if int(payload.get("testEvaluationCount", -1)) != 0:
+            raise RuntimeError(
+                f"{source} is marked calibration_ready_pre_test but testEvaluationCount is not zero."
+            )
+        calibration = payload.get("calibration")
+        selected = calibration.get("selected") if isinstance(calibration, dict) else None
+        frozen = payload.get("frozenThreshold")
+        if not isinstance(selected, dict) or frozen is None:
+            raise RuntimeError(f"{source} has no frozen calibration workpoint.")
+        if abs(float(selected.get("threshold", float("nan"))) - float(frozen)) > 1e-6:
+            raise RuntimeError(f"{source} has inconsistent selected and frozen thresholds.")
+        rows = payload.get("calibrationThresholdRows")
+        if not isinstance(rows, list) or not rows:
+            raise RuntimeError(f"{source} has no calibration threshold rows.")
+        normalized = dict(payload)
+        normalized["thresholdRows"] = rows
+        normalized["workpoints"] = {
+            "primaryWeightedPrecision": dict(selected),
+            "calibration": calibration,
+        }
+        return normalized, protocol
+    if protocol == "frozen_calibration_one_shot_test":
+        if int(payload.get("testEvaluationCount", -1)) != 1:
+            raise RuntimeError(f"{source} is not a complete one-shot frozen-test summary.")
+        return payload, protocol
+    if protocol:
+        raise RuntimeError(f"Unsupported export threshold protocol in {source}: {protocol}")
+    # Legacy exploratory summaries are still accepted for historical exports,
+    # but the caller will require a recorded safe threshold row below.
+    return payload, "legacy_eval_summary"
+
+
 def make_display_name(model_name: str) -> str:
     label = model_name
     if label.startswith("pvs_"):
@@ -206,12 +250,38 @@ def main() -> None:
     bin_path = output_dir / "instance_pvs_assets.bin"
     builder.write(bin_path)
 
-    eval_summary = json.loads(Path(args.eval_summary).read_text(encoding="utf-8")) if Path(args.eval_summary).exists() else {}
+    eval_summary_path = Path(args.eval_summary)
+    if not eval_summary_path.exists():
+        raise FileNotFoundError(
+            f"Threshold provenance file does not exist: {eval_summary_path}. "
+            "Formal exports require calibration_ready_summary.json or eval_summary.json."
+        )
+    eval_summary, threshold_protocol = normalize_threshold_payload(
+        json.loads(eval_summary_path.read_text(encoding="utf-8")),
+        eval_summary_path,
+    )
     target_weighted_recall = target_weighted_recall_from_payload(eval_summary)
     threshold_rows = eval_summary.get("thresholdRows") if isinstance(eval_summary.get("thresholdRows"), list) else []
     workpoints = eval_summary.get("workpoints") if isinstance(eval_summary.get("workpoints"), dict) else {}
     selected_workpoint = workpoints.get(args.workpoint) if isinstance(workpoints.get(args.workpoint), dict) else None
     primary_workpoint = select_weighted_precision_workpoint(threshold_rows, target_weighted_recall)
+    if threshold_protocol == "calibration_ready_pre_test":
+        # The training process selected this row using the registered point
+        # and bootstrap lower-bound floors.  Do not silently choose another
+        # row with a larger point estimate while exporting.
+        recorded = workpoints.get("primaryWeightedPrecision")
+        if not isinstance(recorded, dict):
+            raise RuntimeError(f"{eval_summary_path} has no recorded primary calibration workpoint.")
+        primary_workpoint = dict(recorded)
+        point_floor = float((eval_summary.get("args") or {}).get("calibration_point_floor", 0.0))
+        lcb_floor = float((eval_summary.get("args") or {}).get("calibration_lcb_floor", 0.0))
+        point = float(primary_workpoint.get("pose_weighted_recall", -1.0))
+        lcb = float(primary_workpoint.get("weighted_recall_lower_confidence_bound", -1.0))
+        if point <= target_weighted_recall or point < point_floor or lcb <= lcb_floor:
+            raise RuntimeError(
+                f"{eval_summary_path} recorded an unsafe calibration workpoint: "
+                f"weighted_recall={point}, point_floor={point_floor}, lcb={lcb}, lcb_floor={lcb_floor}."
+            )
     if args.workpoint == "primaryWeightedPrecision":
         selected_workpoint = primary_workpoint
     elif selected_workpoint is None:
@@ -289,6 +359,7 @@ def main() -> None:
         "instanceToGlobalGlb": instance_to_glb.astype(np.int32).tolist(),
         "exportSourceCheckpoint": str(Path(args.checkpoint).as_posix()),
         "exportSourceEvalSummary": str(Path(args.eval_summary).as_posix()),
+        "exportThresholdProtocol": threshold_protocol,
         "exportedBy": "neural_instance_culling/model/export_directional_occlusion_proxy_frontend.py",
         "exportedAt": datetime.now(timezone.utc).isoformat(),
         "thresholdSelection": threshold_selection,

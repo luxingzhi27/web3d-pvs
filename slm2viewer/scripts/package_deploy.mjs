@@ -26,7 +26,7 @@ const deployDir = resolve(rootDir, outputDirValue || 'public_deploy');
 const deployAssetProxyPath = '/hkust-v3-assets';
 const remoteAssetBaseUrl = 'https://smart3d.hkust-gz.edu.cn/proxy/hkust-v3/assets';
 const sceneModelDirByName = Object.freeze({
-  'hkust-v3': 'pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best',
+  'hkust-v3': 'pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best',
   'ifcbench_fantasy_metropolis_instanced_v2': 'pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40_best',
 });
 const sceneEqualsArg = process.argv.find((arg) => arg.startsWith('--scene='));

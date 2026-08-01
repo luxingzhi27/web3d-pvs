@@ -18,7 +18,7 @@ const viewerDir = path.resolve(scriptDir, '..');
 const defaultSourceDir = path.join(viewerDir, 'public_deploy');
 const defaultOutputDir = path.join(viewerDir, 'public_deploy_hkust_liteweb3d');
 const defaultArchive = path.join(viewerDir, 'hkust_v3_public_deploy_liteweb3d.tar.gz');
-const hkustModelDir = 'pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best';
+const hkustModelDir = 'pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best';
 const defaultAssetBaseUrl = 'https://www.liteweb3d.com/data/hkust-v3/';
 
 function parseArgs() {

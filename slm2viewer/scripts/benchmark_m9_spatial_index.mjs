@@ -18,7 +18,7 @@ const PROJECT_DIR = path.resolve(VIEWER_DIR, '..');
 const DEFAULTS = Object.freeze({
   modelMeta: path.join(
     VIEWER_DIR,
-    'assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best/instance_model_meta.json',
+    'assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best/instance_model_meta.json',
   ),
   runtimeMeta: path.join(VIEWER_DIR, 'assets/scenes/hkust-v3/runtimeVisibilityMeta.json'),
   dataset: path.join(

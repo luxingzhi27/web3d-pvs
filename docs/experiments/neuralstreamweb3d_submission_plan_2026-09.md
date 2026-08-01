@@ -976,3 +976,18 @@ Node 语法检查和差异检查均通过。正式主线训练、M0 frozen test�
   完整 validation/calibration 图像评价及 one-shot test 图像门尚未通过。
 - 回归验证更新为 benchmark Python `35 tests, OK`、前端当前完整性 smoke 通过、M9 前端回归 `8` 项通过。
   本轮提交均采用追加 commit 并推送到 `origin/main`，没有删除或改写既有历史。
+
+### 21.15 HKUST 正式模型导出（2026-08-01）
+
+HKUST 已完成 `pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_hkust_spatial_fov66_seed20260801_protocolfix_retry2`
+的前端导出。导出器原先只接受旧式 `eval_summary.json`，而正式训练使用
+`calibration_ready_summary.json`；本次补充了正式校准摘要解析，并强制验证
+`testEvaluationCount=0`、冻结阈值一致性、weighted recall 点估计和 bootstrap 下限，再写出
+`pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best`。导出结果阈值为 `0.02`，
+calibration weighted recall 为 `0.9930808`，单侧 bootstrap 95% 下界为 `0.9909417`，前端运行资产为
+`13,844,856` bytes。默认前端、静态完整性 smoke、M9 审计和部署打包脚本已同步切换；旧 `w042`
+仅保留为历史资产。
+
+本次变更没有改变模型权重或 test 结果，也没有把 M5 图像门、Metropolis M0/M3 或 M4 消融标记为完成。
+M9 空间 AABB 审计在强模型元数据下仍集合一致，但索引 p50/p95 比全扫描更慢，空间分页和性能优化仍是
+未完成工作。详细记录见 `docs/experiments/m0_hkust_formal_export_2026-08-01.md`。
