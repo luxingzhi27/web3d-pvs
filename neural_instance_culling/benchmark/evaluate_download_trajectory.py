@@ -342,12 +342,6 @@ def build_pose_plans(
         raise ValueError(f"Unsupported GLB aggregation {aggregation!r}; allowed={GLB_AGGREGATIONS}.")
     if aggregation_top_k <= 0:
         raise ValueError("aggregation_top_k must be positive.")
-    if score_mode == "independent-utility":
-        raise RuntimeError(
-            "score mode independent-utility is not implemented: no independent ranker is registered; "
-            "the evaluator refuses to substitute the current utility head."
-        )
-
     num_poses = int(dataset.poses.shape[0])
     instance_to_glb = np.asarray(runner.instance_to_glb, dtype=np.int64).reshape(-1)
     plans: list[PosePlan] = []
@@ -1035,6 +1029,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--glb-root", help="Root used to resolve paths in glbIndex.json.")
     parser.add_argument("--glb-time-index", help="Strict per-GLB decode/upload time cost index JSON.")
     parser.add_argument("--models", help="Comma-separated retained runner names.")
+    parser.add_argument("--independent-ranker-spec", action="append", default=[], help="name|checkpoint for an independent RankNet utility runner.")
     parser.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"))
     parser.add_argument("--score-mode", default="current-cascade", choices=SCORE_MODES)
     parser.add_argument("--glb-aggregation", default="max", choices=GLB_AGGREGATIONS)
@@ -1069,6 +1064,14 @@ def main(argv: list[str] | None = None) -> None:
         time_budgets = _parse_float_list(args.time_budgets_ms)
         initial_ids = _parse_id_list(args.initial_cache_glbs)
         specs = selected_default_specs(args.models)
+        for raw in args.independent_ranker_spec:
+            parts = str(raw).split("|")
+            if len(parts) != 2 or any(not part.strip() for part in parts):
+                raise ValueError("--independent-ranker-spec must use name|checkpoint")
+            name, checkpoint = (part.strip() for part in parts)
+            if name in specs:
+                raise ValueError(f"independent ranker duplicates model name {name!r}")
+            specs[name] = {"kind": "independent_utility_ranker", "checkpoint": checkpoint}
         if not specs:
             raise ValueError("--models must contain at least one retained runner.")
         device = select_device(args.device)

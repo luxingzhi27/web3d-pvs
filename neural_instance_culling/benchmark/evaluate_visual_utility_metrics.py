@@ -134,6 +134,21 @@ def parse_learned_aabb_ray_specs(values: Iterable[str]) -> dict[str, dict[str, s
     return specs
 
 
+def parse_independent_ranker_specs(values: Iterable[str]) -> dict[str, dict[str, str]]:
+    """Parse explicit train-only independent utility ranker checkpoints."""
+
+    specs: dict[str, dict[str, str]] = {}
+    for raw in values:
+        parts = str(raw).split("|")
+        if len(parts) != 2 or any(not part.strip() for part in parts):
+            raise ValueError("--independent-ranker-spec must use name|checkpoint")
+        name, checkpoint = (part.strip() for part in parts)
+        if name in specs:
+            raise ValueError(f"Duplicate independent ranker spec: {name!r}")
+        specs[name] = {"kind": "independent_utility_ranker", "checkpoint": checkpoint}
+    return specs
+
+
 def load_frozen_thresholds(
     path: str | Path,
     model_names: Iterable[str],
@@ -704,10 +719,17 @@ def _score_mode_result(result: Any, mode: str) -> tuple[np.ndarray | None, dict[
             "source": "result.scores",
         }
     if mode == "independent-utility":
-        return None, {
-            "status": "not_implemented",
+        values = getattr(result, "independent_utility_scores", None)
+        if values is None:
+            return None, {
+                "status": "not_implemented",
+                "definition": "independently trained GLB utility/ranking model",
+                "reason": "This runner does not expose an independently trained utility score.",
+            }
+        return _probability_scores(values), {
+            "status": "implemented",
             "definition": "independently trained GLB utility/ranking model",
-            "reason": "No independently trained ranker and no registered independent score output are available.",
+            "source": "result.independent_utility_scores",
         }
     if mode == "current-cascade":
         values = getattr(result, "download_scores", None)
@@ -1369,6 +1391,8 @@ def run_self_test() -> dict[str, Any]:
     assert _score_mode_result(result, "current-cascade")[0][0] > 0.5
     assert np.isclose(_score_mode_result(result, "visibility-gated")[0][0], np.float64(0.8 * 0.7))
     assert _score_mode_result(result, "independent-utility")[1]["status"] == "not_implemented"
+    independent_result = SimpleNamespace(independent_utility_scores=np.asarray([0.6, 0.2], dtype=np.float32))
+    assert _score_mode_result(independent_result, "independent-utility")[1]["status"] == "implemented"
     with tempfile.TemporaryDirectory() as temp_dir:
         time_index = Path(temp_dir) / "glb_costs.json"
         time_index.write_text(
@@ -1506,6 +1530,12 @@ def main() -> None:
         default=[],
         help="Explicit M6 learned AABB-ray runner: name|checkpoint[|training summary].",
     )
+    parser.add_argument(
+        "--independent-ranker-spec",
+        action="append",
+        default=[],
+        help="Explicit M7 independent RankNet utility runner: name|checkpoint.",
+    )
     parser.add_argument("--dataset-dir", default=str(ROOT / "dataset/out/pose_csr_hkust_v3_viewcell_colorid_fov66"))
     parser.add_argument("--runtime-meta", default="hkust-v3/assets/runtimeVisibilityMeta.json")
     parser.add_argument("--glb-index", default="hkust-v3/assets/glbIndex.json")
@@ -1566,12 +1596,17 @@ def main() -> None:
     try:
         dynamic_specs = parse_learned_model_specs(args.learned_model_spec)
         learned_aabb_specs = parse_learned_aabb_ray_specs(args.learned_aabb_ray_spec)
+        independent_specs = parse_independent_ranker_specs(args.independent_ranker_spec)
     except ValueError as exc:
         parser.error(str(exc))
     dynamic_overlap = set(dynamic_specs).intersection(learned_aabb_specs)
     if dynamic_overlap:
         parser.error(f"learned model and learned AABB-ray specs duplicate names: {sorted(dynamic_overlap)}")
     dynamic_specs.update(learned_aabb_specs)
+    dynamic_overlap = set(dynamic_specs).intersection(independent_specs)
+    if dynamic_overlap:
+        parser.error(f"learned and independent ranker specs duplicate names: {sorted(dynamic_overlap)}")
+    dynamic_specs.update(independent_specs)
     overlap = set(specs).intersection(dynamic_specs)
     if overlap:
         parser.error(f"--learned-model-spec duplicates registered model names: {sorted(overlap)}")

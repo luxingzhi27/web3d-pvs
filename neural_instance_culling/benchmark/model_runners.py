@@ -22,6 +22,7 @@ from common.threshold_selection import (  # noqa: E402
 from directional_occlusion_proxy_encoder_model import DirectionalOcclusionProxyEncoderPVSModel  # noqa: E402
 from pose_csr_dataset import PoseCSRDataset, _project_aabb_features_numpy  # noqa: E402
 from aabb_ray_feature_utils import FEATURE_DIM as AABB_RAY_FEATURE_DIM, build_aabb_ray_features  # noqa: E402
+from utility_ranker import FEATURE_DIM as UTILITY_RANKER_FEATURE_DIM, IndependentUtilityRankerMLP  # noqa: E402
 from train_aabb_ray_baseline import AabbRayMLP  # noqa: E402
 from triangle_hzb import (  # noqa: E402
     camera_basis as triangle_hzb_camera_basis,
@@ -93,6 +94,7 @@ class PredictionResult:
     diagnostics: dict | None = None
     utility_scores: np.ndarray | None = None
     download_scores: np.ndarray | None = None
+    independent_utility_scores: np.ndarray | None = None
 
 
 class BaseModelRunner:
@@ -649,6 +651,76 @@ class DirectionalOcclusionProxyEncoderRunner(BaseModelRunner):
             diagnostics=diagnostics,
             utility_scores=utility_scores,
             download_scores=download_scores,
+        )
+
+
+class IndependentUtilityRankerRunner(BaseModelRunner):
+    """Cold-start GLB utility ranker with no visibility-score input."""
+
+    def __init__(self, *args, scene_diagonal: float, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.scene_diagonal = float(scene_diagonal)
+        self.requires_mvp = True
+        self.information_level = "L0_metadata_cold_start"
+        self.decision_mode = "score_only"
+
+    @torch.no_grad()
+    def _score_pose(self, camera_world, camera_view, instance_ids, mvp) -> np.ndarray:
+        features = build_aabb_ray_features(
+            self.world_aabbs,
+            instance_ids,
+            camera_world,
+            camera_view,
+            mvp,
+            self.scene_diagonal,
+        )
+        logits = self.model(torch.from_numpy(features).to(self.device))
+        return torch.sigmoid(logits).detach().cpu().numpy().astype(np.float32, copy=False)
+
+    @torch.no_grad()
+    def score_arrays(self, camera_norm, camera_world, camera_view, instance_ids, mvp=None):
+        del camera_norm
+        if mvp is None:
+            raise RuntimeError("independent utility ranker requires MVP rows")
+        t0 = time.perf_counter()
+        scores = self._score_pose(
+            np.asarray(camera_world)[0],
+            np.asarray(camera_view)[0],
+            np.asarray(instance_ids, dtype=np.int64),
+            np.asarray(mvp)[0] if np.asarray(mvp).ndim == 2 else np.asarray(mvp),
+        )
+        t1 = time.perf_counter()
+        return PredictionResult(
+            scores=scores,
+            forward_ms=(t1 - t0) * 1000.0,
+            total_ms=(t1 - t0) * 1000.0,
+            independent_utility_scores=scores,
+        )
+
+    @torch.no_grad()
+    def score_batch(self, batch):
+        t0 = time.perf_counter()
+        ids_all = np.asarray(batch["instance"], dtype=np.int64).reshape(-1)
+        offsets = np.asarray(batch["pose_offsets"], dtype=np.int64)
+        scores = np.zeros((ids_all.size,), dtype=np.float32)
+        for pose_id in range(offsets.size - 1):
+            start, end = int(offsets[pose_id]), int(offsets[pose_id + 1])
+            if end <= start:
+                continue
+            if "mvp" not in batch:
+                raise RuntimeError("independent utility ranker requires MVP rows")
+            scores[start:end] = self._score_pose(
+                batch["camera_world"][start],
+                batch["camera_view"][start],
+                ids_all[start:end],
+                batch["mvp"][start],
+            )
+        t1 = time.perf_counter()
+        return PredictionResult(
+            scores=scores,
+            forward_ms=(t1 - t0) * 1000.0,
+            total_ms=(t1 - t0) * 1000.0,
+            independent_utility_scores=scores,
         )
 
 
@@ -1290,6 +1362,37 @@ def load_directional_occlusion_proxy_encoder_runner(
     )
 
 
+def load_independent_utility_ranker_runner(
+    name: str,
+    checkpoint_path: str | Path,
+    runtime_meta_path: str | Path,
+    fallback_threshold: float,
+    device: torch.device,
+) -> IndependentUtilityRankerRunner:
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    if checkpoint.get("schema") != "neuralstreamweb3d-independent-utility-ranker-v1":
+        raise ValueError(f"{checkpoint_path} is not an independent utility ranker v1 checkpoint")
+    config = checkpoint.get("config") or {}
+    if int(config.get("featureDim", -1)) != UTILITY_RANKER_FEATURE_DIM:
+        raise ValueError(f"{checkpoint_path} has an unexpected independent ranker featureDim")
+    world_aabbs, instance_to_glb, runtime = load_runtime_meta(runtime_meta_path, int(config["numInstances"]))
+    model = IndependentUtilityRankerMLP(UTILITY_RANKER_FEATURE_DIM).to(device)
+    model.load_state_dict(checkpoint["model"], strict=True)
+    model.eval()
+    return IndependentUtilityRankerRunner(
+        name=name,
+        kind="independent_utility_ranker",
+        model=model,
+        world_aabbs=world_aabbs,
+        instance_to_glb=instance_to_glb,
+        runtime_meta=runtime,
+        checkpoint=checkpoint,
+        threshold=float(fallback_threshold),
+        device=device,
+        scene_diagonal=float(config["sceneDiagonal"]),
+    )
+
+
 def load_runner(
     name: str,
     spec: dict[str, str],
@@ -1326,6 +1429,14 @@ def load_runner(
             runtime_meta,
             spec["runtime_features"],
             spec.get("eval_summary"),
+            fallback_threshold,
+            device,
+        )
+    if kind == "independent_utility_ranker":
+        return load_independent_utility_ranker_runner(
+            name,
+            spec["checkpoint"],
+            runtime_meta,
             fallback_threshold,
             device,
         )

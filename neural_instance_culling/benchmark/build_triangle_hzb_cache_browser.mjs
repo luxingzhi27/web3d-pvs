@@ -151,13 +151,25 @@ function sceneDiagonal(runtimeMeta) {
   return Math.sqrt(size.reduce((sum, value) => sum + Number(value) ** 2, 0));
 }
 
-function parseSplitId(datasetMeta, splitName) {
-  if (!splitName || splitName === 'all') return null;
-  const splitIds = datasetMeta.splitIds || {};
-  if (!Object.prototype.hasOwnProperty.call(splitIds, splitName)) {
-    throw new Error(`dataset splitIds has no '${splitName}'`);
+function parseSplitIds(datasetMeta, splitValue) {
+  const names = String(splitValue || 'all')
+    .split(/[,+]/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (names.length === 0 || names.includes('all')) {
+    if (names.length > 1 || (names.length === 1 && names[0] !== 'all')) {
+      throw new Error("split 'all' cannot be combined with another split");
+    }
+    return { names: ['all'], ids: null };
   }
-  return Number(splitIds[splitName]);
+  const splitIds = datasetMeta.splitIds || {};
+  const ids = names.map((name) => {
+    if (!Object.prototype.hasOwnProperty.call(splitIds, name)) {
+      throw new Error(`dataset splitIds has no '${name}'`);
+    }
+    return Number(splitIds[name]);
+  });
+  return { names, ids: new Set(ids) };
 }
 
 function readPoseRecords(datasetDir, datasetMeta, args) {
@@ -168,11 +180,12 @@ function readPoseRecords(datasetDir, datasetMeta, args) {
     throw new Error(`triangle HZB generator requires directional 64-byte poses.bin, got stride=${stride}`);
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const splitId = parseSplitId(datasetMeta, args.split);
+  const selectedSplits = parseSplitIds(datasetMeta, args.split);
   const selected = [];
   for (let poseIndex = 0; poseIndex < bytes.byteLength / stride; poseIndex += 1) {
     const offset = poseIndex * stride;
-    if (splitId !== null && view.getUint8(offset + 44) !== splitId) continue;
+    const splitId = view.getUint8(offset + 44);
+    if (selectedSplits.ids !== null && !selectedSplits.ids.has(splitId)) continue;
     selected.push({
       ordinal: selected.length,
       poseIndex,
@@ -192,7 +205,7 @@ function readPoseRecords(datasetDir, datasetMeta, args) {
     return { ...row, ordinal, aspect: args.aspect > 0 ? args.aspect : poseAspect };
   });
   if (result.length === 0) throw new Error(`no poses selected from split '${args.split}'`);
-  return result;
+  return { poses: result, splitNames: selectedSplits.names };
 }
 
 function readGlbEntries(assetsDir, glbIdList) {
@@ -486,7 +499,8 @@ async function main() {
   const args = parseArgs(process.argv);
   const datasetMeta = readJson(path.join(args.datasetDir, 'dataset_meta.json'));
   const runtimeMeta = readJson(path.resolve(datasetMeta.runtimeMeta || path.join(args.assetsDir, 'runtimeVisibilityMeta.json')));
-  const poses = readPoseRecords(args.datasetDir, datasetMeta, args);
+  const poseSelection = readPoseRecords(args.datasetDir, datasetMeta, args);
+  const poses = poseSelection.poses;
   const { index: glbIndex, selected: glbEntries } = readGlbEntries(args.assetsDir, args.glbIdList);
   const { descriptors, valueCount } = buildLevelDescriptors(args.width, args.height);
   const cameraFar = args.cameraFar > 0 ? args.cameraFar : sceneDiagonal(runtimeMeta) * 2.0;
@@ -508,6 +522,8 @@ async function main() {
     assetsDir: args.assetsDir,
     datasetDir: args.datasetDir,
     glbIndex: path.join(args.assetsDir, 'glbIndex.json'),
+    split: args.split,
+    selectedSplits: poseSelection.splitNames,
     width: args.width,
     height: args.height,
     fovYDeg: args.fovYDeg,
@@ -612,6 +628,7 @@ async function main() {
   console.log(JSON.stringify({
     schema: manifest.schema,
     split: args.split,
+    selectedSplits: poseSelection.splitNames,
     poseCount: poses.length,
     glbCount: glbEntries.length,
     width: args.width,

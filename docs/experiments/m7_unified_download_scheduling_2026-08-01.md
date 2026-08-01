@@ -1,7 +1,7 @@
 # M7：统一下载调度评估入口
 
 日期：2026-08-01
-状态：评估器协议与小型 fixture 已完成；正式 validation/calibration/test 长实验尚未运行。
+状态：评估器协议、独立 RankNet runner 和小型 fixture 已完成；正式主线/独立排序器 validation/calibration 长实验尚未完成。
 
 ## 变更目的
 
@@ -59,7 +59,7 @@ conda run --no-capture-output -n slm_pvs python \
 | 模式 | 实例排序分数 | 状态与边界 |
 |---|---|---|
 | `visibility-only` | 实例可见性概率 | 已实现；用于判断专用下载头是否只复现可见性后处理 |
-| `independent-utility` | 独立训练的效用/排序器输出 | 明确标记 `not_implemented`；当前仓库没有独立 ranker，评估器不会用当前 utility head 冒充它 |
+| `independent-utility` | 独立训练的效用/排序器输出 | runner 已实现；未注册独立 checkpoint 时仍为 `not_implemented`，评估器不会用当前 utility head 冒充它 |
 | `current-cascade` | 当前级联下载头输出，必要时把 logit 转为概率 | 已实现；只在 runner 暴露 download head 时可用 |
 | `visibility-gated` | 可见性概率乘以当前 utility-head 输出 | 作为 `diagnostic_proxy`；当前 utility head 本身读取可见性，因此不能解释为独立显著性头或已训练的 `visibility × salience` 模型 |
 
@@ -150,7 +150,7 @@ Formal test evaluation requires --frozen-threshold-file; test threshold scanning
 当前文档不把 M7 说成已经通过投稿门控，原因如下：
 
 1. 尚未在空间隔离数据上完成正式 validation/calibration 与冻结 test；本轮仅验证代码协议。
-2. 独立 RankNet/ListNet/成本敏感排序器没有训练数据、模型注册和同容量实现，故不能伪造结果。它是后续必要 baseline，不是当前结果。
+2. 独立 RankNet runner 和 train-only 训练入口已经补齐，但两个场景的 checkpoint、正式 calibration 和同容量结果仍在运行，不能提前写入主表。
 3. 当前仍没有每个 GLB 的真实设备解码/上传时间索引，因此静态评估中的 `utility@time` 在真实运行中会保持不可用，直到采集可复现的设备与网络测量；本轮只修复了时间索引的解析和一致性门控。
 4. M8 的最小离线轨迹、冷/温缓存、带宽并发、missing-utility integral 和无效下载字节回放已单独实现于 `evaluate_download_trajectory.py`，但它使用确定性的等份带宽槽位模型，尚未替代真实 4G/Wi-Fi trace、设备解码上传和首屏 p95 帧时间实验。详见 `m7_m8_trajectory_replay_2026-08-01.md`。
 5. 图像级 miss-pixel、wrong-ID 和实例级渲染正确性不在本文件内实现，仍由 M5 管线负责，M7 只消费 weak utility 目标。
@@ -160,6 +160,96 @@ Formal test evaluation requires --frozen-threshold-file; test threshold scanning
 ## 保留判断
 
 本次代码保留为 M7 主线评估入口。它解决的是实验协议和可比较性问题，并没有提前宣称算法收益。后续正式运行必须在输出目录保存 `summary.json`、`summary.md`、冻结阈值文件路径、实际 split 解析结果、GLB 字节来源和时间索引来源；任何缺失资源或未实现模式都应保留为显式状态，而不是回退到旧的 runner download score。
+
+## 2026-08-01 独立 RankNet 排序器补齐
+
+### 变更目的
+
+此前 `independent-utility` 只返回 `not_implemented`，因此无法判断当前下载头的收益是否来自共享可见性表征，还是仅来自一个额外的排序模型。本次加入一个明确的独立对照：它输入实例 AABB、当前相机射线/FOV 和保存的 MVP 投影特征，输出实例级弱视觉效用排序分数；输入中没有当前可见性概率，也不读取目标 GLB 三角形。
+
+### 修改文件和协议
+
+- `neural_instance_culling/benchmark/utility_ranker.py`：共享 18 维输入的两层 SiLU MLP 定义。
+- `neural_instance_culling/benchmark/train_independent_utility_ranker.py`：只使用 train split 的候选集合训练 pairwise RankNet；正样本来自保存候选中的可见实例，负样本来自同一 pose 的保存候选不可见实例。
+- `neural_instance_culling/benchmark/model_runners.py`：新增独立排序 runner 和 `independent_utility_scores` 输出字段。
+- `neural_instance_culling/benchmark/evaluate_visual_utility_metrics.py`：新增 `--independent-ranker-spec name|checkpoint`，并让 `independent-utility` 只读取独立输出字段。
+- `neural_instance_culling/benchmark/evaluate_download_trajectory.py`：轨迹回放支持显式注册独立排序器。
+
+可复现训练命令模板：
+
+```bash
+conda run --no-capture-output -n slm_pvs python -u \
+  neural_instance_culling/benchmark/train_independent_utility_ranker.py \
+  --dataset-dir <pose-csr> --runtime-meta <runtimeVisibilityMeta.json> \
+  --output-dir neural_instance_culling/model/out/m7_independent_ranknet_<scene>_spatial_fov66_seed20260801 \
+  --epochs 12 --steps-per-epoch 400 --pairs-per-batch 2048 \
+  --pairs-per-pose 32 --seed 20260801 --device cuda \
+  > train_stdout.log 2> train_stderr.log
+```
+
+`visible_weights` 只作为弱效用教师，使用 `log1p(weight) / log1p(1,000,000)` 归一化；报告中仍不能把它称为真实像素覆盖率。排序器 checkpoint 的 schema 为 `neuralstreamweb3d-independent-utility-ranker-v1`，候选语义固定为保存的后退相机候选集合，训练不访问 test。
+
+### 当前执行状态
+
+- HKUST 输出目录：`model/out/m7_independent_ranknet_hkust_spatial_fov66_seed20260801/`，GPU 1，训练日志已分离保存。
+- Metropolis 输出目录：`model/out/m7_independent_ranknet_metropolis_spatial_fov66_seed20260801/`，GPU 3，当前 tmux 输出同时写入 `train_combined.log`；该日志包含 stdout/stderr，后续归档时保留这一 provenance 说明。
+- 两个训练均已完成：HKUST 的最佳 validation RankNet loss 为 `0.0435587`，Metropolis 为 `0.2489221`；两个
+  checkpoint 均写入 `best.pt` 和 `training_summary.json`，训练只读取 train/validation，未读取 test。
+- 代码回归：统一视觉效用 evaluator self-test、下载轨迹 self-test 和 benchmark unittest 全部通过。
+
+完成训练后，正式 validation/calibration 运行应把主线模型和独立排序器并列注册，并至少比较 `visibility-only`、`independent-utility`、`current-cascade`、`visibility-gated` 四种 score mode，以及 `max`、`sum`、`top-k`、`noisy-or` 四种 GLB 聚合。独立排序器只作为下载调度 baseline，不得被当作实例可见性主模型。
+
+## 2026-08-01 独立 RankNet validation/calibration 结果
+
+此前一次启动把未加引号的 `name|checkpoint` 传给 shell，导致 `|checkpoint` 被解释为管道并产生
+`permission denied`；失败目录保留为审计记录。随后使用环境内 Python、独立会话和带引号的参数重跑：
+
+```bash
+/home/data/rhyang/miniconda3/envs/slm_pvs/bin/python -u \
+  neural_instance_culling/benchmark/evaluate_visual_utility_metrics.py \
+  --models '' \
+  --independent-ranker-spec 'ranker_name|/absolute/path/to/best.pt' \
+  --dataset-dir <pose-csr> --runtime-meta <runtimeVisibilityMeta.json> \
+  --glb-index <glbIndex.json> --glb-root <glb-root> \
+  --split validation --output-dir <output> --device cpu \
+  --poses-per-batch 4 --max-candidates-per-pose 0 \
+  --score-modes independent-utility \
+  --glb-aggregations max,sum,top-k,noisy-or
+```
+
+四个正式输出目录均已完成，且遍历完整唯一 split：
+
+- HKUST：`m7_ranknet_hkust_spatial_fov66_validation_20260801_retry2/`（664 pose）和
+  `m7_ranknet_hkust_spatial_fov66_calibration_20260801_retry2/`（690 pose）。
+- Metropolis：`m7_ranknet_metropolis_spatial_fov66_validation_20260801_retry2/`（2,088 pose）和
+  `m7_ranknet_metropolis_spatial_fov66_calibration_20260801_retry2/`（2,376 pose）。
+
+下表固定使用 `max` 聚合，数值来自独立排序器的 `utilityAtBytes`；“效用召回”是弱
+`log1p(visible_weights)` 教师的召回，不是真实像素覆盖率。字节削减以该 pose 的候选 GLB 总字节为分母。
+
+| 场景/split | 1 MiB 效用召回 / 字节削减 | 5 MiB 效用召回 / 字节削减 | 10 MiB 效用召回 / 字节削减 | 20 MiB 效用召回 / 字节削减 |
+|---|---:|---:|---:|---:|
+| HKUST/calibration | 0.7794 / 70.69% | 0.8512 / 50.20% | 0.8797 / 44.91% | 0.9099 / 40.46% |
+| HKUST/validation | 0.6794 / 77.35% | 0.8023 / 57.55% | 0.8397 / 51.27% | 0.8794 / 47.05% |
+| Metropolis/calibration | 0.2613 / 95.67% | 0.4694 / 81.82% | 0.5991 / 65.30% | 0.8063 / 42.96% |
+| Metropolis/validation | 0.2709 / 96.56% | 0.4513 / 85.87% | 0.5924 / 73.50% | 0.8311 / 51.53% |
+
+独立排序器在 HKUST 的 byte-prefix 达到效用召回约 0.999 时平均需要约 108.0 MB（validation），
+在 Metropolis validation 约需要 35.8 MB，但 Metropolis 的 `requiredStatus` 为 `mixed`，不能解释为
+所有 pose 都满足统一的可见性安全约束。以上结果只说明排序器能产生可复现的 GLB 预算曲线；它没有
+可见性输出，评测摘要里的 `best`/阈值字段是接口诊断，不能报告为 pose visibility precision 或
+visibility threshold。最终仍需等待正式主线 checkpoint 的 `visibility-only`、当前级联和可见性门控
+结果，再判断是否存在同等画面安全下的调度收益。
+
+当前 M7 质量门仍为未通过：没有真实设备解码/上传时间索引、网络 trace、paired 主线比较或最终图像
+损失证据，因此不把独立 RankNet 的字节曲线写成端到端下载收益。
+
+### 质量门状态
+
+独立排序器的 schema、输入隔离、完整 validation/calibration 和字节曲线子门已通过；M7 的联合调度
+Go 条件仍未判断。还需要正式主线 calibration-ready、固定轨迹冷/温缓存回放和 paired 结果，才能比较
+安全约束下的字节/时间收益。若独立排序器不弱于当前级联头，则“联合下载头优于后处理”的主张仍需
+谨慎；若级联没有至少 15% 的同效用资源收益，下载头只能作为工程组件。
 
 ## 2026-08-01 正式 baseline 回放启动记录
 
@@ -244,8 +334,9 @@ HKUST 的修复后 calibration 已完整写出摘要，包含 690 个 pose；Met
 修正后的目录 `m7_baselines_metropolis_spatial_fov66_calibration_20260801_fixedrule_retry3/` 已写出完整
 `summary.json`，遍历全部 `2,376` 个 calibration pose。候选语义为
 `stored_candidate_set_strict`，GLB 成本来自本地文件实际字节数。回放包含七个 model-free runner、四种
-分数模式和四种 GLB 聚合方式；`independent-utility` 明确标记为未实现，不能用当前模型的效用头冒充
-独立排序器。
+分数模式和四种 GLB 聚合方式；该次 model-free 输出没有注册独立 RankNet，因此其中的
+`independent-utility` 仍明确标记为未实现。它与本节前面的独立 RankNet 正式结果是两个不同的评测
+批次，不能混用。
 
 | Runner | 安全工作点 | weighted recall | useful cull | bad cull | 平均预测 | 说明 |
 |---|---:|---:|---:|---:|---:|---|

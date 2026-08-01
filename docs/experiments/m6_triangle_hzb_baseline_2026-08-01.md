@@ -109,3 +109,46 @@ PYTHONDONTWRITEBYTECODE=1 conda run --no-capture-output -n slm_pvs \
 
 2026-08-01 结果：32 项全部通过。生成器另通过 `node --check`、`git diff --check` 和上述浏览器
 smoke。该记录对应提交 `139b092`（runner）及后续生成器提交，旧提交历史保留不重写。
+
+## 2026-08-01 validation/calibration 正式缓存执行
+
+为避免把 train/test 几何混入 warm-cache 对照，生成器现在支持用逗号或加号选择多个 split，例如
+`--split validation,calibration`，并在 manifest 的 `selectedSplits` 中记录实际选择。该修改只影响 pose 选择，不改变深度编码、HZB 下采样或候选查询。
+
+Metropolis 已完成完整缓存：
+
+- 输出：`benchmark/out/m6_triangle_hzb_metropolis_spatial_fov66_valcal_256x144/triangle_hzb.bin`
+- 全部 `3,669` 个 GLB，`4,464` 个 validation+calibration pose，`256x144` level-0，66°查询视场；`formalReady=true`
+- 对应 validation/calibration 阈值诊断已在独立输出目录运行，结果生成前不提前报告数值。
+
+HKUST 已用正确的 `hkust-v3/assets` 资产根目录启动同样的完整缓存生成，覆盖 `3,273` 个 GLB 和
+`1,354` 个 validation+calibration pose。第一次启动曾误用了前端镜像路径并立即失败；没有生成部分缓存，失败日志保留在同一输出目录，随后已用正确路径重启。
+
+当前三角形 HZB 的浏览器后端在本机 headless Chrome 中记录为 SwiftShader/WebGL，Vulkan 初始化仍报错，
+因此它可以作为几何语义的 warm-cache 对照，但不能据此宣称 NVIDIA GPU HZB 构建性能。正式报告需要同时保留浏览器后端和缓存构建时间。
+
+## 2026-08-01 完整 validation/calibration 结果
+
+两套缓存均覆盖完整 GLB inventory，且评测严格读取保存的后退相机候选集合，没有把 GT 可见实例补入候选。
+缓存文件和评测 pose 数量如下：
+
+| 场景 | GLB 数 | validation pose | calibration pose | 缓存 level-0 | 缓存文件 | 结果 |
+|---|---:|---:|---:|---:|---:|---|
+| HKUST | 3,273 | 664 | 690 | 256x144 | 266,255,976 bytes | `formalReady=true` |
+| Metropolis | 3,669 | 2,088 | 2,376 | 256x144 | 877,818,816 bytes | `formalReady=true` |
+
+缓存文件分别位于 `benchmark/out/m6_triangle_hzb_hkust_spatial_fov66_valcal_256x144/` 和
+`benchmark/out/m6_triangle_hzb_metropolis_spatial_fov66_valcal_256x144/`。评测命令使用模型视场角
+66°，前端真实渲染视场角记录为 60°，并使用 CPU runner 查询缓存。
+
+| 场景/split | weighted recall 安全工作点 | 诊断性最佳平衡准确率阈值 | 该点 weighted recall | 该点普通 recall | useful cull | bad cull |
+|---|---|---:|---:|---:|---:|---:|
+| HKUST/calibration | 无 | 0.001 | 0.13870 | 0.26244 | 0.80815 | 0.05365 |
+| HKUST/validation | 无 | 0.15 | 0.13963 | 0.30316 | 0.73645 | 0.03741 |
+| Metropolis/calibration | 无 | 0.26 | 0.95451 | 0.90692 | 0.63214 | 0.00926 |
+| Metropolis/validation | 无 | 0.24 | 0.93709 | 0.88924 | 0.65548 | 0.00965 |
+
+这里的“无”表示阈值扫描中没有同时满足 `weighted recall > 0.99` 的行；后面的诊断点只用于说明
+失败形态，不能作为安全工作点或投稿主表。结果表明，当前真实三角形 HZB 查询在这套离线缓存/查询
+实现下不能达到主线的画面安全约束，不能替代固定实例特征模型。它仍保留为 L2 warm-cache 几何基线：
+缓存要求本地已有完整 GLB 三角形，且缓存本身约为 266 MB/878 MB，不能与 Cold-0 模型直接比较。

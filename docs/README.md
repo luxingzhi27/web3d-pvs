@@ -37,6 +37,8 @@
 29. M13 复现资产清单工具：`neural_instance_culling/tools/build_artifact_manifest.py`（只记录路径、字节数和 SHA-256，不复制大文件）
 30. M8 确定性 pose-index 轨迹生成器：`neural_instance_culling/benchmark/build_pose_index_trajectory.py`（明确标注为非真实导航）
 31. M5 真实浏览器实例级 Color-ID 渲染 smoke：`evaluation/m5_image_pipeline_smoke_2026-08-01.md`
+32. M7 独立 RankNet 下载排序器和调度对照：`experiments/m7_unified_download_scheduling_2026-08-01.md`
+33. M6 真实三角形 HZB 生成与 validation/calibration 执行：`experiments/m6_triangle_hzb_baseline_2026-08-01.md`
 
 ## 当前场景
 
