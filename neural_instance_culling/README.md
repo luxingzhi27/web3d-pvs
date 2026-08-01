@@ -126,6 +126,23 @@ conda run -n slm_pvs python neural_instance_culling/benchmark/evaluate_unified_p
   --device cuda
 ```
 
+真实三角形 HZB 是 L2 warm-cache 基线。它要求完整本地 GLB 已可由浏览器光栅化，不能与冷启动
+模型的资源预算直接混比。先用子集进行链路 smoke：
+
+```bash
+node neural_instance_culling/benchmark/build_triangle_hzb_cache_browser.mjs \
+  --assets-dir slm2viewer/assets/scenes/ifcbench_fantasy_metropolis_instanced_v2 \
+  --dataset-dir neural_instance_culling/dataset/out/pose_csr_metropolis_spatial_dense_subpose_union_fov66_v2 \
+  --output /tmp/triangle_hzb_smoke/values.bin \
+  --split test --max-poses 1 --glb-id-list 1109 \
+  --width 64 --height 64 --chrome-exe /opt/google/chrome/google-chrome \
+  --timeout-ms 120000 --force
+```
+
+只有完整 GLB 清单和完整 validation/calibration pose split 生成的缓存，且元数据中的
+`formalReady=true`，才允许进入 HZB baseline 评测。`baseline_aabb_hzb` 仍只表示
+`baseline_aabb_depth_proxy`，不能与 `baseline_triangle_hzb` 混称。
+
 IFCBench Metropolis 的原始构件源保存在
 `ifcbench_fantasy_metropolis_source/assets`，当前实例化展示资产保存在
 `ifcbench_fantasy_metropolis_instanced_v2/assets`。实例化工具要求显式指定输入源，

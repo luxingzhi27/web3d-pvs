@@ -661,6 +661,11 @@ def main() -> None:
     parser.add_argument("--runtime-meta", default="hkust-v3/assets/runtimeVisibilityMeta.json")
     parser.add_argument("--glb-index", default="hkust-v3/assets/glbIndex.json")
     parser.add_argument("--glb-root", default="hkust-v3/assets")
+    parser.add_argument(
+        "--triangle-hzb-cache",
+        default="",
+        help="Explicit .bin cache for baseline_triangle_hzb; required when that model is selected.",
+    )
     parser.add_argument("--output-dir", default=str(ROOT / "benchmark/out/unified_pvs_metrics"))
     parser.add_argument("--split", choices=["train", "val", "validation", "calibration", "test"], default="test")
     parser.add_argument("--target-recall", type=float, default=0.95)
@@ -709,6 +714,15 @@ def main() -> None:
 
     device = select_device(args.device)
     specs = selected_default_specs(args.models)
+    if "baseline_triangle_hzb" in specs:
+        if not args.triangle_hzb_cache:
+            parser.error("--triangle-hzb-cache is required when --models includes baseline_triangle_hzb")
+        specs["baseline_triangle_hzb"] = {
+            **specs["baseline_triangle_hzb"],
+            "cache": str(Path(args.triangle_hzb_cache).resolve()),
+        }
+    elif args.triangle_hzb_cache:
+        parser.error("--triangle-hzb-cache is only valid with --models baseline_triangle_hzb")
     first = next(iter(specs.values()))
     if first.get("checkpoint"):
         checkpoint = torch.load(first["checkpoint"], map_location="cpu")

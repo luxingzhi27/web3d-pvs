@@ -905,3 +905,16 @@ Metropolis 使用独立 retry1 目录重跑，待摘要生成后才进入 M7 数
 manifest，再在独立目录中对完整 test split 执行一次 `evaluate_frozen_test.py evaluate`。脚本不扫描 test
 阈值、不补 GT 候选、不裁剪候选，也不覆盖既有输出。当前 tmux 会话为 `formal_m0_followup`，该记录在
 正式摘要生成前不改变 M0 的“总门未通过”判断。
+
+### 21.10 三角形 HZB 基线生成链路（2026-08-01）
+
+新增 `benchmark/build_triangle_hzb_cache_browser.mjs`，将真实本地 GLB 三角形交给浏览器
+Three.js 光栅化，输出线性视深 level-0，并在浏览器中逐级进行最小池化；
+`benchmark/triangle_hzb.py` 和 `model_runners.py` 已完成缓存读取、AABB 投影查询和严格候选
+接口。一次 1 GLB/1 pose 的 smoke 产生了 7 层、`64x36`、level-0 深度范围
+`0.029750–1.000000` 的缓存，Python runner 对 7,405 个候选返回有限结果。
+
+该 smoke 使用的是非完整 GLB 子集，缓存被明确标记 `formalReady=false`，不能进入 M6 正式表格。
+完整 HKUST/Metropolis validation/calibration、三角形 HZB 与标准深度渲染的同位姿校验、真实 GPU
+后端和性能计时仍未完成；因此 M6 总门仍保持未通过。详细记录见
+`docs/experiments/m6_triangle_hzb_baseline_2026-08-01.md`。
