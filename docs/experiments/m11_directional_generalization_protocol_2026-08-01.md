@@ -97,6 +97,6 @@ conda run --no-capture-output -n slm_pvs python -u \
 
 输出目录至少包含目标固定特征表、`instance_features_meta.json`、
 `calibration_ready_summary.json`；若安全工作点存在，还包含
-`frozen_test_manifest.json` 和 `summary.json`。本入口已经完成静态编译检查，但截至本记录更新时尚未
-运行实际跨场景 test；不能把入口存在解释为跨场景泛化成立。少样本适配仍需在该零样本执行完成后按
-预注册的 1%、5% 和 10% 训练视点另行实现和评测。
+`frozen_test_manifest.json` 和 `summary.json`。入口已通过静态编译和一实例/两实例参数形状迁移
+合成 smoke；截至本记录更新时尚未运行实际跨场景 test，不能把入口存在解释为跨场景泛化成立。少样本
+适配仍需在该零样本执行完成后按预注册的 1%、5% 和 10% 训练视点另行实现和评测。
