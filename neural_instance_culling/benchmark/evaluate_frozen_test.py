@@ -43,7 +43,7 @@ if str(BENCHMARK_DIR) not in sys.path:
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
 
-from evaluate_unified_pvs_metrics import (  # noqa: E402
+from evaluate_visual_utility_metrics import (  # noqa: E402
     evaluate_runner,
     load_glb_byte_costs,
     parse_int_list,

@@ -46,6 +46,22 @@ PYTHONDONTWRITEBYTECODE=1 conda run --no-capture-output -n slm_pvs \
 
 该修正提高了 M0/M7 评测协议的可审计性，但不改变正式准入标准。M0 总门仍未通过，原因是当前空间训练尚未产出带最终 bootstrap 校准、固定特征导出和独立 one-shot test manifest 的完整 artifact。训练完成后仍必须先执行 `evaluate_frozen_test.py prepare`，再在独占目录中执行一次 test。
 
+## 冻结测试入口回归（2026-08-01）
+
+HKUST 训练完成后首次执行冻结测试时，入口在真正遍历 test pose 之前失败：
+`evaluate_frozen_test.py` 错误导入了 `evaluate_unified_pvs_metrics.evaluate_runner`，但调用处使用的是
+带实例效用、GLB 字节预算和多个调度模式的 `evaluate_visual_utility_metrics.evaluate_runner`
+契约，因此出现 `evaluate_runner() got multiple values for argument 'poses_per_batch'`。
+该失败 claim 的 `testEvaluationCount` 保持为 `0`，没有产生 test 指标，不能被当作一次成功的测试运行。
+
+修复内容：
+
+- 冻结入口改为导入 `evaluate_visual_utility_metrics` 中与实际调用参数一致的评测器；
+- 新增回归测试，检查冻结入口包含 `count_budgets`、`target_utility_recall` 参数且不误用统一可见性评测器的 `target_recall` 参数；
+- 保留失败输出目录作为审计证据，修复后的真正 test 运行使用新鲜输出目录，避免覆盖失败 claim。
+
+该问题属于评测入口缺陷，不是模型、数据或阈值问题；修复后必须重新执行完整唯一 test split，且仍禁止重新扫描阈值或修复候选集合。
+
 ## 保留决定与风险
 
 保留为当前主线协议代码和回归测试。剩余风险是正式训练进程启动时可能使用旧版源码；其输出必须按实际日志和 artifact provenance 审计，不能把本次新增测试追溯应用到已经运行的进程。

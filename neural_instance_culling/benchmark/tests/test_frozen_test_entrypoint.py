@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 import tempfile
@@ -40,6 +41,12 @@ class _Dataset:
 
 
 class FrozenTestEntrypointTests(unittest.TestCase):
+    def test_frozen_entrypoint_uses_utility_evaluator_contract(self) -> None:
+        parameters = inspect.signature(frozen.evaluate_runner).parameters
+        self.assertIn("count_budgets", parameters)
+        self.assertIn("target_utility_recall", parameters)
+        self.assertNotIn("target_recall", parameters)
+
     def test_formal_summary_threshold_is_not_replaced_by_runner_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             summary = Path(temp_dir) / "eval_summary.json"
