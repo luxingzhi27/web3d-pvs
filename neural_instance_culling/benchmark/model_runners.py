@@ -23,6 +23,13 @@ from directional_occlusion_proxy_encoder_model import DirectionalOcclusionProxyE
 from pose_csr_dataset import PoseCSRDataset, _project_aabb_features_numpy  # noqa: E402
 from aabb_ray_feature_utils import FEATURE_DIM as AABB_RAY_FEATURE_DIM, build_aabb_ray_features  # noqa: E402
 from train_aabb_ray_baseline import AabbRayMLP  # noqa: E402
+from triangle_hzb import (  # noqa: E402
+    camera_basis as triangle_hzb_camera_basis,
+    load_triangle_hzb_cache,
+    project_aabb_to_camera,
+    query_hzb_levels,
+    unflatten_hzb_levels,
+)
 
 
 DEFAULT_MODEL_SPECS: dict[str, dict[str, str]] = {
@@ -48,6 +55,10 @@ DEFAULT_MODEL_SPECS: dict[str, dict[str, str]] = {
         "kind": "aabb_hzb",
         "display_name": "baseline_aabb_depth_proxy",
         "legacy_name": "baseline_aabb_hzb",
+    },
+    "baseline_triangle_hzb": {
+        "kind": "triangle_hzb",
+        "display_name": "baseline_triangle_hzb",
     },
     "pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_best": {
         "kind": "directional_occlusion_proxy_encoder",
@@ -716,6 +727,165 @@ class AabbHzbRunner(BaseModelRunner):
         return PredictionResult(scores=scores, forward_ms=(t1 - t0) * 1000.0, total_ms=(t1 - t0) * 1000.0)
 
 
+class TriangleHzbRunner(StaticRuleRunner):
+    """Warm-cache HZB baseline built from rasterized scene triangles.
+
+    The cache contains a level-zero depth image rendered from all local GLB
+    triangles and min-pooled mip levels.  Runtime queries still use the
+    candidate AABB, but the occluder depth is geometric rather than an AABB
+    proxy.  This runner is deliberately not presented as a cold-start method:
+    loading the triangle scene and building the HZB are measured separately by
+    the cache-generation pipeline.
+    """
+
+    def __init__(
+        self,
+        *args,
+        cache_path: str | Path,
+        depth_bias: float = 0.003,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.cache_path = Path(cache_path).resolve()
+        self.cache_meta, self.cache_values = load_triangle_hzb_cache(self.cache_path)
+        self.requires_mvp = False
+        self.information_level = "L2_warm_triangle_depth"
+        self.resource_assumption = "full_local_glb_triangle_geometry_and_triangle_hzb_cache"
+        self.depth_bias = float(depth_bias)
+        if not np.isfinite(self.depth_bias) or self.depth_bias < 0.0:
+            raise ValueError("triangle HZB depth_bias must be finite and non-negative")
+        self.camera_far = float(self.cache_meta.get("cameraFar", 0.0))
+        if not np.isfinite(self.camera_far) or self.camera_far <= 0.0:
+            raise ValueError("triangle HZB cache must declare a positive cameraFar")
+        self.level_descriptors = list(self.cache_meta.get("levelDescriptors") or [])
+        if not self.level_descriptors:
+            raise ValueError("triangle HZB cache has no levelDescriptors")
+        self.pose_records = {
+            int(row["poseIndex"]): row
+            for row in (self.cache_meta.get("poses") or [])
+            if isinstance(row, dict) and row.get("poseIndex") is not None
+        }
+        if not self.pose_records:
+            raise ValueError("triangle HZB cache has no pose records")
+        self.pose_indices = np.asarray(sorted(self.pose_records), dtype=np.int64)
+        self.pose_world = np.asarray(
+            [self.pose_records[int(index)]["cameraWorld"] for index in self.pose_indices],
+            dtype=np.float32,
+        ).reshape(-1, 3)
+        self.pose_forward = np.asarray(
+            [self.pose_records[int(index)]["cameraForward"] for index in self.pose_indices],
+            dtype=np.float32,
+        ).reshape(-1, 3)
+        self.pose_forward = np.asarray(
+            [triangle_hzb_camera_basis(value)[0] for value in self.pose_forward],
+            dtype=np.float32,
+        )
+        expected_level_count = sum(int(row["count"]) for row in self.level_descriptors)
+        self.level_value_count = int(expected_level_count)
+        for pose_index, row in self.pose_records.items():
+            offset = int(row.get("valueOffset", -1))
+            count = int(row.get("valueCount", -1))
+            if offset < 0 or count != expected_level_count or offset + count > self.cache_values.size:
+                raise ValueError(f"invalid triangle HZB pose range for pose {pose_index}")
+
+    def _levels_for_pose(self, pose_index: int) -> list[np.ndarray]:
+        row = self.pose_records.get(int(pose_index))
+        if row is None:
+            raise KeyError(f"triangle HZB cache has no exact pose {pose_index}")
+        start = int(row["valueOffset"])
+        values = self.cache_values[start:start + self.level_value_count]
+        return unflatten_hzb_levels(values, self.level_descriptors)
+
+    def _nearest_cached_pose(self, camera_world: np.ndarray, camera_forward: np.ndarray) -> int:
+        position_delta = self.pose_world - np.asarray(camera_world, dtype=np.float32).reshape(1, 3)
+        position_term = np.sum(position_delta * position_delta, axis=1)
+        forward = triangle_hzb_camera_basis(camera_forward)[0]
+        direction_term = 1.0 - np.clip(self.pose_forward @ forward, -1.0, 1.0)
+        metric = position_term + direction_term * max(self.camera_far * self.camera_far * 0.01, 1.0)
+        return int(self.pose_indices[int(np.argmin(metric))])
+
+    def _score_pose(
+        self,
+        instance_ids: np.ndarray,
+        camera_world: np.ndarray,
+        camera_view: np.ndarray,
+        pose_index: int,
+    ) -> np.ndarray:
+        ids = self._validate_instance_ids(instance_ids)
+        if ids.size == 0:
+            return np.zeros((0,), dtype=np.float32)
+        view = np.asarray(camera_view, dtype=np.float32).reshape(-1)
+        if view.size < 5:
+            raise ValueError("triangle HZB runner requires camera_view=[forward_x, forward_y, forward_z, tan_x, tan_y]")
+        rects, nearest_depth, _far_depth, valid = project_aabb_to_camera(
+            self.world_aabbs[ids],
+            np.asarray(camera_world, dtype=np.float32),
+            view[:3],
+            float(view[3]),
+            float(view[4]),
+            self.camera_far,
+        )
+        levels = self._levels_for_pose(int(pose_index))
+        scores = np.zeros((ids.size,), dtype=np.float32)
+        for index in np.flatnonzero(valid).tolist():
+            scores[index] = query_hzb_levels(
+                levels,
+                rects[index],
+                float(nearest_depth[index]),
+                self.depth_bias,
+            )
+        return scores
+
+    def score_arrays(
+        self,
+        camera_norm: np.ndarray,
+        camera_world: np.ndarray,
+        camera_view: np.ndarray,
+        instance_ids: np.ndarray,
+        mvp: np.ndarray | None = None,
+    ) -> PredictionResult:
+        del camera_norm, mvp
+        t0 = time.perf_counter()
+        ids = self._validate_instance_ids(instance_ids)
+        worlds = np.asarray(camera_world, dtype=np.float32).reshape(-1, 3)
+        views = np.asarray(camera_view, dtype=np.float32).reshape(-1, 5)
+        if worlds.shape[0] != ids.size or views.shape[0] != ids.size:
+            raise ValueError("triangle HZB runner received misaligned camera and candidate rows")
+        if ids.size == 0:
+            scores = np.zeros((0,), dtype=np.float32)
+        else:
+            pose_index = self._nearest_cached_pose(worlds[0], views[0, :3])
+            scores = self._score_pose(ids, worlds[0], views[0], pose_index)
+        t1 = time.perf_counter()
+        return PredictionResult(scores=scores, forward_ms=(t1 - t0) * 1000.0, total_ms=(t1 - t0) * 1000.0)
+
+    def score_batch(self, batch: dict[str, np.ndarray]) -> PredictionResult:
+        if "pose_indices" not in batch:
+            raise RuntimeError("triangle HZB runner requires exact pose_indices in the PoseCSR batch")
+        t0 = time.perf_counter()
+        ids_all = np.asarray(batch["instance"], dtype=np.int64).reshape(-1)
+        offsets = np.asarray(batch["pose_offsets"], dtype=np.int64)
+        pose_indices = np.asarray(batch["pose_indices"], dtype=np.int64).reshape(-1)
+        if pose_indices.size != offsets.size - 1:
+            raise ValueError("triangle HZB pose_indices do not match pose_offsets")
+        scores = np.zeros((ids_all.size,), dtype=np.float32)
+        for pose_row in range(offsets.size - 1):
+            start = int(offsets[pose_row])
+            end = int(offsets[pose_row + 1])
+            if end <= start:
+                continue
+            scores[start:end] = self._score_pose(
+                ids_all[start:end],
+                np.asarray(batch["camera_world"][start], dtype=np.float32),
+                np.asarray(batch["camera_view"][start], dtype=np.float32),
+                int(pose_indices[pose_row]),
+            )
+        if not np.all(np.isfinite(scores)):
+            raise ValueError("triangle HZB runner returned non-finite scores")
+        t1 = time.perf_counter()
+        return PredictionResult(scores=scores, forward_ms=(t1 - t0) * 1000.0, total_ms=(t1 - t0) * 1000.0)
+
+
 class LearnedAabbRayRunner(BaseModelRunner):
     """Small learned L0 baseline using only AABB/ray/MVP features."""
 
@@ -842,6 +1012,28 @@ def load_aabb_hzb_runner(name: str, runtime_meta_path: str | Path, fallback_thre
         checkpoint={"config": {"numInstances": int(world_aabbs.shape[0])}},
         threshold=fallback_threshold,
         device=device,
+    )
+
+
+def load_triangle_hzb_runner(
+    name: str,
+    cache_path: str | Path,
+    runtime_meta_path: str | Path,
+    fallback_threshold: float,
+    device: torch.device,
+) -> TriangleHzbRunner:
+    world_aabbs, instance_to_glb, runtime = load_runtime_meta(runtime_meta_path)
+    return TriangleHzbRunner(
+        name=name,
+        kind="triangle_hzb",
+        model=None,
+        world_aabbs=world_aabbs,
+        instance_to_glb=instance_to_glb,
+        runtime_meta=runtime,
+        checkpoint={"config": {"numInstances": int(world_aabbs.shape[0])}},
+        threshold=fallback_threshold,
+        device=device,
+        cache_path=cache_path,
     )
 
 
@@ -1121,6 +1313,11 @@ def load_runner(
         )
     if kind == "aabb_hzb":
         return load_aabb_hzb_runner(name, runtime_meta, fallback_threshold, device)
+    if kind == "triangle_hzb":
+        cache_path = spec.get("cache")
+        if not cache_path:
+            raise ValueError("triangle_hzb runner requires an explicit cache path")
+        return load_triangle_hzb_runner(name, cache_path, runtime_meta, fallback_threshold, device)
     if kind == "directional_occlusion_proxy_encoder":
         return load_directional_occlusion_proxy_encoder_runner(
             name,

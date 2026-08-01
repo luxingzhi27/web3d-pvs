@@ -17,6 +17,12 @@ sys.path.insert(0, str(MODEL_DIR))
 from model_runners import load_runner, selected_default_specs  # noqa: E402
 from pose_csr_dataset import DIRECTIONAL_POSE_DTYPE  # noqa: E402
 from train_aabb_ray_baseline import AabbRayMLP  # noqa: E402
+from triangle_hzb import (  # noqa: E402
+    CACHE_SCHEMA,
+    DEPTH_ENCODING,
+    build_hzb_levels,
+    flatten_hzb_levels,
+)
 
 
 def write_runtime_meta(path: Path) -> None:
@@ -89,6 +95,30 @@ def make_batch() -> dict[str, np.ndarray]:
         "pose_offsets": np.asarray([0, 3, 5], dtype=np.int64),
         "mvp": np.tile(identity_mvp, (5, 1)),
     }
+
+
+def write_triangle_hzb_cache(path: Path) -> None:
+    depth = np.full((4, 4), 0.2, dtype=np.float32)
+    levels = build_hzb_levels(depth, width=4, height=4)
+    values, descriptors = flatten_hzb_levels(levels)
+    path.write_bytes(values.tobytes())
+    metadata = {
+        "schema": CACHE_SCHEMA,
+        "depthEncoding": DEPTH_ENCODING,
+        "cameraFar": 10.0,
+        "levelDescriptors": descriptors,
+        "valueCount": int(values.size),
+        "poses": [
+            {
+                "poseIndex": 0,
+                "cameraWorld": [0.0, 0.0, 0.0],
+                "cameraForward": [0.0, 0.0, -1.0],
+                "valueOffset": 0,
+                "valueCount": int(values.size),
+            },
+        ],
+    }
+    path.with_suffix(".json").write_text(json.dumps(metadata), encoding="utf-8")
 
 
 class VisibilityBaselineRunnerTests(unittest.TestCase):
@@ -267,6 +297,39 @@ class VisibilityBaselineRunnerTests(unittest.TestCase):
             result = runner.score_batch(make_batch())
             self.assertEqual(result.scores.shape, (5,))
             self.assertTrue(np.isfinite(result.scores).all())
+
+    def test_triangle_hzb_cache_uses_triangle_depth_and_exact_pose_indices(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime_meta = root / "runtimeVisibilityMeta.json"
+            write_runtime_meta(runtime_meta)
+            cache_path = root / "triangle_hzb_values.bin"
+            write_triangle_hzb_cache(cache_path)
+            runner = load_runner(
+                "baseline_triangle_hzb",
+                {"kind": "triangle_hzb", "cache": str(cache_path)},
+                runtime_meta,
+                torch.device("cpu"),
+            )
+            batch = {
+                "camera_world": np.zeros((2, 3), dtype=np.float32),
+                "camera_view": np.tile(np.asarray([0.0, 0.0, 1.0, 1.0, 1.0], dtype=np.float32), (2, 1)),
+                "instance": np.asarray([0, 2], dtype=np.int64),
+                "pose_offsets": np.asarray([0, 2], dtype=np.int64),
+                "pose_indices": np.asarray([0], dtype=np.int64),
+            }
+            result = runner.score_batch(batch)
+            # Instance 0 is in front of the cached depth and instance 2 is
+            # behind it.  The score is a geometric HZB query, not a GT lookup.
+            self.assertEqual(result.scores.shape, (2,))
+            self.assertGreater(result.scores[0], 0.99)
+            self.assertLess(result.scores[1], 0.01)
+            self.assertEqual(runner.information_level, "L2_warm_triangle_depth")
+
+            missing_indices = dict(batch)
+            missing_indices.pop("pose_indices")
+            with self.assertRaisesRegex(RuntimeError, "exact pose_indices"):
+                runner.score_batch(missing_indices)
 
 
 if __name__ == "__main__":
