@@ -73,6 +73,17 @@ git diff --check: passed
 
 M4 的主比较以 `geometry + context + ray` 为代理增量母基线，按相同 calibration 安全工作点比较 useful cull、bad cull、weighted recall、普通集合指标和图像/下载指标。方向代理只有在三种子 paired bootstrap 的安全工作点上达到投稿计划规定的 useful cull 或同效用字节收益，并且区间不跨零时，才能升级为独立论文贡献；否则将其降级为固定场景表征中的辅助分支，不通过命名或阈值调整掩盖失败。
 
+## 2026-08-02 路线选择规则冻结
+
+在正式矩阵摘要生成前，固定以下路线判定，不读取 test，也不在结果出来后改变阈值或比较口径：
+
+1. 主代理增量比较固定为 `full - geometry_context_ray`；两个变体各自使用自身 calibration 冻结的安全工作点，验证 pose 必须逐 pose 对齐。
+2. 路线 A（保留方向代理独立贡献）要求 `useful_cull` 的三种子分层配对 bootstrap 平均增益至少 `+0.02`，且 95% 区间下界大于 `0`。两个模型都必须满足 weighted recall 安全校准规则；若完整模型的 `bad_cull` 或 miss-pixel 明显恶化，路线 A 仍不能成立。
+3. 若路线 A 条件不满足，采用路线 B：以 `geometry_context_ray` 作为主可见性架构，方向代理只作为固定场景表征中的辅助消融，不声称其具有独立因果收益。该决定不通过降低阈值、候选补入或前端白名单修正。
+4. `geometry_context_proxy_ray_no_inhibition` 只用于区分“代理输入”和“显式抑制头”的作用，不能替代 `geometry_context_ray` 母基线；`aabb_ray` 和 `geometry_ray` 用于报告逐级输入增益。
+
+如果 M4 只产生安全但不满足 `+2` 个百分点的代理增益，后续 M5 仍可对路线 B 运行视觉安全修复；其结果不能回头修改 M4 路线判断。
+
 ## 正式矩阵收尾入口
 
 `neural_instance_culling/benchmark/run_formal_m4_ablation_matrix.sh` 已登记五个变体和三个随机种子。它等待当前主线训练与已启动的 AABB+ray seed 结束后，默认使用 GPU 0、1、2 按三个并发槽排队运行剩余成员；每个成员拥有独立目录、stdout/stderr、checkpoint 和 calibration-ready 记录，不覆盖已有结果。
