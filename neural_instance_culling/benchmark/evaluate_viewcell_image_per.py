@@ -302,12 +302,30 @@ class ViewcellDataset:
         center_residual = np.linalg.norm(center_delta - offsets[:, None] * forward_norm, axis=1)
         max_center_residual = float(np.max(center_residual)) if pose_count else 0.0
         min_back_offset = float(np.min(offsets)) if pose_count else 0.0
-        if min_back_offset <= 0.0 or max_center_residual > 1e-3:
-            raise ValueError(
-                "Pose CSR/view-cell row alignment failed: view-cell centers are not the "
-                "forward-offset centers of the back cameras; "
-                f"minBackOffset={min_back_offset:.9g}, maxCenterResidual={max_center_residual:.9g}"
-            )
+        camera_semantics = str(pose_dataset.meta.get("cameraSemantics", "")).lower()
+        canonical_center_semantics = (
+            "canonical viewcell" in camera_semantics
+            or "canonical plan center" in camera_semantics
+        )
+        if canonical_center_semantics:
+            # The formal spatial CSR keeps the canonical view-cell center as
+            # camera_world.  It is still the same row-wise pose as the source
+            # view-cell, but it does not apply the legacy back-camera offset.
+            if max_center_residual > 1e-3 or min_back_offset < -1e-3:
+                raise ValueError(
+                    "Pose CSR/view-cell row alignment failed: canonical view-cell centers "
+                    "do not match camera_world; "
+                    f"maxCenterResidual={max_center_residual:.9g}, minCenterOffset={min_back_offset:.9g}"
+                )
+            center_relation = "source view-cell center equals canonical camera_world"
+        else:
+            if min_back_offset <= 0.0 or max_center_residual > 1e-3:
+                raise ValueError(
+                    "Pose CSR/view-cell row alignment failed: view-cell centers are not the "
+                    "forward-offset centers of the back cameras; "
+                    f"minBackOffset={min_back_offset:.9g}, maxCenterResidual={max_center_residual:.9g}"
+                )
+            center_relation = "source view-cell center is a positive forward offset from camera_world"
 
         self.split_alignment = {
             "source": "pose_csr",
@@ -316,6 +334,8 @@ class ViewcellDataset:
             "forwardMaxAbsError": forward_max_abs_error,
             "minBackOffset": min_back_offset,
             "maxCenterResidual": max_center_residual,
+            "centerRelation": center_relation,
+            "cameraSemantics": pose_dataset.meta.get("cameraSemantics"),
             "poseCsrDataset": str(pose_dataset.dataset_dir),
         }
         return dict(self.split_alignment)

@@ -19,6 +19,11 @@
   - 相机前向量最大绝对误差不超过容差；
   - view-cell 中心必须位于后退相机沿前向量的正向偏移上，中心残差不超过 `1e-3 m`。
 - 修复 schema-only 渲染返回空图像指标时汇总器对 `None` 调用 `.get` 的错误。
+- 修复正式空间 CSR 的中心语义：当 `dataset_meta.json` 声明
+  `camera_world is the canonical viewcell plan center` 时，`camera_world` 就是规范
+  view-cell 中心，不再错误要求它位于后退相机的正向偏移位置。该分支仍逐行校验
+  相机前向量、行数和中心残差；未声明该语义的数据集继续使用旧的后退相机偏移检查。
+- 增加 canonical-center 回归 fixture，防止后续把两种合法的 pose 语义混为一谈。
 
 ## 资源与运行命令
 
@@ -40,7 +45,7 @@ PYTHONDONTWRITEBYTECODE=1 conda run --no-capture-output -n slm_pvs \
   neural_instance_culling.benchmark.tests.test_training_calibration_control -v
 ```
 
-结果：8 个测试通过。真实资源对齐结果：`7999` 行，正式 split 为 `2772/213/168/238/4608`；前向量最大误差约 `1.2e-7`，中心残差最大约 `6.1e-5 m`。
+结果：8 个测试通过。真实资源对齐结果：`7999` 行，正式 split 为 `2772/213/168/238/4608`；前向量最大误差约 `1.2e-7`，canonical-center 数据的中心残差为 `0`。
 
 schema-only smoke：
 
@@ -53,6 +58,13 @@ conda run --no-capture-output -n slm_pvs python -u \
 ```
 
 该 smoke 成功生成完整的 `componentGlobalId` manifest，包含全部 `3273` 个本地 GLB；输出明确标记 `formalImageEvaluationReady=false`，没有被计入正式图像结果。
+
+修复后的真实 GLB v3 smoke 使用 1 个 validation view-cell、1 个 dense subpose、
+`320x180` 分辨率和真实 `60°` 渲染相机，模型输入仍为 `66°`。浏览器加载并完成
+实例级绑定，无缺失 GLB 或渲染失败；组件 precision/recall 为 `0.9375/0.9375`，
+weighted recall 为 `0.999986`，PER 为 `0.009337`，miss-pixel rate 为 `0.003242`，
+wrong-instance pixel rate 为 `0.006096`。这仍只是入口 smoke，且加载完整本地 GLB
+清单，不能替代完整 validation/calibration 图像评价或冻结 test 主表。
 
 ## 质量门判断
 

@@ -17,7 +17,7 @@ from evaluate_viewcell_image_per import ViewcellDataset  # noqa: E402
 from pose_csr_dataset import DIRECTIONAL_POSE_DTYPE, PoseCSRDataset  # noqa: E402
 
 
-def _write_fixture(root: Path) -> tuple[Path, Path]:
+def _write_fixture(root: Path, *, canonical_center: bool = False) -> tuple[Path, Path]:
     viewcell = root / "viewcell_source"
     pose_csr = root / "pose_csr"
     viewcell.mkdir()
@@ -32,7 +32,7 @@ def _write_fixture(root: Path) -> tuple[Path, Path]:
         [[0.0, 2.0, 3.0], [5.0, 2.0, 0.0], [0.0, 2.0, -4.0]],
         dtype=np.float32,
     )
-    centers = camera_world + forward * np.float32(3.4641016)
+    centers = camera_world if canonical_center else camera_world + forward * np.float32(3.4641016)
 
     def write(name: str, values: np.ndarray) -> None:
         values.tofile(viewcell / name)
@@ -68,15 +68,16 @@ def _write_fixture(root: Path) -> tuple[Path, Path]:
     np.ones((count,), dtype="<f4").tofile(pose_csr / "visible_weights.bin")
     np.asarray([0, 1, 2, 3], dtype="<u8").tofile(pose_csr / "frustum_offsets.bin")
     np.arange(count, dtype="<u4").tofile(pose_csr / "frustum_ids.bin")
+    pose_meta = {
+        "poseCount": count,
+        "poseStrideBytes": 64,
+        "numInstances": count,
+        "splitIds": {"train": 0, "validation": 1, "calibration": 2, "test": 3},
+    }
+    if canonical_center:
+        pose_meta["cameraSemantics"] = "camera_world is the canonical viewcell plan center"
     (pose_csr / "dataset_meta.json").write_text(
-        json.dumps(
-            {
-                "poseCount": count,
-                "poseStrideBytes": 64,
-                "numInstances": count,
-                "splitIds": {"train": 0, "validation": 1, "calibration": 2, "test": 3},
-            }
-        ),
+        json.dumps(pose_meta),
         encoding="utf-8",
     )
     return viewcell, pose_csr
@@ -111,6 +112,21 @@ class ViewcellSplitSourceTests(unittest.TestCase):
             pose = PoseCSRDataset(pose_dir, num_instances=3)
             with self.assertRaisesRegex(ValueError, "camera_forward differs"):
                 viewcells.split_indices("test", 0, split_source="pose_csr", pose_dataset=pose)
+
+    def test_canonical_viewcell_center_semantics_are_explicitly_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            viewcell_dir, pose_dir = _write_fixture(Path(temp_dir), canonical_center=True)
+            viewcells = ViewcellDataset(viewcell_dir)
+            pose = PoseCSRDataset(pose_dir, num_instances=3)
+
+            selected = viewcells.split_indices(
+                "test", 0, split_source="pose_csr", pose_dataset=pose
+            )
+            self.assertEqual(selected.tolist(), [2])
+            self.assertEqual(
+                viewcells.split_alignment["centerRelation"],
+                "source view-cell center equals canonical camera_world",
+            )
 
 
 if __name__ == "__main__":
