@@ -289,3 +289,71 @@ def pose_set_visibility_loss_with_calibration(
         "posProbMean": _mean_or_zero(pos_prob_means),
         "negProbMean": _mean_or_zero(neg_prob_means),
     }
+
+
+def pose_visual_safety_loss(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    pose_offsets: torch.Tensor,
+    visible_weights: torch.Tensor | None,
+    weight_power: float = 1.0,
+    tail_k: int = 8,
+    tail_margin: float = 1.0,
+    tail_weight: float = 0.5,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Differentiate the visual cost of missing visible instances.
+
+    ``visible_weights`` is a screen-coverage proxy for Color-ID datasets and a
+    weak importance value for legacy rvcServer datasets. Per-pose
+    normalization removes dependence on the absolute unit while preserving the
+    relative cost of missing high-contribution positives. The optional top-k
+    margin protects the largest positives from being hidden by an average.
+    """
+    scores = logits.float().view(-1)
+    y = target.float().view(-1)
+    raw_weights = (
+        torch.zeros_like(scores)
+        if visible_weights is None
+        else torch.clamp(visible_weights.float().view(-1), min=0.0)
+    )
+    mass_terms: list[torch.Tensor] = []
+    tail_terms: list[torch.Tensor] = []
+    coverage_terms: list[torch.Tensor] = []
+    for pose_id in range(max(0, pose_offsets.numel() - 1)):
+        start = int(pose_offsets[pose_id].item())
+        end = int(pose_offsets[pose_id + 1].item())
+        if end <= start:
+            continue
+        pos_mask = y[start:end] > 0.5
+        if not pos_mask.any():
+            continue
+        pos_scores = scores[start:end][pos_mask]
+        pos_prob = torch.sigmoid(pos_scores)
+        pos_raw_weights = raw_weights[start:end][pos_mask]
+        # Legacy sources may not provide a meaningful positive weight. Fall
+        # back to an ordinary positive miss loss instead of zero gradient.
+        if float(pos_raw_weights.sum().detach().cpu()) <= 1e-8:
+            importance = torch.ones_like(pos_raw_weights)
+        else:
+            importance = torch.pow(pos_raw_weights, max(0.0, float(weight_power)))
+        total_importance = torch.clamp(importance.sum(), min=1e-8)
+        mass_terms.append(((1.0 - pos_prob) * importance).sum() / total_importance)
+        coverage_terms.append(pos_raw_weights.mean())
+
+        k = min(max(0, int(tail_k)), pos_scores.numel())
+        if k > 0 and float(tail_weight) > 0.0:
+            top_indices = torch.topk(pos_raw_weights, k=k, largest=True, sorted=False).indices
+            top_scores = pos_scores[top_indices]
+            tail_terms.append(F.softplus(float(tail_margin) - top_scores).mean())
+
+    zero = torch.zeros((), device=scores.device, dtype=scores.dtype)
+    mass = torch.stack(mass_terms).mean() if mass_terms else zero
+    tail = torch.stack(tail_terms).mean() if tail_terms else zero
+    loss = mass + float(tail_weight) * tail
+    coverage = torch.stack(coverage_terms).mean() if coverage_terms else zero
+    return loss, {
+        "lossVisualSafety": float(loss.detach().cpu()),
+        "lossVisualSafetyMass": float(mass.detach().cpu()),
+        "lossVisualSafetyTail": float(tail.detach().cpu()),
+        "visualSafetyPositiveWeightMean": float(coverage.detach().cpu()),
+    }

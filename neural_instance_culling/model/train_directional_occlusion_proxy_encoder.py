@@ -20,6 +20,7 @@ from common.occlusion_edges import glb_priority_loss, load_glb_costs
 from common.pose_set_loss import (
     pose_set_visibility_loss_with_calibration,
     pose_set_visibility_loss_with_importance,
+    pose_visual_safety_loss,
 )
 from common.runtime_meta import load_runtime_meta, scene_min_max
 from directional_occlusion_proxy_encoder_model import DirectionalOcclusionProxyEncoderPVSModel, load_directional_occlusion_evidence
@@ -605,7 +606,18 @@ def visibility_supervision_loss(
     proxy_rank_loss_value, proxy_rank_parts = proxy_rank_loss(logits, target, evidence, pose_offsets, args.proxy_rank_margin)
     scaled_budget = float(args.budget_loss_weight) * budget_loss
     scaled_proxy_rank = float(args.proxy_rank_weight) * proxy_rank_loss_value
-    loss = set_loss + scaled_rvl + scaled_budget + scaled_proxy_rank
+    visual_safety_value, visual_safety_parts = pose_visual_safety_loss(
+        logits,
+        target,
+        pose_offsets,
+        visible_weights,
+        weight_power=args.visual_safety_weight_power,
+        tail_k=args.visual_safety_tail_k,
+        tail_margin=args.visual_safety_tail_margin,
+        tail_weight=args.visual_safety_tail_weight,
+    )
+    scaled_visual_safety = float(args.visual_safety_loss_weight) * visual_safety_value
+    loss = set_loss + scaled_rvl + scaled_budget + scaled_proxy_rank + scaled_visual_safety
     return loss, {
         **set_parts,
         **rvl_parts,
@@ -615,6 +627,8 @@ def visibility_supervision_loss(
         "lossVisibilityRvlScaled": float(scaled_rvl.detach().cpu()),
         "lossVisibilityBudgetScaled": float(scaled_budget.detach().cpu()),
         "lossVisibilityProxyRankScaled": float(scaled_proxy_rank.detach().cpu()),
+        **visual_safety_parts,
+        "lossVisibilityVisualSafetyScaled": float(scaled_visual_safety.detach().cpu()),
         "lossVisibility": float(loss.detach().cpu()),
     }
 
@@ -917,6 +931,36 @@ def main() -> None:
     parser.add_argument("--hard-negative-logit-margin", type=float, default=-1.0)
     parser.add_argument("--hard-negative-top-k", type=int, default=512)
     parser.add_argument("--importance-weight-scale", type=float, default=2.5)
+    parser.add_argument(
+        "--visual-safety-loss-weight",
+        type=float,
+        default=0.0,
+        help="Weight for the pose-level soft missed-coverage loss; zero keeps the registered baseline.",
+    )
+    parser.add_argument(
+        "--visual-safety-weight-power",
+        type=float,
+        default=1.0,
+        help="Power applied to positive visible weights before per-pose normalization.",
+    )
+    parser.add_argument(
+        "--visual-safety-tail-k",
+        type=int,
+        default=8,
+        help="Number of highest-weight visible positives receiving the visual safety margin.",
+    )
+    parser.add_argument(
+        "--visual-safety-tail-margin",
+        type=float,
+        default=1.0,
+        help="Target positive logit margin for the highest-weight visible positives.",
+    )
+    parser.add_argument(
+        "--visual-safety-tail-weight",
+        type=float,
+        default=0.5,
+        help="Relative weight of the high-contribution positive margin inside the visual safety loss.",
+    )
     parser.add_argument("--proxy-evidence-weight", type=float, default=0.25)
     parser.add_argument("--proxy-visible-guard-weight", type=float, default=0.08)
     parser.add_argument("--proxy-sparsity-weight", type=float, default=0.02)
