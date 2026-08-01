@@ -17,7 +17,8 @@
 | AABB + ray | `geo_context_proxy_zero` | AABB 派生的射线/屏幕标量 | 仅使用轻量实例包围盒和当前视线查询 |
 | geometry + ray | `context_proxy_zero` | 几何特征和当前视线查询 | 检验固定几何是否提供超出 AABB 的信息 |
 | geometry + context + ray | `proxy_zero` | 几何、上下文和当前视线查询 | 检验方向代理的增量作用 |
-| full | `none` | 几何、上下文、方向代理和当前视线查询 | 当前正式主线 |
+| geometry + context + proxy + ray（无显式抑制） | `none` + `--disable-explicit-inhibition` | 几何、上下文、方向代理和当前视线查询；抑制输出固定为零 | 区分代理输入与显式抑制头的贡献 |
+| full | `none` | 几何、上下文、方向代理、当前视线查询和显式抑制 | 当前正式主线 |
 
 固定特征文件仍完整导出，以便报告冷启动字节和 schema 成本；这不是把特征从资产中删除，而是明确禁止相应分支参与该消融的运行时决策。该语义会写入 checkpoint 的 `config.runtimeFeatureAblation` 和训练参数。
 
@@ -31,6 +32,9 @@
 - `neural_instance_culling/benchmark/evaluate_proxy_interventions.py`
   - 从 checkpoint 配置恢复消融状态，避免评估时静默恢复完整输入。
 
+模型配置同时记录 `usesExplicitInhibition`。默认值为 `true`，只有正式消融显式传入
+`--disable-explicit-inhibition` 才会将抑制输出置零；该开关不删除参数，保证 state-dict schema 与主线一致。
+
 ## 运行模板
 
 每个场景和每个变体必须使用独立输出目录、显式 seed、完整 validation/calibration/test 协议。以下只给出参数片段，正式运行时沿用 M1 的场景资源参数：
@@ -42,7 +46,7 @@
 --device cuda
 ```
 
-其中 `context_proxy_zero` 只是示例；完整矩阵必须包含上述四个变体，至少三个随机种子。正式 test 仍只能读取 calibration 冻结的阈值，不能为某个消融单独扫描 test 阈值。
+其中 `context_proxy_zero` 只是示例；完整矩阵必须包含上述五个变体，至少三个随机种子。正式 test 仍只能读取 calibration 冻结的阈值，不能为某个消融单独扫描 test 阈值。
 
 ## 已完成验证
 
@@ -68,6 +72,15 @@ git diff --check: passed
 ## 质量门与解释边界
 
 M4 的主比较以 `geometry + context + ray` 为代理增量母基线，按相同 calibration 安全工作点比较 useful cull、bad cull、weighted recall、普通集合指标和图像/下载指标。方向代理只有在三种子 paired bootstrap 的安全工作点上达到投稿计划规定的 useful cull 或同效用字节收益，并且区间不跨零时，才能升级为独立论文贡献；否则将其降级为固定场景表征中的辅助分支，不通过命名或阈值调整掩盖失败。
+
+## 正式矩阵收尾入口
+
+`neural_instance_culling/benchmark/run_formal_m4_ablation_matrix.sh` 已登记五个变体和三个随机种子。它等待当前主线训练与已启动的 AABB+ray seed 结束后，默认使用 GPU 0、1、2 按三个并发槽排队运行剩余成员；每个成员拥有独立目录、stdout/stderr、checkpoint 和 calibration-ready 记录，不覆盖已有结果。
+
+矩阵名称为 `aabb_ray`、`geometry_ray`、`geometry_context_ray`、
+`geometry_context_proxy_ray_no_inhibition`、`full`，种子默认是 `20260801`、`20260802`、`20260803`。
+其中首个 `aabb_ray/20260801` 就是本节后面的已启动目录，其余成员由收尾入口补齐。若机器上有其他 GPU 作业，使用
+`SLM_M4_GPUS="1"` 可以改为单槽运行；脚本不会自动终止外部进程。
 
 ## 2026-08-01 正式矩阵启动记录
 

@@ -43,6 +43,7 @@ class DirectionalOcclusionProxyEncoderPVSModel(nn.Module):
         interaction_dim: int = 64,
         scene_size_m: list[float] | tuple[float, ...] | None = None,
         runtime_feature_ablation: str = "none",
+        use_explicit_inhibition: bool = True,
     ):
         super().__init__()
         valid_ablations = {
@@ -70,6 +71,7 @@ class DirectionalOcclusionProxyEncoderPVSModel(nn.Module):
         self.ray_scalar_fourier_bands = int(ray_scalar_fourier_bands)
         self.camera_location_dim = int(max(0, camera_location_dim))
         self.runtime_feature_ablation = str(runtime_feature_ablation)
+        self.use_explicit_inhibition = bool(use_explicit_inhibition)
         self.runtime_feature_dim = self.geo_dim + self.context_dim + self.direction_bins * self.depth_shells * self.proxy_dim
         self.query_feature_dim = self.geo_dim + self.context_dim + self.proxy_dim
         self.ray_direction_feature_dim = fourier_dim(3, self.ray_fourier_bands)
@@ -142,6 +144,7 @@ class DirectionalOcclusionProxyEncoderPVSModel(nn.Module):
             "runtimeUsesPointNet": False,
             "runtimeUsesGraphPropagation": False,
             "runtimeFeatureAblation": self.runtime_feature_ablation,
+            "usesExplicitInhibition": bool(self.use_explicit_inhibition),
             "predictionSemantics": "fixed instance context and directional occlusion proxy features queried by current ray-space features",
         }
 
@@ -459,7 +462,12 @@ class DirectionalOcclusionProxyEncoderPVSModel(nn.Module):
             camera_pos_norm=camera_pos_norm,
         )
         base_logits = self.visibility_mlp.logits(camera_feat, torch.empty((query.shape[0], 0), device=query.device, dtype=query.dtype), query)
-        inhibition = torch.clamp(F.softplus(self.inhibition_head(torch.cat([query, camera_feat], dim=-1))), 0.0, 4.0)
+        if self.use_explicit_inhibition:
+            inhibition = torch.clamp(
+                F.softplus(self.inhibition_head(torch.cat([query, camera_feat], dim=-1))), 0.0, 4.0
+            )
+        else:
+            inhibition = torch.zeros_like(base_logits)
         final_logits = base_logits - inhibition
         utility_logits = self.compute_utility_logits(query, final_logits)
         download_logits = self.compute_download_logits(query, final_logits, utility_logits)

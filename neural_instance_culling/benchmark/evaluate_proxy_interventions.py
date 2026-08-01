@@ -151,6 +151,7 @@ def build_model(checkpoint: dict[str, Any], runtime_meta: dict[str, Any], device
         interaction_dim=int((checkpoint.get("args") or {}).get("interaction_dim", 64)),
         scene_size_m=scene_size.tolist(),
         runtime_feature_ablation=str(config.get("runtimeFeatureAblation", "none")),
+        use_explicit_inhibition=bool(config.get("usesExplicitInhibition", True)),
     ).to(device)
     model.set_scene_bounds(torch.from_numpy(scene_min).to(device), torch.from_numpy(scene_size).to(device))
     model.set_instance_world_aabbs(torch.from_numpy(world_aabbs).to(device))

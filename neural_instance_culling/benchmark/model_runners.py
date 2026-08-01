@@ -1269,6 +1269,7 @@ def load_directional_occlusion_proxy_encoder_runner(
         interaction_dim=train_args.get("interaction_dim", 64),
         scene_size_m=config.get("sceneSizeM", scene_size.tolist()),
         runtime_feature_ablation=str(config.get("runtimeFeatureAblation", "none")),
+        use_explicit_inhibition=bool(config.get("usesExplicitInhibition", True)),
     ).to(device)
     model.set_scene_bounds(torch.from_numpy(scene_min).to(device), torch.from_numpy(scene_size).to(device))
     model.set_instance_world_aabbs(torch.from_numpy(world_aabbs).to(device))

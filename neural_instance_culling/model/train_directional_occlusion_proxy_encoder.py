@@ -800,6 +800,11 @@ def main() -> None:
             "context_proxy_zero is geometry+ray; geo_context_proxy_zero is AABB+ray."
         ),
     )
+    parser.add_argument(
+        "--disable-explicit-inhibition",
+        action="store_true",
+        help="Registered M4 control: keep the directional proxy input but replace the learned inhibition output with zero.",
+    )
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument(
         "--loss-profile",
@@ -957,6 +962,7 @@ def main() -> None:
         interaction_dim=args.interaction_dim,
         scene_size_m=scene_size.tolist(),
         runtime_feature_ablation=args.runtime_feature_ablation,
+        use_explicit_inhibition=not args.disable_explicit_inhibition,
     ).to(device)
     model.set_scene_bounds(torch.from_numpy(scene_min).to(device), torch.from_numpy(scene_size).to(device))
     model.set_instance_world_aabbs(torch.from_numpy(world_aabbs).to(device))

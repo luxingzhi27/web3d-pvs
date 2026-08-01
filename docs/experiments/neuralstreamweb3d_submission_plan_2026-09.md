@@ -925,3 +925,11 @@ Three.js 光栅化，输出线性视深 level-0，并在浏览器中逐级进行
 `calibration_ready_summary.json`，并等待 M0 one-shot test 完成后，在完整 validation split 上运行全部代理/上下文推理期干预。
 每个变体使用同一候选 CSR、同一 calibration 阈值和同一 pose 计划，保存逐 pose 指标、logit/门控诊断和 10,000 次配对 bootstrap。
 它不覆盖已有输出，也不打开 test split。正式指标产生前，M3 仍标记为“未执行正式版本”。
+
+### 21.12 M4 抑制头控制与矩阵收尾（2026-08-01）
+
+审计发现原 M4 变体虽然能屏蔽固定输入，却没有办法单独关闭显式抑制头。模型新增默认开启的
+`usesExplicitInhibition` 配置字段和 `--disable-explicit-inhibition` 控制；关闭时保留相同 state-dict
+结构，但将抑制输出固定为零，加载器会从 checkpoint 恢复该语义。新增
+`run_formal_m4_ablation_matrix.sh`，登记五种输入/抑制变体和三个随机种子，等待现有训练作业结束后按
+固定 GPU 槽运行。当前 M4 正式指标仍未生成。

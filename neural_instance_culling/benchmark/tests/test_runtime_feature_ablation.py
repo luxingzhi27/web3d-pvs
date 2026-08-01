@@ -70,6 +70,23 @@ class RuntimeFeatureAblationTests(unittest.TestCase):
             self.assertEqual(bool(torch.count_nonzero(proxy).item() == 0), proxy_zero, ablation)
             self.assertEqual(model.config["runtimeFeatureAblation"], ablation)
 
+    def test_explicit_inhibition_control_is_serialized_and_zeroed(self) -> None:
+        model = self._model("none")
+        model.use_explicit_inhibition = False
+        runtime = torch.ones((3, 15), dtype=torch.float32)
+        camera_view = torch.tensor([[0.0, 0.0, 1.0, 1.0, 1.0]] * 3)
+        camera_world = torch.tensor([[0.0, 0.0, -2.0]] * 3)
+        ids = torch.tensor([0, 1, 2])
+        _logits, aux = model.compute_logits_with_aux(
+            torch.zeros((3, 3)),
+            camera_view,
+            camera_world,
+            ids,
+            runtime_features=runtime,
+        )
+        self.assertFalse(model.config["usesExplicitInhibition"])
+        self.assertTrue(torch.equal(aux["inhibition"], torch.zeros_like(aux["inhibition"])))
+
 
 if __name__ == "__main__":
     unittest.main()
