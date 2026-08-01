@@ -19,6 +19,7 @@
 本次新增文件：
 
 - `neural_instance_culling/benchmark/evaluate_download_trajectory.py`
+- `neural_instance_culling/benchmark/measure_glb_decode_upload_costs.mjs`
 - `neural_instance_culling/benchmark/tests/test_download_trajectory.py`
 - `docs/experiments/m7_m8_trajectory_replay_2026-08-01.md`
 
@@ -284,3 +285,27 @@ PYTHONDONTWRITEBYTECODE=1 conda run --no-capture-output -n slm_pvs \
 
 只有在实测 GLB 解码/上传成本索引和真实网络轨迹准备好之后，输出才可进入 M8 正式比较；当前
 没有用该工具生成的假设轨迹宣称投稿质量门通过。
+
+## 9. 浏览器成本采集器（2026-08-02）
+
+新增 `measure_glb_decode_upload_costs.mjs`，使用与 M5 相同的 Three.js `GLTFLoader`，并显式初始化 Meshopt 和 Draco 解码器。它从 `glbIndex.json` 读取完整 GLB 清单，在浏览器中逐个获取二进制、解析 glTF，并通过实际 WebGL render 提交几何后记录：
+
+- 文件字节数；
+- fetch 时间；
+- glTF 解析/解码时间；
+- render 提交时间；
+- 从解析开始到提交完成的 `decodeUploadMs`；
+- 三角形数、网格数和错误原因。
+
+缺少文件、解码器失败或浏览器异常会使条目保持 `status=error`；只有所有选中条目成功时输出才标记 `status=complete`。采集器不会对失败条目估计时间。
+
+已通过：
+
+```bash
+node neural_instance_culling/benchmark/measure_glb_decode_upload_costs.mjs --self-test
+node --check neural_instance_culling/benchmark/measure_glb_decode_upload_costs.mjs
+```
+
+真实 smoke 使用 HKUST 的 1 个小构件和 3 个最大构件，结果写在 `/tmp`，不作为正式成本索引：1 个小构件成功，约 `2,964` bytes、`12.4 ms` 解析、`31.8 ms` render 提交；3 个约 `41.5 MB` 构件均成功，`decodeUploadMs` 约 `232--529 ms`。这些数值只证明采集链路和大构件路径可运行，尚未覆盖全部 `3,273` 个 GLB，也不代表移动设备性能。
+
+正式 M8 仍需在固定浏览器/后端和完整清单上运行采集，记录浏览器版本、图形适配器、分辨率和温度条件，并将完整成本索引与 SHA-256 一起冻结。SwiftShader smoke 不得冒充硬件 GPU 或 Android 成本证据。
