@@ -399,3 +399,21 @@ Wi-Fi/受控 4G、三条轨迹、每条件至少 30 次有效运行、p50/p95/p9
 20 MiB 工作点的对应弱效用召回为 HKUST `0.1982/0.1948`、Metropolis `0.3004/0.1509`（当前级联/RankNet）。
 这些数字来自三条确定性离线轨迹的均值和样本标准差，不是移动设备或真实网络测量；M8 仍保留 No-Go，
 因为缺少多种子 paired bootstrap、真实 4G/Wi-Fi trace、图像效用和硬件解码/上传成本。
+
+### 2026-08-02 M4/M5/M11 队列状态复核
+
+本次复核确认正式队列仍按预注册依赖运行，没有使用中间 checkpoint 或通过阈值调整提前推进质量门。M4
+输入/遮挡代理消融矩阵共有 `15` 个变体（5 种输入变体 × 3 个 seed），其中 `7` 个已经生成
+`calibration_ready_summary.json`；第二批的 `geometry_context_ray`、
+`geometry_context_proxy_ray_no_inhibition` 和 `full` 仍在 40 epoch 训练中，最近核验约为第 `17`、
+`19` 和 `16` 个 epoch，训练记录中的非有限 loss/gradient 跳过计数均为 `0`。M4 validation evaluator
+继续等待全部矩阵，尚未生成配对 bootstrap 汇总，因此方向遮挡代理的路线 A/B 尚未判定。
+
+M11 Metropolis 1% 少样本适配 `retry3` 约完成第 `7/40` 个 epoch，非有限 loss/gradient 计数为 `0`；
+5% 和 10% 队列尚未启动，当前不记录少样本指标。M5 视觉安全修复矩阵和共享浏览器图像评价均继续等待
+正式 M4/M11 会话退出，尚未生成修复 checkpoint 或图像结果。M4/M5 队列脚本通过 Bash 语法检查，
+相关 Python 入口通过编译和帮助命令 smoke；该检查只证明执行入口可用，不改变各阶段的 No-Go 状态。
+
+截至本记录，工作区无未提交代码修改，默认模型、前端资产、测试阈值和 FOV 口径均未改变。下一步仍是
+等待 M4 完整矩阵，随后只在固定 validation/calibration 规则下执行汇总，再按预注册门限决定是否保留
+完整方向遮挡代理路线。
