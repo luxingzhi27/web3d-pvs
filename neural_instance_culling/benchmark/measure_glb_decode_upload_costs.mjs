@@ -170,6 +170,7 @@ async function measure(entry, loader, renderer, camera) {
     result.fetchMs = fetchEnd - fetchStart;
     result.parseMs = parseEnd - parseStart;
     result.decodeUploadMs = uploadEnd - parseStart;
+    result.totalDecodeUploadMs = result.decodeUploadMs;
     result.renderSubmitMs = uploadEnd - renderStart;
     result.totalMs = uploadEnd - started;
     result.triangles = triangles(root);

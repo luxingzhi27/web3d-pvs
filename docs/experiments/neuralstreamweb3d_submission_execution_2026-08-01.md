@@ -113,3 +113,48 @@ M5 失败分析和修复准则见 `docs/evaluation/m5_hkust_image_failure_analys
 针对当前 `visible_weights` 的 `log1p`/`1024` 截断无法区分高覆盖构件的问题，新增 `docs/experiments/m5_visual_safety_repair_protocol_2026-08-02.md`。协议预注册了线性视觉质量损失、视觉质量加上高贡献正例 margin、软化权重和当前损失控制变量四个变体。损失直接近似 pose 内漏掉可见覆盖的比例，并保留 RVL 误报项、预算项和 calibration 安全规则；它不是降低阈值，也不把 Color-ID 权重宣称为精确真实像素覆盖率。
 
 M5 修复只有在 M4 核心路线确定后启动。所有变体都必须使用固定 validation、独立 calibration、真实 60°实例级图像评价和 test one-shot 规则；当前 M5 仍为 No-Go。
+
+## 2026-08-02 M7 成本索引与验证集回放
+
+### 运行目的
+
+在不读取正式 test split、不重新选择阈值的前提下，补齐 HKUST 的真实浏览器 GLB 解码/上传成本索引，并用同一条确定性 validation pose 回放比较当前联合级联和独立 RankNet。该回放用于检查 M7/M8 工具链和排序顺序，不能替代真实用户轨迹、真实网络测量或移动设备测试。
+
+### 成本采集结果
+
+命令：
+
+```bash
+node neural_instance_culling/benchmark/measure_glb_decode_upload_costs.mjs \
+  --glb-index hkust-v3/assets/glbIndex.json \
+  --glb-root hkust-v3/assets \
+  --output neural_instance_culling/benchmark/out/m7_glb_decode_upload_costs_hkust_20260802.json \
+  --chrome-exe /usr/bin/google-chrome \
+  --timeout-ms 7200000
+```
+
+结果为 3,273/3,273 个 GLB 成功，失败 0 个，实际文件总大小 `563,269,492` bytes。每个条目包含网络读取、glTF 解析、渲染提交和总解码/上传时间。浏览器使用的是 headless Chrome，当前适配器不能证明使用了硬件 GPU；该索引可以作为桌面浏览器成本证据，不能外推为移动设备性能。
+
+采集器现将总成本写入 `totalDecodeUploadMs`；回放器同时兼容早期已生成的 `decodeUploadMs` 字段。回放命令也允许只注册独立排序器，不再强制提供一个可见性模型。相关修改位于 `measure_glb_decode_upload_costs.mjs`、`evaluate_visual_utility_metrics.py` 和 `evaluate_download_trajectory.py`。
+
+### 确定性 validation 回放
+
+轨迹由 `pose_csr_hkust_v3_spatial_raw_subpose_aabb_fov66_v1` 的 664 个 validation pose 按原始索引升序生成，网络模型为 5 MB/s、50 ms 请求延迟、6 个下载并发和 2 个解码/上传并发，初始缓存为空。轨迹文件和两个结果文件为：
+
+- `neural_instance_culling/benchmark/out/m7_m8_hkust_validation_replay_20260802.json`
+- `neural_instance_culling/benchmark/out/m7_m8_hkust_validation_cascade_20260802.json`
+- `neural_instance_culling/benchmark/out/m7_m8_hkust_validation_ranknet_20260802.json`
+
+| 方法 | 50 MB 弱效用召回 | 5 s 弱效用召回 | 平均缺失弱效用比例 | 首个有用完成时间 |
+|---|---:|---:|---:|---:|
+| 当前联合级联 | 0.019998 | 0.007831 | 0.1547% | 113.75 ms |
+| 独立 RankNet | 0.018891 | 0.004672 | 1.7456% | 112.14 ms |
+
+这里的弱效用是 `log1p(visible_weights)`，不是像素覆盖率。两种方法在完整 331.5 s 回放结束时都请求并上传了全部 3,273 个 GLB，无效下载字节均为 `79,165,748` bytes，占总资源约 `14.05%`。因此结果只说明当前级联在该固定回放的早期时间/字节工作点提供了更高的弱效用，不支持“减少总下载量”或“联合级联已经优于独立排序器”的投稿结论。
+
+### 阶段判断
+
+- 成本索引子门：通过，资源完整且回放器能够严格读取，不做缺失成本填补。
+- 回放工具子门：通过；单元测试 5 项通过，Python 编译检查和 `git diff --check` 通过。
+- M7/M8 正式质量门：仍未通过。当前缺少真实网络轨迹、冷/温缓存配对、多轨迹置信区间和移动/硬件浏览器端到端测量；弱效用也不能替代 M5 的像素级图像效用。
+- M10：继续保持 `No-Go / 设备证据缺失`，仅保留 [移动设备测试方案](../frontend/m10_device_benchmark_2026-08-01.md)，不生成移动端 p50/p95/p99 数据。

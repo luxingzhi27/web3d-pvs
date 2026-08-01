@@ -17,6 +17,7 @@ from neural_instance_culling.benchmark.evaluate_download_trajectory import (
     load_trajectory,
     simulate_download_trajectory,
 )
+from neural_instance_culling.benchmark.evaluate_visual_utility_metrics import _time_value_from_entry
 
 
 class _FakeDataset:
@@ -190,6 +191,9 @@ class DownloadTrajectoryTests(unittest.TestCase):
 
     def test_replay_schema_is_explicit(self) -> None:
         self.assertEqual(REPLAY_SCHEMA, "neuralstreamweb3d-download-trajectory-replay-v1")
+
+    def test_browser_cost_probe_single_interval_is_accepted(self) -> None:
+        self.assertAlmostEqual(_time_value_from_entry({"decodeUploadMs": 12.5}), 12.5)
 
 
 if __name__ == "__main__":

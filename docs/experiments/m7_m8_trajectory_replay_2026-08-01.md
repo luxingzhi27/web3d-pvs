@@ -1,7 +1,7 @@
 # M7/M8：离线轨迹下载回放评估器
 
 **日期：** 2026-08-01  
-**状态：** 最小可复现实现完成；未运行正式 test split，也未修改任何现有 test 数据。  
+**状态：** 最小可复现实现完成；已运行 HKUST validation 确定性回放，未运行正式 test split，也未修改任何现有 test 数据。
 **目的：** 为 M7 的 GLB 下载排序和 M8 的冷/温缓存导航实验提供一个独立的离线回放入口。该入口不修改训练模型、不修改前端调度代码，也不把弱可见权重冒充真实像素效用。
 
 ## 1. 本次变更
@@ -94,7 +94,7 @@
 - `visibility-only`：使用实例可见性分数；
 - `current-cascade`：使用当前模型下载头的分数，并进行概率归一化；
 - `visibility-gated`：使用可见性分数乘当前效用头输出，只作为诊断模式；
-- `independent-utility`：当前没有注册独立排序器，明确返回未实现，不用当前效用头冒充独立模型。
+- `independent-utility`：只有通过 `--independent-ranker-spec name|checkpoint` 显式注册的独立排序器才可用；没有注册时明确返回未实现，不用当前效用头冒充独立模型。
 
 本回放是下载排序评估，不执行可见性阈值扫描。runner 中加载的阈值只作为 checkpoint 元数据记录，不能改变本回放的 GLB 排序。
 
@@ -201,7 +201,7 @@ PYTHONDONTWRITEBYTECODE=1 conda run --no-capture-output -n slm_pvs \
 
 ### 5.3 真实离线轨迹回放模板
 
-下面是实际运行模板；本次只验证了 self-test 和新增单元测试，没有执行该真实数据命令，也没有读取正式 test split：
+下面是实际运行模板；该命令用于 validation 确定性回放，不读取正式 test split：
 
 ```bash
 conda run --no-capture-output -n slm_pvs \
@@ -241,17 +241,19 @@ self-test: passed
 unit tests: 5 tests, OK
 py_compile: passed
 git diff --check: passed
+HKUST validation replay: 664 poses, cascade and independent RankNet completed
+GLB browser cost index: 3273/3273 measured, 0 failed
 formal test split: not run
 existing test data: unchanged
 ```
 
 新增实现满足 M7/M8 最小“协议可复现、事件语义清楚、缺失资源不静默填补”的代码质量门。投稿计划中的完整科学门仍未通过，原因是：
 
-1. 当前仓库没有已注册的独立 GLB 排序器，`independent-utility` 仍明确为未实现；
+1. 独立 RankNet 已注册并完成一条 validation 回放，但尚未完成多种子和多轨迹 paired bootstrap；
 2. 本回放使用固定等份带宽槽位模型，不等同于真实浏览器 TCP、HTTP/2 或 HTTP/3 调度；
-3. 尚未采集桌面/移动设备上的真实 GLB 解码和 GPU 上传时间轨迹；
+3. 成本采集来自 headless Chrome，尚未得到硬件移动 WebGPU 的真实 GLB 解码和 GPU 上传时间轨迹；
 4. 尚未执行多轨迹、4G/Wi-Fi trace、三种子 paired bootstrap 和真实前端 p95 帧时间；
-5. 弱可见权重不能替代 M5 的像素级效用，因此不能据此宣称图像安全或联合下载头已经优于独立排序器。
+5. 弱可见权重不能替代 M5 的像素级效用，因此当前结果不能据此宣称图像安全或联合下载头已经优于独立排序器。
 
 所以本文件记录的是 M7/M8 的可复现实验基础设施，不是完整投稿主表结果，也不改变当前主线模型的 Go/No-Go 结论。
 

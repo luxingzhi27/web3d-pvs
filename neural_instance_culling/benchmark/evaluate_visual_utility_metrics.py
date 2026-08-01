@@ -315,6 +315,13 @@ def _time_value_from_entry(entry: dict[str, Any]) -> float | None:
         value = read_nonnegative(key)
         if value is not None:
             return value
+    # ``decodeUploadMs`` is the field emitted by the browser probe before the
+    # strict total-field name was added to the cost-index contract.  It is a
+    # single measured interval, so accepting it preserves old complete probe
+    # outputs without inferring time from bytes.
+    value = read_nonnegative("decodeUploadMs")
+    if value is not None:
+        return value
     return None
 
 

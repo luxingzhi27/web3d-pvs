@@ -1054,7 +1054,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.self_test:
         print(json.dumps(_self_test(), ensure_ascii=False, indent=2))
         return
-    required = ("trajectory", "dataset_dir", "runtime_meta", "glb_index", "glb_time_index", "models")
+    required = ("trajectory", "dataset_dir", "runtime_meta", "glb_index", "glb_time_index")
     missing = [f"--{name.replace('_', '-')}" for name in required if not getattr(args, name)]
     if missing:
         parser.error("missing required arguments: " + ", ".join(missing))
