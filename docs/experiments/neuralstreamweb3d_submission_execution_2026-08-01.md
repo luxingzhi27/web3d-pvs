@@ -277,3 +277,29 @@ npm --prefix slm2viewer test -- --runInBand
 
 M12 的“前端半精度资产、WGSL 权重布局、射线查询、实例级可见性输出和 GLB 下载排序输出与 FP16 参考一致性”子门通过。首轮较大 logit 差异作为参考口径错误的失败证据保留，不再引用为实现缺陷。M10 仍保持 `No-Go / 真实设备证据缺失`；移动设备测试方案、候选规模矩阵、冷/温缓存协议和预注册正确性门限已写入
 `docs/frontend/m10_device_benchmark_2026-08-01.md`，未用 SwiftShader 数字填充移动端 p50/p95/p99。
+
+### 2026-08-02 M8 多轨迹离线回放补录
+
+为避免单条固定轨迹支撑过强的下载调度结论，本轮从两个场景的 validation split 各生成三条、每条 128 个
+pose 的确定性轨迹。轨迹使用相同的 66°模型查询相机和 60°真实渲染相机，起始偏移分别为 HKUST
+`0/180/360`、Metropolis `0/600/1200`；网络模型固定为 5 MB/s、50 ms 请求延迟、6 个下载并发和 2 个
+解码/上传并发。轨迹、成本索引和运行结果均保存在：
+
+`neural_instance_culling/benchmark/out/m8_trajectories_20260802/` 和
+`neural_instance_culling/benchmark/out/m8_<scene>_track_<a|b|c>_<cascade|ranknet>_20260802.json`。
+
+Metropolis 成本索引覆盖 `3,669/3,669` 个 GLB，失败 `0`；HKUST 沿用覆盖 `3,273/3,273` 个 GLB 的完整索引。
+两份索引都来自 headless Chrome/SwiftShader，只能作为离线解码成本输入，不能外推到移动 GPU。
+
+| 场景 | 方法 | 缺失弱效用 | 最终弱效用召回 | 首个有用画面 ms |
+|---|---|---:|---:|---:|
+| HKUST | 当前联合级联 | `2.25% ± 0.39%` | `0.9707 ± 0.0103` | `103.4 ± 9.0` |
+| HKUST | 独立 RankNet | `10.68% ± 1.25%` | `0.8542 ± 0.0175` | `107.9 ± 7.3` |
+| Metropolis | 当前联合级联 | `6.04% ± 0.66%` | `0.9346 ± 0.0184` | `78.1 ± 1.0` |
+| Metropolis | 独立 RankNet | `32.06% ± 5.14%` | `0.6700 ± 0.0227` | `69.4 ± 13.8` |
+
+“弱效用”严格指 `log1p(visible_weights)`，其中 `visible_weights` 是构件重要性权重，不是真实像素覆盖率。
+结果支持当前级联在这组固定离线条件下的早期效用诊断，但不满足 M8 正式质量门：没有真实网络轨迹、真实
+设备解码/上传、多种子 paired bootstrap 或像素级图像效用；因此不将其写成端到端下载收益，也不改变 M7/M8
+和 M10 的 No-Go 状态。详细事件、字节指标和轨迹文件见
+[M7/M8 回放报告](m7_m8_trajectory_replay_2026-08-01.md)。

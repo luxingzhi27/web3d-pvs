@@ -266,9 +266,12 @@ existing test data: unchanged
 ## 8. 确定性 pose-index 轨迹生成器
 
 新增 `neural_instance_culling/benchmark/build_pose_index_trajectory.py`，用于从数据集已有的
-native split 生成可复现的 pose-index 回放输入。它按 split 中的原始 pose 索引升序、固定步长和
-可选 stride 生成 `poses`，写入数据集 metadata SHA-256、pose 索引 SHA-256、66°模型视场角、
+native split 生成可复现的 pose-index 回放输入。它按 split 中的原始 pose 索引升序、固定起始偏移、
+固定步长和可选 stride 生成 `poses`，写入数据集 metadata SHA-256、pose 索引 SHA-256、66°模型视场角、
 60°真实渲染视场角以及网络/缓存参数。
+
+为支持多轨迹配对回放，工具新增 `--start-offset`；该参数只改变从同一 native split 选取的
+pose-index 子序列，并在 `selection.startOffset` 中记录，不改变 pose 内容、候选集合或 GT。
 
 该工具输出始终带有：
 
@@ -287,6 +290,47 @@ PYTHONDONTWRITEBYTECODE=1 conda run --no-capture-output -n slm_pvs \
 
 只有在实测 GLB 解码/上传成本索引和真实网络轨迹准备好之后，输出才可进入 M8 正式比较；当前
 没有用该工具生成的假设轨迹宣称投稿质量门通过。
+
+## 2026-08-02 多轨迹离线回放补充
+
+### 轨迹和成本资源
+
+使用 `--start-offset` 从两个场景的 validation split 生成各三条、每条 128 个 pose 的固定轨迹：
+
+| 场景 | 起始偏移 | 轨迹文件 | 模型相机/真实渲染相机 |
+|---|---:|---|---|
+| HKUST | 0、180、360 | `m8_trajectories_20260802/hkust_track_[a-c]_wifi.json` | 66° / 60° |
+| Metropolis | 0、600、1200 | `m8_trajectories_20260802/metropolis_track_[a-c]_wifi.json` | 66° / 60° |
+
+这些轨迹均带有 `formal=false` 和 `measurementStatus=assumed_not_device_measurement`，因此只是
+空间分层的确定性 replay，不是真实用户导航。HKUST 成本索引沿用
+`m7_glb_decode_upload_costs_hkust_20260802.json`；Metropolis 新增
+`m8_glb_decode_upload_costs_metropolis_20260802.json`，覆盖 `3,669/3,669` 个 GLB，失败 `0`，
+状态为 `complete`。两份索引都来自 headless Chrome/SwiftShader 路径，不能外推到 Android GPU。
+
+每条轨迹分别运行当前级联下载分数和 train-only 独立 RankNet，采用相同的冷缓存、5 MB/s、50 ms
+请求延迟、6 个下载并发、2 个解码/上传并发、`max` GLB 聚合和严格实际文件字节。输出为：
+
+```text
+benchmark/out/m8_<scene>_track_<a|b|c>_<cascade|ranknet>_20260802.json
+```
+
+### 结果摘要
+
+下表的“缺失弱效用”是回放期间 `weak log1p(visible_weights)` 的时间积分比例；它不是 miss-pixel，
+也不是图像质量。括号内为三条轨迹的样本标准差。
+
+| 场景 | 方法 | 缺失弱效用 | 最终弱效用召回 | 首个有用画面 ms | 下载字节 MB | 无效下载字节 MB |
+|---|---|---:|---:|---:|---:|---:|
+| HKUST | current cascade | 2.25% (0.39%) | 0.9707 (0.0103) | 103.4 (9.0) | 124.5 (9.5) | 98.5 (9.6) |
+| HKUST | independent RankNet | 10.68% (1.25%) | 0.8542 (0.0175) | 107.9 (7.3) | 117.1 (6.6) | 110.5 (6.8) |
+| Metropolis | current cascade | 6.04% (0.66%) | 0.9346 (0.0184) | 78.1 (1.0) | 72.6 (0.7) | 48.1 (1.9) |
+| Metropolis | independent RankNet | 32.06% (5.14%) | 0.6700 (0.0227) | 69.4 (13.8) | 75.2 (2.4) | 57.4 (0.2) |
+
+该结果支持“当前级联在这组弱效用、固定带宽 replay 下优于独立 RankNet”的诊断，但不满足联合
+调度主张的完整质量门：没有真实 Wi-Fi/4G trace、真实设备解码/上传、图像效用、多个随机种子，
+并且轨迹本身不是用户测量。因此本结果保留为 M8 离线多轨迹子门证据，不改写为端到端下载收益，
+也不提前读取正式 test。
 
 ## 9. 浏览器成本采集器（2026-08-02）
 

@@ -125,6 +125,12 @@ def main() -> None:
     parser.add_argument("--dataset-dir", type=Path)
     parser.add_argument("--split", default="validation")
     parser.add_argument("--stride", type=int, default=1)
+    parser.add_argument(
+        "--start-offset",
+        type=int,
+        default=0,
+        help="Skip this many poses in the selected native split before applying stride.",
+    )
     parser.add_argument("--max-poses", type=int, default=0, help="0 keeps every selected split pose")
     parser.add_argument("--step-ms", type=float, default=500.0)
     parser.add_argument("--bandwidth-bytes-per-sec", type=float, default=5_000_000.0)
@@ -141,8 +147,10 @@ def main() -> None:
         return
     if args.dataset_dir is None or args.output is None:
         parser.error("--dataset-dir and --output are required unless --self-test is used.")
-    if args.stride <= 0 or args.max_poses < 0 or args.step_ms <= 0:
-        parser.error("--stride and --step-ms must be positive; --max-poses must be non-negative.")
+    if args.stride <= 0 or args.start_offset < 0 or args.max_poses < 0 or args.step_ms <= 0:
+        parser.error(
+            "--stride and --step-ms must be positive; --start-offset and --max-poses must be non-negative."
+        )
     if args.bandwidth_bytes_per_sec <= 0 or args.request_latency_ms < 0:
         parser.error("Network bandwidth must be positive and request latency must be non-negative.")
     if args.max_concurrent_downloads <= 0 or args.max_concurrent_decode_uploads <= 0:
@@ -152,7 +160,10 @@ def main() -> None:
     dataset = PoseCSRDataset(dataset_dir, num_instances=int(meta["numInstances"]))
     if args.split not in dataset.split_ids:
         raise ValueError(f"Split {args.split!r} is unavailable; found {sorted(dataset.split_ids)}")
-    indices = np.asarray(dataset.split(args.split).pose_indices, dtype=np.int64)[:: args.stride]
+    split_indices = np.asarray(dataset.split(args.split).pose_indices, dtype=np.int64)
+    if args.start_offset >= split_indices.size:
+        raise ValueError("The selected start offset is outside the requested split.")
+    indices = split_indices[args.start_offset:: args.stride]
     if args.max_poses:
         indices = indices[: args.max_poses]
     if indices.size == 0:
@@ -175,6 +186,7 @@ def main() -> None:
         initial_cache_glb_ids=initial,
     )
     payload["selection"]["stride"] = int(args.stride)
+    payload["selection"]["startOffset"] = int(args.start_offset)
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
