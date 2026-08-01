@@ -1,0 +1,136 @@
+{
+  "schema": "neuralstreamweb3d-m0-frozen-artifact-manifest-v1",
+  "created": "2026-08-02T00:20:00+08:00",
+  "codeCommitAtEvaluation": "8aba381",
+  "protocol": "fixed_validation_independent_calibration_frozen_test",
+  "testPolicy": "complete unique test split, one frozen calibration threshold, one shot",
+  "fov": {
+    "modelQueryDeg": 66,
+    "frontendRenderDeg": 60
+  },
+  "scenes": {
+    "hkust": {
+      "dataset": "neural_instance_culling/dataset/out/pose_csr_hkust_v3_spatial_raw_subpose_aabb_fov66_v1",
+      "testPoseCount": 722,
+      "testEvaluationCount": 1,
+      "frozenThreshold": 0.019999999552965164,
+      "weightedRecall": 0.9970467144161531,
+      "poseRecall": 0.94608400112385,
+      "posePrecision": 0.46265209230305565,
+      "usefulCull": 0.7594458697516647,
+      "badCull": 0.00461261280292039,
+      "artifacts": [
+        {
+          "role": "frozen_manifest",
+          "path": "neural_instance_culling/benchmark/out/m0_frozen_pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_hkust_spatial_fov66_seed20260801_protocolfix_retry2/frozen_manifest.json",
+          "bytes": 2734,
+          "sha256": "fbd49e97ccb05e83e1e7ad86d465fe4a2505797cbfdf21ea37ba40be715467ed"
+        },
+        {
+          "role": "test_summary",
+          "path": "neural_instance_culling/benchmark/out/m0_frozen_pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_hkust_spatial_fov66_seed20260801_protocolfix_retry2/test/summary.json",
+          "bytes": 9426,
+          "sha256": "f15b9a046e164455784c7f710d904f539ea36354b31d103e7f0966c204d43ea5"
+        },
+        {
+          "role": "checkpoint",
+          "path": "neural_instance_culling/model/out/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_hkust_spatial_fov66_seed20260801_protocolfix_retry2/best.pt",
+          "bytes": 48746716,
+          "sha256": "b479422f0431ecfcdd36cbee927863d5d2f1785aa6a9dee7f02173d539f117f5"
+        },
+        {
+          "role": "runtime_features_fp16",
+          "path": "neural_instance_culling/model/out/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_hkust_spatial_fov66_seed20260801_protocolfix_retry2/instance_runtime_features_fp16.bin",
+          "bytes": 13257024,
+          "sha256": "8dcc43c4845485791dbd0bb8552bced929c29af47a1f9b529319691e2c99173a"
+        },
+        {
+          "role": "calibration_summary",
+          "path": "neural_instance_culling/model/out/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_hkust_spatial_fov66_seed20260801_protocolfix_retry2/calibration_ready_summary.json",
+          "bytes": 2960804,
+          "sha256": "53b9b7dfa6a8a8a93bfd9e8a3d842d9afef215869adc414167fc27324b0562ce"
+        },
+        {
+          "role": "dataset_meta",
+          "path": "neural_instance_culling/dataset/out/pose_csr_hkust_v3_spatial_raw_subpose_aabb_fov66_v1/dataset_meta.json",
+          "bytes": 7790,
+          "sha256": "5b1a4b7696fb4457e9ad199b8a29eb8359c3967605ec18227e9b4f140e6d96e4"
+        },
+        {
+          "role": "runtime_meta",
+          "path": "hkust-v3/assets/runtimeVisibilityMeta.json",
+          "bytes": 15161665,
+          "sha256": "a46c0c53185d93ced4af52579fdf91608f727fc9fb02fbaa9b7dff1da4419228"
+        },
+        {
+          "role": "glb_index",
+          "path": "hkust-v3/assets/glbIndex.json",
+          "bytes": 498417,
+          "sha256": "3552d07643880f374d65a610afa05a7429c4d9c50f5e3031e973e653105ba95e"
+        }
+      ]
+    },
+    "metropolis": {
+      "dataset": "neural_instance_culling/dataset/out/pose_csr_metropolis_spatial_dense_subpose_union_fov66_v2",
+      "testPoseCount": 2340,
+      "testEvaluationCount": 1,
+      "frozenThreshold": 0.3199999928474426,
+      "weightedRecall": 0.9921197272709215,
+      "poseRecall": 0.9314135343707002,
+      "posePrecision": 0.268366521016315,
+      "usefulCull": 0.5239034489432253,
+      "badCull": 0.007592604709614534,
+      "artifacts": [
+        {
+          "role": "frozen_manifest",
+          "path": "neural_instance_culling/benchmark/out/m0_frozen_pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_metropolis_spatial_fov66_seed20260801_protocolfix_bs1_gpu2/frozen_manifest.json",
+          "bytes": 2763,
+          "sha256": "a9bf8f2664c959a8e3b5def827a13bc49dc9bbf15a38cdcca6308119fb837527"
+        },
+        {
+          "role": "test_summary",
+          "path": "neural_instance_culling/benchmark/out/m0_frozen_pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_metropolis_spatial_fov66_seed20260801_protocolfix_bs1_gpu2/test/summary.json",
+          "bytes": 9465,
+          "sha256": "61e153847698d6c2d617a3c35796ceae35336d9cd40a37f43c5e2651219bed79"
+        },
+        {
+          "role": "checkpoint",
+          "path": "neural_instance_culling/model/out/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_metropolis_spatial_fov66_seed20260801_protocolfix_bs1_gpu2/best.pt",
+          "bytes": 103502300,
+          "sha256": "e2d3b45bd0c2343650a4be3b81766046fd8c6e1bbb33851f499ba8f501c134b2"
+        },
+        {
+          "role": "runtime_features_fp16",
+          "path": "neural_instance_culling/model/out/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_metropolis_spatial_fov66_seed20260801_protocolfix_bs1_gpu2/instance_runtime_features_fp16.bin",
+          "bytes": 29073792,
+          "sha256": "6ed77df7ca38c37ac33299f1d8883b1d0d6a27c3d1e2bf895d0cd6e507f8b340"
+        },
+        {
+          "role": "calibration_summary",
+          "path": "neural_instance_culling/model/out/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_metropolis_spatial_fov66_seed20260801_protocolfix_bs1_gpu2/calibration_ready_summary.json",
+          "bytes": 3401697,
+          "sha256": "223cf32027e4a06084f2c92233e6c6d7c14cb0d666f9be2f3c68bb245afe8f8b"
+        },
+        {
+          "role": "dataset_meta",
+          "path": "neural_instance_culling/dataset/out/pose_csr_metropolis_spatial_dense_subpose_union_fov66_v2/dataset_meta.json",
+          "bytes": 7701,
+          "sha256": "b43c99c47c3bb1dbf95531a83a0c85b019c204bd423a3153b623b119e75843e5"
+        },
+        {
+          "role": "runtime_meta",
+          "path": "ifcbench_fantasy_metropolis_instanced_v2/assets/runtimeVisibilityMeta.json",
+          "bytes": 32199244,
+          "sha256": "da486e5b7bfb3d89143d7bbca200509daebd52b3dfe81ecb1f78d1649fd811c4"
+        },
+        {
+          "role": "glb_index",
+          "path": "ifcbench_fantasy_metropolis_instanced_v2/assets/glbIndex.json",
+          "bytes": 542156,
+          "sha256": "dad806871421e5543bb9f7a2f89c2df6561e7b737c7040bf295df4ad64647e36"
+        }
+      ]
+    }
+  },
+  "interpretation": "These artifacts are frozen-test evidence. Weighted recall is based on visible_weights, which are screen-coverage-derived weak importance weights, not a substitute for pixel-level image safety."
+}

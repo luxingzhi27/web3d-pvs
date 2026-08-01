@@ -61,6 +61,8 @@ export class LightweightPVSDispatcher {
     this.modelInfo = null;
     this.predictSerial = 0;
     this.pending = new Map();
+    this.m12RequestSerial = 0;
+    this.m12Pending = new Map();
     this.pendingInitResolve = null;
     this.pendingInitReject = null;
   }
@@ -173,6 +175,20 @@ export class LightweightPVSDispatcher {
       return;
     }
 
+    if (data.type === 'm12-result' || data.type === 'm12-error') {
+      const pending = this.m12Pending.get(data.requestId);
+      if (!pending) return;
+      this.m12Pending.delete(data.requestId);
+      if (data.type === 'm12-error') {
+        const error = new Error(data.message || 'M12 WebGPU parity probe failed.');
+        error.stack = data.stack || error.stack;
+        pending.reject(error);
+      } else {
+        pending.resolve(data);
+      }
+      return;
+    }
+
     if (data.type !== 'result') return;
     const pending = this.pending.get(data.serial);
     if (!pending) return;
@@ -224,6 +240,20 @@ export class LightweightPVSDispatcher {
     });
   }
 
+  /**
+   * Run the opt-in M12 FP32/FP16/WebGPU parity probe through the real worker.
+   * This method is intentionally unused by the viewer scheduler.
+   */
+  async benchmarkM12(cases) {
+    if (!this.isReady) await this.init();
+    if (!this.worker) throw new Error('M12 parity probe requires a live PVS worker.');
+    const requestId = ++this.m12RequestSerial;
+    return new Promise((resolve, reject) => {
+      this.m12Pending.set(requestId, { resolve, reject });
+      this.worker.postMessage({ type: 'm12-probe', requestId, cases });
+    });
+  }
+
   requestWebGPUUpgrade() {
     return this.backend === 'worker-webgpu';
   }
@@ -261,6 +291,10 @@ export class LightweightPVSDispatcher {
       this.worker = null;
     }
     this.pending.clear();
+    for (const pending of this.m12Pending.values()) {
+      pending.reject(new Error('PVS dispatcher disposed during M12 parity probe.'));
+    }
+    this.m12Pending.clear();
     this.isReady = false;
   }
 }

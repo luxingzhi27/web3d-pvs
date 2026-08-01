@@ -1,4 +1,4 @@
-# M10 设备 Benchmark 审计
+# M10 设备 Benchmark 审计与执行方案
 
 日期：2026-08-01  
 状态：桌面 headless smoke 通过；真实设备质量门未通过。
@@ -23,7 +23,7 @@
 
 ## 门控判断
 
-当前数据只能证明“桌面 SwiftShader 浏览器路径可启动并完成一次 smoke”。不能据此声称移动端实时、硬件 WebGPU 性能或 10k 候选满足 `p95 < 20 ms`。M10 保持 No-Go，后续需要在真实设备上按固定 commit、冻结模型、固定 FOV 和固定轨迹采集 p50/p95/p99；没有真实样本的候选规模桶必须标记缺失，不能补齐。
+当前数据只能证明“桌面 SwiftShader 浏览器路径可启动并完成一次 smoke”。不能据此声称移动端实时或硬件 WebGPU 性能，也不能用它判断 10k 候选是否满足移动端延迟目标。M10 保持 No-Go，后续需要在真实设备上按固定 commit、冻结模型、固定 FOV 和固定轨迹采集 p50/p95/p99；没有真实样本的候选规模桶必须标记缺失，不能补齐。
 
 ## 移动设备执行方案
 
@@ -80,3 +80,64 @@
 正式报告按设备和场景分别给出冷/温缓存的 p50/p95/p99，不把不同设备或不同候选桶平均成一个数字。系统目标为 10k 候选下移动端 WebGPU 查询 p95 `<50 ms`、主线程附加工作 `<2 ms`，且没有明显帧停顿；图像安全仍必须满足独立的 weighted recall 和 miss-pixel 约束。
 
 若设备不支持硬件 WebGPU、只能连接模拟器，或无法取得 Android 设备，本阶段只报告“设备证据缺失”，保留桌面 smoke 和完整采集协议；不得据此声称移动端实时。拿到设备后先运行小规模 schema/adapter smoke，再启动上述完整矩阵。
+
+### 6. 拿到设备后的固定执行顺序
+
+测试不直接从完整矩阵开始，必须按以下顺序逐级放行：
+
+1. **冻结构建。** 记录 `git rev-parse HEAD`、前端构建产物的 SHA-256、模型权重/特征表/运行元数据的 SHA-256、场景资产版本、模型阈值、查询 FOV `66°`、渲染 FOV `60°` 和 viewport。随后只使用这一份构建完成整个批次。
+2. **连接设备。** 设备打开 USB 调试并保持非省电模式，记录电量和初始温度。典型检查命令为：
+
+   ```bash
+   adb devices -l
+   adb shell getprop ro.product.model
+   adb shell getprop ro.board.platform
+   adb shell getprop ro.build.version.release
+   adb forward tcp:9222 localabstract:chrome_devtools_remote
+   curl http://127.0.0.1:9222/json/version
+   ```
+
+   `adb`、远程调试端点或硬件 WebGPU 任一项不可用时，只做环境记录，不进入性能统计。
+3. **硬件适配器预检。** 用 Android Chrome 打开固定 URL，通过 DevTools Protocol 读取 `navigator.gpu.requestAdapter()`、适配器信息、页面暴露的 PVS backend 和模型初始化状态。必须确认 backend 为 `worker-webgpu`/`webgpu`，适配器为真实移动 GPU，且没有 CPU、AABB 或其他降级路径；同时检查页面错误、WebGPU device lost、shader 编译错误和资源请求错误。
+4. **小规模 schema smoke。** 每个场景先执行 3 次、每次 256 个候选的预测，检查输出长度、实例 ID 范围、分数是否有限、冻结阈值下结果是否可复现、页面是否无错误，以及首轮模型 dispatch 前没有目标 GLB 的三角形/材质/纹理请求。此步骤失败则停止该设备，不执行大矩阵。
+5. **功能一致性 smoke。** 使用 M12 固定 cases 对比 PyTorch FP16 参考与设备 WebGPU 输出，记录可见性和下载优先级的最大绝对误差、阈值翻转率、实例集合 Jaccard 和 GLB 排序相关性。误差门限先由桌面真实 WebGPU 的 M12 结果冻结；在门限尚未冻结前只能标记为 exploratory，不能写成通过。
+6. **正式矩阵。** 依次执行冷缓存、温缓存和网络 trace 条件；每个条件按三条轨迹和候选规模桶运行，保留完整原始记录。不要在同一批次中更新页面代码、模型、资产、Chrome 或设备系统。
+
+Android Chrome 的自动化可以通过 `adb forward` 暴露的 DevTools Protocol 连接；后续实现的采集器应支持类似
+`chromium.connectOverCDP('http://127.0.0.1:9222')` 的连接方式，而不是在服务器上启动桌面 Chromium 代替真实设备。
+
+### 7. 原始数据格式与有效运行判定
+
+每次运行写一份 JSONL，推荐目录为：
+
+```text
+benchmark/out/m10_mobile/<commit>/<device>/<scene>/<cache>/<network>/<trajectory>/run-001.jsonl
+```
+
+每条记录至少包含以下字段：
+
+| 字段 | 含义 |
+|---|---|
+| `schema`, `commit`, `runId` | 记录格式、代码提交和运行唯一标识 |
+| `device`, `android`, `chrome`, `adapter` | 设备、系统、浏览器和硬件 WebGPU 适配器 |
+| `scene`, `trajectory`, `cache`, `network` | 场景、轨迹、缓存状态和网络条件 |
+| `candidateCount`, `candidateHash`, `featurePageHitRate` | 后退视锥候选数量、候选集合校验值和特征页命中率 |
+| `timings` | 候选生成、buffer 更新、dispatch、readback、实例聚合、调度、首个有用画面和 GLB 解码/上传耗时 |
+| `frame` | p50/p95 统计前的逐帧耗时、掉帧和长帧计数 |
+| `memory`, `temperature`, `battery` | JS heap、GPU/纹理内存、温度、电量及可取得的功耗信息 |
+| `errors`, `deviceLost`, `fallback` | 页面错误、设备丢失和任何降级路径 |
+| `valid`, `invalidReason` | 是否进入统计以及被排除的明确原因 |
+
+有效运行必须同时满足：硬件 adapter 未变化、无页面错误和 device lost、模型输出有限且候选集合哈希匹配、无兼容降级、请求没有返回 HTML/错误页面、场景没有被浏览器强制回收。温度过高、设备降频、网络超时和 OOM 不能静默删除，必须作为无效原因单独统计。
+
+### 8. 统计、质量门和交付物
+
+对每一个“设备 × 场景 × 缓存 × 网络 × 轨迹 × 候选桶”单元，先去除预注册的 warm-up，再对有效运行计算 p50、p95、p99 和 95% bootstrap 区间。bootstrap 的重采样单位是完整运行，不是单个 dispatch 或单帧；有效运行少于 25 次时只报告缺失，不补造分位数。
+
+质量门分为三类：
+
+- **兼容性门：** 硬件 WebGPU、Worker 推理、实例级过滤和 GLB 调度均可运行，无降级、无 device lost、无 OOM。
+- **正确性门：** M12 与参考输出的误差、阈值翻转、实例集合和 GLB 排序达到已冻结的 parity 门限；同一冻结阈值下仍满足模型独立报告中的 weighted recall 与 miss-pixel 安全约束。移动端不得为了性能改变阈值或候选语义。
+- **性能门：** 10k 候选时 WebGPU 查询 p95 `<50 ms`，主线程附加工作 p95 `<2 ms`，不出现连续长帧；同时报告首个有用画面、GLB 字节、峰值内存和温度变化。该数值是当前建议目标，不是已完成的设备实测结论。
+
+最终交付两份文件：一份不删减的原始 JSONL/trace 清单，一份按设备和场景分开的结果报告 `m10_mobile_results_<date>.md`。报告必须明确区分“实测通过”“设备证据缺失”和“未达到目标”，不得把桌面 SwiftShader、模拟器或单次 smoke 填入移动端 p50/p95/p99。

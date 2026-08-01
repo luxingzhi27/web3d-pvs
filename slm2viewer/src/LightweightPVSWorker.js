@@ -14,6 +14,7 @@ let state = {
   meta: null,
   runtimeMeta: null,
   pvs: null,
+  m12Pvs: null,
   componentAabbs: null,
   instanceToGlobalGlb: null,
   localToGlobalInstance: null,
@@ -471,6 +472,7 @@ async function initWorker(message) {
       : null,
     downloadPlanMode: normalizeDownloadPlanMode(message.downloadPlanMode),
     assetVersion: message.assetVersion || null,
+    m12Pvs: null,
   };
 
   const metaStart = nowMs();
@@ -664,6 +666,59 @@ async function predictWorker(message) {
   });
 }
 
+async function m12ProbeWorker(message) {
+  if (!state.ready) throw new Error('Lightweight PVS worker is not ready.');
+  if (!state.m12Pvs) {
+    const probe = new InstancePVS(state.assetBaseUrl, {
+      runtimeMetaUrl: '',
+      debugLogging: false,
+      assetVersion: state.assetVersion,
+      inferenceFovYDeg: MODEL_INPUT_FOV_Y_DEG,
+      deferRuntimeMeta: true,
+      benchmarkRawOutput: true,
+    });
+    try {
+      await probe.init();
+    } catch (error) {
+      const detail = probe.lastWebGPUTimings?.error || probe.lastWebGPUTimings?.unavailableReason;
+      if (detail && !String(error.message || '').includes(detail)) {
+        error.message = `${error.message || error} (${detail})`;
+      }
+      throw error;
+    }
+    state.m12Pvs = probe;
+  }
+  const cases = Array.isArray(message.cases) ? message.cases : [];
+  const results = [];
+  for (const item of cases) {
+    // M12 cases are generated offline with a `camera` field; accepting the
+    // older `snapshot` spelling keeps captured probes backwards compatible.
+    const snapshot = item && (item.snapshot || item.camera) ? (item.snapshot || item.camera) : {};
+    const camera = buildPredictionCamera(snapshot, state.meta);
+    const candidateIds = Array.isArray(item?.candidateIds)
+      ? item.candidateIds.map((value) => Number(value) >>> 0)
+      : [];
+    const prediction = await state.m12Pvs.predict(camera, {
+      camera,
+      candidateIds,
+      returnRawOutput: true,
+    }, camera);
+    results.push({
+      caseId: item?.caseId == null ? results.length : item.caseId,
+      backend: prediction?.backend || state.m12Pvs.backend,
+      candidateIds: prediction?.rawCandidateIds || candidateIds,
+      rawOutput: prediction?.rawOutput || [],
+      timings: prediction?.timings || null,
+    });
+  }
+  self.postMessage({
+    type: 'm12-result',
+    requestId: message.requestId,
+    backend: state.m12Pvs.backend,
+    results,
+  });
+}
+
 self.onmessage = (event) => {
   const message = event.data || {};
   Promise.resolve()
@@ -694,14 +749,18 @@ self.onmessage = (event) => {
         }
       } else if (message.type === 'predict') {
         await predictWorker(message);
+      } else if (message.type === 'm12-probe') {
+        await m12ProbeWorker(message);
       }
     })
     .catch((error) => {
-      self.postMessage({
-        type: 'error',
+      const payload = {
+        type: message.type === 'm12-probe' ? 'm12-error' : 'error',
         serial: message.serial,
+        requestId: message.requestId,
         message: error && error.message ? error.message : String(error),
         stack: error && error.stack ? error.stack : null,
-      });
+      };
+      self.postMessage(payload);
     });
 };

@@ -47,6 +47,11 @@
 39. M7 HKUST 正式 validation/calibration 下载调度结果：`experiments/m7_unified_download_scheduling_2026-08-01.md`
 40. M0 Metropolis 正式 frozen test：`evaluation/m0_metropolis_formal_frozen_test_2026-08-01.md`
 41. M5 HKUST 正式 calibration 图像门：`evaluation/m5_hkust_formal_calibration_image_2026-08-01.md`
+42. M11 航向泛化与跨场景适配协议：`experiments/m11_directional_generalization_protocol_2026-08-01.md`
+43. NeuralStreamWeb3D 投稿计划执行记录：`experiments/neuralstreamweb3d_submission_execution_2026-08-01.md`
+44. M0 frozen test 关键产物清单：`evaluation/m0_frozen_artifact_manifest_2026-08-01.json`
+45. M5 HKUST 图像安全门失败分析：`evaluation/m5_hkust_image_failure_analysis_2026-08-01.md`
+46. M5 图像安全修复实验预注册协议：`experiments/m5_visual_safety_repair_protocol_2026-08-02.md`
 
 ## 当前场景
 

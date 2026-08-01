@@ -192,6 +192,10 @@ export class InstancePVS {
     this.isReady = false;
     this.backend = 'uninitialized';
     this.debugLogging = Boolean(options.debugLogging);
+    // M12 uses a separate, opt-in pipeline that exposes raw logits for
+    // PyTorch/WebGPU parity checks. Production assets keep the normal two-word
+    // packed output and never enter this branch.
+    this.benchmarkRawOutput = Boolean(options.benchmarkRawOutput);
     this.assetVersion = options.assetVersion || null;
     this.configuredInferenceFovYDeg = MODEL_INPUT_FOV_Y_DEG;
     this.inferenceFovYDeg = MODEL_INPUT_FOV_Y_DEG;
@@ -354,6 +358,7 @@ export class InstancePVS {
   }
 
   _outputValueWords() {
+    if (this.benchmarkRawOutput && this._isDirectionalOcclusionProxyRuntime()) return 4;
     const hasPriorityOutput = this.meta?.outputsDownloadPriority === true || this.meta?.outputsGlbPriority === true;
     return Math.max(1, Number(this.meta?.outputValueWords || (hasPriorityOutput ? 2 : 1)) | 0);
   }
@@ -1079,10 +1084,18 @@ export class InstancePVS {
       this.assetBuffer = null;
       this.gpuWeightData = null;
       const pipelineStart = nowMs();
+      const shaderModule = this.device.createShaderModule({ code: this._buildShader() });
+      if (typeof shaderModule.getCompilationInfo === 'function') {
+        const compilationInfo = await shaderModule.getCompilationInfo();
+        const errors = (compilationInfo.messages || [])
+          .filter((message) => message.type === 'error')
+          .map((message) => `${message.lineNum || 0}:${message.linePos || 0} ${message.message}`);
+        if (errors.length) throw new Error(`WGSL compilation failed: ${errors.join('; ')}`);
+      }
       const pipelineDesc = {
         layout: 'auto',
         compute: {
-          module: this.device.createShaderModule({ code: this._buildShader() }),
+          module: shaderModule,
           entryPoint: 'main',
         },
       };
@@ -1102,6 +1115,11 @@ export class InstancePVS {
       return true;
     } catch (error) {
       if (this.debugLogging) console.warn('[InstancePVS] WebGPU init failed.', error);
+      this.lastWebGPUTimings = {
+        ...(this.lastWebGPUTimings || {}),
+        unavailableReason: 'WebGPU initialization failed',
+        error: error && error.message ? String(error.message) : String(error),
+      };
       this.adapter = null;
       this.device = null;
       this.pipeline = null;
@@ -1310,6 +1328,7 @@ export class InstancePVS {
 
     const postStart = performance.now();
     const returnAllScores = Boolean(legacyOptions.returnAllScores);
+    const returnRawOutput = Boolean(legacyOptions.returnRawOutput && this.benchmarkRawOutput);
     const prefetchThreshold = Math.max(0, Math.min(1, Number(
       legacyOptions.prefetchThreshold !== undefined
         ? legacyOptions.prefetchThreshold
@@ -1437,6 +1456,10 @@ export class InstancePVS {
       candidateCount: candidateIds.length,
       visibleInstanceCount: visibleInstances.length,
       hasModelDownloadPriority,
+      ...(returnRawOutput ? {
+        rawOutput: Array.from(raw),
+        rawCandidateIds: Array.from(candidateIds),
+      } : {}),
       backend: this.backend,
       executionTime: end - start,
       timings: { ...this.lastPredictTimings },
@@ -2172,13 +2195,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let final_logit = base_logit - inhibition_value(query);
   let final_prob = sigmoid(final_logit);
   let utility_prob = sigmoid(utility_logit(query, final_prob));
-  let download_prob = sigmoid(download_logit(query, final_prob, utility_prob));
+  let download_logit_value = download_logit(query, final_prob, utility_prob);
+  let download_prob = sigmoid(download_logit_value);
   let vis_q16 = u32(clamp(final_prob, 0.0, 1.0) * 65535.0);
   let dl_q16 = u32(clamp(download_prob, 0.0, 1.0) * 65535.0);
   let flag = select(0u, 1u, final_prob >= threshold);
   let out_base = idx * OUTPUT_VALUE_WORDS;
   output_values[out_base] = (vis_q16 << 1u) | flag;
   output_values[out_base + 1u] = dl_q16;
+  if (OUTPUT_VALUE_WORDS >= 4u) {
+    output_values[out_base + 2u] = bitcast<u32>(final_logit);
+    output_values[out_base + 3u] = bitcast<u32>(download_logit_value);
+  }
 }
 `;
   }
