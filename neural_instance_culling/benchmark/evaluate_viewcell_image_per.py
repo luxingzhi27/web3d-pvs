@@ -78,6 +78,12 @@ class SetMetrics:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate viewcell PVS with component-ID image manifests.")
     parser.add_argument("--model-name", default="pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best")
+    parser.add_argument(
+        "--model-spec",
+        action="append",
+        default=[],
+        help="Explicit dynamic model spec name|checkpoint|runtime_features|calibration_summary; repeat is rejected.",
+    )
     parser.add_argument("--runtime-meta", type=Path, default=Path("hkust-v3/assets/runtimeVisibilityMeta.json"))
     parser.add_argument(
         "--viewcell-dataset",
@@ -143,6 +149,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-every", type=int, default=1)
     parser.add_argument("--skip-raw-subpose-gt", action="store_true", help="Skip optional raw subpose labels; this does not create a formal image reference.")
     return parser.parse_args()
+
+
+def parse_model_spec(value: str) -> tuple[str, dict[str, str]]:
+    parts = [part.strip() for part in str(value).split("|")]
+    if len(parts) != 4 or any(not part for part in parts):
+        raise ValueError("--model-spec must use name|checkpoint|runtime_features|calibration_summary")
+    name, checkpoint, runtime_features, eval_summary = parts
+    return name, {
+        "kind": "directional_occlusion_proxy_encoder",
+        "checkpoint": checkpoint,
+        "runtime_features": runtime_features,
+        "eval_summary": eval_summary,
+    }
 
 
 def read_json(path: Path) -> Any:
@@ -687,6 +706,20 @@ def resolve_threshold(args: argparse.Namespace, spec: dict[str, str], runner) ->
             )
         return float(runner.threshold), {"source": "runner fallback", "threshold": float(runner.threshold)}
     data = read_json(Path(eval_summary))
+    if data.get("protocol") == "calibration_ready_pre_test":
+        if int(data.get("testEvaluationCount", 0)) != 0:
+            raise RuntimeError(
+                f"{eval_summary} is marked pre-test but records testEvaluationCount={data.get('testEvaluationCount')}."
+            )
+        frozen = data.get("frozenThreshold")
+        if frozen is None or not np.isfinite(float(frozen)) or not 0.0 <= float(frozen) <= 1.0:
+            raise RuntimeError(f"{eval_summary} has no valid calibration frozenThreshold.")
+        return float(frozen), {
+            "source": "pre-test calibration summary; no threshold scan",
+            "threshold": float(frozen),
+            "protocol": data.get("protocol"),
+            "testEvaluationCount": 0,
+        }
     if data.get("protocol") == "frozen_calibration_one_shot_test":
         if int(data.get("testEvaluationCount", 0)) != 1:
             raise RuntimeError(
@@ -902,7 +935,15 @@ def run_true_glb_renderer(
 
 def main() -> None:
     args = parse_args()
-    output_dir = args.output_dir or (ROOT / "benchmark/out" / f"viewcell_image_per_{args.model_name}")
+    if len(args.model_spec) > 1:
+        raise ValueError("--model-spec may be supplied at most once")
+    dynamic_spec = None
+    if args.model_spec:
+        dynamic_spec = parse_model_spec(args.model_spec[0])
+        output_model_name = dynamic_spec[0]
+    else:
+        output_model_name = args.model_name
+    output_dir = args.output_dir or (ROOT / "benchmark/out" / f"viewcell_image_per_{output_model_name}")
     output_dir.mkdir(parents=True, exist_ok=True)
     prepare_flat_output_dir(output_dir / "samples", (".bin",))
     prepare_flat_output_dir(output_dir / "previews", (".png",))
@@ -926,7 +967,7 @@ def main() -> None:
     if pose_dataset.poses.shape[0] != viewcells.viewcell_ids.shape[0]:
         raise RuntimeError(f"Pose CSR count {pose_dataset.poses.shape[0]} does not match viewcell count {viewcells.viewcell_ids.shape[0]}")
 
-    specs = selected_default_specs(args.model_name)
+    specs = {dynamic_spec[0]: dynamic_spec[1]} if dynamic_spec is not None else selected_default_specs(args.model_name)
     canonical_name, spec = next(iter(specs.items()))
     runner = load_runner(canonical_name, spec, args.runtime_meta, device)
     threshold, threshold_info = resolve_threshold(args, spec, runner)
@@ -1211,6 +1252,7 @@ def main() -> None:
         "created": datetime.now().isoformat(timespec="seconds"),
         "neuralPvsMetricReference": "https://windingwind.github.io/neuralpvs/index.html",
         "modelName": canonical_name,
+        "modelSpec": spec,
         "threshold": float(threshold),
         "thresholdSelection": threshold_info,
         "device": str(device),
