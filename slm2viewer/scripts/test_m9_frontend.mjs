@@ -13,6 +13,7 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const VIEWER_DIR = path.resolve(SCRIPT_DIR, '..');
 const loaderSource = fs.readFileSync(path.join(VIEWER_DIR, 'slm2/SLM2Loader.js'), 'utf8');
 const viewerSource = fs.readFileSync(path.join(VIEWER_DIR, 'src/viewer.js'), 'utf8');
+const workerSource = fs.readFileSync(path.join(VIEWER_DIR, 'src/LightweightPVSWorker.js'), 'utf8');
 const loaderClassStart = loaderSource.indexOf('export class SLM2Loader');
 assert.notEqual(loaderClassStart, -1, 'SLM2Loader class must be present');
 
@@ -219,6 +220,19 @@ function testUpdateRunsBeforeRender() {
   assert.ok(updateIndex < renderIndex, 'SLM2Loader update must precede the frame render');
 }
 
+function testCandidateSelectionPropagationContract() {
+  assert.match(workerSource, /candidateSelection\s*=\s*normalizeCandidateSelection/,
+    'worker must normalize InstancePVS candidate selection metadata');
+  assert.match(workerSource, /candidateSelection,\s*visibleInstanceCount/,
+    'worker result must expose candidate selection metadata');
+  assert.match(loaderSource, /candidateSelection:\s*predictionPayload/,
+    'SLM2Loader scheduler stats must retain candidate selection metadata');
+  assert.match(loaderSource, /candidateSelection:\s*pred\s*&&/,
+    'benchmark visibility state must receive candidate selection metadata');
+  assert.match(viewerSource, /pvsCandidateSelection/,
+    'debug panel must expose candidate selection metadata');
+}
+
 function testValidBindingStillFiltersInstances() {
   const loader = createLoader();
   const hash = 'valid-binding';
@@ -247,4 +261,5 @@ testInvalidBindingFailsClosed();
 testMissingExpectedBindingFailsClosed();
 testValidBindingStillFiltersInstances();
 testUpdateRunsBeforeRender();
-console.log('M9 frontend regression checks passed (7 cases).');
+testCandidateSelectionPropagationContract();
+console.log('M9 frontend regression checks passed (8 cases).');

@@ -182,6 +182,7 @@ export class LightweightPVSDispatcher {
     this.lastPredictTimings = {
       serial: data.serial,
       ...(data.timings || {}),
+      candidateSelection: data.candidateSelection || data.timings?.candidateSelection || null,
       stale: data.stale,
       backend: data.backend || this.backend,
       fallbackReason: data.fallbackReason || null,

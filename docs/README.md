@@ -33,9 +33,10 @@
 25. M0/M1 中间校准提前退出的审计与协议恢复：`experiments/m0_training_protocol_recovery_2026-08-01.md`
 26. M7/M8 离线 pose-index 轨迹下载回放、冷/温缓存和完成事件：`experiments/m7_m8_trajectory_replay_2026-08-01.md`
 27. M9 浏览器运行时、Cold-0、实例绑定 fail-closed 和远端 GLB smoke：`frontend/m9_browser_runtime_benchmark_2026-08-01.md`
-28. M13 复现资产清单工具：`neural_instance_culling/tools/build_artifact_manifest.py`（只记录路径、字节数和 SHA-256，不复制大文件）
-29. M8 确定性 pose-index 轨迹生成器：`neural_instance_culling/benchmark/build_pose_index_trajectory.py`（明确标注为非真实导航）
-30. M5 真实浏览器实例级 Color-ID 渲染 smoke：`evaluation/m5_image_pipeline_smoke_2026-08-01.md`
+28. M9 空间 AABB 索引与全量扫描集合一致性、候选规模和耗时审计：`evaluation/m9_spatial_aabb_index_audit_2026-08-01.json`
+29. M13 复现资产清单工具：`neural_instance_culling/tools/build_artifact_manifest.py`（只记录路径、字节数和 SHA-256，不复制大文件）
+30. M8 确定性 pose-index 轨迹生成器：`neural_instance_culling/benchmark/build_pose_index_trajectory.py`（明确标注为非真实导航）
+31. M5 真实浏览器实例级 Color-ID 渲染 smoke：`evaluation/m5_image_pipeline_smoke_2026-08-01.md`
 
 ## 当前场景
 

@@ -256,6 +256,7 @@ export class SLM2Loader
       prefetchComponentIds: [],
       prefetchGlbIds: [],
       priorityItems: [],
+      candidateSelection: null,
     };
     this.lastLoadMetrics = {
       queueLength: 0,
@@ -3271,6 +3272,7 @@ export class SLM2Loader
       prefetchComponentIds: this._normalizeIdList(payload.prefetchComponentIds),
       prefetchGlbIds: this._normalizeIdList(payload.prefetchGlbIds),
       priorityItems: this._sanitizePriorityItems(payload.priorityItems),
+      candidateSelection: payload.candidateSelection || null,
     };
   }
 
@@ -3288,6 +3290,9 @@ export class SLM2Loader
       prefetchComponentIds: this.lastBenchmarkVisibilityIds.prefetchComponentIds.slice(),
       prefetchGlbIds: this.lastBenchmarkVisibilityIds.prefetchGlbIds.slice(),
       priorityItems: this.lastBenchmarkVisibilityIds.priorityItems.slice(),
+      candidateSelection: this.lastBenchmarkVisibilityIds.candidateSelection
+        ? Object.assign({}, this.lastBenchmarkVisibilityIds.candidateSelection)
+        : null,
     };
   }
 
@@ -3864,6 +3869,7 @@ export class SLM2Loader
                   prefetchComponentIds: appliedVisibility.prefetchComponentModelList || [],
                   prefetchGlbIds: (appliedVisibility.prefetchList || []).map(function(item){ return item.id; }),
                   priorityItems: appliedVisibility.priorityItems || [],
+                  candidateSelection: pred && (pred.candidateSelection || (pred.timings && pred.timings.candidateSelection)) || null,
                 });
                 this._recordVisibilityMetrics({
                   mode: 'neural',
@@ -5150,6 +5156,9 @@ export class SLM2Loader
       renderGlbCount: renderInfos.length,
       hasModelDownloadPriority: predictionPayload ? Boolean(predictionPayload.hasModelDownloadPriority) : false,
       prioritySource: predictionPayload && predictionPayload.timings ? predictionPayload.timings.prioritySource : null,
+      candidateSelection: predictionPayload
+        ? (predictionPayload.candidateSelection || (predictionPayload.timings && predictionPayload.timings.candidateSelection) || null)
+        : null,
       workerTimings: predictionPayload ? predictionPayload.timings || null : null,
     };
     this.lastLightweightPVSSchedulerStats = schedulerStats;

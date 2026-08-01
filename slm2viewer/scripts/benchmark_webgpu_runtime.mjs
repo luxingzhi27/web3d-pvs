@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const VIEWER_DIR = path.resolve(SCRIPT_DIR, '..');
-const SCRIPT_VERSION = 'm9-browser-runtime-audit-v2';
+const SCRIPT_VERSION = 'm9-browser-runtime-audit-v3';
 const DEFAULT_SCENE = 'hkust-v3';
 const DEFAULT_PORT = 3000;
 const DEFAULT_DURATION_MS = 15000;
@@ -639,6 +639,21 @@ function appendBrowserEvents(report, browserEvents) {
   }
 }
 
+function compactCandidateSelection(value) {
+  if (!value || typeof value !== 'object') return null;
+  const numberOrNull = (item) => {
+    const number = Number(item);
+    return Number.isFinite(number) ? number : null;
+  };
+  return {
+    source: value.source ? String(value.source) : null,
+    candidateCount: numberOrNull(value.candidateCount),
+    queryCellCount: numberOrNull(value.queryCellCount),
+    indexedInstanceCount: numberOrNull(value.indexedInstanceCount),
+    overflowInstanceCount: numberOrNull(value.overflowInstanceCount),
+  };
+}
+
 function compactRuntimeStats(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const visibility = raw.visibility || {};
@@ -651,6 +666,9 @@ function compactRuntimeStats(raw) {
   const startup = raw.startup || {};
   const load = raw.load || {};
   const gate = neural.predictionGate || {};
+  const candidateSelection = compactCandidateSelection(
+    prediction.candidateSelection || scheduler.candidateSelection,
+  );
   return {
     browserTimeMs: Number.isFinite(Number(raw.browserTimeMs)) ? Number(raw.browserTimeMs) : null,
     startup: {
@@ -686,6 +704,7 @@ function compactRuntimeStats(raw) {
           ? (scheduler.candidateCount == null ? null : Number(scheduler.candidateCount))
           : Number(prediction.candidateCount),
         candidateMs: prediction.candidateMs == null ? null : Number(prediction.candidateMs),
+        candidateSelection,
         rawInstanceCount: prediction.rawInstanceCount == null ? null : Number(prediction.rawInstanceCount),
         rawGlbCount: prediction.rawGlbCount == null ? null : Number(prediction.rawGlbCount),
         renderInstanceCount: prediction.renderInstanceCount == null ? null : Number(prediction.renderInstanceCount),
@@ -702,6 +721,7 @@ function compactRuntimeStats(raw) {
         renderComponentCount: scheduler.renderComponentCount == null ? null : Number(scheduler.renderComponentCount),
         renderGlbCount: scheduler.renderGlbCount == null ? null : Number(scheduler.renderGlbCount),
         backend: scheduler.backend || null,
+        candidateSelection,
       },
       renderVisibility: {
         epoch: renderVisibility.epoch == null ? null : Number(renderVisibility.epoch),
@@ -987,6 +1007,52 @@ function buildRuntimeAssetErrorSummary(report) {
   };
 }
 
+function percentile(values, probability) {
+  if (!values.length) return null;
+  const sorted = values.slice().sort((a, b) => a - b);
+  const position = (sorted.length - 1) * probability;
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  if (lower === upper) return sorted[lower];
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
+}
+
+function summarizeCandidateSelection(runtimeSnapshots) {
+  const selections = (runtimeSnapshots || [])
+    .map((snapshot) => snapshot?.neural?.prediction?.candidateSelection)
+    .filter((selection) => selection && Number.isFinite(Number(selection.candidateCount)));
+  const counts = selections.map((selection) => Number(selection.candidateCount));
+  const sourceCounts = {};
+  for (const selection of selections) {
+    const source = selection.source || 'unknown';
+    sourceCounts[source] = (sourceCounts[source] || 0) + 1;
+  }
+  if (!counts.length) {
+    return {
+      status: 'not-observed',
+      sampleCount: 0,
+      sourceCounts,
+      p50: null,
+      p95: null,
+      p99: null,
+      min: null,
+      max: null,
+      mean: null,
+    };
+  }
+  return {
+    status: 'observed',
+    sampleCount: counts.length,
+    sourceCounts,
+    p50: percentile(counts, 0.50),
+    p95: percentile(counts, 0.95),
+    p99: percentile(counts, 0.99),
+    min: Math.min(...counts),
+    max: Math.max(...counts),
+    mean: counts.reduce((sum, value) => sum + value, 0) / counts.length,
+  };
+}
+
 function buildSummary(report) {
   const events = report.events;
   const firstPrediction = events.find((event) => event.name === 'visibility.worker.postMessage' && event.details?.type === 'predict');
@@ -1080,6 +1146,7 @@ function buildSummary(report) {
       firstPredictionMetricMs: firstPredictionMs,
       finalBackend: report.runtimeSnapshots.at(-1)?.neural?.backend || null,
       finalRuntimePrediction: report.runtimeSnapshots.at(-1)?.neural?.prediction || null,
+      candidateSelection: summarizeCandidateSelection(report.runtimeSnapshots),
       backendTransitions: report.runtimeSnapshots
         .map((snapshot) => snapshot.neural?.backend)
         .filter((backend, index, values) => backend && values.indexOf(backend) === index),
@@ -1232,6 +1299,7 @@ async function pollPageRuntime(page, report, durationMs, pollMs, waitFor, settle
                 serial: prediction.serial, totalMs: prediction.totalMs,
                 inferenceMs: prediction.inferenceMs, postMs: prediction.postMs,
                 candidateCount: prediction.candidateCount, candidateMs: prediction.candidateMs,
+                candidateSelection: prediction.candidateSelection || scheduler.candidateSelection || null,
                 rawInstanceCount: prediction.rawInstanceCount,
                 rawGlbCount: prediction.rawGlbCount, renderInstanceCount: prediction.renderInstanceCount,
                 renderGlbCount: prediction.renderGlbCount, backend: prediction.backend, stale: prediction.stale,
@@ -1241,6 +1309,7 @@ async function pollPageRuntime(page, report, durationMs, pollMs, waitFor, settle
                 rawGlbCount: scheduler.rawGlbCount, scheduledComponentCount: scheduler.scheduledComponentCount,
                 scheduledGlbCount: scheduler.scheduledGlbCount, renderComponentCount: scheduler.renderComponentCount,
                 renderGlbCount: scheduler.renderGlbCount, backend: scheduler.backend,
+                candidateSelection: scheduler.candidateSelection || null,
               },
               renderVisibility: neural.renderVisibility || null,
               renderRefresh: neural.renderRefresh || null,
@@ -1520,6 +1589,20 @@ function runSelfTest() {
     contentType: 'text/html', contentValidation: 'invalid-html-content',
   });
   assert(buildSummary(invalidContent).targetGlb.responseSummary.invalidContentResponses === 1, 'invalid target content is counted separately from request ordering');
+  const candidateSummary = summarizeCandidateSelection([
+    { neural: { prediction: { candidateSelection: { source: 'spatial_aabb_index', candidateCount: 10 } } } },
+    { neural: { prediction: { candidateSelection: { source: 'spatial_aabb_index', candidateCount: 20 } } } },
+    { neural: { prediction: { candidateSelection: { source: 'spatial_aabb_index', candidateCount: 40 } } } },
+  ]);
+  assert(candidateSummary.p50 === 20 && candidateSummary.p95 > 20 && candidateSummary.p99 > candidateSummary.p95,
+    'candidate p50/p95/p99 summary is computed');
+  const compact = compactRuntimeStats({
+    neural: {
+      predictTimings: { candidateCount: 12, candidateSelection: { source: 'spatial_aabb_index', candidateCount: 12 } },
+    },
+  });
+  assert(compact.neural.prediction.candidateSelection.source === 'spatial_aabb_index',
+    'candidate selection is retained in compact runtime stats');
   const output = { schemaVersion: 'm9-self-test-v1', scriptVersion: SCRIPT_VERSION, passed: true, assertions };
   console.log(JSON.stringify(output, null, 2));
   return output;

@@ -257,6 +257,7 @@ export class Viewer
       pvsInferenceMs: '-',
       pvsPostMs: '-',
       pvsPredictionAgeMs: '-',
+      pvsCandidateSelection: '-',
       pvsGate: '-',
       pvsRawInstances: '0',
       pvsRawGlbs: '0',
@@ -543,6 +544,7 @@ export class Viewer
     const render = neural.renderVisibility || {};
     const actualRender = neural.actualRender || {};
     const scheduler = neural.priorityScheduler || {};
+    const candidateSelection = neural.predictTimings?.candidateSelection || scheduler.candidateSelection || {};
     const resourceWS = neural.resourceWS || {};
     const frozenInspect = neural.frozenInspect || {};
     const httpAdaptive = load.httpAdaptive || {};
@@ -572,6 +574,7 @@ export class Viewer
       `neuralInit total=${fmt(initTimings.totalMs, 0)}ms fetch=${fmt(initTimings.fetchMs, 0)} decode=${fmt(initTimings.decodeMs, 0)} parse=${fmt(initTimings.parseMs, 0)} gpu=${fmt(initTimings.gpuInitMs, 0)}ms`,
       `gate pos=${fmt(gate.positionDelta, 1)} angle=${fmt(gate.angleDeltaDeg, 1)}deg min=${fmt(gate.minIntervalMs, 0)}ms forceNext=${gate.forceNext}`,
       `prediction serial=${visibility.serial || '-'} age=${predictionAge == null ? '-' : fmt(predictionAge, 0) + 'ms'} latency=${fmt(visibility.latencyMs)}ms`,
+      `candidate source=${candidateSelection.source || '-'} count=${candidateSelection.candidateCount ?? '-'} cells=${candidateSelection.queryCellCount ?? '-'} indexed=${candidateSelection.indexedInstanceCount ?? '-'} overflow=${candidateSelection.overflowInstanceCount ?? '-'}`,
       `modelBackGlb=${visibility.rawGlbCount || 0} loadNow=${notes.loadNowGlbCount != null ? notes.loadNowGlbCount : '-'} currentFrustumGlb=${notes.renderCandidateGlbCount != null ? notes.renderCandidateGlbCount : '-'} residentVisible=${notes.renderResidentCount != null ? notes.renderResidentCount : (visibility.visibleGlbCount != null ? visibility.visibleGlbCount : '-')} modelBackInst=${visibility.rawInstanceCount || 0}`,
       `download queue=${load.queueLength || 0} wanted=${load.wantedHashCount || 0} inflight=${load.inflightCount || 0} pendingParse=${load.pendingHashCount || 0} pendingIntegrate=${load.pendingSceneInsertions || 0}`,
       `prefetch=${load.prefetchQueueLength || 0} activeLoads=${load.activeDirectLoadCount || 0} integrated+=${load.lastIntegratedCount || 0} batch=${fmt(load.lastBatchMs)}ms tex=${fmt(load.lastTextureTaskMs)}ms`,
@@ -717,6 +720,7 @@ export class Viewer
     const actualRender = neural.actualRender || {};
     const httpAdaptive = load.httpAdaptive || {};
     const predictTimings = neural.predictTimings || {};
+    const scheduler = neural.priorityScheduler || {};
     const initTimings = neural.initTimings || {};
     const gate = neural.predictionGate || {};
     const modelInfo = neural.modelInfo || predictTimings.modelInfo || {};
@@ -724,6 +728,7 @@ export class Viewer
     const notes = visibility.notes || {};
     const predictDebug = this.predictionDebugLastStats || {};
     const predictionAge = visibility.timestamp ? Math.max(0, performance.now() - visibility.timestamp) : null;
+    const candidateSelection = predictTimings.candidateSelection || scheduler.candidateSelection || {};
 
     this.runtimeDebugState.frontendAssetEstimate = FRONTEND_RUNTIME_ASSET_ESTIMATE.label;
     this.runtimeDebugState.cullingMode = neural.cullingMode || this.slm2Loader.getCullingMode();
@@ -742,6 +747,7 @@ export class Viewer
     this.runtimeDebugState.pvsInferenceMs = this._formatRuntimeDebugNumber(predictTimings.inferenceMs, 1, 'ms');
     this.runtimeDebugState.pvsPostMs = this._formatRuntimeDebugNumber(predictTimings.postMs, 1, 'ms');
     this.runtimeDebugState.pvsPredictionAgeMs = predictionAge == null ? '-' : this._formatRuntimeDebugNumber(predictionAge, 0, 'ms');
+    this.runtimeDebugState.pvsCandidateSelection = `${candidateSelection.source || '-'} / ${this._formatRuntimeDebugInt(candidateSelection.candidateCount)} candidates / ${this._formatRuntimeDebugInt(candidateSelection.queryCellCount)} cells / ${this._formatRuntimeDebugInt(candidateSelection.overflowInstanceCount)} overflow`;
     this.runtimeDebugState.pvsGate = `pos ${this._formatRuntimeDebugNumber(gate.positionDelta, 1, 'm')} / yaw ${this._formatRuntimeDebugNumber(gate.yawDeltaDeg || gate.angleDeltaDeg, 1, '°')} / min ${this._formatRuntimeDebugNumber(gate.minIntervalMs, 0, 'ms')}`;
     this.runtimeDebugState.pvsRawInstances = this._formatRuntimeDebugInt(
       predictTimings.rawInstanceCount != null ? predictTimings.rawInstanceCount : visibility.rawInstanceCount
@@ -2239,6 +2245,7 @@ export class Viewer
     addRuntimeStatus('pvsInferenceMs', '模型推理耗时');
     addRuntimeStatus('pvsPostMs', '后处理耗时');
     addRuntimeStatus('pvsPredictionAgeMs', '预测结果年龄');
+    addRuntimeStatus('pvsCandidateSelection', '后退视锥候选索引');
     addRuntimeStatus('pvsGate', '触发门槛');
     addRuntimeStatus('pvsRawInstances', '后退视锥模型构件');
     addRuntimeStatus('pvsRawGlbs', '后退视锥模型GLB');

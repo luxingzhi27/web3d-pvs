@@ -440,3 +440,61 @@ M9 离线审计自测通过；本次 3 秒本地 Chromium smoke 因本地没有�
 当前质量状态：空间索引代码门通过，远端有效主体 GLB 的长时 p95 和移动端规模门仍未完成。必须在有效主体资源上比较
 索引与全扫描的候选集合哈希、漏失数量、候选耗时和端到端 p95，确认 `candidateSelection.source=spatial_aabb_index`
 不会改变画面安全性后，才能将其计入 M9 性能结果。
+
+## 8.6 候选元数据传递与空间索引复核（2026-08-01）
+
+### 变更目的
+
+将后退相机候选阶段从模型输出中单独标识出来，避免把“候选实例数”“模型预测可见实例数”和“真实相机最终显示实例数”混为一个统计量。新增的候选元数据包含查询来源、候选数量、空间桶查询数量、索引实例数和溢出实例数，只用于调试和 benchmark，不改变模型输入、阈值或显示语义。
+
+### 实现与验证
+
+候选元数据现在沿以下链路传递：
+
+```text
+InstancePVS 的 AABB 查询
+  -> LightweightPVSWorker
+  -> LightweightPVSDispatcher
+  -> SLM2Loader runtime stats / benchmark visibility state
+  -> 前端调试面板与 benchmark_webgpu_runtime.mjs
+```
+
+修改内容：
+
+- Worker 统一整理空间索引或全量扫描的候选来源；
+- 加载器的 `priorityScheduler` 和 benchmark 可见性状态保留候选查询信息；
+- 右上角调试面板显示候选来源、候选数、查询桶数和溢出实例数；
+- `benchmark_webgpu_runtime.mjs` 保存候选信息，并对观测到的候选数计算 p50/p95/p99；
+- 新增 `scripts/benchmark_m9_spatial_index.mjs`，使用真实 HKUST CSR 位姿逐 pose 比较空间索引与全量扫描的实例集合哈希。
+
+回归命令：
+
+```bash
+npm run test:m9
+npm test
+node scripts/benchmark_webgpu_runtime.mjs --self-test
+npm run build
+node scripts/benchmark_m9_spatial_index.mjs --samples 128 --far 2000 \
+  --out ../docs/evaluation/m9_spatial_aabb_index_audit_2026-08-01.json
+```
+
+结果：
+
+| 项目 | 结果 |
+|---|---:|
+| M9 前端回归 | 8/8 通过 |
+| 当前场景/模型完整性 smoke | 通过 |
+| benchmark 自测 | 9/9 通过 |
+| Parcel 构建 | 通过 |
+| 空间索引/全量扫描集合不一致 | 0/128 |
+| 索引实例数 / 溢出实例数 | 18,810 / 21 |
+| 真实主体 GLB 远端抽样魔数检查 | 8/8 有效 |
+| 远端 WebGPU 最终后端 | `worker-webgpu` |
+
+空间索引审计的候选规模完全一致：强制索引和全量扫描的 p50/p95/p99 分别为 `1623.5/18394.8/18830.19`。在该审计配置下，强制索引的候选查询耗时为 `11.07/16.48/36.97 ms`，全量扫描为 `0.56/2.85/3.17 ms`。这说明当前实现的正确性已通过，但在远裁剪面为 2,000 米的这组位姿上，桶枚举开销高于直接扫描；因此生产逻辑保留查询桶超过 `100,000` 时回退全量扫描的策略，没有把空间索引宣称为无条件加速。
+
+远端主体 GLB 的浏览器 smoke 使用 `https://www.liteweb3d.com/data/hkust-v3/`，观测到 253 个非 HTML 响应，其中 8 个读取到 `glTF` 魔数；最终 WebGPU 预测的候选数为 5,959，候选来源为 `full_aabb_scan`，4 个候选快照的 p50/p95/p99 均为 5,959。这个分位数样本来自单次桌面 smoke，只用于确认统计链路和当前场景量级，不能作为移动端性能结论。
+
+### 当前结论与风险
+
+本轮证明空间索引不会漏掉或新增候选实例，候选元数据也已经能被前端和审计工具读取。它没有证明当前默认远裁剪面下索引一定比全量 AABB 扫描更快；在真实 HKUST 配置中，本轮观测实际走的是全量扫描。后续若要继续优化，应先减少候选查询的空间范围或采用更适合视锥形状的层次结构，再以相同集合哈希、候选耗时和最终画面结果重新验收。

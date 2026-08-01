@@ -252,6 +252,21 @@ function componentIdsToGlbIds(componentIds) {
   return Array.from(set).sort((a, b) => a - b);
 }
 
+function normalizeCandidateSelection(value, fallbackCount = null) {
+  if (!value || typeof value !== 'object') return null;
+  const numberOrNull = (item) => {
+    const number = Number(item);
+    return Number.isFinite(number) ? number : null;
+  };
+  return {
+    source: value.source ? String(value.source) : null,
+    candidateCount: numberOrNull(value.candidateCount) ?? numberOrNull(fallbackCount),
+    queryCellCount: numberOrNull(value.queryCellCount),
+    indexedInstanceCount: numberOrNull(value.indexedInstanceCount),
+    overflowInstanceCount: numberOrNull(value.overflowInstanceCount),
+  };
+}
+
 function candidatePriority(item, fallback = 0) {
   const downloadPriority = Number(item?.downloadPriority);
   if (Number.isFinite(downloadPriority)) return downloadPriority;
@@ -551,6 +566,7 @@ async function predictWorker(message) {
   let fallbackReason = null;
   let inferenceMs = 0;
   let candidateMs = 0;
+  let candidateSelection = null;
   let hasModelDownloadPriority = false;
   let pvsOutputUsesGlobalIds = false;
 
@@ -568,6 +584,10 @@ async function predictWorker(message) {
     visibleCandidates = Array.isArray(pred?.candidates) ? pred.candidates : [];
     prefetchCandidates = Array.isArray(pred?.prefetchCandidates) ? pred.prefetchCandidates : [];
     candidateCount = Number(pred?.candidateCount || 0);
+    candidateSelection = normalizeCandidateSelection(
+      pred?.timings?.candidateSelection || pred?.candidateSelection,
+      candidateCount,
+    );
     hasModelDownloadPriority = Boolean(pred?.hasModelDownloadPriority);
   } else {
     fallbackReason = state.initTimings?.fallbackReason || 'webgpu-unavailable';
@@ -578,6 +598,10 @@ async function predictWorker(message) {
       if (intersectsComponent(id, frustum)) rawComponentIds.push(id >>> 0);
     }
     candidateCount = rawComponentIds.length;
+    candidateSelection = normalizeCandidateSelection({
+      source: 'worker_full_aabb_scan',
+      candidateCount,
+    }, candidateCount);
     visibleCandidates = candidateFromVisibleComponents(rawComponentIds);
     hasModelDownloadPriority = false;
   }
@@ -614,6 +638,7 @@ async function predictWorker(message) {
     renderComponentModelList: Uint32Array.from(outputRenderComponentIds),
     renderModelList: Uint32Array.from(renderGlbIds),
     candidateCount,
+    candidateSelection,
     visibleInstanceCount: rawComponentIds.length,
     hasModelDownloadPriority,
     executionTime: end - start,
@@ -622,6 +647,7 @@ async function predictWorker(message) {
       inferenceMs,
       candidateMs,
       postMs: end - start - inferenceMs,
+      candidateSelection,
       rawInstanceCount: outputRawComponentIds.length,
       rawGlbCount: modelList.length,
       immediateGlbCount: plan.immediate.length,
