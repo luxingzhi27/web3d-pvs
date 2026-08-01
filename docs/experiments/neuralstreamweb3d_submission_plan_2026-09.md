@@ -991,3 +991,9 @@ calibration weighted recall 为 `0.9930808`，单侧 bootstrap 95% 下界为 `0.
 本次变更没有改变模型权重或 test 结果，也没有把 M5 图像门、Metropolis M0/M3 或 M4 消融标记为完成。
 M9 空间 AABB 审计在强模型元数据下仍集合一致，但索引 p50/p95 比全扫描更慢，空间分页和性能优化仍是
 未完成工作。详细记录见 `docs/experiments/m0_hkust_formal_export_2026-08-01.md`。
+
+### 21.16 M6 NeuralPVS 与 M10 设备审计（2026-08-01）
+
+NeuralPVS 审计确认当前仓库没有可公平运行的原始或适配实现。论文方法需要真实深度片段、视锥体体素表示、体素到实例的映射以及相应的三维网络；现有 Color-ID 实例并集、AABB 投影 froxel 诊断和 AABB depth proxy 都不能替代这些输入。因此 M6 只保留 L0 元数据基线和 L2 三角形 HZB warm-cache 子门，NeuralPVS 子门未实现，不能生成或宣称伪造的比较结果。详见 `docs/experiments/m6_neuralpvs_baseline_audit_2026-08-01.md`。
+
+M10 审计完成桌面 headless smoke：WebGPU 路径可运行，但实际适配器是 SwiftShader；没有硬件独显/集显的正式分布，也没有两个 Android 性能档位、网络轨迹或完整分项计时。因此当前只证明浏览器启动和 Cold-0 请求顺序，不能宣称移动端实时。详见 `docs/frontend/m10_device_benchmark_2026-08-01.md`。

@@ -40,6 +40,8 @@
 32. M7 独立 RankNet 下载排序器和调度对照：`experiments/m7_unified_download_scheduling_2026-08-01.md`
 33. M6 真实三角形 HZB 生成与 validation/calibration 执行：`experiments/m6_triangle_hzb_baseline_2026-08-01.md`
 34. M9 空间特征分页格式、候选集合审计与运行时边界：`evaluation/m9_spatial_feature_page_audit_2026-08-01.json`、`frontend/m9_browser_runtime_benchmark_2026-08-01.md`
+35. M6 NeuralPVS 对照实现缺口与公平边界：`experiments/m6_neuralpvs_baseline_audit_2026-08-01.md`
+36. M10 桌面/移动设备 benchmark 可复核性审计：`frontend/m10_device_benchmark_2026-08-01.md`
 
 ## 当前场景
 
@@ -82,6 +84,8 @@
 | `experiments/m0_fixed_validation_calibration_protocol_2026-08-01.md` | 固定 validation、独立 calibration、冻结阈值和 one-shot test 的实现与门控 |
 | `experiments/m2_spatial_split_execution_2026-08-01.md` | HKUST/Metropolis 空间隔离四路 split、guard 和类别稀疏风险 |
 | `evaluation/m1_resource_semantics_audit_2026-08-01.md` | 正式候选/点云/实例映射复审，以及旧数据失败记录 |
+| `experiments/m6_neuralpvs_baseline_audit_2026-08-01.md` | NeuralPVS-style baseline 所需深度片段、视锥体体素和冷启动资源审计 |
+| `frontend/m10_device_benchmark_2026-08-01.md` | 当前 Chrome/WebGPU smoke、设备缺口和 M10 门控判断 |
 
 ## 当前图示资产
 
