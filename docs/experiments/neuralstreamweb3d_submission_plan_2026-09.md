@@ -1018,5 +1018,8 @@ mean `<0.5%` 且 p95 `<1%`，M5 图像门保持 No-Go。漏像素集中在少数
   recall `0.990532`、useful cull `0.881718`、bad cull `0.005222`。在 20 MiB 弱效用预算下，
   validation 的 visibility-only、current-cascade、visibility-gated、independent-utility 效用召回
   分别为 `0.9440`、`0.9254`、`0.9421`、`0.8794`；这些不是像素效用或真实下载时间结论。
-- M5 HKUST calibration 图像评价和 M7 Metropolis validation/calibration 仍在运行；M4 三种子训练
-  已启动。M0、M3、M5、M6、M7、M10 的正式门控状态仍以各自报告为准，尚未将任何 No-Go 门改为通过。
+- M5 HKUST calibration 图像评价仍在运行；M7 Metropolis validation/calibration 已完成，主线
+  calibration 工作点为阈值 `0.48`、weighted recall `0.990281`、useful cull `0.580003`、bad cull
+  `0.008333`，20 MiB validation 的 visibility-only/current-cascade 效用召回为 `0.9912/0.9921`。
+  M4 三种子训练已启动。M0、M3、M5、M6、M7、M10 的正式门控状态仍以各自报告为准，尚未将任何
+  No-Go 门改为通过。

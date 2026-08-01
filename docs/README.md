@@ -45,6 +45,7 @@
 37. M5 HKUST 正式模型 validation 图像门：`evaluation/m5_hkust_formal_validation_image_2026-08-01.md`
 38. M3 两场景正式代理干预与配对 bootstrap：`experiments/m3_formal_execution_2026-08-01.md`
 39. M7 HKUST 正式 validation/calibration 下载调度结果：`experiments/m7_unified_download_scheduling_2026-08-01.md`
+40. M0 Metropolis 正式 frozen test：`evaluation/m0_metropolis_formal_frozen_test_2026-08-01.md`
 
 ## 当前场景
 
@@ -92,6 +93,7 @@
 | `evaluation/m5_hkust_formal_validation_image_2026-08-01.md` | HKUST 正式模型 213 个 validation view-cell 的实例级图像质量与长尾诊断 |
 | `experiments/m3_formal_execution_2026-08-01.md` | HKUST/Metropolis 正式代理、上下文干预和 paired bootstrap 机制诊断 |
 | `experiments/m7_unified_download_scheduling_2026-08-01.md` | M7 主线、独立排序器和严格 GLB 字节预算的正式比较 |
+| `evaluation/m0_metropolis_formal_frozen_test_2026-08-01.md` | Metropolis 空间隔离数据的独立 calibration、冻结阈值和 one-shot test 结果 |
 
 ## 当前图示资产
 

@@ -191,6 +191,36 @@ HKUST 主线和独立 RankNet 已在严格保存候选集合上完成完整 vali
 与独立排序器，但没有真实解码/上传时间、网络轨迹和多种子置信区间，不能宣称联合下载头的工程或论文收益。
 Metropolis 正式 M7 仍在运行。
 
+## 2026-08-01 正式 Metropolis validation/calibration
+
+Metropolis 主线和独立 RankNet 随后也完成了完整 validation/calibration。validation 遍历 `2,088`
+个唯一 pose，calibration 遍历 `2,376` 个唯一 pose。两份摘要均严格读取保存的候选集合和实际 GLB
+文件字节；由于没有逐 GLB 解码/上传时间索引，`utilityAtTime` 仍为 `not_available`。Metropolis 的
+部分 pose 没有有效弱效用分母，因此摘要把它们标记为 `mixed`，没有把非适用 pose 填成零效用。
+
+主线在 calibration 的安全工作点为阈值 `0.48`，weighted recall `0.990281`、useful cull
+`0.580003`、bad cull `0.008333`、平均预测 `3197.61`、平均候选 `10030.98`。validation 诊断工作点
+为阈值 `0.38`，weighted recall `0.990132`、useful cull `0.695805`、bad cull `0.006616`、平均预测
+`2690.13`。独立 RankNet 仍是下载排序 baseline，不承担实例可见性安全结论。
+
+在 `20 MiB` 字节预算和 `max` GLB 聚合下，弱 `log1p(visible_weights)` 效用教师的结果为：
+
+| 场景/split | score mode | 效用召回 | 字节削减 | required recall |
+|---|---|---:|---:|---:|
+| Metropolis validation | visibility-only | 0.9912 | 51.49% | 0.9629 |
+| Metropolis validation | current-cascade | 0.9921 | 51.49% | 0.9662 |
+| Metropolis validation | visibility-gated | 0.9905 | 51.49% | 0.9601 |
+| Metropolis validation | independent-utility | 0.8311 | 51.53% | 0.7622 |
+| Metropolis calibration | visibility-only | 0.9747 | 42.97% | 0.9157 |
+| Metropolis calibration | current-cascade | 0.9789 | 42.97% | 0.9249 |
+| Metropolis calibration | visibility-gated | 0.9718 | 42.95% | 0.9113 |
+| Metropolis calibration | independent-utility | 0.8063 | 42.96% | 0.7599 |
+
+validation 和 calibration 的弱效用预算曲线不完全一致，且 `requiredStatus=mixed`。因此这些数字只支持
+“当前模型可以产生可复现的严格字节预算排序”这一工程事实，不能证明真实首屏时间收益，也不能把
+`current-cascade` 的小幅优势解释为独立下载头贡献。M7 的联合调度主张仍需真实解码/上传时间、网络
+轨迹、多种子和图像效用验证；现阶段保留为正式 baseline 结果，不改变主线 No-Go 判断。
+
 ## 2026-08-01 独立 RankNet 排序器补齐
 
 ### 变更目的
