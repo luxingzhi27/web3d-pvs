@@ -320,3 +320,19 @@ negative 排序保持不变。默认 `visual_safety_loss_weight=0`，因此当�
 为避免改变正在运行的 M4/M11 资源和 GPU 调度，矩阵已在 `m5_visual_repair` tmux 会话排队，日志为
 `neural_instance_culling/benchmark/out/m5_visual_safety_repair_queue.log`；当前状态是等待正式会话退出，尚未
 生成修复 checkpoint，也没有读取 test 或重新选择阈值。
+
+## 2026-08-02 Benchmark 回归复核
+
+在不改变正在运行的 M4/M11 训练、评测队列和任何正式输出目录的前提下，重新执行当前 benchmark
+Python 回归套件：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 conda run --no-capture-output -n slm_pvs \
+  python -m unittest discover \
+  -s neural_instance_culling/benchmark/tests -p 'test*.py' -v
+```
+
+结果为 `39 tests, OK`。覆盖范围包括下载轨迹冷/温缓存语义、固定测试入口和阈值来源、实例级
+Color-ID schema、三角形 HZB 缓存查询、M4 输入/抑制消融序列化、M5 视觉安全损失及训练校准控制。
+该结果只证明代码契约和回归测试通过，不替代正式 validation/calibration 图像质量、泛化、移动设备
+性能或 M13 one-shot test；相关质量门状态保持不变。
