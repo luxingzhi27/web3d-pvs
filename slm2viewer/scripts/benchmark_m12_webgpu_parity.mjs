@@ -23,6 +23,7 @@ function parseArgs(argv) {
     url: null,
     startServer: false,
     headed: false,
+    debugStages: false,
     executablePath: process.env.CHROME_PATH || process.env.CHROMIUM_PATH || null,
     timeoutMs: 180000,
   };
@@ -31,6 +32,7 @@ function parseArgs(argv) {
     const token = argv[i];
     if (token === '--start-server') { options.startServer = true; continue; }
     if (token === '--headed') { options.headed = true; continue; }
+    if (token === '--debug-stages') { options.debugStages = true; continue; }
     if (token === '--help' || token === '-h') { options.help = true; continue; }
     const equal = token.indexOf('=');
     const name = token.slice(0, equal >= 0 ? equal : undefined).replace(/^--/, '');
@@ -140,12 +142,12 @@ async function main() {
         initError: dispatcher.initError ? String(dispatcher.initError.message || dispatcher.initError) : null,
       } : null;
     }, options.timeoutMs);
-    const result = await page.evaluate(async (probeCases) => {
+    const result = await page.evaluate(async ({ probeCases, debugStages }) => {
       const dispatcher = window.__slmApp?.viewer?.slm2Loader?.neuralPVS;
       if (!dispatcher || typeof dispatcher.benchmarkM12 !== 'function') {
         throw new Error('The loaded frontend does not expose the M12 probe method. Rebuild the source bundle.');
       }
-      const probe = await dispatcher.benchmarkM12(probeCases);
+      const probe = await dispatcher.benchmarkM12(probeCases, { debugStages: debugStages });
       let adapterInfo = null;
       try {
         const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
@@ -157,7 +159,7 @@ async function main() {
         } : null;
       } catch (_) { /* adapter metadata is optional */ }
       return { probe, adapterInfo };
-    }, cases);
+    }, { probeCases: cases, debugStages: options.debugStages });
     const payload = {
       schema: 'm12-webgpu-parity-capture-v1',
       cases: options.cases,
@@ -166,6 +168,7 @@ async function main() {
       frontendReady: ready,
       adapterInfo: result.adapterInfo,
       pageErrors,
+      debugStages: options.debugStages,
       probe: result.probe,
     };
     fs.mkdirSync(path.dirname(options.out), { recursive: true });

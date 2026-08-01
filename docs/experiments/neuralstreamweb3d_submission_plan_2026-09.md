@@ -1059,3 +1059,15 @@ HKUST calibration 的 `168` 个 view-cell 已在同一 Chrome 页面中完成真
 该修复只通过空间索引正确性子门，far=2000 时索引 p50 `12.20 ms` 高于全扫描 `0.69 ms`，因此不形成空间索引
 加速主张，默认查询仍保留超过桶数量上限时的全量扫描回退。移动设备仍无真实证据，沿用 M10 的测试方案和 No-Go
 状态。
+
+### 21.22 M12 后退相机一致性修复（2026-08-02）
+
+M12 的首轮 WGSL parity 参考未应用当前前端的后退相机位移，因而比较了不同查询位置。现已让参考生成器读取导出的
+`predictionCameraMode` 和 `pvsBackOffsetM`，并保存实际 `predictionPosition`。协议对齐后的 16 个固定 case、7,845 个
+候选值中，FP16/WGSL 阈值翻转率为 `0`，可见性 logit 平均绝对误差/p99 为 `0.000507/0.001489`，下载排序
+Spearman/top-10% Jaccard 为 `0.999996/1.000000`。原始结果见
+`neural_instance_culling/benchmark/out/m12_webgpu_parity_hkust_strong_v2_back_camera_20260802/`。
+
+该结果通过 M12 数值一致性子门，但浏览器适配器为 SwiftShader，不能转化为硬件 GPU 或移动端性能结论。M10 仍保持
+真实设备证据缺失；移动端测试协议和相对 FP16 的预注册正确性门限见
+`docs/frontend/m10_device_benchmark_2026-08-01.md`。

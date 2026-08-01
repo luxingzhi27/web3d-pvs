@@ -141,7 +141,11 @@ def _forward_batch(model, cases: list[dict[str, Any]], runtime_features: np.ndar
             ids = torch.from_numpy(np.asarray(case["candidateIds"], dtype=np.int64)).to(device)
             camera = case["camera"]
             camera_norm = torch.from_numpy(np.asarray(camera["cameraNorm"], dtype=np.float32)).expand(ids.numel(), -1).to(device)
-            camera_world = torch.from_numpy(np.asarray(camera["position"], dtype=np.float32)).expand(ids.numel(), -1).to(device)
+            # Match LightweightPVSWorker.buildPredictionCamera exactly.  The
+            # dataset pose is the canonical view-cell center; the browser may
+            # query the model from the protocol-defined backward camera.
+            prediction_position = camera.get("predictionPosition", camera["position"])
+            camera_world = torch.from_numpy(np.asarray(prediction_position, dtype=np.float32)).expand(ids.numel(), -1).to(device)
             camera_view = torch.from_numpy(np.asarray(camera["cameraView"], dtype=np.float32)).expand(ids.numel(), -1).to(device)
             logits, aux = model.compute_logits_with_aux(
                 camera_norm,
@@ -170,6 +174,15 @@ def main() -> None:
     parser.add_argument("--candidate-limit", type=int, default=1024)
     parser.add_argument("--split", default="validation")
     parser.add_argument("--seed", type=int, default=20260801)
+    parser.add_argument(
+        "--frontend-model-meta",
+        default=None,
+        help=(
+            "Optional exported instance_model_meta.json. When supplied, the "
+            "reference uses its predictionCameraMode and pvsBackOffsetM, "
+            "matching the browser worker."
+        ),
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -188,6 +201,13 @@ def main() -> None:
     selected = np.linspace(0, eligible.size - 1, num=max(1, min(args.case_count, eligible.size)), dtype=np.int64)
     pose_indices = eligible[selected]
     cases: list[dict[str, Any]] = []
+    prediction_camera_mode = "active-camera"
+    prediction_back_offset = 0.0
+    if args.frontend_model_meta:
+        frontend_meta_path = Path(args.frontend_model_meta)
+        frontend_meta = json.loads(frontend_meta_path.read_text(encoding="utf-8"))
+        prediction_camera_mode = str(frontend_meta.get("predictionCameraMode", prediction_camera_mode))
+        prediction_back_offset = max(0.0, float(frontend_meta.get("pvsBackOffsetM", 0.0)))
     for case_id, pose_index in enumerate(pose_indices.tolist()):
         pose = dataset.poses[int(pose_index)]
         forward = np.asarray(pose["camera_forward"], dtype=np.float32)
@@ -198,6 +218,10 @@ def main() -> None:
         visible_ids, visible_weights = dataset.visible_slice(int(pose_index))
         tan_x = float(camera_view[3])
         tan_y = float(camera_view[4])
+        canonical_position = np.asarray(pose["camera_world"], dtype=np.float32)
+        prediction_position = canonical_position.copy()
+        if prediction_camera_mode == "viewcell-back-camera" and prediction_back_offset > 0.0:
+            prediction_position -= forward * np.float32(prediction_back_offset)
         cases.append({
             "caseId": int(case_id),
             "poseIndex": int(pose_index),
@@ -206,6 +230,7 @@ def main() -> None:
             "visibleWeights": np.asarray(visible_weights, dtype=np.float32).tolist(),
             "camera": {
                 "position": np.asarray(pose["camera_world"], dtype=np.float32).tolist(),
+                "predictionPosition": prediction_position.tolist(),
                 "cameraNorm": np.asarray(pose["camera_norm"], dtype=np.float32).tolist(),
                 "cameraForward": forward.tolist(),
                 "cameraView": camera_view.astype(np.float32).tolist(),
@@ -214,6 +239,8 @@ def main() -> None:
                 "aspect": tan_x / max(tan_y, 1e-8),
                 "near": 0.1,
                 "far": 20000.0,
+                "predictionCameraMode": prediction_camera_mode,
+                "predictionBackOffsetM": float(prediction_back_offset),
             },
         })
     if not cases:
@@ -238,6 +265,8 @@ def main() -> None:
         "seed": int(args.seed),
         "caseCount": len(cases),
         "candidateLimit": int(args.candidate_limit),
+        "predictionCameraMode": prediction_camera_mode,
+        "predictionBackOffsetM": float(prediction_back_offset),
         "threshold": float(checkpoint.get("best", {}).get("threshold", 0.02)),
         "cases": cases,
     }

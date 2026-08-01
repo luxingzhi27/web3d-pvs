@@ -36,7 +36,7 @@
 | M9 | 子门进行中 | 前端静态审计、空间页和浏览器 smoke 存在；运行时分项计时、真实视锥更新和 Cold-0 请求证据仍需统一。 |
 | M10 | No-Go/设备证据缺失 | 已固化 Android 测试方案；没有实体 Android、ADB 和硬件 WebGPU，不生成移动端性能数字。 |
 | M11 | 运行中/未通过 | HKUST 方向留出训练已在 GPU 3 启动；Metropolis 和零/少样本跨场景实验尚未完成。 |
-| M12 | 探索性 | 16 个 case 的 SwiftShader WGSL parity 已生成，但不能作为硬件性能结论，且 logit 差异仍需定位。 |
+| M12 | 数值一致性子门通过，硬件性能门未通过 | 参考已按前端后退相机口径修复；16 个 case 的 FP16/WGSL 阈值翻转率为 0，SwiftShader 不能作为硬件性能结论。 |
 | M13 | 未开始 | 三种子正式重训、冻结阈值、one-shot test、图像、调度和运行主表均未冻结。 |
 
 ## 当前后台任务
@@ -240,3 +240,40 @@ node slm2viewer/scripts/benchmark_webgpu_runtime.mjs \
 - 三次候选数均为 `5,959`，原始预测实例均为 `5,087`，最终实例均为 `4,928`。
 
 该结果使 M9 的有效主体资源、实例级过滤和 Cold-0 顺序子门获得重复证据，但仍不是多轨迹、候选规模分桶或移动设备 benchmark。服务器 headless Chrome/SwiftShader 的耗时不进入移动端性能表，M9 总门继续保持未通过。
+
+## 2026-08-02 M12 后退相机口径修复与 WGSL 一致性
+
+### 变更目的
+
+M12 首轮 parity 对比出现较大的 logit 差异。逐层审计发现，Python 参考使用数据集的规范 view-cell 中心，而当前前端按照
+`predictionCameraMode=viewcell-back-camera` 从规范位置沿主视线后退 `3.464101552963257 m` 后执行模型查询。参考和前端并非同一相机位置，因此首轮差异不能用于判断 WGSL 实现。
+
+### 修改内容
+
+- 修改 `neural_instance_culling/benchmark/prepare_m12_webgpu_parity.py`：读取导出的 `instance_model_meta.json`，在 cases 中保存 `predictionPosition` 和后退相机参数；PyTorch 参考使用实际查询位置。
+- 修改 `slm2viewer/src/InstancePVS.js`：保留 M12 专用的 18-word 调试输出，记录射线、固定特征和门控中间量；正常运行仍为 4-word raw 输出，不改变生产模型协议。
+- 保留 `slm2viewer/src/LightweightPVSWorker.js`、`LightweightPVSDispatcher.js` 和 `benchmark_m12_webgpu_parity.mjs` 的 M12 opt-in 调试入口；该入口不被正常调度器调用。
+
+### 复核命令与结果
+
+固定输入为 HKUST validation 的 16 个 case、7,845 个候选实例、模型查询 FOV `66°`、真实渲染 FOV `60°`、当前导出权重和固定实例特征。产物目录为：
+
+`neural_instance_culling/benchmark/out/m12_webgpu_parity_hkust_strong_v2_back_camera_20260802/`
+
+验证包括：
+
+```bash
+node --check slm2viewer/src/InstancePVS.js
+node --check slm2viewer/src/LightweightPVSWorker.js
+node --check slm2viewer/scripts/benchmark_m12_webgpu_parity.mjs
+npm --prefix slm2viewer test -- --runInBand
+```
+
+结果：页面错误 `0`，WebGPU probe `16/16` 完成，阈值翻转率相对 FP16 为 `0`；可见性 logit 平均绝对误差/p99/最大值为
+`0.000507/0.001489/0.001709`，下载 logit 为 `6.51e-5/2.02e-4/2.89e-4`，下载排序 Spearman/top-10% Jaccard 为
+`0.999996/1.000000`。浏览器适配器是 `google/swiftshader`，所以只通过数值一致性子门，不能作为硬件 WebGPU 或移动端性能证据。
+
+### 阶段判断
+
+M12 的“前端半精度资产、WGSL 权重布局、射线查询、实例级可见性输出和 GLB 下载排序输出与 FP16 参考一致性”子门通过。首轮较大 logit 差异作为参考口径错误的失败证据保留，不再引用为实现缺陷。M10 仍保持 `No-Go / 真实设备证据缺失`；移动设备测试方案、候选规模矩阵、冷/温缓存协议和预注册正确性门限已写入
+`docs/frontend/m10_device_benchmark_2026-08-01.md`，未用 SwiftShader 数字填充移动端 p50/p95/p99。

@@ -196,6 +196,9 @@ export class InstancePVS {
     // PyTorch/WebGPU parity checks. Production assets keep the normal two-word
     // packed output and never enter this branch.
     this.benchmarkRawOutput = Boolean(options.benchmarkRawOutput);
+    // M12-only diagnostic path. It appends intermediate values after the
+    // normal raw logits; production prediction never enables this flag.
+    this.benchmarkDebugStages = Boolean(options.benchmarkDebugStages);
     this.assetVersion = options.assetVersion || null;
     this.configuredInferenceFovYDeg = MODEL_INPUT_FOV_Y_DEG;
     this.inferenceFovYDeg = MODEL_INPUT_FOV_Y_DEG;
@@ -358,7 +361,10 @@ export class InstancePVS {
   }
 
   _outputValueWords() {
-    if (this.benchmarkRawOutput && this._isDirectionalOcclusionProxyRuntime()) return 4;
+    if (this.benchmarkRawOutput && this._isDirectionalOcclusionProxyRuntime()) {
+      // M12-only stage audit fields. Normal runtime output remains four words.
+      return this.benchmarkDebugStages ? 18 : 4;
+    }
     const hasPriorityOutput = this.meta?.outputsDownloadPriority === true || this.meta?.outputsGlbPriority === true;
     return Math.max(1, Number(this.meta?.outputValueWords || (hasPriorityOutput ? 2 : 1)) | 0);
   }
@@ -1840,6 +1846,14 @@ struct QueryFeatures {
   cam: array<f32, ${cameraDim}>,
   ray_dir: array<f32, ${rayDirDim}>,
   query: array<f32, ${queryDim}>,
+  debug_ray_dir0: f32,
+  debug_ray_dir1: f32,
+  debug_ray_dir2: f32,
+  debug_runtime0: f32,
+  debug_query_before_gate0: f32,
+  debug_runtime_gate_sum0: f32,
+  debug_runtime_gate_tanh0: f32,
+  debug_selected_proxy0: f32,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -2074,11 +2088,21 @@ fn make_query(inst_id: u32, candidate_index: u32) -> QueryFeatures {
       }
     }
     out.query[GEO_DIM + CONTEXT_DIM + p] = selected;
+    if (p == 0u) { out.debug_selected_proxy0 = selected; }
   }
+  out.debug_ray_dir0 = out.ray_dir[0u];
+  out.debug_ray_dir1 = out.ray_dir[1u];
+  out.debug_ray_dir2 = out.ray_dir[2u];
+  out.debug_runtime0 = runtime_value(inst_id, candidate_index, 0u);
   for (var o = 0u; o < QUERY_DIM; o = o + 1u) {
     var sum = w(OFFSET_RUNTIME_GATE_B + o);
     for (var i = 0u; i < RAY_DIR_DIM; i = i + 1u) {
       sum = sum + w(OFFSET_RUNTIME_GATE_W + o * RAY_DIR_DIM + i) * out.ray_dir[i];
+    }
+    if (o == 0u) {
+      out.debug_query_before_gate0 = out.query[o];
+      out.debug_runtime_gate_sum0 = sum;
+      out.debug_runtime_gate_tanh0 = tanh(sum);
     }
     out.query[o] = out.query[o] * (1.0 + tanh(sum));
   }
@@ -2200,7 +2224,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let threshold = uniforms.camera_threshold.w;
   let query = make_query(inst_id, idx);
   let base_logit = visibility_logit(query);
-  let final_logit = base_logit - inhibition_value(query);
+  let inhibition = inhibition_value(query);
+  let final_logit = base_logit - inhibition;
   let final_prob = sigmoid(final_logit);
   let utility_prob = sigmoid(utility_logit(query, final_prob));
   let download_logit_value = download_logit(query, final_prob, utility_prob);
@@ -2214,6 +2239,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (OUTPUT_VALUE_WORDS >= 4u) {
     output_values[out_base + 2u] = bitcast<u32>(final_logit);
     output_values[out_base + 3u] = bitcast<u32>(download_logit_value);
+  }
+  if (OUTPUT_VALUE_WORDS >= 10u) {
+    output_values[out_base + 4u] = bitcast<u32>(base_logit);
+    output_values[out_base + 5u] = bitcast<u32>(inhibition);
+    output_values[out_base + 6u] = bitcast<u32>(query.cam[0]);
+    output_values[out_base + 7u] = bitcast<u32>(query.cam[1]);
+    output_values[out_base + 8u] = bitcast<u32>(query.query[0]);
+    output_values[out_base + 9u] = bitcast<u32>(query.query[1]);
+  }
+  if (OUTPUT_VALUE_WORDS >= 18u) {
+    output_values[out_base + 10u] = bitcast<u32>(query.debug_ray_dir0);
+    output_values[out_base + 11u] = bitcast<u32>(query.debug_ray_dir1);
+    output_values[out_base + 12u] = bitcast<u32>(query.debug_ray_dir2);
+    output_values[out_base + 13u] = bitcast<u32>(query.debug_runtime0);
+    output_values[out_base + 14u] = bitcast<u32>(query.debug_query_before_gate0);
+    output_values[out_base + 15u] = bitcast<u32>(query.debug_runtime_gate_sum0);
+    output_values[out_base + 16u] = bitcast<u32>(query.debug_runtime_gate_tanh0);
+    output_values[out_base + 17u] = bitcast<u32>(query.debug_selected_proxy0);
   }
 }
 `;

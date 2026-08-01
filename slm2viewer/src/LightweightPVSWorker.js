@@ -676,6 +676,7 @@ async function m12ProbeWorker(message) {
       inferenceFovYDeg: MODEL_INPUT_FOV_Y_DEG,
       deferRuntimeMeta: true,
       benchmarkRawOutput: true,
+      benchmarkDebugStages: Boolean(message.debugStages),
     });
     try {
       await probe.init();

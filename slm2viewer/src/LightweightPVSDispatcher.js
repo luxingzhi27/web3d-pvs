@@ -244,13 +244,18 @@ export class LightweightPVSDispatcher {
    * Run the opt-in M12 FP32/FP16/WebGPU parity probe through the real worker.
    * This method is intentionally unused by the viewer scheduler.
    */
-  async benchmarkM12(cases) {
+  async benchmarkM12(cases, options = {}) {
     if (!this.isReady) await this.init();
     if (!this.worker) throw new Error('M12 parity probe requires a live PVS worker.');
     const requestId = ++this.m12RequestSerial;
     return new Promise((resolve, reject) => {
       this.m12Pending.set(requestId, { resolve, reject });
-      this.worker.postMessage({ type: 'm12-probe', requestId, cases });
+      this.worker.postMessage({
+        type: 'm12-probe',
+        requestId,
+        cases,
+        debugStages: Boolean(options.debugStages),
+      });
     });
   }
 

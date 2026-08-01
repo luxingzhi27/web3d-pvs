@@ -100,7 +100,7 @@
    `adb`、远程调试端点或硬件 WebGPU 任一项不可用时，只做环境记录，不进入性能统计。
 3. **硬件适配器预检。** 用 Android Chrome 打开固定 URL，通过 DevTools Protocol 读取 `navigator.gpu.requestAdapter()`、适配器信息、页面暴露的 PVS backend 和模型初始化状态。必须确认 backend 为 `worker-webgpu`/`webgpu`，适配器为真实移动 GPU，且没有 CPU、AABB 或其他降级路径；同时检查页面错误、WebGPU device lost、shader 编译错误和资源请求错误。
 4. **小规模 schema smoke。** 每个场景先执行 3 次、每次 256 个候选的预测，检查输出长度、实例 ID 范围、分数是否有限、冻结阈值下结果是否可复现、页面是否无错误，以及首轮模型 dispatch 前没有目标 GLB 的三角形/材质/纹理请求。此步骤失败则停止该设备，不执行大矩阵。
-5. **功能一致性 smoke。** 使用 M12 固定 cases 对比 PyTorch FP16 参考与设备 WebGPU 输出，记录可见性和下载优先级的最大绝对误差、阈值翻转率、实例集合 Jaccard 和 GLB 排序相关性。误差门限先由桌面真实 WebGPU 的 M12 结果冻结；在门限尚未冻结前只能标记为 exploratory，不能写成通过。
+5. **功能一致性 smoke。** 使用 M12 固定 cases 对比 PyTorch FP16 参考与设备 WebGPU 输出，记录可见性和下载优先级的最大绝对误差、阈值翻转率、实例集合 Jaccard 和 GLB 排序相关性。当前已冻结一份协议对齐的半精度参考基线；由于服务器浏览器使用 SwiftShader，这份基线只用于数值门限和回归检查，不用于硬件性能结论。
 6. **正式矩阵。** 依次执行冷缓存、温缓存和网络 trace 条件；每个条件按三条轨迹和候选规模桶运行，保留完整原始记录。不要在同一批次中更新页面代码、模型、资产、Chrome 或设备系统。
 
 Android Chrome 的自动化可以通过 `adb forward` 暴露的 DevTools Protocol 连接；后续实现的采集器应支持类似
@@ -137,7 +137,46 @@ benchmark/out/m10_mobile/<commit>/<device>/<scene>/<cache>/<network>/<trajectory
 质量门分为三类：
 
 - **兼容性门：** 硬件 WebGPU、Worker 推理、实例级过滤和 GLB 调度均可运行，无降级、无 device lost、无 OOM。
-- **正确性门：** M12 与参考输出的误差、阈值翻转、实例集合和 GLB 排序达到已冻结的 parity 门限；同一冻结阈值下仍满足模型独立报告中的 weighted recall 与 miss-pixel 安全约束。移动端不得为了性能改变阈值或候选语义。
+- **正确性门：** M12 与 FP16 参考输出的误差、阈值翻转、实例集合和 GLB 排序达到已冻结的 parity 门限；同一冻结阈值下仍满足模型独立报告中的 weighted recall 与 miss-pixel 安全约束。移动端不得为了性能改变阈值或候选语义。
 - **性能门：** 10k 候选时 WebGPU 查询 p95 `<50 ms`，主线程附加工作 p95 `<2 ms`，不出现连续长帧；同时报告首个有用画面、GLB 字节、峰值内存和温度变化。该数值是当前建议目标，不是已完成的设备实测结论。
 
 最终交付两份文件：一份不删减的原始 JSONL/trace 清单，一份按设备和场景分开的结果报告 `m10_mobile_results_<date>.md`。报告必须明确区分“实测通过”“设备证据缺失”和“未达到目标”，不得把桌面 SwiftShader、模拟器或单次 smoke 填入移动端 p50/p95/p99。
+
+## 2026-08-02 M12 参考口径与移动端正确性门限冻结
+
+### 参考口径修复
+
+M12 首轮探索结果曾把数据集的规范视点中心直接用于 Python 参考，而浏览器运行时按照导出的
+`predictionCameraMode=viewcell-back-camera` 和 `pvsBackOffsetM=3.464101552963257` 沿主视线后退后查询。两者相差一个后退相机位移，造成了表面上的 logit 偏差；这不是 WGSL 权重布局或射线特征实现错误。
+
+已修改 `neural_instance_culling/benchmark/prepare_m12_webgpu_parity.py`：参考生成器可读取前端
+`instance_model_meta.json`，同时保存规范位置 `position` 和实际查询位置 `predictionPosition`，并在 PyTorch 参考中使用与
+`LightweightPVSWorker.buildPredictionCamera` 相同的相机位置。正常前端推理没有改变。
+
+### 协议对齐基线
+
+固定输入为 HKUST 16 个 validation case、7,845 个候选实例、模型查询 FOV `66°`、真实渲染 FOV `60°`、当前导出权重和固定实例特征。原始产物保存在：
+
+`neural_instance_culling/benchmark/out/m12_webgpu_parity_hkust_strong_v2_back_camera_20260802/`
+
+关键结果如下：
+
+| 项目 | 协议对齐结果 |
+|---|---:|
+| WebGPU case 数 | 16 |
+| 候选值数量 | 7,845 |
+| 页面错误 | 0 |
+| 阈值翻转率，相对 FP16 | 0 |
+| 可见性 logit 平均绝对误差 / p99 / 最大值，相对 FP16 | `0.000507 / 0.001489 / 0.001709` |
+| 可见性概率平均绝对误差 / p99 / 最大值，相对 FP16 | `4.41e-6 / 1.58e-5 / 3.27e-4` |
+| 下载 logit 平均绝对误差 / p99 / 最大值，相对 FP16 | `6.51e-5 / 2.02e-4 / 2.89e-4` |
+| 下载概率平均绝对误差 / p99 / 最大值，相对 FP16 | `7.49e-6 / 1.51e-5 / 6.42e-5` |
+| GLB 下载排序 Spearman / top-10% Jaccard | `0.999996 / 1.000000` |
+
+浏览器适配器仍为 `google / swiftshader`，所以本结果通过的是“算子、权重、半精度资产和决策格式的一致性子门”，不是硬件 GPU 性能子门。
+
+### 真实设备到位后的预注册门限
+
+在没有 Android 设备之前不填充移动端性能数据。设备可用后，先使用上述同一批 cases 和同一冻结阈值运行正确性 smoke；建议的硬件 WebGPU 宽松门限为：可见性 logit p99 绝对误差 `<=0.01`、可见性概率 p99 `<=1e-4`、下载 logit p99 `<=0.002`、下载概率 p99 `<=1e-4`、阈值翻转率 `<=0.001`、GLB 排序 Spearman `>=0.995`、top-10% Jaccard `>=0.95`，并且输出必须有限、页面无错误、无 device lost 和无降级路径。门限是相对 FP16 参考，不是相对 FP32 训练值。
+
+M10 当前仍为 `No-Go / 真实设备证据缺失`。拿到设备后必须先通过适配器和 256 候选 schema smoke，再执行冷/温缓存、三条轨迹、候选规模桶和每条件至少 30 次有效重复的完整矩阵；没有实测的桶继续标记为缺失。
