@@ -141,3 +141,19 @@ Metropolis 还存在点云缓存与实例化 GLB 原型索引不一致，以及�
 
 本选项只用于当前正在运行的训练结束后的新实验和后续多种子实验；已经启动的旧进程不受源码修改影响，
 其收尾结果仍按“内置 one-shot test 或失败”分支审计，不能用新选项追溯改变其 test 计数。
+
+## 2026-08-01 正式训练收尾自动化
+
+为避免正式训练完成后遗漏冻结测试，新增
+`neural_instance_culling/benchmark/run_formal_training_followup.sh`。脚本只绑定当前登记的
+HKUST 与 Metropolis 空间训练输出，等待各自的 `calibration_ready_summary.json` 出现后，依次执行：
+
+1. `evaluate_frozen_test.py prepare`，从完整 validation 选择记录和独立 calibration 记录生成不可变清单；
+2. `evaluate_frozen_test.py evaluate`，在保存的严格候选集合上遍历完整 test split，使用单一冻结阈值且只运行一次。
+
+脚本为两个场景分别写入 prepare/evaluate stdout、stderr 和独立输出目录，使用 GPU 0/2 与
+`slm_pvs` conda 环境。当前脚本已在 tmux 会话 `formal_m0_followup` 中启动，尚未产生正式 test
+结果；在 `summary.json` 生成前不报告 M0 数值，也不创建第二次 test 运行。
+
+验证：`bash -n` 与 `git diff --check` 通过。该自动化只负责执行既有协议，不放宽 weighted recall、bootstrap
+下置信界、候选集合或 one-shot 约束。

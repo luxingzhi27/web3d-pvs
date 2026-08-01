@@ -331,6 +331,7 @@ class PoseCSRSplit:
         instances: list[np.ndarray] = []
         targets: list[np.ndarray] = []
         visible_weight_targets: list[np.ndarray] = []
+        batch_pose_indices: list[int] = []
         offsets = [0]
         visible_counts = []
         candidate_counts = []
@@ -394,6 +395,7 @@ class PoseCSRSplit:
                 offsets.append(offsets[-1])
                 visible_counts.append(int(visible_unique.size))
                 candidate_counts.append(0)
+                batch_pose_indices.append(pose_index)
                 continue
             label = np.isin(candidate_ids, visible_unique, assume_unique=True).astype(np.float32)
             weight_map = {int(idx): float(weight) for idx, weight in zip(visible_ids.tolist(), visible_weights.tolist())}
@@ -410,6 +412,7 @@ class PoseCSRSplit:
             offsets.append(offsets[-1] + count)
             visible_counts.append(int(visible_unique.size))
             candidate_counts.append(count)
+            batch_pose_indices.append(pose_index)
 
         if not instances:
             return {
@@ -423,6 +426,7 @@ class PoseCSRSplit:
                 "pose_offsets": np.asarray(offsets, dtype=np.int64),
                 "visible_counts": np.asarray(visible_counts, dtype=np.int64),
                 "candidate_counts": np.asarray(candidate_counts, dtype=np.int64),
+                "pose_indices": np.asarray(batch_pose_indices, dtype=np.int64),
             }
 
         out = {
@@ -437,6 +441,7 @@ class PoseCSRSplit:
             "pose_offsets": np.asarray(offsets, dtype=np.int64),
             "visible_counts": np.asarray(visible_counts, dtype=np.int64),
             "candidate_counts": np.asarray(candidate_counts, dtype=np.int64),
+            "pose_indices": np.asarray(batch_pose_indices, dtype=np.int64),
         }
         if mvps:
             out["mvp"] = np.concatenate(mvps, axis=0)

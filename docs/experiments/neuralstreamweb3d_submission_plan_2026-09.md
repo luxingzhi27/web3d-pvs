@@ -896,3 +896,12 @@ Metropolis 使用独立 retry1 目录重跑，待摘要生成后才进入 M7 数
 - 学习型 AABB+ray MLP 已在 HKUST 和 Metropolis 完成完整 validation/calibration；Metropolis 的 calibration 工作点为阈值 `0.20`、weighted recall `0.99118`、useful cull `0.22468`、bad cull `0.00653`。该结果是 L0 元数据冷启动基线，不读取目标 GLB 三角形。
 - Metropolis M7 修正后 model-free calibration 已完成 `2,376` 个 pose。七个 runner 中只有 keep-all 和 camera-distance 达到 weighted-recall 安全条件；其余 runner 明确无安全工作点。该摘要支持 baseline 参照，不支持联合下载头主张。
 - M6 总门仍未通过：`baseline_aabb_hzb` 仍是 AABB depth proxy，真实三角形 HZB 和 NeuralPVS 适配没有被伪造；M7/M8 总门仍未通过：独立排序器、设备成本、真实网络轨迹和联合级联比较尚未完成。
+
+### 21.9 正式训练收尾链路（2026-08-01）
+
+为保证 M0 不因训练任务结束后的人工衔接遗漏而停在半成品状态，新增并启动
+`neural_instance_culling/benchmark/run_formal_training_followup.sh`。它只监听当前登记的两条
+`rvl_strong_v2` 空间训练输出；每个输出出现 `calibration_ready_summary.json` 后，先生成不可变 frozen
+manifest，再在独立目录中对完整 test split 执行一次 `evaluate_frozen_test.py evaluate`。脚本不扫描 test
+阈值、不补 GT 候选、不裁剪候选，也不覆盖既有输出。当前 tmux 会话为 `formal_m0_followup`，该记录在
+正式摘要生成前不改变 M0 的“总门未通过”判断。
