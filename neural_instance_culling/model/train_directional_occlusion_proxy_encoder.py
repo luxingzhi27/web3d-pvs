@@ -181,6 +181,89 @@ def build_protocol_splits(
     return train_split, validation_split, calibration_split, test_split, protocol
 
 
+def apply_train_pose_fraction(
+    dataset: PoseCSRDataset,
+    train_split,
+    protocol: dict[str, Any],
+    fraction: float,
+    seed: int,
+):
+    """Select a deterministic subset of native train poses for M11 adaptation.
+
+    Validation, calibration and test remain untouched.  The selected indices
+    are recorded in the checkpoint protocol so a later frozen-test audit can
+    distinguish few-shot adaptation from full-data training.
+    """
+    fraction = float(fraction)
+    if not 0.0 < fraction <= 1.0:
+        raise ValueError(f"train_pose_fraction must be in (0, 1], got {fraction}")
+    indices = np.asarray(train_split.pose_indices, dtype=np.int64)
+    if fraction >= 1.0:
+        return train_split, protocol
+    if indices.size == 0:
+        raise ValueError("Cannot select a few-shot training subset from an empty train split")
+    count = max(1, int(round(indices.size * fraction)))
+    rng = np.random.default_rng(int(seed) + 3109)
+    selected = np.sort(rng.choice(indices, size=count, replace=False).astype(np.int64, copy=False))
+    selected_split = dataset.subset("train_fit_fraction", selected)
+    updated = dict(protocol)
+    updated.update(
+        {
+            "trainFitSelectionFraction": fraction,
+            "trainFitSelectionSeed": int(seed) + 3109,
+            "trainFitCount": int(selected.size),
+            "trainFitDigest": _pose_index_digest(selected),
+            "trainFitSemantics": "deterministic subset of native train poses; validation/calibration/test unchanged",
+        }
+    )
+    return selected_split, updated
+
+
+def load_initial_checkpoint(
+    model: DirectionalOcclusionProxyEncoderPVSModel,
+    checkpoint_path: Path,
+    allow_scene_transfer: bool,
+) -> dict[str, Any]:
+    """Load a normal checkpoint or only shared parameters for scene transfer."""
+    checkpoint = torch.load(checkpoint_path, map_location=model.scene_min.device)
+    source_state = checkpoint.get("model")
+    if not isinstance(source_state, dict):
+        raise ValueError(f"{checkpoint_path} has no model state")
+    if not allow_scene_transfer:
+        model.load_state_dict(source_state, strict=True)
+        return {
+            "path": str(checkpoint_path.as_posix()),
+            "mode": "strict_same_scene_checkpoint",
+            "best": checkpoint.get("best"),
+            "config": checkpoint.get("config"),
+        }
+
+    target_parameters = dict(model.named_parameters())
+    transferable: dict[str, torch.Tensor] = {}
+    mismatched: list[str] = []
+    for name, value in source_state.items():
+        if name not in target_parameters:
+            continue
+        if tuple(value.shape) != tuple(target_parameters[name].shape):
+            mismatched.append(name)
+            continue
+        transferable[name] = value
+    missing = sorted(set(target_parameters) - set(transferable))
+    if mismatched or missing:
+        raise ValueError(
+            "scene-transfer checkpoint is incompatible with the target model: "
+            f"mismatched={mismatched[:8]}, missing={missing[:8]}"
+        )
+    model.load_state_dict(transferable, strict=False)
+    return {
+        "path": str(checkpoint_path.as_posix()),
+        "mode": "shared_learnable_parameters_only_scene_buffers_rebuilt",
+        "transferredParameterCount": len(transferable),
+        "sourceConfig": checkpoint.get("config"),
+        "sourceBest": checkpoint.get("best"),
+    }
+
+
 def evaluate_calibration_and_validation(
     model,
     validation_split,
@@ -884,6 +967,17 @@ def main() -> None:
     )
     parser.add_argument("--calibration-bootstrap-confidence", type=float, default=0.95)
     parser.add_argument("--init-checkpoint", default="", help="Optional checkpoint used to initialize model weights before training.")
+    parser.add_argument(
+        "--allow-scene-transfer",
+        action="store_true",
+        help="Load only shape-compatible learnable parameters from --init-checkpoint and rebuild target-scene buffers.",
+    )
+    parser.add_argument(
+        "--train-pose-fraction",
+        type=float,
+        default=1.0,
+        help="Deterministic fraction of native train poses for few-shot adaptation; validation/calibration/test are unchanged.",
+    )
     parser.add_argument("--fixed-runtime-features", default="", help="Optional exported full-instance runtime feature table used during training/eval instead of recomputing offline encoders.")
     parser.add_argument("--freeze-offline-encoder", action="store_true", help="Freeze PointNet++ geo encoder and context/proxy evidence encoder; train only runtime query heads.")
     parser.add_argument(
@@ -905,6 +999,10 @@ def main() -> None:
     args = parser.parse_args()
     if args.skip_final_test and args.export_eval_checkpoint:
         parser.error("--skip-final-test cannot be combined with --export-eval-checkpoint")
+    if not 0.0 < float(args.train_pose_fraction) <= 1.0:
+        parser.error("--train-pose-fraction must be in (0, 1]")
+    if args.allow_scene_transfer and not args.init_checkpoint:
+        parser.error("--allow-scene-transfer requires --init-checkpoint")
     loss_profile_overrides = resolve_loss_profile(args)
     runtime_ablation_loss_overrides = apply_runtime_feature_ablation_loss(args)
 
@@ -930,6 +1028,13 @@ def main() -> None:
         dataset,
         seed=args.seed,
         calibration_fraction=args.calibration_fraction,
+    )
+    train_split, protocol_split = apply_train_pose_fraction(
+        dataset,
+        train_split,
+        protocol_split,
+        args.train_pose_fraction,
+        args.seed,
     )
     camera_bounds = dataset.meta.get("cameraBounds", runtime_meta["sceneBounds"])
     point_np, glb_meta = load_glb_points(args.glb_points, max_points=args.glb_train_points)
@@ -975,13 +1080,11 @@ def main() -> None:
     init_checkpoint_meta: dict[str, Any] | None = None
     if args.init_checkpoint:
         init_checkpoint_path = Path(args.init_checkpoint)
-        checkpoint = torch.load(init_checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint["model"], strict=True)
-        init_checkpoint_meta = {
-            "path": str(init_checkpoint_path.as_posix()),
-            "best": checkpoint.get("best"),
-            "config": checkpoint.get("config"),
-        }
+        init_checkpoint_meta = load_initial_checkpoint(
+            model,
+            init_checkpoint_path,
+            allow_scene_transfer=bool(args.allow_scene_transfer),
+        )
     freeze_report = freeze_offline_encoder(model) if args.freeze_offline_encoder else None
     fixed_runtime_features = None
     fixed_runtime_meta = None

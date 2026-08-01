@@ -100,3 +100,9 @@ conda run --no-capture-output -n slm_pvs python -u \
 `frozen_test_manifest.json` 和 `summary.json`。入口已通过静态编译和一实例/两实例参数形状迁移
 合成 smoke；截至本记录更新时尚未运行实际跨场景 test，不能把入口存在解释为跨场景泛化成立。少样本
 适配仍需在该零样本执行完成后按预注册的 1%、5% 和 10% 训练视点另行实现和评测。
+
+少样本训练使用同一训练器的两个显式选项：`--init-checkpoint <source-best.pt> --allow-scene-transfer`
+只迁移可学习参数，`--train-pose-fraction 0.01|0.05|0.10` 使用按 seed 固定抽取的目标场景训练
+view-cell 子集。选中的训练 pose 数量和摘要会写入 `protocolSplit`；验证、校准和测试 pose 不会因
+该选项被重采样或缩减。默认 `--train-pose-fraction 1.0` 和不带 `--allow-scene-transfer` 的行为
+保持原有同场景训练语义。
