@@ -933,3 +933,6 @@ Three.js 光栅化，输出线性视深 level-0，并在浏览器中逐级进行
 结构，但将抑制输出固定为零，加载器会从 checkpoint 恢复该语义。新增
 `run_formal_m4_ablation_matrix.sh`，登记五种输入/抑制变体和三个随机种子，等待现有训练作业结束后按
 固定 GPU 槽运行。该脚本已在 `formal_m4_matrix` tmux 会话中启动并等待现有训练进程；当前 M4 正式指标仍未生成。
+
+另有 `run_formal_m4_validation_evaluations.sh` 收尾会话入口，负责在矩阵完成后锁定同一 validation
+候选并生成逐 pose 配对 bootstrap；它的输出不会打开 test split。

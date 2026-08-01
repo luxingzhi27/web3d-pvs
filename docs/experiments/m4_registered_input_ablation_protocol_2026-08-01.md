@@ -111,3 +111,8 @@ M4 比较。其余变体和随机种子仍需使用不同的稳定输出目录�
 
 矩阵收尾脚本已在 `formal_m4_matrix` tmux 会话启动，当前等待 HKUST 主线、Metropolis 主线和已登记的
 AABB+ray 训练退出；它尚未启动新的消融训练，也尚无正式指标。
+
+训练完成后的比较入口为 `run_formal_m4_validation_evaluations.sh`。它会等待全部矩阵成员和 M3
+完成，在每个成员的完整 validation split 上只运行 `baseline` 变体，保存同一 pose 的候选哈希、逐 pose
+指标和冻结阈值，然后由 `summarize_formal_m4_matrix.py` 执行“随机种子聚类、种子内 pose 重采样”的
+10,000 次配对 bootstrap。输出明确标记为 validation-only，不会读取 test。
