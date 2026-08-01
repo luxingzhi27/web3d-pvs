@@ -997,3 +997,26 @@ M9 空间 AABB 审计在强模型元数据下仍集合一致，但索引 p50/p95
 NeuralPVS 审计确认当前仓库没有可公平运行的原始或适配实现。论文方法需要真实深度片段、视锥体体素表示、体素到实例的映射以及相应的三维网络；现有 Color-ID 实例并集、AABB 投影 froxel 诊断和 AABB depth proxy 都不能替代这些输入。因此 M6 只保留 L0 元数据基线和 L2 三角形 HZB warm-cache 子门，NeuralPVS 子门未实现，不能生成或宣称伪造的比较结果。详见 `docs/experiments/m6_neuralpvs_baseline_audit_2026-08-01.md`。
 
 M10 审计完成桌面 headless smoke：WebGPU 路径可运行，但实际适配器是 SwiftShader；没有硬件独显/集显的正式分布，也没有两个 Android 性能档位、网络轨迹或完整分项计时。因此当前只证明浏览器启动和 Cold-0 请求顺序，不能宣称移动端实时。详见 `docs/frontend/m10_device_benchmark_2026-08-01.md`。
+
+### 21.17 M5 HKUST validation 图像门（2026-08-01）
+
+冻结模型在完整 `213` 个 validation view-cell 上完成真实 GLB、实例级 Color-ID 评价。聚合
+`miss-pixel rate=0.4947%`，但按 view-cell 的均值为 `0.5409%`、p95 为 `3.1973%`、最大值为
+`13.1422%`；self-consistency PER 为 0，说明渲染绑定链路自身没有出现错误。由于计划门槛要求
+mean `<0.5%` 且 p95 `<1%`，M5 图像门保持 No-Go。漏像素集中在少数大型高贡献构件，不能归因于
+低视觉效用长尾，也不能通过 test 阈值扫描修复。完整记录见
+`docs/evaluation/m5_hkust_formal_validation_image_2026-08-01.md`。
+
+### 21.18 M3/M7 正式结果补录（2026-08-01）
+
+- M3 两场景正式推理干预均已完成。HKUST 的代理清零相对 baseline 的 useful-cull 差值为
+  `-0.001293`，95% CI `[-0.002912, 0.000235]`；Metropolis 的代理清零会把 weighted recall
+  从 `0.992301` 降至 `0.223644`，跨实例代理置换降至 `0.696713`。代理确实参与模型决策，
+  但清零时的额外剔除伴随严重漏检，不能称为有效效率增益。M3 机制诊断完成，独立贡献主张等待
+  M4 三种子消融。
+- M7 HKUST 正式 validation/calibration 已完成。主线 calibration 工作点为阈值 `0.05`、weighted
+  recall `0.990532`、useful cull `0.881718`、bad cull `0.005222`。在 20 MiB 弱效用预算下，
+  validation 的 visibility-only、current-cascade、visibility-gated、independent-utility 效用召回
+  分别为 `0.9440`、`0.9254`、`0.9421`、`0.8794`；这些不是像素效用或真实下载时间结论。
+- M5 HKUST calibration 图像评价和 M7 Metropolis validation/calibration 仍在运行；M4 三种子训练
+  已启动。M0、M3、M5、M6、M7、M10 的正式门控状态仍以各自报告为准，尚未将任何 No-Go 门改为通过。

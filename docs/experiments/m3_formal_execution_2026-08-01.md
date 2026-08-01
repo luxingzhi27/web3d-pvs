@@ -12,14 +12,15 @@ M3 用同一个正式 checkpoint 做推理期干预，判断固定方向遮挡�
 
 ## 结果状态
 
-HKUST 正式 checkpoint 已完成 M3；Metropolis 仍等待正式 calibration-ready checkpoint。HKUST
+HKUST 和 Metropolis 的正式 checkpoint 均已完成 M3。两场景都使用 calibration 冻结阈值、完整
+validation split 和保存的后退相机候选集合；没有读取 test，也没有在干预阶段重选阈值。HKUST
 输出目录为：
 
 ```text
 neural_instance_culling/benchmark/out/m3_formal_pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_hkust_spatial_fov66_seed20260801_protocolfix_retry2_validation/
 ```
 
-本次使用 calibration 冻结阈值 `0.02`，在完整 validation 的 `664` 个 pose 上执行九种干预，
+HKUST 使用 calibration 冻结阈值 `0.02`，在完整 validation 的 `664` 个 pose 上执行九种干预，
 每个变体共享同一候选集合，并运行 `10,000` 次 paired bootstrap。代表性逐 pose 结果如下：
 
 | 变体 | Pose precision | Pose recall | Weighted recall | Useful cull | Bad cull | 平均预测 |
@@ -41,7 +42,32 @@ neural_instance_culling/benchmark/out/m3_formal_pvs_directional_occlusion_proxy_
 稳定的 useful-cull 增益，也没有达到预注册的 2 个百分点门槛。随机代理和跨实例置换的
 weighted recall 降到约 `0.98855`，因此不能视作保持安全约束的等价替代。
 
-当前只能引用旧模型的探索性干预结果，不能作为正式模型证据。正式路线判断仍遵循投稿计划：相对于 `geometry + context + ray`，只有在安全工作点下 useful cull 提升至少 2 个百分点，或同一图像效用下字节减少至少 10%，且三种子 paired bootstrap 不跨零时，才保留“方向代理具有独立贡献”的主张；否则转为路线 B 并删除该主张。
+这些 HKUST 结果已经是正式 checkpoint 的 validation 证据，不再属于旧模型的探索性结果。正式路线判断仍遵循投稿计划：相对于 `geometry + context + ray`，只有在安全工作点下 useful cull 提升至少 2 个百分点，或同一图像效用下字节减少至少 10%，且三种子 paired bootstrap 不跨零时，才保留“方向代理具有独立贡献”的主张；否则转为路线 B 并删除该主张。
+
+### Metropolis 正式结果
+
+Metropolis 使用 calibration 冻结阈值 `0.3199999928`，在 `2,088` 个 validation pose 中有 `2,066`
+个非空候选 pose，空候选 pose 仍保留在统计分母中。以下是跨 pose 合并后的结果：
+
+| 变体 | 聚合 precision | 聚合 recall | Weighted recall | Useful cull | Bad cull | 平均预测 |
+|---|---:|---:|---:|---:|---:|---:|
+| baseline | 0.282519 | 0.921357 | 0.992301 | 0.717516 | 0.006652 | 2822.90 |
+| proxy zero | 0.120423 | 0.102487 | 0.223644 | 0.852107 | 0.075911 | 736.67 |
+| proxy random | 0.117275 | 0.735796 | 0.906010 | 0.446993 | 0.022346 | 5430.84 |
+| direction mean | 0.147279 | 0.913702 | 0.993213 | 0.467979 | 0.007299 | 5370.06 |
+| direction roll | 0.189598 | 0.760663 | 0.934491 | 0.640425 | 0.020243 | 3472.76 |
+| proxy cross-instance permutation | 0.109095 | 0.602775 | 0.696713 | 0.499081 | 0.033597 | 4782.62 |
+| context zero | 0.213457 | 0.920946 | 0.994834 | 0.628401 | 0.006686 | 3734.56 |
+| context + proxy zero | 0.286488 | 0.191686 | 0.685122 | 0.875042 | 0.068367 | 579.16 |
+
+相对于 baseline 的 paired bootstrap（10,000 次）表明：
+
+- 代理清零的 useful-cull 差值为 `+0.172404`，95% CI `[+0.167775, +0.177133]`，但 weighted recall 差值为 `-0.807329`，95% CI `[-0.815546, -0.799001]`，bad-cull 增加 `+0.080834`。
+- 方向平均的 useful-cull 差值为 `-0.304757`，95% CI `[-0.310416, -0.299157]`，weighted recall 差值为 `+0.001268`，95% CI `[+0.000848, +0.001699]`，但预测数量大幅增加。
+- 方向循环移位的 useful-cull 差值为 `-0.111973`，95% CI `[-0.119538, -0.104345]`，weighted recall 差值为 `-0.068657`，95% CI `[-0.072543, -0.064747]`。
+- 上下文清零的 useful-cull 差值为 `-0.175856`，95% CI `[-0.182776, -0.168971]`，weighted recall 差值为 `+0.002989`，95% CI `[+0.002649, +0.003353]`，但 precision 和有效剔除明显恶化。
+
+这些结果说明代理和上下文确实被模型读取，代理置换会破坏输出；但“清除代理后剔除更多”伴随严重漏检，不能计为有效改进。当前证据支持“代理是模型决策的一部分”，不支持在安全约束下单独宣称代理带来 useful-cull 增益。M4 三种子消融仍是判断独立贡献的正式依据。
 
 ## 可复现命令
 
@@ -53,7 +79,7 @@ tmux new-session -d -s formal_m3_followup \
 
 ## 当前结论
 
-- 目标：已登记并完成 HKUST 单种子正式干预；Metropolis 和三种子重训练仍待完成。
+- 目标：两个场景的正式推理干预均已完成；M4 三种子重训练和 validation 评估仍在运行。
 - 代码：正式 runner、候选配对校验和 bootstrap 结果均已生成。
-- 指标：HKUST 已生成；方向代理存在可观测影响，但当前单种子结果未满足路线 A 的独立 useful-cull 准入条件。
+- 指标：代理清零或跨实例置换会明显破坏安全召回，证明代理分支被实际读取；但这不等价于安全工作点上的独立效率增益。
 - 是否保留为主线：暂不把“方向代理独立贡献”写入主张；等待 M4 三种子结果，若仍不达门槛则转路线 B。

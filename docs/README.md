@@ -42,6 +42,9 @@
 34. M9 空间特征分页格式、候选集合审计与运行时边界：`evaluation/m9_spatial_feature_page_audit_2026-08-01.json`、`frontend/m9_browser_runtime_benchmark_2026-08-01.md`
 35. M6 NeuralPVS 对照实现缺口与公平边界：`experiments/m6_neuralpvs_baseline_audit_2026-08-01.md`
 36. M10 桌面/移动设备 benchmark 可复核性审计：`frontend/m10_device_benchmark_2026-08-01.md`
+37. M5 HKUST 正式模型 validation 图像门：`evaluation/m5_hkust_formal_validation_image_2026-08-01.md`
+38. M3 两场景正式代理干预与配对 bootstrap：`experiments/m3_formal_execution_2026-08-01.md`
+39. M7 HKUST 正式 validation/calibration 下载调度结果：`experiments/m7_unified_download_scheduling_2026-08-01.md`
 
 ## 当前场景
 
@@ -86,6 +89,9 @@
 | `evaluation/m1_resource_semantics_audit_2026-08-01.md` | 正式候选/点云/实例映射复审，以及旧数据失败记录 |
 | `experiments/m6_neuralpvs_baseline_audit_2026-08-01.md` | NeuralPVS-style baseline 所需深度片段、视锥体体素和冷启动资源审计 |
 | `frontend/m10_device_benchmark_2026-08-01.md` | 当前 Chrome/WebGPU smoke、设备缺口和 M10 门控判断 |
+| `evaluation/m5_hkust_formal_validation_image_2026-08-01.md` | HKUST 正式模型 213 个 validation view-cell 的实例级图像质量与长尾诊断 |
+| `experiments/m3_formal_execution_2026-08-01.md` | HKUST/Metropolis 正式代理、上下文干预和 paired bootstrap 机制诊断 |
+| `experiments/m7_unified_download_scheduling_2026-08-01.md` | M7 主线、独立排序器和严格 GLB 字节预算的正式比较 |
 
 ## 当前图示资产
 

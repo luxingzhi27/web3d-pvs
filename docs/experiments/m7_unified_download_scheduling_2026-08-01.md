@@ -161,6 +161,36 @@ Formal test evaluation requires --frozen-threshold-file; test threshold scanning
 
 本次代码保留为 M7 主线评估入口。它解决的是实验协议和可比较性问题，并没有提前宣称算法收益。后续正式运行必须在输出目录保存 `summary.json`、`summary.md`、冻结阈值文件路径、实际 split 解析结果、GLB 字节来源和时间索引来源；任何缺失资源或未实现模式都应保留为显式状态，而不是回退到旧的 runner download score。
 
+## 2026-08-01 正式 HKUST validation/calibration
+
+HKUST 主线和独立 RankNet 已在严格保存候选集合上完成完整 validation/calibration。validation 遍历
+`664` 个唯一 pose，calibration 遍历 `690` 个唯一 pose；GLB 成本使用实际文件字节，时间成本没有提供，
+因此 `utilityAtTime` 保持 `not_available`。可见性阈值只作为 validation/calibration 工作点诊断，不能当作
+正式 test 阈值。
+
+主线在 calibration 的安全工作点为阈值 `0.05`，weighted recall `0.990532`、useful cull
+`0.881718`、bad cull `0.005222`、平均预测 `158.78`、平均候选 `5078.98`。validation 诊断工作点为
+阈值 `0.03`，weighted recall `0.990822`、useful cull `0.884581`、bad cull `0.010269`、平均预测
+`197.53`。独立 RankNet 不是实例可见性主模型；它只用于下载排序对照。
+
+在 `20 MiB` 字节预算和 `max` GLB 聚合下，弱 `log1p(visible_weights)` 效用教师的结果为：
+
+| 场景/split | score mode | 效用召回 | 字节削减 |
+|---|---|---:|---:|
+| HKUST validation | visibility-only | 0.9440 | 47.11% |
+| HKUST validation | current-cascade | 0.9254 | 47.14% |
+| HKUST validation | visibility-gated | 0.9421 | 47.08% |
+| HKUST validation | independent-utility | 0.8794 | 47.05% |
+| HKUST calibration | visibility-only | 0.9574 | 40.47% |
+| HKUST calibration | current-cascade | 0.9379 | 40.57% |
+| HKUST calibration | visibility-gated | 0.9510 | 40.44% |
+| HKUST calibration | independent-utility | 0.9099 | 40.46% |
+
+“效用召回”只表示弱教师定义下被预算前缀覆盖的可见效用比例，不能解释为真实像素覆盖率；
+“字节削减”相对当前候选 GLB 字节。当前结果说明可见性-only 在该弱教师和固定字节预算下优于当前级联
+与独立排序器，但没有真实解码/上传时间、网络轨迹和多种子置信区间，不能宣称联合下载头的工程或论文收益。
+Metropolis 正式 M7 仍在运行。
+
 ## 2026-08-01 独立 RankNet 排序器补齐
 
 ### 变更目的
