@@ -298,7 +298,7 @@ CPU pose batch 4 和四个严格字节预算。启动命令采用独立 session�
 
 ```bash
 --models baseline_keep_all,baseline_aabb_ray \
---learned-model-spec pvs_formal|/path/best.pt|/path/instance_runtime_features_fp16.bin|/path/calibration_ready_summary.json
+--learned-model-spec 'pvs_formal|/path/best.pt|/path/instance_runtime_features_fp16.bin|/path/calibration_ready_summary.json'
 ```
 
 模型 runner 对 `calibration_ready_pre_test` 只接受 `testEvaluationCount=0`，对
