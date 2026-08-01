@@ -321,6 +321,18 @@ negative 排序保持不变。默认 `visual_safety_loss_weight=0`，因此当�
 `neural_instance_culling/benchmark/out/m5_visual_safety_repair_queue.log`；当前状态是等待正式会话退出，尚未
 生成修复 checkpoint，也没有读取 test 或重新选择阈值。
 
+为避免正式图像评价对每个修复模型重复加载完整 HKUST GLB 清单，新增
+`neural_instance_culling/benchmark/run_m5_visual_safety_image_evaluation.py`。该入口先对四个变体、三个
+seed 的 validation/calibration 生成 schema-only 的完整实例级 manifest，再通过
+`run_m5_component_image_batch.py` 在同一个浏览器页面中顺序处理 24 个批次，完整 `3,273` 个 GLB 只加载一次。
+批次之间使用带变体、seed 和 split 的样本前缀，避免不同模型的相同 view-cell 样本 ID 冲突；脚本不读取 test、
+不扫描阈值、不改候选集合，也不产生前端兼容降级。
+
+队列已在 `tmux m5_visual_image` 中启动，日志为
+`neural_instance_culling/benchmark/out/m5_visual_safety_image_evaluation_queue.log`。截至本记录更新时，
+12 个修复 checkpoint 均尚未完成，因此队列只在等待，不占用 GPU；完成后输出 validation/calibration 图像汇总，
+若浏览器渲染失败则保留原始日志并保持 M5 No-Go，不以缩小样本替代正式评价。
+
 ## 2026-08-02 Benchmark 回归复核
 
 在不改变正在运行的 M4/M11 训练、评测队列和任何正式输出目录的前提下，重新执行当前 benchmark
