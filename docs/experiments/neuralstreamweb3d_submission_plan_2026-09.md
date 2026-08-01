@@ -956,3 +956,23 @@ RankNet loss 为 `0.0435587`，Metropolis 为 `0.2489221`。在独立排序器�
 本轮 benchmark 回归已达到 33 项单元测试全部通过，visual utility/trajectory self-test、Python 编译、
 Node 语法检查和差异检查均通过。正式主线训练、M0 frozen test、M3/M4 消融仍由持久会话继续执行，
 本节不把中间 checkpoint 写入投稿主表。
+
+### 21.14 执行状态更新（2026-08-01）
+
+本次更新只写入已经实际产生的产物，不把后台任务的预期结果提前写入主表：
+
+- M0 HKUST：正式空间模型已完成 40 epoch、calibration 安全校准和一次完整 frozen test。阈值为
+  `0.02`，test 遍历 `722` 个唯一 pose，`testEvaluationCount=1`；weighted recall 为 `0.997047`，
+  pose recall 为 `0.946084`，useful cull 为 `0.759446`，bad cull 为 `0.004613`。冻结入口首次运行曾因
+  评测器导入契约错误在读取 test 前失败，失败 claim 被单独保留，修复后使用同一 immutable manifest
+  在新目录完成真正测试。
+- M3 HKUST：在完整 validation 的 `664` 个 pose 上完成九种推理干预和 `10,000` 次 paired bootstrap。
+  代理清零相对 baseline 的 useful-cull 差值为 `-0.001293`，95% CI 为 `[-0.002912, 0.000235]`；
+  weighted-recall 差值为 `-0.000202`，95% CI 为 `[-0.000988, 0.001003]`。代理分支会改变输出，
+  但当前未满足预注册的独立 useful-cull 增益门槛，不能单独宣称方向代理贡献成立。
+- Metropolis 正式主线仍在 GPU 2 上运行，当前约为 `31/40` epoch；其 calibration、冻结 test 和 M3
+  结果尚未产生。M4 三种子矩阵和其 validation 配对评估继续等待主线训练完成。
+- M5 的 canonical view-cell center 语义入口修复已推送；真实 GLB v3 smoke 通过，但仍是小规模 smoke，
+  完整 validation/calibration 图像评价及 one-shot test 图像门尚未通过。
+- 回归验证更新为 benchmark Python `35 tests, OK`、前端当前完整性 smoke 通过、M9 前端回归 `8` 项通过。
+  本轮提交均采用追加 commit 并推送到 `origin/main`，没有删除或改写既有历史。
