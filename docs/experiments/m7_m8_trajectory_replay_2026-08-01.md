@@ -355,3 +355,15 @@ node --check neural_instance_culling/benchmark/measure_glb_decode_upload_costs.m
 真实 smoke 使用 HKUST 的 1 个小构件和 3 个最大构件，结果写在 `/tmp`，不作为正式成本索引：1 个小构件成功，约 `2,964` bytes、`12.4 ms` 解析、`31.8 ms` render 提交；3 个约 `41.5 MB` 构件均成功，`decodeUploadMs` 约 `232--529 ms`。这些数值只证明采集链路和大构件路径可运行，尚未覆盖全部 `3,273` 个 GLB，也不代表移动设备性能。
 
 正式 M8 仍需在固定浏览器/后端和完整清单上运行采集，记录浏览器版本、图形适配器、分辨率和温度条件，并将完整成本索引与 SHA-256 一起冻结。SwiftShader smoke 不得冒充硬件 GPU 或 Android 成本证据。
+
+## 2026-08-02 当前主线回放入口修正
+
+此前尝试把当前主线模型和独立 RankNet 同时传给 `evaluate_download_trajectory.py`，并统一使用
+`current-cascade`。RankNet 只提供独立效用排序分数，没有下载头；评估器按设计拒绝了该组合，六个
+`m8_formal_current_*_20260802` 输出只保留错误日志，不能作为空结果或性能结果。
+
+已新增 `neural_instance_culling/benchmark/run_m8_formal_trajectory_replay.sh`，将两类 runner 分为
+兼容的独立回放：当前主线只使用 `current-cascade`，RankNet 只使用 `independent-utility`。两类回放
+共享完全相同的轨迹、候选集合、GLB 文件字节、解码成本、带宽、并发和预算；新结果追加
+`20260802_retry1` 后缀，不覆盖旧失败输出和旧 `w042` 探索性回放。当前主线六个回放完成前，不把旧
+`w042` 表中的数字改写为当前模型结果。

@@ -348,3 +348,48 @@ PYTHONDONTWRITEBYTECODE=1 conda run --no-capture-output -n slm_pvs \
 Color-ID schema、三角形 HZB 缓存查询、M4 输入/抑制消融序列化、M5 视觉安全损失及训练校准控制。
 该结果只证明代码契约和回归测试通过，不替代正式 validation/calibration 图像质量、泛化、移动设备
 性能或 M13 one-shot test；相关质量门状态保持不变。
+
+## 2026-08-02 M11 跨场景资源修正与零样本边界
+
+首次启动 Metropolis 少样本适配时，训练器发现方向数据集使用 41,298 个原始构件记录，而队列脚本传入
+的 `glb_points_v3_formal_metropolis_fov66.bin` 只有 3,669 行实例化原型缓存，因而在训练前以
+`GLB point cache row count 3669 < runtime GLB count 41298` 拒绝运行。该失败输出目录保留，未用补零、
+截断或更换实例编号来绕过检查。
+
+已修正 `neural_instance_culling/benchmark/run_m11_metropolis_fewshot.sh`：方向数据集现在使用
+`ifcbench_fantasy_metropolis_instanced_v2_glb_points_v3.bin`，其元数据为 41,298 行，与
+`ifcbench_fantasy_metropolis_source/assets/runtimeVisibilityMeta.json` 和方向数据集一致；重跑输出追加
+`retry2` 后缀。该修正仅恢复数据语义一致性，不改变训练、阈值或评价规则。
+
+同时完成 HKUST 到 Metropolis 的零样本迁移，输出为
+`model/out/m11_transfer_hkust_directional_to_metropolis_yaw20_seed20260801_retry2/summary.json`。
+目标 calibration 冻结阈值为 `1.7782794e-07`；Metropolis test weighted recall `0.9999826`，但
+agg precision `0.0911073`，平均预测 `11,481.48`、平均候选 `11,481.53`，有效剔除近乎为零。
+这证明零样本参数迁移只能保留安全召回，不能保留目标场景的剔除能力；M11 不提出通用零样本主张。
+少样本适配的第一次资源修正运行 `retry2` 在 1% 训练的第 1 个 epoch 因单步上下文传播显存不足而失败，
+失败目录和 stderr 保留。随后 `run_m11_metropolis_fewshot.sh` 增加了单 pose 批次、较小离线特征导出批次、
+默认 AMP 和可扩展显存分段配置，使用新输出后缀 `retry3` 在 GPU 3 重新启动 1%、5%、10% 队列；完成前
+不记录正式适配指标。
+
+### 2026-08-02 M11 少样本显存边界与移动测试边界
+
+Metropolis 方向数据集按原始构件粒度包含 `41,298` 个实例，训练时上下文证据会把当前 pose 的目标实例和
+证据来源同时展开。`retry2` 使用两 pose 批次，在第一个 epoch 中触发 `torch.OutOfMemoryError`，当时
+可见显存不足约 `2.61 GiB`；这不是通过减少候选、修改 GT 或替换点云缓存解决的问题。新队列配置仅将
+批处理改为逐 pose，并降低离线特征导出峰值；如果 retry3 仍失败，将保留日志并把 M11 少样本适配降级为
+“资源边界未建立”，不伪造跨场景收益。
+
+移动端目前没有实体 Android 设备、ADB 和可核验的硬件 WebGPU 适配器，因此 M10 仍只保留测试方案和
+`No-Go / 真实设备证据缺失` 状态。方案已经固定了高性能/中端两档设备、256 至 16k 候选桶、冷/温缓存、
+Wi-Fi/受控 4G、三条轨迹、每条件至少 30 次有效运行、p50/p95/p99、分项计时、内存/温度和 FP16/WGSL
+正确性 smoke；没有真实样本的桶必须报告缺失，不能用 SwiftShader 结果填充移动端结论。
+
+### 2026-08-02 M8 当前主线回放 runner 组合修正
+
+六个当前主线离线回放初次启动后被评估器拒绝：命令同时注册当前模型和独立 RankNet，却指定统一的
+`current-cascade`；独立 RankNet 没有下载头，不能提供该分数模式。原始 stdout/stderr 保留在
+`benchmark/out/m8_formal_current_*_20260802.{stdout,stderr}.log`，不把失败输出计入 M8。
+
+新增 `neural_instance_culling/benchmark/run_m8_formal_trajectory_replay.sh`，按 runner 粒度拆成
+当前级联和独立排序两组，分别使用 `current-cascade` 与 `independent-utility`，并在相同轨迹、成本索引和
+预算下运行。新结果使用 `m8_formal_*_20260802_retry1` 命名，避免覆盖旧失败目录和历史 `w042` replay。

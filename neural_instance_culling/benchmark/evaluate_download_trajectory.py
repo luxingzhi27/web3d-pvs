@@ -40,6 +40,7 @@ from evaluate_visual_utility_metrics import (  # noqa: E402
     _score_mode_result,
     load_glb_byte_costs,
     load_glb_time_costs,
+    parse_learned_model_specs,
 )
 from model_runners import (  # noqa: E402
     load_runner,
@@ -1029,6 +1030,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--glb-root", help="Root used to resolve paths in glbIndex.json.")
     parser.add_argument("--glb-time-index", help="Strict per-GLB decode/upload time cost index JSON.")
     parser.add_argument("--models", help="Comma-separated retained runner names.")
+    parser.add_argument(
+        "--learned-model-spec",
+        action="append",
+        default=[],
+        help="Explicit learned runner: name|checkpoint|runtime_features|calibration_summary.",
+    )
     parser.add_argument("--independent-ranker-spec", action="append", default=[], help="name|checkpoint for an independent RankNet utility runner.")
     parser.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"))
     parser.add_argument("--score-mode", default="current-cascade", choices=SCORE_MODES)
@@ -1063,7 +1070,12 @@ def main(argv: list[str] | None = None) -> None:
         byte_budgets = _parse_float_list(args.byte_budgets)
         time_budgets = _parse_float_list(args.time_budgets_ms)
         initial_ids = _parse_id_list(args.initial_cache_glbs)
-        specs = selected_default_specs(args.models)
+        specs = selected_default_specs(args.models or "")
+        explicit_specs = parse_learned_model_specs(args.learned_model_spec)
+        duplicate_specs = sorted(set(specs).intersection(explicit_specs))
+        if duplicate_specs:
+            raise ValueError(f"explicit learned model specs duplicate retained models: {duplicate_specs}")
+        specs.update(explicit_specs)
         for raw in args.independent_ranker_spec:
             parts = str(raw).split("|")
             if len(parts) != 2 or any(not part.strip() for part in parts):

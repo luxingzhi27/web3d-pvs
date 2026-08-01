@@ -113,3 +113,44 @@ calibration 后，在 GPU 3 上依次运行 1%、5%、10% 三个独立输出目�
 安全时生成 frozen manifest 和一次完整 test；不安全的比例只保留训练/校准失败证据并继续后续比例。
 该队列尚未产生正式指标，运行日志写入 `neural_instance_culling/benchmark/out/m11_metropolis_fewshot_queue.log`
 及各实验目录，不能把队列启动状态当成泛化结果。
+
+## 2026-08-02 资源语义修正与零样本迁移结果
+
+### 资源校验失败与修正
+
+首次启动少样本队列时，训练器在资源校验阶段拒绝运行：方向 Metropolis 数据集的
+`dataset_meta.json` 使用 `ifcbench_fantasy_metropolis_source` 的 41,298 个原始构件记录，
+但脚本误用了只有 3,669 行的实例化原型点云缓存。该失败目录和 stderr 保留为输入语义错误证据，
+没有把不匹配的缓存补零或截断。
+
+脚本 `neural_instance_culling/benchmark/run_m11_metropolis_fewshot.sh` 已改为使用
+`neural_instance_culling/dataset/out/ifcbench_fantasy_metropolis_instanced_v2_glb_points_v3.bin`，
+该文件的元数据报告 `41,298` 行、每个 GLB `1,024` 个点，与方向数据集的原始构件粒度和
+`ifcbench_fantasy_metropolis_source/assets/runtimeVisibilityMeta.json` 一致。第一次修正后的
+`retry2` 训练又在 1% 适配的第 1 个 epoch、约第 266 个 step 触发 CUDA out-of-memory；该目录和
+stderr 保留为显存边界证据，没有复用其不完整输出。
+
+为解决这个与场景规模相关的运行资源问题，队列默认追加 `retry3` 后缀，使用单 pose 训练批次、
+`feature-export-batch-size=128`、可选 AMP（默认开启）和 `expandable_segments:True`。这些参数只改变
+训练的显存占用和批处理方式，不截断候选、不补入 GT、也不改变 validation/calibration/test 的数据
+语义；retry3 完成前不记录任何少样本指标。
+
+### 零样本迁移
+
+使用 HKUST 方向模型的可学习参数，在 Metropolis 重新生成目标场景固定特征；实例 AABB、实例到 GLB
+映射、方向证据和场景缓冲区均来自目标场景。输出为
+`neural_instance_culling/model/out/m11_transfer_hkust_directional_to_metropolis_yaw20_seed20260801_retry2/`，
+目标校准和 test 均遵循一次冻结规则。
+
+| 指标 | calibration 冻结点 | Metropolis test |
+|---|---:|---:|
+| 阈值 | `1.7782794e-07` | 同左 |
+| pose weighted recall | `0.9999959` | `0.9999826` |
+| pose recall | `0.9999927` | `0.9999957` |
+| agg precision | `0.0937433` | `0.0911073` |
+| useful cull | 近似 `0` | 近似 `0` |
+| 平均预测 / 候选 | `10520.06 / 10520.07` | `11481.48 / 11481.53` |
+
+结论是：共享查询参数本身可以维持高召回，但不能在未重建目标场景表征并适配参数的情况下维持有效剔除。
+因此论文不使用“零样本跨场景通用模型”表述，M11 的跨场景结论限定为“目标场景离线特征重建加少样本
+适配”，1%、5%、10% 适配结果待 `retry3` 队列完成后按相同安全规则评估。
