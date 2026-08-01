@@ -160,6 +160,9 @@ export class InstancePVS {
     this.cameraBounds = null;
     this.instanceBoxes = [];
     this.instanceWorldAabbs = null;
+    this.spatialAabbIndex = null;
+    this.lastCandidateSelection = null;
+    this._spatialScratchBox = new Box3();
     this.instanceToGlobalGlb = [];
     this.instanceToGlobalGlbArray = null;
     // Some exported feature tables use compact local rows while the renderer
@@ -237,6 +240,7 @@ export class InstancePVS {
     this._validateRuntimeLayout();
     if (this._isV3Runtime() || this._isDirectionalOcclusionProxyRuntime() || this._isUtilityDynamicPoolRuntime()) {
       this._buildV3AabbCacheFromAsset(assetBuffer);
+      this._rebuildSpatialAabbIndex();
     }
 
     const runtimeStart = nowMs();
@@ -357,6 +361,7 @@ export class InstancePVS {
     const cache = this._buildInstanceBoxCache(runtimeMeta);
     this.instanceBoxes = cache.boxes;
     if (cache.aabbs) this.instanceWorldAabbs = cache.aabbs;
+    this._rebuildSpatialAabbIndex();
     return this.instanceBoxes.length;
   }
 
@@ -472,6 +477,79 @@ export class InstancePVS {
     return out;
   }
 
+  _rebuildSpatialAabbIndex() {
+    const count = Number(this.meta?.numInstances || 0);
+    const boxes = this.instanceBoxes;
+    if (!count || !boxes || boxes.length === 0 || !this.sceneBounds) {
+      this.spatialAabbIndex = null;
+      return;
+    }
+    const configuredCellSize = Number(this.meta?.spatialAabbCellSizeM ?? 64);
+    const cellSize = Number.isFinite(configuredCellSize) && configuredCellSize > 0 ? configuredCellSize : 64;
+    const configuredMaxCells = Number(this.meta?.spatialAabbMaxCellsPerInstance ?? 128);
+    const maxCellsPerInstance = Number.isFinite(configuredMaxCells) && configuredMaxCells >= 1
+      ? Math.floor(configuredMaxCells)
+      : 128;
+    const origin = this.sceneBounds.min.map(Number);
+    const buckets = new Map();
+    const overflowIds = [];
+    let minCell = [Infinity, Infinity, Infinity];
+    let maxCell = [-Infinity, -Infinity, -Infinity];
+    let indexedInstanceCount = 0;
+    for (let id = 0; id < Math.min(count, boxes.length); id += 1) {
+      const box = boxes[id];
+      if (!box || !box.min || !box.max) continue;
+      const lo = [
+        Math.floor((box.min.x - origin[0]) / cellSize),
+        Math.floor((box.min.y - origin[1]) / cellSize),
+        Math.floor((box.min.z - origin[2]) / cellSize),
+      ];
+      const hi = [
+        Math.floor((box.max.x - origin[0]) / cellSize),
+        Math.floor((box.max.y - origin[1]) / cellSize),
+        Math.floor((box.max.z - origin[2]) / cellSize),
+      ];
+      const span = (hi[0] - lo[0] + 1) * (hi[1] - lo[1] + 1) * (hi[2] - lo[2] + 1);
+      if (!Number.isFinite(span) || span > maxCellsPerInstance) {
+        overflowIds.push(id);
+        continue;
+      }
+      indexedInstanceCount += 1;
+      for (let ix = lo[0]; ix <= hi[0]; ix += 1) {
+        for (let iy = lo[1]; iy <= hi[1]; iy += 1) {
+          for (let iz = lo[2]; iz <= hi[2]; iz += 1) {
+            const key = `${ix},${iy},${iz}`;
+            let bucket = buckets.get(key);
+            if (!bucket) {
+              bucket = [];
+              buckets.set(key, bucket);
+            }
+            bucket.push(id);
+          }
+        }
+      }
+      for (let axis = 0; axis < 3; axis += 1) {
+        minCell[axis] = Math.min(minCell[axis], lo[axis]);
+        maxCell[axis] = Math.max(maxCell[axis], hi[axis]);
+      }
+    }
+    if (!buckets.size && !overflowIds.length) {
+      this.spatialAabbIndex = null;
+      return;
+    }
+    this.spatialAabbIndex = {
+      cellSize,
+      origin,
+      buckets,
+      overflowIds,
+      minCell: minCell.map((value) => Number.isFinite(value) ? value : 0),
+      maxCell: maxCell.map((value) => Number.isFinite(value) ? value : 0),
+      indexedInstanceCount,
+      overflowInstanceCount: overflowIds.length,
+      maxQueryCells: Number(this.meta?.spatialAabbMaxQueryCells ?? 100000),
+    };
+  }
+
   _buildInstanceIdMaps() {
     const count = Number(this.meta?.numInstances || 0);
     const configured = Array.isArray(this.meta?.globalInstanceIds)
@@ -534,7 +612,11 @@ export class InstancePVS {
   _frustumCandidateIds(camera) {
     // CPU 候选过滤：先用实例 AABB 去掉明显不在视野附近的实例。
     // 神经网络只负责遮挡可见性，不负责基础视锥裁剪。
-    if (!camera || this.instanceBoxes.length === 0) return Array.from({ length: this.meta.numInstances }, (_v, i) => i);
+    if (!camera || this.instanceBoxes.length === 0) {
+      const ids = Array.from({ length: this.meta.numInstances }, (_v, i) => i);
+      this.lastCandidateSelection = { source: 'all_instances_no_aabb_cache', candidateCount: ids.length };
+      return ids;
+    }
     // 候选视锥使用固定的 66° 模型查询口径；真实 60° 视锥只负责最终显示。
     const candidateCamera = camera.clone();
     candidateCamera.fov = MODEL_INPUT_FOV_Y_DEG;
@@ -542,11 +624,87 @@ export class InstancePVS {
     candidateCamera.updateMatrixWorld(true);
     const matrix = new Matrix4().multiplyMatrices(candidateCamera.projectionMatrix, candidateCamera.matrixWorldInverse);
     const frustum = new Frustum().setFromProjectionMatrix(matrix);
+    const index = this.spatialAabbIndex;
+    if (index) {
+      const corners = [];
+      let finiteCorners = true;
+      for (const z of [-1, 1]) {
+        for (const y of [-1, 1]) {
+          for (const x of [-1, 1]) {
+            const point = new Vector3(x, y, z).unproject(candidateCamera);
+            if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(point.z)) {
+              finiteCorners = false;
+            }
+            corners.push(point);
+          }
+        }
+      }
+      if (finiteCorners) {
+        const boundsMin = [Infinity, Infinity, Infinity];
+        const boundsMax = [-Infinity, -Infinity, -Infinity];
+        for (const point of corners) {
+          boundsMin[0] = Math.min(boundsMin[0], point.x);
+          boundsMin[1] = Math.min(boundsMin[1], point.y);
+          boundsMin[2] = Math.min(boundsMin[2], point.z);
+          boundsMax[0] = Math.max(boundsMax[0], point.x);
+          boundsMax[1] = Math.max(boundsMax[1], point.y);
+          boundsMax[2] = Math.max(boundsMax[2], point.z);
+        }
+        const lo = boundsMin.map((value, axis) => Math.floor((value - index.origin[axis]) / index.cellSize) - 1);
+        const hi = boundsMax.map((value, axis) => Math.floor((value - index.origin[axis]) / index.cellSize) + 1);
+        const rawCellCount = (hi[0] - lo[0] + 1) * (hi[1] - lo[1] + 1) * (hi[2] - lo[2] + 1);
+        const maxQueryCells = Number.isFinite(index.maxQueryCells) && index.maxQueryCells > 0
+          ? index.maxQueryCells
+          : 100000;
+        if (Number.isFinite(rawCellCount) && rawCellCount <= maxQueryCells) {
+          const seen = new Set(index.overflowIds);
+          for (let ix = lo[0]; ix <= hi[0]; ix += 1) {
+            for (let iy = lo[1]; iy <= hi[1]; iy += 1) {
+              for (let iz = lo[2]; iz <= hi[2]; iz += 1) {
+                const cellMin = new Vector3(
+                  index.origin[0] + ix * index.cellSize,
+                  index.origin[1] + iy * index.cellSize,
+                  index.origin[2] + iz * index.cellSize,
+                );
+                this._spatialScratchBox.min.copy(cellMin);
+                this._spatialScratchBox.max.set(
+                  cellMin.x + index.cellSize,
+                  cellMin.y + index.cellSize,
+                  cellMin.z + index.cellSize,
+                );
+                if (!frustum.intersectsBox(this._spatialScratchBox)) continue;
+                const bucket = index.buckets.get(`${ix},${iy},${iz}`);
+                if (bucket) for (const id of bucket) seen.add(id);
+              }
+            }
+          }
+          const ids = [];
+          for (const id of seen) {
+            const box = this.instanceBoxes[id];
+            if (box && frustum.intersectsBox(box)) ids.push(id);
+          }
+          this.lastCandidateSelection = {
+            source: 'spatial_aabb_index',
+            queryCellCount: rawCellCount,
+            indexedInstanceCount: index.indexedInstanceCount,
+            overflowInstanceCount: index.overflowInstanceCount,
+            candidateCount: ids.length,
+          };
+          return ids;
+        }
+      }
+    }
     const ids = [];
     for (let i = 0; i < this.instanceBoxes.length; i += 1) {
       const box = this.instanceBoxes[i];
       if (box && frustum.intersectsBox(box)) ids.push(i);
     }
+    this.lastCandidateSelection = {
+      source: 'full_aabb_scan',
+      candidateCount: ids.length,
+      indexedInstanceCount: index?.indexedInstanceCount ?? 0,
+      overflowInstanceCount: index?.overflowInstanceCount ?? 0,
+    };
     return ids;
   }
 
@@ -868,6 +1026,7 @@ export class InstancePVS {
         serial: this.predictSerial,
         totalMs: emptyEnd - start,
         candidateMs: candidateEnd - candidateStart,
+        candidateSelection: this.lastCandidateSelection,
         inferenceMs: 0,
         postMs: 0,
         candidateCount: 0,
@@ -1004,6 +1163,7 @@ export class InstancePVS {
       serial: this.predictSerial,
       totalMs: end - start,
       candidateMs: candidateEnd - candidateStart,
+      candidateSelection: this.lastCandidateSelection,
       inferenceMs: inferenceEnd - inferenceStart,
       postMs: end - postStart,
       candidateCount: candidateIds.length,
