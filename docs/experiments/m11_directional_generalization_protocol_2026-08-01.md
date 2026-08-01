@@ -106,3 +106,10 @@ conda run --no-capture-output -n slm_pvs python -u \
 view-cell 子集。选中的训练 pose 数量和摘要会写入 `protocolSplit`；验证、校准和测试 pose 不会因
 该选项被重采样或缩减。默认 `--train-pose-fraction 1.0` 和不带 `--allow-scene-transfer` 的行为
 保持原有同场景训练语义。
+
+已登记 Metropolis 少样本队列 `tmux m11_metropolis_fewshot`，入口为
+`neural_instance_culling/benchmark/run_m11_metropolis_fewshot.sh`。队列等待 HKUST 方向模型完成最终
+calibration 后，在 GPU 3 上依次运行 1%、5%、10% 三个独立输出目录，并在每个模型自身的 calibration
+安全时生成 frozen manifest 和一次完整 test；不安全的比例只保留训练/校准失败证据并继续后续比例。
+该队列尚未产生正式指标，运行日志写入 `neural_instance_culling/benchmark/out/m11_metropolis_fewshot_queue.log`
+及各实验目录，不能把队列启动状态当成泛化结果。
