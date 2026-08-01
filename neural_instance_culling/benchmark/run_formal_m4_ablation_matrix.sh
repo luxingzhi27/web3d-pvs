@@ -20,9 +20,16 @@ GLB_INDEX="hkust-v3/assets/glbIndex.json"
 GLB_ROOT="hkust-v3/assets"
 OUTPUT_ROOT="neural_instance_culling/model/out"
 
-wait_for_pid_exit() {
+wait_for_optional_pid_exit() {
   local pid="$1"
   local label="$2"
+  if [[ -z "$pid" ]]; then
+    return 0
+  fi
+  if [[ ! "$pid" =~ ^[0-9]+$ ]]; then
+    printf '[formal-m4] invalid PID for %s: %s\n' "$label" "$pid" >&2
+    return 1
+  fi
   while kill -0 "$pid" 2>/dev/null; do
     printf '[formal-m4] waiting for %s (pid=%s)\n' "$label" "$pid"
     sleep "$POLL_SECONDS"
@@ -94,9 +101,14 @@ run_variant() {
   printf '[formal-m4] completed %s\n' "$experiment"
 }
 
-wait_for_pid_exit 3368062 "HKUST mainline"
-wait_for_pid_exit 3335609 "Metropolis mainline"
-wait_for_pid_exit 3379206 "registered AABB+ray ablation"
+# These are intentionally opt-in.  Hard-coding PIDs from a previous machine
+# makes the queue non-reproducible and can accidentally wait on an unrelated
+# process after PID reuse.  The registered AABB+ray output remains a required
+# artifact gate below; external jobs may be supplied only by the launcher that
+# knows their current PIDs.
+wait_for_optional_pid_exit "${SLM_M4_HKUST_MAINLINE_PID:-}" "HKUST mainline"
+wait_for_optional_pid_exit "${SLM_M4_METROPOLIS_MAINLINE_PID:-}" "Metropolis mainline"
+wait_for_optional_pid_exit "${SLM_M4_AABB_RAY_PID:-}" "registered AABB+ray ablation"
 wait_for_existing_aabb
 
 variants=(aabb_ray geometry_ray geometry_context_ray geometry_context_proxy_ray_no_inhibition full)

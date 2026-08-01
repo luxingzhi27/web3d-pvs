@@ -193,3 +193,20 @@ node neural_instance_culling/benchmark/measure_glb_decode_upload_costs.mjs \
 
 该修复保留为当前前端代码，原因是它消除了索引路径对候选集合的错误影响。性能子门仍为 No-Go；移动端方案继续
 保持“设备证据缺失”，不以桌面或 headless Chrome 结果替代真实 Android 测量。
+
+## 2026-08-02 M4 队列可复现性修复
+
+### 变更目的
+
+M4 队列脚本原先把等待中的外部训练任务写成固定进程号。这些进程号只对应一次服务器运行，换机器、重启或发生进程号复用时，脚本可能无意义地等待，或者把无关进程当成实验依赖。该问题影响实验编排的可复现性，但不影响已经越过等待阶段的当前训练进程。
+
+### 修改与验证
+
+- 修改 `neural_instance_culling/benchmark/run_formal_m4_ablation_matrix.sh`：删除硬编码 PID；改为仅在启动器显式提供 `SLM_M4_HKUST_MAINLINE_PID`、`SLM_M4_METROPOLIS_MAINLINE_PID` 或 `SLM_M4_AABB_RAY_PID` 时等待对应任务。
+- 已有的 `calibration_ready_summary.json` 产物门控保持不变，注册的 AABB+ray 结果仍必须存在，不能通过跳过等待伪造矩阵完整性。
+- 当前 `formal_m4_matrix` 已在修改前进入训练阶段，未重启、覆盖或改变其 GPU 任务；本次修改只影响后续启动。
+- 待当前队列完成后执行 `bash -n neural_instance_culling/benchmark/run_formal_m4_ablation_matrix.sh`、`git diff --check`，并在下一次启动时验证空 PID 不会阻塞、显式 PID 仍能正确等待。
+
+### 质量判断
+
+该变更保留为正式实验基础设施修复。它不改变数据、模型、损失、阈值或评测口径，也不改变当前 M4 的科学结果；后续矩阵运行不再依赖本机历史进程号。
