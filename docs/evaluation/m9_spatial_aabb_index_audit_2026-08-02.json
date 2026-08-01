@@ -1,9 +1,7 @@
 {
   "schemaVersion": "m9-spatial-aabb-index-audit-v1",
   "status": "pass",
-  "supersededBy": "m9_spatial_aabb_index_audit_2026-08-02.json",
-  "historicalNote": "Historical far=2000 audit before the cross-cell AABB overflow correction; retained for provenance and not the current runtime correctness record.",
-  "modelMeta": "slm2viewer/assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best/instance_model_meta.json",
+  "modelMeta": "slm2viewer/assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best/instance_model_meta.json",
   "runtimeMeta": "slm2viewer/assets/scenes/hkust-v3/runtimeVisibilityMeta.json",
   "dataset": "neural_instance_culling/dataset/out/pose_csr_hkust_v3_spatial_raw_subpose_aabb_fov66_v1",
   "configuration": {
@@ -14,9 +12,9 @@
     "runtimeMaxQueryCells": 100000,
     "forcedIndexMaxQueryCells": 1000000000,
     "cellSizeM": 64,
-    "indexedInstanceCount": 18810,
-    "overflowInstanceCount": 21,
-    "bucketCount": 815
+    "indexedInstanceCount": 16053,
+    "overflowInstanceCount": 2778,
+    "bucketCount": 169
   },
   "candidateCount": {
     "forcedIndex": {
@@ -41,21 +39,21 @@
   "elapsedMs": {
     "forcedIndex": {
       "sampleCount": 128,
-      "p50": 11.073285499999997,
-      "p95": 16.479481150000012,
-      "p99": 36.969851379999966,
-      "min": 7.795575999999983,
-      "max": 44.142304000000024,
-      "mean": 12.261683632812503
+      "p50": 12.202996499999927,
+      "p95": 20.07617124999998,
+      "p99": 36.26140406000006,
+      "min": 9.391228000000012,
+      "max": 45.671605,
+      "mean": 13.650974984374999
     },
     "fullScan": {
       "sampleCount": 128,
-      "p50": 0.5633354999999369,
-      "p95": 2.8522503499999514,
-      "p99": 3.1667768800000196,
-      "min": 0.23235700000009274,
-      "max": 3.6842619999999897,
-      "mean": 0.960722539062496
+      "p50": 0.6925320000000283,
+      "p95": 3.3817408500000625,
+      "p99": 3.465723590000091,
+      "min": 0.2827470000001995,
+      "max": 3.4801700000000437,
+      "mean": 1.1727679843749996
     }
   },
   "sourceCounts": {

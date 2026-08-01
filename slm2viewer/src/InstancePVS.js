@@ -712,7 +712,15 @@ export class InstancePVS {
         Math.floor((box.max.z - origin[2]) / cellSize),
       ];
       const span = (hi[0] - lo[0] + 1) * (hi[1] - lo[1] + 1) * (hi[2] - lo[2] + 1);
-      if (!Number.isFinite(span) || span > maxCellsPerInstance) {
+      // Three.js Frustum.intersectsBox is intentionally conservative for a
+      // large box: different frustum planes may select different support
+      // corners, so a box can pass even when none of its spatial sub-cells
+      // passes. Splitting such a box during indexed lookup would therefore
+      // change the legacy full-AABB candidate set and could drop a candidate.
+      // Keep every cross-cell box in the overflow list; only a box wholly
+      // contained in one cell is safe to retrieve through the cell bucket.
+      const crossesCellBoundary = lo.some((value, axis) => hi[axis] !== value);
+      if (!Number.isFinite(span) || span > maxCellsPerInstance || crossesCellBoundary) {
         overflowIds.push(id);
         continue;
       }

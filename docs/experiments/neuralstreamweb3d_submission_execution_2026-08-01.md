@@ -158,3 +158,38 @@ node neural_instance_culling/benchmark/measure_glb_decode_upload_costs.mjs \
 - 回放工具子门：通过；单元测试 5 项通过，Python 编译检查和 `git diff --check` 通过。
 - M7/M8 正式质量门：仍未通过。当前缺少真实网络轨迹、冷/温缓存配对、多轨迹置信区间和移动/硬件浏览器端到端测量；弱效用也不能替代 M5 的像素级图像效用。
 - M10：继续保持 `No-Go / 设备证据缺失`，仅保留 [移动设备测试方案](../frontend/m10_device_benchmark_2026-08-01.md)，不生成移动端 p50/p95/p99 数据。
+
+## 2026-08-02 M9 空间索引正确性修复
+
+### 目的
+
+强制空间索引审计在短远裁剪面下发现候选集合漏失。该问题不是实例 AABB 数据错误，而是完整 AABB 的
+`Frustum.intersectsBox` 保守误报在空间切桶后不能保持：完整大盒体可能通过，任意一个子桶却都不通过。继续使用
+旧索引会让候选集合依赖索引路径，存在画面漏检风险。
+
+### 修改与验证
+
+- 修改 `slm2viewer/src/InstancePVS.js`：跨越任意空间桶边界的实例统一进入溢出列表；仅完全包含在单桶内的 AABB
+  放入桶索引；溢出项保持原有精确盒体测试。
+- 新增并归档 `neural_instance_culling/benchmark/out/m9_spatial_aabb_index_far100_20260802.json`、
+  `far500`、`far1000`、`far2000` 四份结果，并将正式 far=2000 摘要写入
+  `docs/evaluation/m9_spatial_aabb_index_audit_2026-08-02.json`。
+- 验证命令：
+
+  ```bash
+  npm --prefix slm2viewer run test:m9
+  node --check slm2viewer/src/InstancePVS.js
+  node slm2viewer/scripts/benchmark_m9_spatial_index.mjs --far 100 --samples 128
+  node slm2viewer/scripts/benchmark_m9_spatial_index.mjs --far 500 --samples 128
+  node slm2viewer/scripts/benchmark_m9_spatial_index.mjs --far 1000 --samples 128
+  node slm2viewer/scripts/benchmark_m9_spatial_index.mjs --far 2000 --samples 128
+  ```
+
+四组均为 `0/128` 集合差异，索引实例数为 `16,053`，溢出实例数为 `2,778`。far=2000 时索引 p50 为
+`12.20 ms`，全量扫描 p50 为 `0.69 ms`；因此空间索引只通过正确性子门，未形成性能收益主张，默认查询仍会在
+桶数量过大时回退全量扫描。`npm run test:m9` 与 Node 语法检查通过。
+
+### 质量判断
+
+该修复保留为当前前端代码，原因是它消除了索引路径对候选集合的错误影响。性能子门仍为 No-Go；移动端方案继续
+保持“设备证据缺失”，不以桌面或 headless Chrome 结果替代真实 Android 测量。
