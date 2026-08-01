@@ -42,6 +42,19 @@ L_visual = L_mass + lambda_tail * L_tail
 | `m5_visual_mass_soft` | 对 `w_i` 使用平方根变换后归一化，再加 `L_tail` | 检查线性权重是否过度牺牲普通剔除效率 |
 | `m5_control_log1p` | 保持当前损失和参数，仅换独立 seed | 估计训练随机性，避免把随机波动误判为修复收益 |
 
+为避免在图像结果生成后反向调权重，第一轮的数值在启动训练前冻结如下：
+
+| 变体 | `visual_safety_loss_weight` | `weight_power` | `tail_k` | `tail_margin` | `tail_weight` |
+|---|---:|---:|---:|---:|---:|
+| `m5_visual_mass_linear` | `0.20` | `1.0` | `0` | `1.0` | `0.0` |
+| `m5_visual_mass_tail` | `0.20` | `1.0` | `8` | `1.0` | `0.5` |
+| `m5_visual_mass_soft` | `0.20` | `0.5` | `8` | `1.0` | `0.5` |
+| `m5_control_log1p` | `0.0` | `1.0` | `8` | `1.0` | `0.5` |
+
+这里的外层权重 `0.20` 与现有下载效用辅助项同量级，避免视觉损失替代 RVL；`weight_power=1.0` 保留
+屏幕覆盖代理的相对比例，`0.5` 用于检验软化长尾是否能减少过度预测。四个变体都使用
+`rvl_strong_v2` 的其余固定参数，不在 validation 或 calibration 上继续搜索这些数值。
+
 第一轮只比较四个预注册变体，不进行无边界权重搜索。若主假设不成立，下一轮必须针对诊断结果提出新的机制假设；每轮最多保留十次有明确假设的尝试，不能通过反复扫描阈值代替模型改进。
 
 ## 4. 安全与选择规则
@@ -72,3 +85,17 @@ L_visual = L_mass + lambda_tail * L_tail
 ## 7. 当前准入状态
 
 该协议本身不改变当前主线和 M5 的 No-Go 状态。M4 三种子消融完成后，先根据其独立效应决定保留完整方向代理路线还是转为简化路线，再执行本协议；这样可以避免在核心架构尚未确定时产生不可比较的修复模型。
+
+## 8. 可复现实验入口
+
+正式矩阵入口为：
+
+```bash
+bash neural_instance_culling/benchmark/run_m5_visual_safety_repair.sh \
+  > neural_instance_culling/benchmark/out/m5_visual_safety_repair_queue.log 2>&1
+```
+
+脚本默认使用 `20260801/20260802/20260803` 三个 seed 和四张 GPU，并在启动前等待当前正式 M4/M11 会话
+退出。每个变体写入独立的 `model/out/<experiment_name>/`，如果发现不完整目录会直接失败，不覆盖中间结果。
+当前脚本已在 `m5_visual_repair` tmux 会话中排队；截至本记录生成时仍在等待 M4/M11 完成，尚未产生修复模型
+或图像指标。

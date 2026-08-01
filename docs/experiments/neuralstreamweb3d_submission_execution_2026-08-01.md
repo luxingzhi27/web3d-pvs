@@ -303,3 +303,20 @@ Metropolis 成本索引覆盖 `3,669/3,669` 个 GLB，失败 `0`；HKUST 沿用�
 设备解码/上传、多种子 paired bootstrap 或像素级图像效用；因此不将其写成端到端下载收益，也不改变 M7/M8
 和 M10 的 No-Go 状态。详细事件、字节指标和轨迹文件见
 [M7/M8 回放报告](m7_m8_trajectory_replay_2026-08-01.md)。
+
+### 2026-08-02 M5 视觉安全修复矩阵排队
+
+M5 validation 图像门的失败证据显示，漏像素主要来自少数高屏幕贡献实例，而现有 `visible_weights` 在
+`log1p`/`1024` 截断后无法区分这些正例。已把预注册协议中的视觉安全损失正式合入训练器：它对每个 pose
+按屏幕覆盖代理计算软漏视觉质量项，并可选地对权重最高的正例施加最低 logit margin；RVL、预测预算和 hard
+negative 排序保持不变。默认 `visual_safety_loss_weight=0`，因此当前主线行为没有改变。
+
+本轮冻结四个变体和三个 seed：线性视觉质量、线性质量加 top-8 margin、平方根软化质量加 top-8 margin，以及
+不启用新项的独立 seed 控制。参数表和语义见
+[M5 修复协议](m5_visual_safety_repair_protocol_2026-08-02.md)，训练入口为
+`neural_instance_culling/benchmark/run_m5_visual_safety_repair.sh`。回归测试 `test_visual_safety_loss.py`
+和训练控制测试均通过。
+
+为避免改变正在运行的 M4/M11 资源和 GPU 调度，矩阵已在 `m5_visual_repair` tmux 会话排队，日志为
+`neural_instance_culling/benchmark/out/m5_visual_safety_repair_queue.log`；当前状态是等待正式会话退出，尚未
+生成修复 checkpoint，也没有读取 test 或重新选择阈值。
