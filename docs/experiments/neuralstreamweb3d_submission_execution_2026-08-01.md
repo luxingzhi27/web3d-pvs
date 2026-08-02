@@ -756,3 +756,8 @@ python -m py_compile run_m5_visual_safety_image_evaluation.py  # OK
 ```
 
 该修改保留为 M5 正式评价链路的一部分；M5 训练和图像评价仍等待 M4/M11 依赖完成，质量门尚未通过。
+
+随后核验发现原 `m5_visual_image` 等待器已经在统计修复提交前导入旧模块。由于该进程当时只等待 checkpoint，尚未创建
+M5 图像或 schema 输出，已在不触碰 M4/M11 训练、不覆盖任何结果的前提下重启同名 tmux 等待器；新进程使用
+`db06a8e` 中的 p95 汇总实现，日志继续写入
+`neural_instance_culling/benchmark/out/m5_visual_safety_image_evaluation_queue.log`。
