@@ -96,6 +96,8 @@ bash neural_instance_culling/benchmark/run_m5_visual_safety_repair.sh \
 ```
 
 脚本默认使用 `20260801/20260802/20260803` 三个 seed 和四张 GPU，并在启动前等待当前正式 M4/M11 会话
-退出。每个变体写入独立的 `model/out/<experiment_name>/`，如果发现不完整目录会直接失败，不覆盖中间结果。
+退出；当前 M11 少样本会话名为 `m11_metropolis_fewshot_retry3`，队列会明确等待该带 retry 后缀的注册任务，
+避免 M4 完成后错误释放 GPU 3。每个变体写入独立的 `model/out/<experiment_name>/`，如果发现不完整目录会直接失败，
+不覆盖中间结果。
 当前脚本已在 `m5_visual_repair` tmux 会话中排队；截至本记录生成时仍在等待 M4/M11 完成，尚未产生修复模型
 或图像指标。

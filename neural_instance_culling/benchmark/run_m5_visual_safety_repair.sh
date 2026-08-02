@@ -30,7 +30,9 @@ wait_for_session_exit() {
 
 wait_for_formal_jobs() {
   local session
-  for session in formal_m4_matrix formal_m4_eval m11_hkust_directional m11_hkust_eval m11_cross_scene_transfer m11_metropolis_fewshot; do
+  # The retry suffix is part of the current registered M11 run. Waiting on
+  # the old unsuffixed name would silently release GPU 3 while M11 is active.
+  for session in formal_m4_matrix formal_m4_eval m11_hkust_directional m11_hkust_eval m11_cross_scene_transfer m11_metropolis_fewshot_retry3; do
     wait_for_session_exit "$session"
   done
 }
