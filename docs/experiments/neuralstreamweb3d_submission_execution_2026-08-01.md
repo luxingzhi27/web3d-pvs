@@ -614,3 +614,19 @@ PYTHONDONTWRITEBYTECODE=1 conda run --no-capture-output -n slm_pvs \
 结果为 `48 tests, OK`。本轮覆盖 M4 路线 bad-cull 安全门、冻结 test 阈值来源、少样本训练划分重建、
 实例级 Color-ID 渲染 schema、候选集合语义、HZB 查询和视觉安全损失。该结果只证明代码契约与回归
 测试通过，不替代 M4 配对 validation 汇总、M5 图像质量门、M11 少样本冻结 test 或 M13 one-shot test。
+
+## 2026-08-02 M4 矩阵调度异常记录
+
+M4 seed `20260803` 的 `geometry_ray` 和 `geometry_context_ray` 已完成并写出
+`calibration_ready_summary.json`。在矩阵主调度 shell 完成这两个变体后，
+`formal_m4_matrix.log` 出现：
+
+```text
+run_formal_m4_ablation_matrix.sh: line 143: unexpected EOF while looking for matching `"'
+```
+
+该异常来自矩阵编排层，不是模型训练日志中的 loss、梯度或 CUDA 错误。两个最后变体
+`geometry_context_proxy_ray_no_inhibition` 和 `full` 已由残留训练子进程继续在 GPU 0/1 运行，
+`formal_m4_eval` 仍在等待它们的校准产物；因此当前不能把 M4 判定为完成，也不能生成路线结论。
+当前工作树中的脚本通过 `bash -n`，异常根因尚未在不影响运行子进程的前提下确定。完成后将审计 15 个成员、
+评测器退出状态和 stale tmux 会话，并把任何恢复动作单独记录；不覆盖已有 checkpoint 或重跑已完成成员。
