@@ -1120,6 +1120,7 @@ warm-cache 和实例级 MLP 结果仍不得冒充 NeuralPVS，M6 保持 `No-Go /
   `geometry_context_ray_no_inhibition` 没有可证明等价的现成 checkpoint，必须用独立输出目录训练或明确把
   推理期近似降级为诊断而不能纳入正式因果主表。
 - 现有 `aabb_ray` 和 `geometry_ray` 继续保留为逐级输入基线，不参与 2×2 因子效应的代数计算。
+- 为完整报告上下文贡献，额外汇总 `geometry_ray - aabb_ray` 和 `geometry_context_ray - geometry_ray` 两个逐级 paired comparison；它们不参与方向代理路线判定。
 
 #### 2×2 因子设计
 

@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from m4_formal_matrix_v2_utils import ALL_VARIANTS, DIAGNOSTIC_METRICS, FACTOR_EFFECTS, FACTOR_VARIANTS, SEEDS, UNAVAILABLE_METRICS
+from m4_formal_matrix_v2_utils import ALL_VARIANTS, DIAGNOSTIC_METRICS, FACTOR_EFFECTS, FACTOR_VARIANTS, SEEDS, STAGED_EFFECTS, UNAVAILABLE_METRICS
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -99,6 +99,24 @@ def render(summary: dict[str, Any], route: dict[str, Any]) -> str:
     for effect_name in FACTOR_EFFECTS:
         lines.extend([f"### `{effect_name}`", "", "| 统计口径 | 指标 | 差值 | 95% CI | 方向 | 是否跨零 |", "|---|---|---:|---|---|---|"])
         effect = summary["factorEffects"][effect_name]["comparisons"]
+        for scope in ("pose_macro", "aggregate"):
+            for metric in DIAGNOSTIC_METRICS:
+                item = effect[scope][metric]
+                lines.append(
+                    f"| {scope} | `{metric}` | {f(item['mean_delta'])} | [{f(item['ci95'][0])}, {f(item['ci95'][1])}] | "
+                    f"{item['direction']} | {f(item['crosses_zero'])} |"
+                )
+        lines.append("")
+
+    lines.extend([
+        "## 逐级输入表征增益",
+        "",
+        "以下比较只用于展示从 AABB 到离线几何、再到上下文表征的逐级变化，不参与方向代理的三层路线判定。它们仍使用相同的 validation pose、候选集合和 paired bootstrap。",
+        "",
+    ])
+    for effect_name in STAGED_EFFECTS:
+        lines.extend([f"### `{effect_name}`", "", "| 统计口径 | 指标 | 差值 | 95% CI | 方向 | 是否跨零 |", "|---|---|---:|---|---|---|"])
+        effect = summary["stagedEffects"][effect_name]["comparisons"]
         for scope in ("pose_macro", "aggregate"):
             for metric in DIAGNOSTIC_METRICS:
                 item = effect[scope][metric]

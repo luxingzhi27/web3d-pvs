@@ -7,7 +7,7 @@ import argparse
 import json
 from pathlib import Path
 
-from m4_formal_matrix_v2_utils import ALL_VARIANTS, DIAGNOSTIC_METRICS, FACTOR_EFFECTS, FACTOR_VARIANTS, SEEDS
+from m4_formal_matrix_v2_utils import ALL_VARIANTS, DIAGNOSTIC_METRICS, FACTOR_EFFECTS, FACTOR_VARIANTS, SEEDS, STAGED_EFFECTS
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,6 +53,18 @@ def validate_summary(payload: dict, expected_pose_count: int = 664) -> None:
                 ci = record.get("ci95")
                 if int(record.get("bootstrap_replicates", 0)) < 10000 or not isinstance(ci, list) or len(ci) != 2:
                     raise ValueError(f"invalid bootstrap record {name}/{scope}/{metric}")
+    staged = payload.get("stagedEffects")
+    if not isinstance(staged, dict) or set(staged) != set(STAGED_EFFECTS):
+        raise ValueError("staged input effects are incomplete")
+    for name in STAGED_EFFECTS:
+        comparisons = staged[name].get("comparisons", {})
+        for scope in ("pose_macro", "aggregate"):
+            if set(comparisons.get(scope, {})) != set(DIAGNOSTIC_METRICS):
+                raise ValueError(f"{name}/{scope} staged metric set is incomplete")
+            for metric, record in comparisons[scope].items():
+                ci = record.get("ci95")
+                if int(record.get("bootstrap_replicates", 0)) < 10000 or not isinstance(ci, list) or len(ci) != 2:
+                    raise ValueError(f"invalid staged bootstrap record {name}/{scope}/{metric}")
 
 
 def validate_route(payload: dict, summary_path: Path) -> None:

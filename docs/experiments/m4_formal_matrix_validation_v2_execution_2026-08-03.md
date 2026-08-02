@@ -12,6 +12,7 @@
 - 旧 M4 的 15 份 intervention 文件已只读审计；每个成员包含 664 个 validation pose 的 TP、FP、FN、TN、候选哈希和阈值来源。
 - 所有旧成员的候选身份一致，候选摘要为 `8bd3e6a840c7624e2de459ef8057b24380c91936383c29f2368d93801f4c17bf`；A 的三个随机种子缺失，不能用旧 checkpoint 伪造。
 - 新汇总器分别生成 pose-level 宏平均和 aggregate 合并指标，报告 recall、weighted recall、precision、F1、Jaccard、accuracy、balanced accuracy、specificity、useful cull、bad cull、平均 TP/FP/FN/TN、平均预测数、预测/候选和预测/GT。
+- 新汇总器同时生成 `geometry_minus_aabb` 与 `context_minus_geometry` 两个逐级 paired comparison，用于单独展示离线几何和上下文表征增益；它们不参与方向代理路线门。
 - 新 bootstrap 按 seed 聚类、再在 seed 内按 pose 重采样，默认 10,000 次；完整输出 B-A、C-A、D-C、D-B 和 D-B-C+A 的差值、95% 区间、方向和是否跨零。
 - 每个 checkpoint 的阈值从自己的 calibration threshold rows 冻结，新增 pose recall >= 0.95、weighted recall > 0.99 和 weighted recall 单侧下界 > 0.99 三重安全约束；validation 不选阈值，test 未读取。
 - 新路线判定分为安全层、分类/剔除层和系统层。系统层需要同位姿图像或 GLB 成本证据；当前 intervention 文件不含这些数据时显式标记 `not_available`。

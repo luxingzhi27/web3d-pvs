@@ -9,6 +9,7 @@ sys.path.insert(0, str(BENCHMARK_DIR))
 
 from decide_m4_route_v2 import self_test as route_self_test  # noqa: E402
 from m4_formal_matrix_v2_utils import (  # noqa: E402
+    ALL_EFFECTS,
     FACTOR_VARIANTS,
     SEEDS,
     bootstrap_effects_by_scope,
@@ -80,6 +81,11 @@ class M4FormalMatrixV2Tests(unittest.TestCase):
             seed=4,
         )
         self.assertEqual(effects["aggregate"]["recall"]["bootstrap_replicates"], 10000)
+
+    def test_staged_effects_are_registered_with_factor_effects(self) -> None:
+        self.assertIn("geometry_minus_aabb", ALL_EFFECTS)
+        self.assertIn("context_minus_geometry", ALL_EFFECTS)
+        self.assertIn("B_minus_A", ALL_EFFECTS)
 
     def test_candidate_digest_is_stable(self) -> None:
         identity = {0: ("a" * 64, 3), 1: ("b" * 64, 4)}

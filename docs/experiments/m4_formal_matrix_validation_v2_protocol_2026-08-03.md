@@ -27,6 +27,8 @@ neural_instance_culling/benchmark/out/m4_formal_matrix_validation_v2/
 
 `aabb_ray` 和 `geometry_ray` 是逐级输入参考，不纳入因子代数。复用前必须逐文件验证 checkpoint SHA、runtime feature SHA、dataset 路径、阈值来源和候选哈希。A 不能用 C 的 `base_logit` 直接伪造正式成员：C 的 base logit 仍可能受训练时抑制分支相关参数影响，且没有独立无抑制训练语义。
 
+为完整报告上下文特征的增益，汇总器另外生成两个不参与路线判定的逐级 paired comparison：`geometry_minus_aabb = geometry_ray - aabb_ray`，以及 `context_minus_geometry = geometry_context_ray - geometry_ray`。前者展示离线几何表征相对 AABB 输入的变化，后者在显式抑制保持开启且方向代理关闭的条件下展示上下文表征的变化；二者同样输出 pose 宏平均、aggregate、差值和 10,000 次 bootstrap 置信区间。
+
 ## 3. 不可变数据协议
 
 - 场景：HKUST v3 空间 validation 数据。

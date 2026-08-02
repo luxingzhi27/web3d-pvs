@@ -50,6 +50,11 @@ FACTOR_EFFECTS = {
         "geometry_context_ray_no_inhibition": 1.0,
     },
 }
+STAGED_EFFECTS = {
+    "geometry_minus_aabb": {"geometry_ray": 1.0, "aabb_ray": -1.0},
+    "context_minus_geometry": {"geometry_context_ray": 1.0, "geometry_ray": -1.0},
+}
+ALL_EFFECTS = {**STAGED_EFFECTS, **FACTOR_EFFECTS}
 
 COUNT_FIELDS = ("tp", "fp", "fn", "tn")
 CORE_METRICS = (

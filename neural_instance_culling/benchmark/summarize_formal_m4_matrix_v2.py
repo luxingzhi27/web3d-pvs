@@ -16,12 +16,14 @@ from typing import Any
 
 from m4_formal_matrix_v2_utils import (
     ALL_VARIANTS,
+    ALL_EFFECTS,
     CORE_METRICS,
     DIAGNOSTIC_METRICS,
     FACTOR_EFFECTS,
     FACTOR_VARIANTS,
     SEEDS,
     STAGED_VARIANTS,
+    STAGED_EFFECTS,
     UNAVAILABLE_METRICS,
     bootstrap_all_effects_by_scope,
     candidate_digest,
@@ -151,7 +153,7 @@ def build_summary(args: argparse.Namespace) -> dict[str, Any]:
     bootstrap_metrics = DIAGNOSTIC_METRICS
     effects = bootstrap_all_effects_by_scope(
         members,
-        FACTOR_EFFECTS,
+        ALL_EFFECTS,
         bootstrap_metrics,
         replicates=args.bootstrap_replicates,
         seed=20260803,
@@ -196,7 +198,8 @@ def build_summary(args: argparse.Namespace) -> dict[str, Any]:
             "diagnosticWorkpoints": "best F1, maximum precision, and old/fixed thresholds are diagnostic only",
         },
         "members": member_summaries,
-        "factorEffects": effects,
+        "stagedEffects": {name: effects[name] for name in STAGED_EFFECTS},
+        "factorEffects": {name: effects[name] for name in FACTOR_EFFECTS},
         "bootstrap": {
             "replicates": args.bootstrap_replicates,
             "confidence": 0.95,
