@@ -1101,3 +1101,91 @@ OACNN/VNet、三维交错模块、数据集读取器、训练器、推理器和 
 资源核算；`slm_pvs` 当前也没有官方所需的 `spconv`/`cupy` 依赖。因此现有 AABB depth proxy、三角形 HZB
 warm-cache 和实例级 MLP 结果仍不得冒充 NeuralPVS，M6 保持 `No-Go / adaptation not implemented`。
 详细审计见 `docs/experiments/m6_neuralpvs_baseline_audit_2026-08-01.md`。
+
+### 21.25 M4-v2 完整因子消融与安全工作点计划（2026-08-03）
+
+上一版 M4 只用 `full - geometry_context_ray` 的 useful-cull 和 bad-cull 门判定方向代理路线，不能区分
+“方向代理是否被模型使用”“方向代理是否改善分类”“方向代理是否改善安全约束下的剔除效率”以及“方向代理是否
+改善系统资源成本”。本节冻结 M4-v2 的执行协议；在本节和对应独立协议提交前，不启动 M4-v2 新评测或新训练。
+
+#### 计划边界和不可变产物
+
+- 不修改、不覆盖 `neural_instance_culling/benchmark/out/m4_formal_matrix_validation_summary.json`、
+  `neural_instance_culling/benchmark/out/m4_formal_route_decision.json` 和
+  `docs/evaluation/m4_formal_matrix_validation_2026-08-02.md`。
+- M4-v2 所有结果写入 `neural_instance_culling/benchmark/out/m4_formal_matrix_validation_v2/`；路线判定写入
+  `m4_formal_route_decision_v2.json` 和同名 Markdown；报告使用独立的
+  `docs/evaluation/m4_formal_matrix_validation_v2_*.md` 名称。
+- 现有 B/C/D 变体的逐 pose validation interventions 优先复用，只重新汇总，不重复训练；缺失的 A 变体
+  `geometry_context_ray_no_inhibition` 没有可证明等价的现成 checkpoint，必须用独立输出目录训练或明确把
+  推理期近似降级为诊断而不能纳入正式因果主表。
+- 现有 `aabb_ray` 和 `geometry_ray` 继续保留为逐级输入基线，不参与 2×2 因子效应的代数计算。
+
+#### 2×2 因子设计
+
+因子一是方向遮挡代理是否输入查询头；因子二是显式遮挡抑制头是否启用。四个正式成员固定为：
+
+| 变体 | 方向代理 | 显式抑制 | 代号 |
+|---|---|---|---|
+| `geometry_context_ray_no_inhibition` | 关闭 | 关闭 | A |
+| `geometry_context_proxy_ray_no_inhibition` | 开启 | 关闭 | B |
+| `geometry_context_ray` | 关闭 | 开启 | C |
+| `full` | 开启 | 开启 | D |
+
+三种 seed 仍为 `20260801`、`20260802`、`20260803`。正式因子差异逐 pose 配对计算：方向代理无抑制主效应
+为 `B-A`，显式抑制无代理主效应为 `C-A`，有抑制时方向代理效应为 `D-C`，交互效应为
+`D-B-C+A`。不能把 `D-C` 单独解释为方向代理的全部贡献。
+
+#### 指标和数据语义
+
+对每个 pose 使用严格存储的后退相机候选 `C`、真实可见集合 `G` 和预测集合 `P`：
+`TP=P∩G`、`FP=P-G`、`FN=G-P`、`TN=C-(P∪G)`。所有成员必须使用同一 validation pose 顺序、同一候选
+集合、同一 GT 和同一候选哈希；禁止 GT union、候选截断和前端白名单修复。
+
+每个工作点同时输出 pose-level 宏平均和所有 pose 合并的 aggregate 结果，包括 pose/aggregate recall、
+weighted recall、visual utility recall、bad cull、precision、F1、Jaccard、accuracy、balanced accuracy、
+specificity、useful cull、平均 TP/FP/FN/TN、平均预测数、预测/候选比、预测/GT 比、GLB 数量和字节削减。
+`visible_weights` 仍只能解释为可见重要性代理，不能称为真实像素覆盖率。若同位姿图像结果或统一 GLB
+成本结果不存在，字段写为 `not_available`，不能从 weighted recall 或 useful cull 推断 miss-pixel、
+wrong-ID、extra-pixel 或下载收益。
+
+运行成本字段至少记录 forward latency、输入维度、固定特征表字节；只有真实浏览器数据存在时才记录 WebGPU、
+主线程和内存，不用服务器 GPU 或 SwiftShader 填补移动端数字。
+
+#### 阈值工作点和统计方法
+
+每个 checkpoint 只能使用自己的 calibration 集冻结阈值，validation/test 不选阈值。安全工作点必须同时满足
+pose recall `>=0.95`、weighted recall `>0.99`，并在校准协议支持时满足 weighted recall 置信下界 `>0.99`；
+若无阈值满足，报告 `no_qualified_safety_workpoint`，不降低门槛参与排名。安全工作点在约束内最大化 useful
+cull；best F1、最高 precision 和固定阈值只作为诊断工作点。
+
+额外记录但不替代原始指标：
+
+```text
+safety_factor = min(1, pose_recall / 0.95) * min(1, weighted_recall / 0.99)
+safety_adjusted_useful_cull = useful_cull * safety_factor
+```
+
+三 seed 使用同一 pose 的 paired bootstrap，先按 seed 聚类，再在 seed 内对 pose 重采样，至少 10,000 次。对
+`B-A`、`C-A`、`D-C`、`D-B` 和 `D-B-C+A` 的所有核心指标输出差值、95% 区间、方向和是否跨零。
+
+#### 路线判定
+
+路线判定分三层。第一层要求方向代理不造成 pose/weighted recall 的明显安全下降，bad-cull 增量满足预注册上限。
+第二层要求在相同安全工作点下，precision、balanced accuracy、F1、useful cull 或预测/GLB 成本至少一项的
+配对区间稳定改善；第三层要求相同视觉效用下 GLB 字节/首屏时间下降，或 miss-pixel/p95 miss-pixel 稳定改善。
+只有“被模型使用”但所有效果指标区间跨零的方向代理，才降级为辅助表征。不能用任意加权分数、降低阈值或
+单独 useful-cull 增益替代上述判定。
+
+#### 执行和验收顺序
+
+1. 提交本节和 `m4_formal_matrix_validation_v2_protocol_2026-08-03.md`，冻结协议后再执行。
+2. 审计 15 份旧 `interventions.json` 的 schema、阈值来源、pose 数、候选 hash 和 TP/FP/FN/TN，生成 v2
+   独立 manifest；不读取 test。
+3. 为 A 变体补齐三种 seed 的独立训练/validation/calibration；B/C/D 和逐级基线只复用已有有效产物。
+4. 用独立 v2 汇总脚本生成 pose 宏平均、aggregate、资源字段、四个主效应和交互 bootstrap；字段缺失必须显式
+   标注，不默认为零。
+5. 用独立 v2 路线脚本生成安全工作点和三层路线判定，执行 schema/self-test/unittest。
+6. 生成 M4-v2 正式报告，更新 `docs/README.md`，不改现有 Route B 结论或默认前端模型。
+
+本计划的可复现协议正文见 `docs/experiments/m4_formal_matrix_validation_v2_protocol_2026-08-03.md`。
