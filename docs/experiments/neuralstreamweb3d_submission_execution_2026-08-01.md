@@ -842,3 +842,14 @@ M0 的正式 HKUST/Metropolis frozen-test 产物已由既有不可变 artifact m
 `slm2viewer/slm2/SLM2Loader.js` 的 `node --check` 全部通过；benchmark 单元测试和相关 Python 文件的语法检查通过。
 此前一次检查使用了不存在的 `slm2viewer/slm2/InstancePVS.js` 路径，已纠正为当前源码目录，不能把路径错误计入代码回归。
 本次没有修改模型、候选集合、阈值或前端默认资产。
+
+### 2026-08-02 16:28 M0 归档与 M7/M8 成本证据复核
+
+使用 conda `slm_pvs` 对 `docs/evaluation/m0_frozen_artifact_manifest_2026-08-01.json` 中 HKUST 和 Metropolis
+的全部冻结清单、test 摘要、checkpoint、固定运行特征、数据元数据、运行时元数据和 GLB 索引逐项重新计算
+SHA-256，并核对文件字节数和 `testEvaluationCount=1`。结果为 `pass`，没有发现归档物被覆盖或漂移。
+
+同时核对 M7/M8 的完整 GLB 成本索引：HKUST `3273/3273`、Metropolis `3669/3669`，失败数均为 `0`，状态均为
+`complete`。该结果只通过完整离线成本索引子门；索引来自 headless Chrome 的 SwiftShader/WebGL 路径，真实网络、
+移动设备解码/上传、图像效用和多种子配对调度门仍未通过。相关口径已同步到
+`docs/experiments/m7_m8_trajectory_replay_2026-08-01.md`。
