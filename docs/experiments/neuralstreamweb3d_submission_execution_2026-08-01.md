@@ -166,6 +166,39 @@ M11 的 1% frozen-test 子门现在具备合法的 split provenance 和 one-shot
 降级为工具缺陷记录，不纳入指标主表。5% 和 10% 适配仍按同一修复后的 manifest 规则顺序执行，
 当前不能提前宣称少样本泛化质量门通过。
 
+## 2026-08-02 M5 队列依赖与路线绑定修复
+
+### 发现的问题
+
+旧的 M5 修复队列把 `formal_m4_matrix` 和若干 tmux 会话作为唯一等待条件。M4 编排异常后，
+`formal_m4_matrix` 可能长期保留而不再代表活动训练；M11 还存在一个仅用于观察
+`m11_metropolis_fewshot_5_10` 的 watcher 会话。继续依赖会话存在会让 M5 队列永久等待，且没有保证
+M4 的 Route A/Route B 已经完成 validation-only 判定。
+
+### 修改与验证
+
+修改文件：
+
+- `neural_instance_culling/benchmark/run_m5_visual_safety_repair.sh`
+- `docs/experiments/m5_visual_safety_repair_protocol_2026-08-02.md`
+
+新队列等待并校验 `m4_formal_matrix_validation_summary.json` 和
+`m4_formal_route_decision.json` 的状态、来源路径和 SHA-256；同时等待实际 M11 5%/10% 任务
+退出并写出 `[m11-fewshot] registered adaptations completed`，不把 watcher 会话视为完成信号。
+路线 A 使用完整模型，路线 B 使用 `proxy_zero` 的 `geometry+context+ray` 参考，选择结果和来源
+写入每个 M5 输出目录的 `m5_route.json`。队列仍保持固定变体、seed、候选 CSR、校准规则和 test 封存。
+
+验证命令：
+
+```bash
+bash -n neural_instance_culling/benchmark/run_m5_visual_safety_repair.sh
+git diff --check
+```
+
+两项检查通过。旧队列在 stale M4 会话等待阶段被终止，未产生 M5 模型或图像结果；修复后队列尚未
+启动，需等 M4 路线文件和 M11 5%/10% 完成标记出现后再启动。该修改不停止或修改当前 M4/M11
+训练进程，也不改变任何已冻结 test 结果。
+
 ## 2026-08-02 M7 成本索引与验证集回放
 
 ### 运行目的

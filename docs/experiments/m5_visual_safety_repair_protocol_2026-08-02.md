@@ -95,9 +95,11 @@ bash neural_instance_culling/benchmark/run_m5_visual_safety_repair.sh \
   > neural_instance_culling/benchmark/out/m5_visual_safety_repair_queue.log 2>&1
 ```
 
-脚本默认使用 `20260801/20260802/20260803` 三个 seed 和四张 GPU，并在启动前等待当前正式 M4/M11 会话
-退出；当前 M11 少样本会话名为 `m11_metropolis_fewshot_retry3`，队列会明确等待该带 retry 后缀的注册任务，
-避免 M4 完成后错误释放 GPU 3。每个变体写入独立的 `model/out/<experiment_name>/`，如果发现不完整目录会直接失败，
-不覆盖中间结果。
-当前脚本已在 `m5_visual_repair` tmux 会话中排队；截至本记录生成时仍在等待 M4/M11 完成，尚未产生修复模型
-或图像指标。
+脚本默认使用 `20260801/20260802/20260803` 三个 seed 和四张 GPU。启动前不再把 tmux 会话是否存在当作
+质量门，而是等待 validation-only 的 M4 汇总、路线判定及其 SHA-256 校验，并等待实际的
+`m11_metropolis_fewshot_5_10` 任务写出完成标记。M4 路线 A 使用完整注册架构；路线 B 使用
+`geometry+context+ray` 参考并将方向代理输入置零。具体选择写入每个输出目录的 `m5_route.json`，不改变
+预注册的变体名称、候选集合或 test 口径。1% M11 还必须存在已经审计的 protocolfix frozen-test 摘要。
+每个变体写入独立的 `model/out/<experiment_name>/`，如果发现不完整目录会直接失败，不覆盖中间结果。
+旧的等待 stale tmux 会话的队列曾在 M4 编排异常后被终止，未产生修复模型；修复后的队列需在 M4 路线
+和 M11 依赖完成后重新启动。

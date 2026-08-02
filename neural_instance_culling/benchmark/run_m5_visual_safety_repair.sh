@@ -19,22 +19,87 @@ RUNTIME_META="hkust-v3/assets/runtimeVisibilityMeta.json"
 GLB_INDEX="hkust-v3/assets/glbIndex.json"
 GLB_ROOT="hkust-v3/assets"
 OUTPUT_ROOT="neural_instance_culling/model/out"
+BENCHMARK_ROOT="neural_instance_culling/benchmark/out"
+M4_SUMMARY="$BENCHMARK_ROOT/m4_formal_matrix_validation_summary.json"
+M4_ROUTE_DECISION="$BENCHMARK_ROOT/m4_formal_route_decision.json"
+M11_FEWSHOT_SESSION="${SLM_M11_FEWSHOT_SESSION:-m11_metropolis_fewshot_5_10}"
+M11_FEWSHOT_LOG="$BENCHMARK_ROOT/m11_metropolis_fewshot_5_10_queue.log"
+M11_ONE_PERCENT_SUMMARY="${SLM_M11_ONE_PERCENT_SUMMARY:-$BENCHMARK_ROOT/m11_formal_metropolis_fewshot_1pct_frozen_test_20260802_protocolfix/summary.json}"
 
-wait_for_session_exit() {
-  local session="$1"
-  while tmux has-session -t "$session" 2>/dev/null; do
-    printf '[m5-queue] waiting for session %s\n' "$session"
+# Filled after the validation-only M4 route decision.  Route B uses the
+# registered geometry+context+ray reference by zeroing only the directional
+# proxy input; it does not silently change the model name or candidate data.
+M5_RUNTIME_FEATURE_ABLATION=""
+M5_ROUTE=""
+
+wait_for_m4_route() {
+  while true; do
+    if [[ -f "$M4_SUMMARY" && -f "$M4_ROUTE_DECISION" ]]; then
+      local route
+      route="$(python - "$M4_SUMMARY" "$M4_ROUTE_DECISION" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+summary_path = Path(sys.argv[1]).resolve()
+decision_path = Path(sys.argv[2]).resolve()
+summary = json.loads(summary_path.read_text(encoding="utf-8"))
+decision = json.loads(decision_path.read_text(encoding="utf-8"))
+if summary.get("status") != "validation_summary_only; formal test not read":
+    raise SystemExit("M4 summary is not validation-only")
+if decision.get("status") != "route_selected_from_validation_only" or decision.get("testRead") is not False:
+    raise SystemExit("M4 route decision is not validation-only")
+if Path(str(decision.get("sourceSummary", ""))).resolve() != summary_path:
+    raise SystemExit("M4 route decision points to a different summary")
+expected = str(decision.get("sourceSummarySha256", ""))
+actual = hashlib.sha256(summary_path.read_bytes()).hexdigest()
+if not expected or expected != actual:
+    raise SystemExit("M4 route decision summary hash does not match")
+route = decision.get("route")
+if route not in {"route_a_directional_proxy", "route_b_system"}:
+    raise SystemExit(f"unsupported M4 route: {route!r}")
+print(route)
+PY
+      )" || true
+      if [[ "$route" == "route_a_directional_proxy" ]]; then
+        M5_ROUTE="$route"
+        M5_RUNTIME_FEATURE_ABLATION="none"
+        printf '[m5-queue] M4 route A accepted; using full registered architecture\n'
+        return 0
+      fi
+      if [[ "$route" == "route_b_system" ]]; then
+        M5_ROUTE="$route"
+        M5_RUNTIME_FEATURE_ABLATION="proxy_zero"
+        printf '[m5-queue] M4 route B accepted; using geometry+context+ray reference\n'
+        return 0
+      fi
+      printf '[m5-queue] M4 artifacts exist but route/hash validation is not ready\n'
+    else
+      printf '[m5-queue] waiting for validation-only M4 summary and route decision\n'
+    fi
     sleep "$POLL_SECONDS"
   done
 }
 
-wait_for_formal_jobs() {
-  local session
-  # The retry suffix is part of the current registered M11 run. Waiting on
-  # the old unsuffixed name would silently release GPU 3 while M11 is active.
-  for session in formal_m4_matrix formal_m4_eval m11_hkust_directional m11_hkust_eval m11_cross_scene_transfer m11_metropolis_fewshot_retry3 m11_metropolis_fewshot_5_10; do
-    wait_for_session_exit "$session"
+wait_for_m11_fewshot() {
+  # The active 5%/10% runner is in m11_metropolis_fewshot_5_10. A separate
+  # watcher session named m11_metropolis_fewshot_retry3 is not a completion
+  # signal and is intentionally ignored here.
+  while tmux has-session -t "$M11_FEWSHOT_SESSION" 2>/dev/null || \
+      pgrep -f 'train_directional_occlusion_proxy_encoder.py.*pvs_m11_fewshot_(5pct|10pct)' >/dev/null 2>&1; do
+    printf '[m5-queue] waiting for active M11 few-shot 5%%/10%% run\n'
+    sleep "$POLL_SECONDS"
   done
+  if [[ ! -f "$M11_FEWSHOT_LOG" ]] || ! rg -q '\[m11-fewshot\] registered adaptations completed' "$M11_FEWSHOT_LOG"; then
+    printf '[m5-queue] M11 few-shot queue exited without its completion marker\n' >&2
+    return 1
+  fi
+  if [[ ! -f "$M11_ONE_PERCENT_SUMMARY" ]]; then
+    printf '[m5-queue] missing audited 1%% M11 frozen-test summary: %s\n' "$M11_ONE_PERCENT_SUMMARY" >&2
+    return 1
+  fi
+  printf '[m5-queue] M11 few-shot queue completed with audited 1%% summary\n'
 }
 
 variant_args() {
@@ -81,6 +146,15 @@ run_variant() {
     return 1
   fi
   mkdir -p "$output_dir"
+  cat > "$output_dir/m5_route.json" <<EOF
+{
+  "m4Route": "$M5_ROUTE",
+  "runtimeFeatureAblation": "$M5_RUNTIME_FEATURE_ABLATION",
+  "sourceSummary": "$M4_SUMMARY",
+  "sourceRouteDecision": "$M4_ROUTE_DECISION",
+  "testReadBeforeTraining": false
+}
+EOF
   printf '[m5-queue] starting %s on GPU %s\n' "$experiment" "$gpu"
   CUDA_VISIBLE_DEVICES="$gpu" PYTHONDONTWRITEBYTECODE=1 \
     conda run --no-capture-output -n "$ENV_NAME" python -u \
@@ -95,6 +169,7 @@ run_variant() {
     --experiment-name "$experiment" \
     --epochs 40 --steps-per-epoch 900 --pose-set-batch-size 2 --eval-every 2 \
     --loss-profile rvl_strong_v2 \
+    --runtime-feature-ablation "$M5_RUNTIME_FEATURE_ABLATION" \
     "${visual_args[@]}" \
     --target-weighted-recall 0.99 --calibration-point-floor 0.9925 --calibration-lcb-floor 0.99 \
     --calibration-bootstrap-replicates 10000 --seed "$seed" --device cuda --skip-final-test \
@@ -102,7 +177,8 @@ run_variant() {
   printf '[m5-queue] completed %s\n' "$experiment"
 }
 
-wait_for_formal_jobs
+wait_for_m4_route
+wait_for_m11_fewshot
 
 variants=(m5_visual_mass_linear m5_visual_mass_tail m5_visual_mass_soft m5_control_log1p)
 gpu_array=($GPU_LIST)
