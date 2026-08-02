@@ -1,7 +1,7 @@
 # M11 航向泛化与跨场景适配协议
 
 日期：2026-08-01
-状态：航向数据划分与方向遮挡证据已生成；Metropolis 少样本 1% `retry3` 正在训练，5%/10% 尚未启动，正式泛化汇总尚未完成。
+状态：航向数据划分与方向遮挡证据已生成；Metropolis 少样本 1% `retry3` 已完成冻结 test，5%/10% 已按同一协议排队，正式泛化汇总尚未完成。
 
 ## 目的
 
@@ -158,3 +158,61 @@ stderr 保留为显存边界证据，没有复用其不完整输出。
 结论是：共享查询参数本身可以维持高召回，但不能在未重建目标场景表征并适配参数的情况下维持有效剔除。
 因此论文不使用“零样本跨场景通用模型”表述，M11 的跨场景结论限定为“目标场景离线特征重建加少样本
 适配”，1%、5%、10% 适配结果待 `retry3` 队列完成后按相同安全规则评估。
+
+## 2026-08-02 少样本冻结测试与协议修复
+
+### 修复内容
+
+少样本 checkpoint 的原生数据集仍包含完整 `train` 划分，但 checkpoint 的
+`protocolSplit.trainFitCount` 记录的是从该划分中按固定种子抽取的适配子集。冻结测试入口此前把完整
+训练 pose 数量直接与子集数量比较，导致 1% 模型在推理前被错误拒绝。修复位于
+`neural_instance_culling/benchmark/evaluate_frozen_test.py`，并新增
+`neural_instance_culling/benchmark/tests/test_frozen_test_entrypoint.py` 回归用例。
+
+修复后的校验规则为：先验证 `originalTrainCount` 与完整原生训练划分一致；若 protocol 记录
+`trainFitSelectionFraction` 和 `trainFitSelectionSeed`，则用与训练器相同的确定性抽样重建适配子集，再校验
+子集数量和 digest；validation、calibration、test 仍必须与数据集完整划分的数量和 digest 严格一致。
+该修复不读取 test 来选择阈值，也不改变候选集合或一次性 frozen test 规则。原失败 manifest/输出目录保留，修复后使用
+带 `protocolfix` 后缀的新证据目录。
+
+验证命令：
+
+```bash
+conda run --no-capture-output -n slm_pvs python -m unittest \
+  neural_instance_culling.benchmark.tests.test_frozen_test_entrypoint -v
+```
+
+结果：`6 tests, OK`；真实 Metropolis 数据集重建出完整训练划分 `20,454` 个 pose 和 1% 适配子集 `205`
+个 pose，记录的 digest 为 `5e10771d52c5c45d`，与 checkpoint 一致。
+
+### 1% 适配 frozen test
+
+manifest：
+`neural_instance_culling/benchmark/out/m11_pvs_m11_fewshot_1pct_metropolis_yaw20_rvl_strong_v2_full40_seed20260801_retry3_protocolfix_frozen_manifest.json`
+
+test 输出：
+`neural_instance_culling/benchmark/out/m11_formal_metropolis_fewshot_1pct_frozen_test_20260802_protocolfix/`
+
+评测使用完整且唯一的 Metropolis directional test split（`2,271` poses），模型查询 FOV 为 `66°`，真实渲染
+FOV 为 `60°`，候选集合采用严格存储候选语义，冻结阈值来自独立 calibration：`0.05000000074505806`。
+
+| 指标 | 1% 适配 frozen test |
+|---|---:|
+| pose recall | 0.945077 |
+| weighted recall | 0.993608 |
+| pose precision | 0.156026 |
+| instance accuracy | 0.395861 |
+| balanced accuracy | 0.628111 |
+| useful cull = TN / candidate | 0.279348 |
+| bad cull = FN / candidate | 0.004880 |
+| 平均 candidate / GT / prediction | 11,481.53 / 1,046.06 / 6,908.04 |
+
+该结果满足 weighted-recall 安全约束，但普通 recall 略低于 `0.95` 且 useful cull 明显弱于场景内主线，因而只能说明
+1% 少样本适配具备有限的安全召回能力，不能作为跨场景高效泛化结论。没有用 test 后调阈值修复这一结果。
+
+### 5%/10% 适配执行状态
+
+在 1% frozen test 完成后，队列脚本支持通过 `SLM_M11_FEWSHOT_LABELS=5pct,10pct` 从指定比例继续执行，避免
+重复训练已完成的 1%。5% 和 10% 使用独立输出目录、同一目标场景、同一 `rvl_strong_v2`、40 epoch、相同
+calibration 安全规则和完整 test 一次性规则；当前队列会话为 `m11_metropolis_fewshot_5_10`，日志为
+`neural_instance_culling/benchmark/out/m11_metropolis_fewshot_5_10_queue.log`，完成前不记录为正式泛化结果。

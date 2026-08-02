@@ -23,6 +23,7 @@ FEATURE_EXPORT_BATCH_SIZE="${SLM_M11_FEWSHOT_FEATURE_EXPORT_BATCH_SIZE:-128}"
 USE_AMP="${SLM_M11_FEWSHOT_AMP:-1}"
 CUDA_ALLOC_CONF="${SLM_M11_FEWSHOT_CUDA_ALLOC_CONF:-expandable_segments:True}"
 EVAL_POSES_PER_BATCH="${SLM_M11_FEWSHOT_EVAL_POSES_PER_BATCH:-1}"
+FEWSHOT_LABELS="${SLM_M11_FEWSHOT_LABELS:-1pct,5pct,10pct}"
 
 TRAIN_MEMORY_ARGS=(
   --pose-set-batch-size "$POSE_SET_BATCH_SIZE"
@@ -102,7 +103,16 @@ run_fraction() {
   fi
 }
 
-run_fraction 1pct 0.01
-run_fraction 5pct 0.05
-run_fraction 10pct 0.10
+IFS=',' read -r -a requested_labels <<< "$FEWSHOT_LABELS"
+for label in "${requested_labels[@]}"; do
+  case "$label" in
+    1pct) run_fraction 1pct 0.01 ;;
+    5pct) run_fraction 5pct 0.05 ;;
+    10pct) run_fraction 10pct 0.10 ;;
+    *)
+      printf '[m11-fewshot] unsupported label: %s\n' "$label" >&2
+      exit 2
+      ;;
+  esac
+done
 printf '[m11-fewshot] registered adaptations completed\n'

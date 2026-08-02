@@ -40,7 +40,70 @@ class _Dataset:
         return _Split()
 
 
+class _ProtocolDataset:
+    split_ids = ("train", "validation", "calibration", "test")
+
+    def __init__(self, _path: str, _num_instances: int):
+        self._splits = {
+            "train": np.arange(10, dtype=np.int64),
+            "validation": np.asarray([10], dtype=np.int64),
+            "calibration": np.asarray([11], dtype=np.int64),
+            "test": np.asarray([12], dtype=np.int64),
+        }
+
+    def split(self, name: str):
+        return SimpleNamespace(pose_indices=self._splits[name])
+
+
 class FrozenTestEntrypointTests(unittest.TestCase):
+    def test_validate_protocol_reconstructs_few_shot_train_fit_subset(self) -> None:
+        dataset = _ProtocolDataset("fixture", 2)
+        seed = 1234
+        fraction = 0.3
+        full_train = dataset.split("train").pose_indices
+        rng = np.random.default_rng(seed)
+        selected = np.sort(rng.choice(full_train, size=3, replace=False).astype(np.int64))
+        protocol = {
+            "schema": "native-four-way-dataset-split-v1",
+            "originalTrainCount": 10,
+            "trainFitCount": 3,
+            "fixedValidationCount": 1,
+            "calibrationCount": 1,
+            "frozenTestCount": 1,
+            "trainFitDigest": frozen.pose_index_digest(selected),
+            "fixedValidationDigest": frozen.pose_index_digest(np.asarray([10], dtype=np.int64)),
+            "calibrationDigest": frozen.pose_index_digest(np.asarray([11], dtype=np.int64)),
+            "frozenTestDigest": frozen.pose_index_digest(np.asarray([12], dtype=np.int64)),
+            "trainFitSelectionFraction": fraction,
+            "trainFitSelectionSeed": seed,
+            "validationSemantics": "complete native validation split; no random pose truncation",
+            "calibrationSemantics": "native calibration split; not used for parameter updates",
+            "testSemantics": "native frozen test split; evaluated once at the frozen calibration threshold",
+        }
+        actual = frozen.validate_protocol_split(protocol, dataset)
+        self.assertEqual(actual["originalTrainCount"], 10)
+        self.assertEqual(actual["trainFitCount"], 3)
+        self.assertEqual(actual["trainFitDigest"], frozen.pose_index_digest(selected))
+
+    def test_validate_protocol_rejects_wrong_original_train_count(self) -> None:
+        dataset = _ProtocolDataset("fixture", 2)
+        protocol = {
+            "originalTrainCount": 9,
+            "trainFitCount": 10,
+            "fixedValidationCount": 1,
+            "calibrationCount": 1,
+            "frozenTestCount": 1,
+            "trainFitDigest": frozen.pose_index_digest(dataset.split("train").pose_indices),
+            "fixedValidationDigest": frozen.pose_index_digest(np.asarray([10], dtype=np.int64)),
+            "calibrationDigest": frozen.pose_index_digest(np.asarray([11], dtype=np.int64)),
+            "frozenTestDigest": frozen.pose_index_digest(np.asarray([12], dtype=np.int64)),
+            "validationSemantics": "complete native validation split; no random pose truncation",
+            "calibrationSemantics": "native calibration split; not used for parameter updates",
+            "testSemantics": "native frozen test split; evaluated once at the frozen calibration threshold",
+        }
+        with self.assertRaisesRegex(ValueError, "originalTrainCount"):
+            frozen.validate_protocol_split(protocol, dataset)
+
     def test_frozen_entrypoint_uses_utility_evaluator_contract(self) -> None:
         parameters = inspect.signature(frozen.evaluate_runner).parameters
         self.assertIn("count_budgets", parameters)

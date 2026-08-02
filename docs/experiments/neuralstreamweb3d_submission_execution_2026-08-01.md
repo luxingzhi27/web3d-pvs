@@ -494,3 +494,27 @@ epoch `37/40`，当前 epoch 的非有限 loss 和梯度跳过均为 `0`；M4 �
 新增 `test_formal_m4_summary.py` 覆盖合法 pre-test 记录和三种非法 test 来源。新增测试与既有协议测试共
 `7 tests, OK`，并对现有 `11` 个 M4 validation 输出执行了同一 `read_input` 审计。该修复只影响汇总器的
 来源判定，不改变模型、阈值、候选集合或 test 数据。
+
+### 2026-08-02 M11 少样本冻结协议修复与移动端测试边界复核
+
+少样本模型的冻结 test 首次执行被 split 校验拒绝，原因是原生数据集的完整训练划分为 `20,454` 个 pose，
+而 checkpoint 记录的 `trainFitCount=205` 是按固定种子抽出的 1% 适配子集。该错误发生在推理前，不是模型预测或
+候选集合错误。已修改 `neural_instance_culling/benchmark/evaluate_frozen_test.py`，并新增少样本协议回归用例：
+校验完整 `originalTrainCount`，按 `trainFitSelectionFraction/Seed` 重建训练子集，严格校验子集 digest；
+validation、calibration、test 仍保持完整划分和一次性冻结规则。相关测试共 `6 tests, OK`。
+
+旧失败 manifest 和输出目录没有覆盖；新的 manifest 和 test 输出使用 `protocolfix` 后缀。
+
+Metropolis directional 1% 适配使用 `2,271` 个唯一 test pose、查询 FOV `66°`、真实渲染 FOV `60°` 和严格存储候选集合。
+阈值为 calibration 冻结的 `0.05000000074505806`，test 只执行一次。结果为：weighted recall `0.993608`、pose
+recall `0.945077`、pose precision `0.156026`、useful cull `0.279348`、bad cull `0.004880`，平均候选/GT/预测
+为 `11,481.53/1,046.06/6,908.04`。该比例满足重要构件召回安全约束，但效率和普通 recall 不足以支持高效跨场景泛化结论。
+
+5% 和 10% 适配已在 `m11_metropolis_fewshot_5_10` 会话中按同一 protocol 启动，日志为
+`neural_instance_culling/benchmark/out/m11_metropolis_fewshot_5_10_queue.log`。
+
+移动端仍没有实体 Android、ADB 连接和可确认的硬件 WebGPU adapter，因此 M10 继续保持
+`No-Go / 真实设备证据缺失`，不生成移动端 p50/p95/p99，也不把桌面 SwiftShader 数字外推到移动端。预注册方案见
+`docs/frontend/m10_device_benchmark_2026-08-01.md`：拿到设备后按高性能/中端两档、三个固定轨迹、冷/温缓存、
+受控 Wi-Fi/4G、`256/512/1k/2k/4k/8k/10k/16k` 候选桶和每条件至少 30 次有效重复执行；先通过 256 候选 schema
+smoke 与 M12 FP16 parity，再进入完整矩阵。缺失设备或缺失候选桶只报告缺失，不能补造统计数字。

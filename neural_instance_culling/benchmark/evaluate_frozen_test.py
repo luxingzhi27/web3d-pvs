@@ -131,18 +131,66 @@ def _split_names(dataset: PoseCSRDataset) -> tuple[str, str, str, str]:
     return required
 
 
-def expected_protocol_split(dataset: PoseCSRDataset) -> dict[str, Any]:
+def _expected_train_fit_indices(
+    full_train_indices: np.ndarray,
+    protocol: dict[str, Any] | None,
+) -> np.ndarray:
+    """Reconstruct the recorded train-fit subset without touching test data.
+
+    Few-shot adaptation records the fraction and the seed used by
+    ``apply_train_pose_fraction``.  The dataset still exposes the complete
+    native train split, so the frozen-test audit must reproduce that subset
+    before checking its count and digest.
+    """
+    indices = np.asarray(full_train_indices, dtype=np.int64)
+    if not protocol:
+        return indices
+
+    fraction_value = protocol.get("trainFitSelectionFraction")
+    seed_value = protocol.get("trainFitSelectionSeed")
+    if fraction_value is None:
+        if seed_value is not None:
+            raise ValueError(
+                "Frozen protocol records trainFitSelectionSeed without trainFitSelectionFraction."
+            )
+        return indices
+    if seed_value is None:
+        raise ValueError(
+            "Frozen protocol records trainFitSelectionFraction without trainFitSelectionSeed."
+        )
+    fraction = float(fraction_value)
+    if not 0.0 < fraction <= 1.0:
+        raise ValueError(f"Frozen train-fit selection fraction is outside (0, 1]: {fraction}")
+    if indices.size == 0:
+        raise ValueError("Cannot reconstruct a train-fit subset from an empty native train split.")
+    count = max(1, int(round(indices.size * fraction)))
+    if count > indices.size:
+        raise ValueError(
+            f"Frozen train-fit selection requests {count} poses from {indices.size} native train poses."
+        )
+    rng = np.random.default_rng(int(seed_value))
+    selected = rng.choice(indices, size=count, replace=False).astype(np.int64, copy=False)
+    return np.sort(selected)
+
+
+def expected_protocol_split(
+    dataset: PoseCSRDataset,
+    protocol: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     train_name, validation_name, calibration_name, test_name = _split_names(dataset)
     train = dataset.split(train_name)
     validation = dataset.split(validation_name)
     calibration = dataset.split(calibration_name)
     test = dataset.split(test_name)
+    full_train_indices = np.asarray(train.pose_indices, dtype=np.int64)
+    train_fit_indices = _expected_train_fit_indices(full_train_indices, protocol)
     return {
-        "trainFitCount": int(train.pose_indices.size),
+        "originalTrainCount": int(full_train_indices.size),
+        "trainFitCount": int(train_fit_indices.size),
         "fixedValidationCount": int(validation.pose_indices.size),
         "calibrationCount": int(calibration.pose_indices.size),
         "frozenTestCount": int(test.pose_indices.size),
-        "trainFitDigest": pose_index_digest(train.pose_indices),
+        "trainFitDigest": pose_index_digest(train_fit_indices),
         "fixedValidationDigest": pose_index_digest(validation.pose_indices),
         "calibrationDigest": pose_index_digest(calibration.pose_indices),
         "frozenTestDigest": pose_index_digest(test.pose_indices),
@@ -154,6 +202,7 @@ def validate_protocol_split(protocol: dict[str, Any], dataset: PoseCSRDataset) -
     if not isinstance(protocol, dict):
         raise ValueError("Frozen manifest protocolSplit must be an object.")
     required_keys = (
+        "originalTrainCount",
         "trainFitCount",
         "fixedValidationCount",
         "calibrationCount",
@@ -166,7 +215,7 @@ def validate_protocol_split(protocol: dict[str, Any], dataset: PoseCSRDataset) -
     missing = [key for key in required_keys if key not in protocol]
     if missing:
         raise ValueError(f"Frozen manifest protocolSplit is missing {missing}.")
-    actual = expected_protocol_split(dataset)
+    actual = expected_protocol_split(dataset, protocol)
     mismatches = {
         key: {"recorded": protocol[key], "actual": actual[key]}
         for key in required_keys

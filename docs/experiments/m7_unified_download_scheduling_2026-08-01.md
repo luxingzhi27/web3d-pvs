@@ -416,3 +416,33 @@ HKUST 的修复后 calibration 已完整写出摘要，包含 690 个 pose；Met
 这次结果通过了 M7 model-free baseline 的“完整 split、严格候选、严格字节、状态显式”子门，但不通过
 投稿计划中的联合调度质量门：当前没有独立 RankNet/ListNet/成本敏感排序器、真实解码时间索引或设备网络轨迹，
 因此不能比较“当前级联优于后处理”。
+
+## 2026-08-02 独立 RankNet 第二种子复核
+
+为检查独立下载排序器对随机种子的敏感性，在不改变候选集合、弱效用定义、FOV 或评测协议的条件下，完成了
+HKUST 和 Metropolis 的 seed-2 独立 RankNet 训练，并分别遍历完整 validation/calibration split。训练只读取
+train split，未读取 test；M7 仍只作为 GLB 下载排序 baseline，不承担实例可见性主模型的安全结论。
+
+| 场景 | seed | 最佳 validation RankNet loss | 安全工作点阈值 | pose recall | weighted recall | pose precision | useful cull | bad cull | 平均预测 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| HKUST | 1 | 0.0435587 | 0.90 | 0.936821 | 0.997075 | 0.096923 | 0.427608 | 0.001289 | 1,270.75 |
+| HKUST | 2 | 0.0459491 | 0.90 | 0.949382 | 0.994230 | 0.093867 | 0.416817 | 0.001493 | 1,644.98 |
+| Metropolis | 1 | 0.2489221 | 0.46 | 0.920182 | 0.990761 | 0.115080 | 0.132045 | 0.010091 | 9,383.47 |
+| Metropolis | 2 | 0.2506600 | 0.42 | 0.907627 | 0.990269 | 0.133219 | 0.270414 | 0.008059 | 5,926.48 |
+
+两种子均满足 validation 的 weighted-recall 安全规则，但 Metropolis 的 useful cull 在两个 seed 间差异较大，说明
+单个 seed 不能支撑稳定的下载排序收益结论。两种子简单均值为：HKUST useful cull `0.4222 ± 0.0076`、weighted
+recall `0.9957 ± 0.0020`；Metropolis useful cull `0.2012 ± 0.0978`、weighted recall `0.9905 ± 0.0003`。
+这些是 validation 诊断，不是 test 结果，也不包含真实网络或移动设备解码成本。
+
+新增产物：
+
+- `model/out/m7_independent_ranknet_hkust_spatial_fov66_seed20260802/`
+- `model/out/m7_independent_ranknet_metropolis_spatial_fov66_seed20260802/`
+- `benchmark/out/m7_ranknet_hkust_spatial_fov66_validation_20260802_seed2_retry1/`
+- `benchmark/out/m7_ranknet_hkust_spatial_fov66_calibration_20260802_seed2_retry1/`
+- `benchmark/out/m7_ranknet_metropolis_spatial_fov66_validation_20260802_seed2_retry1/`
+- `benchmark/out/m7_ranknet_metropolis_spatial_fov66_calibration_20260802_seed2_retry1/`
+
+阶段判断保持不变：独立排序器的训练、输入隔离和完整非 test split 评测子门通过；M7 联合调度总门仍未通过，
+还缺少同轨迹的多种子 paired bootstrap、冷/温缓存端到端指标、真实解码/上传时间和硬件移动浏览器证据。
