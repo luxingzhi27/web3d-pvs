@@ -559,3 +559,25 @@ repulsive/no-guess 类损失；数据格式为 `gv/*.bin.gz` 和 `pvv/*.bin.gz` 
 冷启动资源核算。因此已有 AABB depth proxy、三角形 HZB warm-cache 和实例级 MLP 仍不能作为 NeuralPVS
 结果；M6 保持 `No-Go / adaptation not implemented`。详细审计见
 `docs/experiments/m6_neuralpvs_baseline_audit_2026-08-01.md`。
+
+## 2026-08-02 12:30 当前持久任务状态复核
+
+本次复核只读取当前文件、checkpoint 和进程状态，没有停止、重启或修改任何正式任务，也没有读取 test
+split。M4 矩阵当前已有 `11/15` 个变体写出
+`calibration_ready_summary.json`；seed `20260803` 的
+`geometry_ray` 与 `geometry_context_ray` 仍在第 `26/40` 个 epoch 左右训练，完成后队列会继续并行生成该
+seed 的 `geometry_context_proxy_ray_no_inhibition` 与 `full`。当前 GPU 计算负载正常，未观察到新的 OOM 或
+非有限损失记录。`formal_m4_eval` 仍等待完整 15 个成员，因此没有提前读取中间结果或生成路线结论。
+
+M11 的 Metropolis 5% 少样本适配正在 GPU 3 上运行，最近已写入第 `5/40` 个 epoch，最后已记录的
+`trainSkippedNonFiniteLoss` 与 `trainSkippedNonFiniteGrad` 均为 `0`；10% 适配仍由注册脚本等待 5% 完成后
+启动。M5 视觉安全修复训练和共享浏览器图像评价继续等待 M4/M11 会话退出，尚未生成修复模型或图像汇总。
+
+M10 仍为 `No-Go / 真实 Android、ADB 和硬件 WebGPU 证据缺失`。移动端不产生占位性能数字；可执行的设备
+方案已固定在 `docs/frontend/m10_device_benchmark_2026-08-01.md`，包括高性能/中端设备、硬件适配器预检、
+256 候选 schema smoke、FP16/WGSL 正确性门、冷/温缓存、Wi-Fi/受控 4G、三条轨迹、候选规模分桶、每条件
+至少 30 次有效重复和 p50/p95/p99 统计。没有真实设备或缺失候选桶时，报告为证据缺失，不以桌面 SwiftShader
+或模拟器结果替代。
+
+本次静态复核通过：`slm2viewer` 当前场景/模型完整性 smoke、M4/M5/M11 队列 Bash 语法检查和
+`git diff --check`。这些检查只证明执行入口没有回归，不改变 M4、M5、M10 或 M13 的质量门状态。
