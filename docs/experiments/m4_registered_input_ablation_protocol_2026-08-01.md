@@ -1,7 +1,7 @@
 # M4：注册输入分支消融协议
 
 日期：2026-08-01
-状态：代码与 fixture 已完成，正式三随机种子训练尚未开始。
+状态：代码与 fixture 已完成，正式三随机种子矩阵训练进行中；截至 2026-08-02 已有 10/15 个成员生成校准就绪产物，完整 validation 汇总尚未生成。
 目的：为核心消融提供与完整模型相同的候选集合、模型容量、训练协议和阈值冻结流程，分别检验几何、上下文和方向遮挡代理输入的独立作用。
 
 ## 变更目的
@@ -122,6 +122,16 @@ M4 比较。其余变体和随机种子仍需使用不同的稳定输出目录�
 
 矩阵收尾脚本已在 `formal_m4_matrix` tmux 会话启动，当前等待 HKUST 主线、Metropolis 主线和已登记的
 AABB+ray 训练退出；它尚未启动新的消融训练，也尚无正式指标。
+
+## 2026-08-02 当前执行状态
+
+五个变体（`aabb_ray`、`geometry_ray`、`geometry_context_ray`、
+`geometry_context_proxy_ray_no_inhibition`、`full`）分别使用三个固定随机种子训练。种子
+`20260801` 和 `20260802` 的 10 个成员均已完成 40 epoch、特征导出和独立校准；种子
+`20260803` 的 `aabb_ray`、`geometry_ray`、`geometry_context_ray` 正在训练，剩余两个成员由队列顺序启动。
+当前没有将不完整的 seed-20260803 结果纳入比较，也没有读取 test。待 15 个成员全部出现
+`calibration_ready_summary.json` 后，`formal_m4_eval` 才会在相同 validation pose 集合上执行配对评估和
+10,000 次分层 bootstrap，随后按本协议冻结的路线 A/B 规则判定方向遮挡代理是否具有独立贡献。
 
 训练完成后的比较入口为 `run_formal_m4_validation_evaluations.sh`。它会等待全部矩阵成员和 M3
 完成，在每个成员的完整 validation split 上只运行 `baseline` 变体，保存同一 pose 的候选哈希、逐 pose
