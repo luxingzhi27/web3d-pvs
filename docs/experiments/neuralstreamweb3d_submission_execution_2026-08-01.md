@@ -42,7 +42,7 @@
 ## 当前后台任务
 
 - M4：`formal_m4_matrix` 与 `formal_m4_eval`，使用固定 HKUST 空间数据和预注册三种子矩阵。
-- M11：`m11_hkust_directional`，实验名为 `pvs_m11_directional_yaw20_rvl_strong_v2_full40_hkust_fov66_seed20260801`，GPU 3，方向留出训练。
+- M11：`m11_metropolis_fewshot_retry3`，实验名为 `pvs_m11_fewshot_1pct_metropolis_yaw20_rvl_strong_v2_full40_seed20260801_retry3`，GPU 3，Metropolis 1% 少样本适配。
 
 后台任务完成前不重用其输出目录、不修改其 checkpoint、不把中间 epoch 写入正式主表。
 
@@ -93,8 +93,11 @@ M5 失败分析和修复准则见 `docs/evaluation/m5_hkust_image_failure_analys
 
 ### 当前资源状态
 
-- M4 三种子消融矩阵仍在运行。已生成的 `aabb+ray`、`geometry+ray`、`geometry+context+ray` 和“无显式抑制头”目录均只作为 calibration-ready 中间产物；完整模型与第二个正式 seed 尚未完成，因此不读取其指标作为 M4 最终结论。
-- M11 HKUST 航向留出训练仍在持久会话中运行；其 validation 摘要不能替代 M11 的方向留出、跨场景和少样本完整实验。
+- M4 三种子消融矩阵仍在运行；五个变体中已有 `10/15` 个成员生成
+  `calibration_ready_summary.json`。第三个 seed 的 `aabb_ray`、`geometry_ray` 和
+  `geometry_context_ray` 正在训练，完整矩阵汇总尚未生成，因此不读取中间产物作为 M4 最终结论。
+- M11 当前运行的是 Metropolis 1% 少样本 `retry3`，约处于 `32/40` epoch，非有限 loss/gradient 跳过计数均为
+  `0`；5% 和 10% 适配尚未启动，不能把该训练状态当作泛化结果。
 - GPU 槽位仍由 M4/M11 占用，新 M5 修复训练尚未启动，避免改变预注册矩阵的资源和代码环境。
 
 ### 回归检查
@@ -102,7 +105,7 @@ M5 失败分析和修复准则见 `docs/evaluation/m5_hkust_image_failure_analys
 2026-08-02 执行并通过：
 
 - `slm2viewer`: `npm test`，当前场景/模型完整性 smoke；
-- benchmark Python unittest，31 项通过；
+- benchmark Python unittest，最新回归为 39 项通过；
 - `node --check` 检查 `InstancePVS.js`、`LightweightPVSDispatcher.js`、`LightweightPVSWorker.js`；
 - `evaluate_proxy_interventions.py --self-test`。
 
