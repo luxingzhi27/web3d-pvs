@@ -354,7 +354,15 @@ node --check neural_instance_culling/benchmark/measure_glb_decode_upload_costs.m
 
 真实 smoke 使用 HKUST 的 1 个小构件和 3 个最大构件，结果写在 `/tmp`，不作为正式成本索引：1 个小构件成功，约 `2,964` bytes、`12.4 ms` 解析、`31.8 ms` render 提交；3 个约 `41.5 MB` 构件均成功，`decodeUploadMs` 约 `232--529 ms`。这些数值只证明采集链路和大构件路径可运行，尚未覆盖全部 `3,273` 个 GLB，也不代表移动设备性能。
 
-正式 M8 仍需在固定浏览器/后端和完整清单上运行采集，记录浏览器版本、图形适配器、分辨率和温度条件，并将完整成本索引与 SHA-256 一起冻结。SwiftShader smoke 不得冒充硬件 GPU 或 Android 成本证据。
+截至本记录更新，两个场景的完整离线成本索引均已生成并可复核：HKUST `3273/3273` 个 GLB、Metropolis
+`3669/3669` 个 GLB，失败数均为 `0`，状态均为 `complete`。对应产物为
+`benchmark/out/m7_glb_decode_upload_costs_hkust_20260802.json` 和
+`benchmark/out/m8_glb_decode_upload_costs_metropolis_20260802.json`；文件字节、条目状态和输入
+`glbIndex.json` 仍需在正式报告中一并记录 SHA-256。该结果通过了“完整离线 GLB 成本索引可复现”子门，
+但索引来自 headless Chrome 的 SwiftShader/WebGL 路径，不能冒充硬件 GPU 或 Android 成本证据。
+M8 整体质量门仍需固定最终模型、真实或明确受控的 Wi-Fi/4G 网络轨迹、图像效用、多种子配对统计以及
+真实设备解码/上传和 p95 帧时间；未满足这些条件前，只能将成本索引作为离线资源成本子门，不能宣称端到端
+联合调度优越性。
 
 ## 2026-08-02 当前主线回放入口修正
 
