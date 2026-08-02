@@ -872,3 +872,23 @@ useful cull 显著高于 1% 适配的 `0.279348`，支持“少样本适配比�
 模型输出、`neural_instance_culling/benchmark/out/` 和
 `docs/evaluation/m11_metropolis_fewshot_5pct_frozen_test_2026-08-02.md` 中。10% 适配已经由同一队列启动；
 M11 总质量门、按航向分层结果和最终 M13 主表仍未完成。
+
+### 2026-08-02 M4 正式 validation 矩阵收尾与路线 B
+
+M4 的 5 个输入变体和 3 个固定随机种子均已完成 40 epoch、特征导出和独立 calibration，共 `15/15` 个成员
+进入 validation 评价。每个成员遍历完整的 `664` 个 validation pose；候选使用严格保存的 66° 后退相机候选，
+不进行 GT union 或候选截断。每个成员的阈值只来自自己的 calibration，M4 汇总没有读取 test。
+
+以 `geometry_context_ray` 为参考，`full - reference` 的 useful-cull 差值为 `-0.002405`，10,000 次分层 paired
+bootstrap 的 95% 区间为 `[-0.019747, 0.007849]`；bad-cull 差值为 `+0.001083`，区间为
+`[+0.000332, +0.001818]`。因此完整模型没有满足路线 A 所需的 useful-cull 增益（至少 `+0.02` 且区间下界
+大于 0），但满足 bad-cull 最大增量门槛，正式路线冻结为 `route_b_system`。
+
+路线 B 以 `geometry_context_ray` 作为主可见性架构，方向遮挡代理降为固定场景特征中的辅助消融；不通过阈值、
+候选集合或前端白名单补救，也不把方向代理写成已证明的独立论文贡献。M4 摘要没有 image/PER/miss-pixel 或
+GLB 字节替代门，因此这些结论继续等待 M5/M7/M8。正式报告为
+`docs/evaluation/m4_formal_matrix_validation_2026-08-02.md`，摘要源 SHA-256 为
+`19fe6267e5a0c16c8975703e38cb80be57647e308cc6028e3fb688515eb5cf9a`。
+
+本次完成的质量记录只修改了 M4 文档和索引，没有修改正在运行的 M11 10% 训练、M5 等待队列、checkpoint、
+候选集合、阈值或前端默认资产。

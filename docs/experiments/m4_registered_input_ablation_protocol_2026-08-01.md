@@ -1,7 +1,7 @@
 # M4：注册输入分支消融协议
 
-日期：2026-08-01
-状态：代码与 fixture 已完成，正式三随机种子矩阵训练进行中；截至 2026-08-02 已有 10/15 个成员生成校准就绪产物，完整 validation 汇总尚未生成。
+日期：2026-08-01；收尾更新：2026-08-02
+状态：正式三随机种子矩阵、validation 汇总和路线判定已完成；采用路线 B，test 尚未读取。
 目的：为核心消融提供与完整模型相同的候选集合、模型容量、训练协议和阈值冻结流程，分别检验几何、上下文和方向遮挡代理输入的独立作用。
 
 ## 变更目的
@@ -138,3 +138,18 @@ AABB+ray 训练退出，当时尚未启动新的消融训练，也没有正式�
 完成，在每个成员的完整 validation split 上只运行 `baseline` 变体，保存同一 pose 的候选哈希、逐 pose
 指标和冻结阈值，然后由 `summarize_formal_m4_matrix.py` 执行“随机种子聚类、种子内 pose 重采样”的
 10,000 次配对 bootstrap。输出明确标记为 validation-only，不会读取 test。
+
+## 2026-08-02 正式 validation 收尾与路线 B
+
+15 个成员（5 个变体 × 3 个 seed）均完成 40 epoch、特征导出和独立 calibration。每个成员在同一
+validation split 上评估 664 个 pose；候选集合为严格保存的后退相机候选，不做 GT union 和候选截断。
+矩阵摘要明确标记为 validation-only，路线文件记录 `testRead=false`，并由 10,000 次分层 paired bootstrap 生成逐 pose 对齐的区间。
+
+路线判定为 `route_b_system`。`full - geometry_context_ray` 的 useful-cull 差值为 `-0.002405`，95% 区间
+`[-0.019747, 0.007849]`，没有达到路线 A 要求的 `+0.02` 且区间下界大于 0；bad-cull 差值为 `+0.001083`，
+区间 `[+0.000332, +0.001818]`，通过不超过 `+0.002` 的安全门。M4 摘要不包含图像/下载字节替代门，不能
+用其改变路线决定。后续以 `geometry_context_ray` 作为主可见性架构，方向遮挡代理只保留为固定特征表中的
+辅助消融，不作独立因果贡献主张。
+
+完整报告见 `docs/evaluation/m4_formal_matrix_validation_2026-08-02.md`。M5 视觉安全修复仍需独立完成，
+M4 validation 结果不能替代图像 PER、miss-pixel、GLB 字节或移动端性能证据。

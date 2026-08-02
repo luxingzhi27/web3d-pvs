@@ -52,6 +52,7 @@
 44. M0 frozen test 关键产物清单：`evaluation/m0_frozen_artifact_manifest_2026-08-01.json`
 45. M5 HKUST 图像安全门失败分析：`evaluation/m5_hkust_image_failure_analysis_2026-08-01.md`
 46. M5 图像安全修复实验预注册协议：`experiments/m5_visual_safety_repair_protocol_2026-08-02.md`
+47. M4 注册输入分支消融矩阵 validation 评价与路线判定：`evaluation/m4_formal_matrix_validation_2026-08-02.md`
 
 ## 当前场景
 
