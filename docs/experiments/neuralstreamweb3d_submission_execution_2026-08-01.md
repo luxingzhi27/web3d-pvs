@@ -789,3 +789,14 @@ bash -n neural_instance_culling/benchmark/run_formal_m4_validation_evaluations.s
 结果为稳定性审计单元测试 `3 tests, OK`，两个正式队列脚本语法检查通过。移动端仍保持
 `No-Go / 真实设备证据缺失`；设备到位前只执行并维护 `docs/frontend/m10_device_benchmark_2026-08-01.md` 中的
 预注册方案，不用 SwiftShader、模拟器或服务器 GPU 结果填充移动端性能分布。
+
+### 2026-08-02 M5 等待器恢复
+
+复核队列时发现 `m5_visual_repair` 等待器已在尚未生成 M4 validation 摘要前退出，旧日志末尾只有
+`Terminated`，没有创建 M5 checkpoint、特征导出或图像结果。检查确认没有同名训练进程，也没有不完整的 M5
+输出目录可复用；M4/M11 正式训练和 M4 评估等待器均未被停止。已重新启动同名等待器，日志改写入
+`neural_instance_culling/benchmark/out/m5_visual_safety_repair_queue_retry2.log`。
+
+恢复后的队列仍只接受结构化的 validation-only M4 路线文件和完整 M11 5%/10% 队列完成标记，随后才按预注册的
+4 个视觉安全变体、3 个 seed 启动训练；没有改变候选集合、阈值、GPU 分配或质量门。该恢复属于执行编排修复，
+不构成 M5 结果，也不提前改变 M4/M5 路线判断。
