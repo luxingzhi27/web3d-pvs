@@ -455,3 +455,16 @@ Color-ID schema、三角形 HZB 缓存、M4 输入消融序列化、视觉安全
 
 上述结果只证明工具链和代码契约可复现，不替代 M4 的配对 validation 统计、M5 的图像质量门、M10 的真实
 移动设备证据或 M13 的 one-shot test。当前 M4/M11 长任务仍按原队列运行，正式质量门状态不变。
+
+### 2026-08-02 M11 AMP 梯度跳过审计
+
+复核 `pvs_m11_fewshot_1pct_metropolis_yaw20_rvl_strong_v2_full40_seed20260801_retry3` 的完整
+`train_history.json` 后，纠正此前只查看最后一个 epoch 所造成的“非有限梯度为 0”表述。训练器中的
+`trainSkippedNonFiniteGrad` 是当前 epoch 的计数，不是全程累计计数；截至 epoch `36/40`，累计跳过
+`16` 个梯度步，`trainSkippedNonFiniteLoss` 累计为 `0`。这些跳过发生在 AMP 反向传播和梯度裁剪之后、优化器
+更新之前，训练器会清零梯度并调用 scaler 更新，不会把该步的非有限梯度写入模型参数。
+
+按已完成的 `36 × 900 = 32,400` 个训练 step 计算，当前跳过比例约为 `0.049%`。该现象不是静默忽略：
+原始 stdout、stderr、逐 epoch 计数和 checkpoint 均保留。当前 retry3 不中途停止，先完成预注册的 40 epoch
+和安全 calibration；最终报告必须同时给出跳过总数、比例和是否存在非有限 loss。如果安全工作点或正式 test
+失败，再以独立输出目录执行关闭 AMP 的 FP32 重跑，不能覆盖本次证据或将其改写为无异常训练。
