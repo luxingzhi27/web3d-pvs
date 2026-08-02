@@ -99,3 +99,11 @@ PYTHONDONTWRITEBYTECODE=1 conda run --no-capture-output -n "$ENV_NAME" python -u
   --bootstrap-replicates 10000 \
   >"$BENCH_ROOT/m4_formal_matrix_validation_summary.log" 2>&1
 printf '[formal-m4-eval] validation matrix summary completed\n'
+
+PYTHONDONTWRITEBYTECODE=1 conda run --no-capture-output -n "$ENV_NAME" python -u \
+  neural_instance_culling/benchmark/decide_m4_route.py \
+  --summary "$BENCH_ROOT/m4_formal_matrix_validation_summary.json" \
+  --output "$BENCH_ROOT/m4_formal_route_decision.json" \
+  --markdown "$BENCH_ROOT/m4_formal_route_decision.md" \
+  >"$BENCH_ROOT/m4_formal_route_decision.log" 2>&1
+printf '[formal-m4-eval] route decision completed\n'
