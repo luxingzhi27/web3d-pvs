@@ -117,6 +117,55 @@ M5 失败分析和修复准则见 `docs/evaluation/m5_hkust_image_failure_analys
 
 M5 修复只有在 M4 核心路线确定后启动。所有变体都必须使用固定 validation、独立 calibration、真实 60°实例级图像评价和 test one-shot 规则；当前 M5 仍为 No-Go。
 
+## 2026-08-02 M11 少样本冻结协议修复
+
+### 发现的问题
+
+Metropolis 1% 少样本适配的首次冻结 test 尝试在协议预检阶段失败。训练摘要
+`calibration_ready_summary.json` 正确记录了训练子集为原生 train split 的 `1%`、选择种子
+`20263910`、205 个 pose 以及对应 digest，但早期生成的 `best.pt` 的 `protocolSplit` 没有携带
+`trainFitSelectionFraction` 和 `trainFitSelectionSeed`。冻结评测器因此只能把 205 个 pose 的
+digest 与完整的 20,454 个 train pose 比较并拒绝执行。失败发生在 test 推理之前，没有产生第二次
+test 统计；原失败 manifest 和输出目录保留作审计证据。
+
+### 修复与验证
+
+修改文件：
+
+- `neural_instance_culling/benchmark/evaluate_frozen_test.py`
+- `neural_instance_culling/benchmark/tests/test_frozen_test_entrypoint.py`
+
+冻结 manifest 生成现在会读取同一模型目录中的校准就绪摘要，确认其仍为
+`calibration_ready_pre_test` 且 `testEvaluationCount=0`，逐字段核对 checkpoint 与摘要的原生
+split 计数和 digest，再补入少样本训练子集重建所需的比例、种子和语义字段。若摘要已经包含 test
+结果、原生 split 不一致或少样本 checkpoint 缺少摘要，入口会拒绝生成 manifest。manifest 同时
+记录校准摘要路径和 SHA-256，便于追溯。
+
+验证命令：
+
+```bash
+conda run --no-capture-output -n slm_pvs python -m unittest \
+  neural_instance_culling.benchmark.tests.test_frozen_test_entrypoint -v
+conda run --no-capture-output -n slm_pvs python -m py_compile \
+  neural_instance_culling/benchmark/evaluate_frozen_test.py \
+  neural_instance_culling/benchmark/tests/test_frozen_test_entrypoint.py
+```
+
+结果为 8 项针对性单元测试通过，随后完整 benchmark 测试集共 50 项通过；使用修复后的校验器对既有
+`m11_pvs_m11_fewshot_1pct_metropolis_yaw20_rvl_strong_v2_full40_seed20260801_retry3_protocolfix_frozen_manifest.json`
+进行 split 审计通过：205/1149/2271/2271，test digest 为
+`dd157d2252edf65b`。对应 one-shot 产物
+`m11_formal_metropolis_fewshot_1pct_frozen_test_20260802_protocolfix/summary.json`
+记录了 2,271 个唯一 test pose，固定阈值 `0.05000000074505806`，weighted recall
+`0.993608`、pose recall `0.945077`、pose precision `0.156026`、useful cull
+`0.279348`、bad cull `0.004880`。该结果仍是少样本泛化证据，不能替代完整数据训练或图像安全门。
+
+### 阶段判断
+
+M11 的 1% frozen-test 子门现在具备合法的 split provenance 和 one-shot 结果；原始协议失败被
+降级为工具缺陷记录，不纳入指标主表。5% 和 10% 适配仍按同一修复后的 manifest 规则顺序执行，
+当前不能提前宣称少样本泛化质量门通过。
+
 ## 2026-08-02 M7 成本索引与验证集回放
 
 ### 运行目的

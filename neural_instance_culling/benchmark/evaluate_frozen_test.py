@@ -362,6 +362,82 @@ def infer_runtime_features(checkpoint_path: Path) -> Path:
     return checkpoint_path.parent / "instance_runtime_features_fp16.bin"
 
 
+def merge_protocol_with_calibration_summary(
+    checkpoint_path: Path,
+    checkpoint_protocol: dict[str, Any],
+) -> tuple[dict[str, Any], Path | None]:
+    """Recover and verify protocol fields omitted by an older checkpoint writer.
+
+    Few-shot training stores the selected train-pose fraction and seed in the
+    calibration-ready summary.  Some earlier writers copied the base split
+    into ``best.pt`` but omitted those two fields, leaving the frozen-test
+    evaluator unable to reconstruct the train-fit digest.  The summary is
+    produced before any test evaluation, so it is a valid provenance source
+    only when it is explicitly still in the pre-test state and its common
+    split fields agree with the checkpoint.
+    """
+    protocol = dict(checkpoint_protocol)
+    summary_path = checkpoint_path.parent / "calibration_ready_summary.json"
+    if not summary_path.is_file():
+        # Full-data checkpoints do not need a train-fit reconstruction.  A
+        # few-shot checkpoint without its selection metadata is unsafe.
+        if int(protocol.get("trainFitCount", -1)) != int(protocol.get("originalTrainCount", -2)):
+            raise ValueError(
+                "Few-shot checkpoint is missing calibration_ready_summary.json; "
+                "cannot reconstruct the immutable train-fit selection."
+            )
+        return protocol, None
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    if summary.get("protocol") != "calibration_ready_pre_test":
+        raise ValueError(
+            f"Calibration summary is not pre-test for {checkpoint_path}: "
+            f"{summary.get('protocol')!r}"
+        )
+    if int(summary.get("testEvaluationCount", -1)) != 0:
+        raise ValueError("Calibration summary already contains a test evaluation.")
+    summary_protocol = summary.get("protocolSplit")
+    if not isinstance(summary_protocol, dict):
+        raise ValueError("Calibration summary has no protocolSplit provenance.")
+
+    common_keys = (
+        "originalTrainCount",
+        "trainFitCount",
+        "fixedValidationCount",
+        "calibrationCount",
+        "frozenTestCount",
+        "trainFitDigest",
+        "fixedValidationDigest",
+        "calibrationDigest",
+        "frozenTestDigest",
+    )
+    mismatches = {
+        key: {
+            "checkpoint": checkpoint_protocol.get(key),
+            "calibrationSummary": summary_protocol.get(key),
+        }
+        for key in common_keys
+        if str(checkpoint_protocol.get(key)) != str(summary_protocol.get(key))
+    }
+    if mismatches:
+        raise ValueError(
+            "Checkpoint and calibration summary split provenance differ: "
+            f"{json.dumps(mismatches, ensure_ascii=False)}"
+        )
+
+    # These fields are the only provenance needed to reconstruct a few-shot
+    # train-fit subset and were absent from the affected checkpoint files.
+    for key in ("trainFitSelectionFraction", "trainFitSelectionSeed", "trainFitSemantics"):
+        if key in summary_protocol:
+            if key in checkpoint_protocol and checkpoint_protocol[key] != summary_protocol[key]:
+                raise ValueError(
+                    f"Checkpoint and calibration summary differ for {key}: "
+                    f"{checkpoint_protocol[key]!r} != {summary_protocol[key]!r}"
+                )
+            protocol[key] = summary_protocol[key]
+    return protocol, summary_path
+
+
 def prepare_one_model(
     name: str,
     checkpoint_path: Path,
@@ -393,9 +469,13 @@ def prepare_one_model(
     if model_kind != "directional_occlusion_proxy_encoder":
         raise ValueError("prepare currently requires a learned directional PVS checkpoint.")
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    protocol = checkpoint.get("protocolSplit")
-    if not isinstance(protocol, dict):
+    checkpoint_protocol = checkpoint.get("protocolSplit")
+    if not isinstance(checkpoint_protocol, dict):
         raise ValueError("Checkpoint has no protocolSplit; it cannot be used for formal M0 test.")
+    protocol, calibration_summary_path = merge_protocol_with_calibration_summary(
+        checkpoint_path,
+        checkpoint_protocol,
+    )
     expected = {
         key: protocol.get(key)
         for key in (
@@ -438,6 +518,9 @@ def prepare_one_model(
         "selectionAudit": audit,
         "preTestEvaluationCount": 0,
     }
+    if calibration_summary_path is not None:
+        manifest_entry["calibrationReadySummary"] = str(calibration_summary_path.resolve())
+        manifest_entry["calibrationReadySummarySha256"] = sha256_file(calibration_summary_path)
     return canonical_name, manifest_entry
 
 

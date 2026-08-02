@@ -56,6 +56,69 @@ class _ProtocolDataset:
 
 
 class FrozenTestEntrypointTests(unittest.TestCase):
+    def test_merge_protocol_recovers_few_shot_selection_from_pre_test_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            checkpoint_path = root / "best.pt"
+            summary_path = root / "calibration_ready_summary.json"
+            checkpoint_protocol = {
+                "originalTrainCount": 10,
+                "trainFitCount": 3,
+                "fixedValidationCount": 1,
+                "calibrationCount": 1,
+                "frozenTestCount": 1,
+                "trainFitDigest": "train-digest",
+                "fixedValidationDigest": "validation-digest",
+                "calibrationDigest": "calibration-digest",
+                "frozenTestDigest": "test-digest",
+            }
+            summary_protocol = {
+                **checkpoint_protocol,
+                "trainFitSelectionFraction": 0.3,
+                "trainFitSelectionSeed": 4321,
+                "trainFitSemantics": "deterministic subset of native train poses",
+            }
+            checkpoint_path.write_bytes(b"checkpoint-fixture")
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "protocol": "calibration_ready_pre_test",
+                        "testEvaluationCount": 0,
+                        "protocolSplit": summary_protocol,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            merged, source = frozen.merge_protocol_with_calibration_summary(
+                checkpoint_path,
+                checkpoint_protocol,
+            )
+            self.assertEqual(merged["trainFitSelectionSeed"], 4321)
+            self.assertEqual(merged["trainFitSelectionFraction"], 0.3)
+            self.assertEqual(source, summary_path)
+
+    def test_merge_protocol_rejects_post_test_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            checkpoint_path = root / "best.pt"
+            checkpoint_path.write_bytes(b"checkpoint-fixture")
+            (root / "calibration_ready_summary.json").write_text(
+                json.dumps(
+                    {
+                        "protocol": "frozen_calibration_one_shot_test",
+                        "testEvaluationCount": 1,
+                        "protocolSplit": {"originalTrainCount": 1},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "not pre-test"):
+                frozen.merge_protocol_with_calibration_summary(
+                    checkpoint_path,
+                    {"originalTrainCount": 1, "trainFitCount": 1},
+                )
+
     def test_validate_protocol_reconstructs_few_shot_train_fit_subset(self) -> None:
         dataset = _ProtocolDataset("fixture", 2)
         seed = 1234
