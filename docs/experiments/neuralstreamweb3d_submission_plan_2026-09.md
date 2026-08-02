@@ -1088,3 +1088,16 @@ M8 首次当前主线回放把主线下载头和独立 RankNet 放在同一次 `
 离线调度诊断。M11 的 Metropolis 少样本 `retry2` 在 1% 适配中触发显存不足，保留失败目录；`retry3`
 已改用单 pose 训练和冻结 test 批次、较小特征导出批次、默认 AMP 与显存分段，当前正在 GPU 3 运行，
 尚未产出适配指标。
+
+### 21.24 NeuralPVS 官方实现审计更正（2026-08-02）
+
+上一条 M6 记录把“当前仓库没有公平适配链路”误写成“公开资料不足以复现”。该表述已更正：NeuralPVS
+官方训练/推理仓库可以获得，审计副本 commit 为 `946088616cad18de81cde12fecd6ab204e52eac9`，其中包含
+OACNN/VNet、三维交错模块、数据集读取器、训练器、推理器和 Dice/focal/repulsive/no-guess 类损失实现；
+官方数据格式为 `gv/*.bin.gz` 与 `pvv/*.bin.gz` 的 bit-packed 三维体素网格。
+
+更正不改变 M6 质量门：当前项目仍没有把三个场景的真实深度/实例 ID 采样转换为官方 froxel 语义，也没有
+完成 froxel 到实例的保守映射、严格 candidate CSR runner、同 FOV/view-cell/calibration/test 评测和冷启动
+资源核算；`slm_pvs` 当前也没有官方所需的 `spconv`/`cupy` 依赖。因此现有 AABB depth proxy、三角形 HZB
+warm-cache 和实例级 MLP 结果仍不得冒充 NeuralPVS，M6 保持 `No-Go / adaptation not implemented`。
+详细审计见 `docs/experiments/m6_neuralpvs_baseline_audit_2026-08-01.md`。

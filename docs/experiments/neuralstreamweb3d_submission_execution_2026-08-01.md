@@ -535,3 +535,15 @@ M11 Metropolis 少样本 `retry3` 的 1% 适配已完成 40 epoch、校准和冻
 本轮重新执行 benchmark 回归套件，结果为 `43 tests, OK`；M4/M5/M11 队列 Bash 检查和 `git diff --check`
 通过。该检查只证明当前协议与工具链没有回归，不改变 M4、M5、M10 或 M13 的质量门状态。工作区保持干净，
 默认模型、前端资产、阈值和 `66°` 模型查询 / `60°` 真实渲染 FOV 口径均未改变。
+
+### 2026-08-02 NeuralPVS 官方实现事实更正
+
+复核临时审计副本 `946088616cad18de81cde12fecd6ab204e52eac9` 后，修正文档中“公开资料不足以复现”的表述。
+官方仓库实际包含 OACNN/VNet、三维交错模块、数据集读取器、训练与推理入口，以及 Dice/focal/
+repulsive/no-guess 类损失；数据格式为 `gv/*.bin.gz` 和 `pvv/*.bin.gz` 的 bit-packed 三维体素网格。
+
+这项更正不改变实验结果或 M6 门控。当前 `slm_pvs` 缺少 `spconv`/`cupy`，项目也没有完成真实深度/实例 ID
+到 froxel 的转换、froxel-to-instance 保守映射、严格 candidate CSR runner、同 FOV/view-cell 的公平评测和
+冷启动资源核算。因此已有 AABB depth proxy、三角形 HZB warm-cache 和实例级 MLP 仍不能作为 NeuralPVS
+结果；M6 保持 `No-Go / adaptation not implemented`。详细审计见
+`docs/experiments/m6_neuralpvs_baseline_audit_2026-08-01.md`。
