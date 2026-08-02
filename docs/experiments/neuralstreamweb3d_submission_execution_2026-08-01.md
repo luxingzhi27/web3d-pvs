@@ -417,3 +417,15 @@ M11 Metropolis 1% 少样本适配 `retry3` 约完成第 `7/40` 个 epoch，非�
 截至本记录，工作区无未提交代码修改，默认模型、前端资产、测试阈值和 FOV 口径均未改变。下一步仍是
 等待 M4 完整矩阵，随后只在固定 validation/calibration 规则下执行汇总，再按预注册门限决定是否保留
 完整方向遮挡代理路线。
+
+### 2026-08-02 M4/M11 长任务进度更新
+
+后续轮询显示 M4 已完成第二个正式 seed 的全部五个变体，当前共有 `10/15` 个
+`calibration_ready_summary.json`。第三个 seed 已启动第一波三个变体：`aabb_ray` 约第 `20` 个 epoch，
+`geometry_ray` 和 `geometry_context_ray` 约第 `6` 个 epoch；其余两个变体尚未启动。训练进程的 GPU
+计算负载和 checkpoint 更新时间正常，当前没有非有限 loss、梯度异常或 OOM。M4 配对 validation 评估器
+已从等待第二个 seed 转为等待第三个 seed 的第一个校准产物，尚未读取不完整结果。
+
+M11 Metropolis 1% 少样本 `retry3` 已推进到约第 `30/40` 个 epoch，非有限计数仍为 `0`；完成后队列
+才会按固定协议进入 5% 和 10% 适配。M5 修复训练和图像评价继续等待 M4/M11 依赖会话，尚未生成修复模型
+或图像汇总。该进度更新只记录执行状态，不改变 M4 路线判定、M5/M10 No-Go 或默认模型。
