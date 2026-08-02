@@ -173,6 +173,60 @@ def prefix_manifest(source: Path, destination: Path, batch_id: str) -> Path:
     return destination
 
 
+def percentile(values: list[float], quantile: float) -> float:
+    """Return a deterministic linearly interpolated percentile."""
+    if not values:
+        raise ValueError("cannot calculate a percentile from an empty list")
+    ordered = sorted(float(value) for value in values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * float(quantile)
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = position - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+
+
+def load_viewcell_metrics(batch_output: Path, expected_batches: list[str]) -> dict[str, dict[str, Any]]:
+    """Summarize per-view-cell image metrics without touching predictions."""
+    metrics_path = batch_output / "true_glb_render" / "sample_image_metrics.json"
+    if not metrics_path.is_file():
+        raise FileNotFoundError(metrics_path)
+    payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, list):
+        raise ValueError(f"sample image metrics must be a list: {metrics_path}")
+    grouped: dict[str, list[dict[str, Any]]] = {batch_id: [] for batch_id in expected_batches}
+    for row in payload:
+        if not isinstance(row, dict):
+            raise ValueError(f"invalid sample image metric row in {metrics_path}")
+        batch_id = str(row.get("batchId") or "")
+        if batch_id not in grouped:
+            raise ValueError(f"unexpected batch id in {metrics_path}: {batch_id!r}")
+        image = row.get("imageMetrics")
+        if not isinstance(image, dict):
+            raise ValueError(f"sample image metric lacks imageMetrics: {metrics_path}")
+        grouped[batch_id].append(image)
+
+    result: dict[str, dict[str, Any]] = {}
+    for batch_id, rows in grouped.items():
+        if not rows:
+            raise ValueError(f"batch {batch_id} has no per-view-cell image metrics")
+        miss = [float(row["missPixelRate"]) for row in rows]
+        wrong = [float(row["wrongInstancePixelRate"]) for row in rows]
+        per = [float(row["PER"]) for row in rows]
+        result[batch_id] = {
+            "sampleCount": len(rows),
+            "viewCellMissPixelRateMean": sum(miss) / len(miss),
+            "viewCellMissPixelRateP95": percentile(miss, 0.95),
+            "viewCellMissPixelRateMax": max(miss),
+            "viewCellWrongInstancePixelRateMean": sum(wrong) / len(wrong),
+            "viewCellWrongInstancePixelRateP95": percentile(wrong, 0.95),
+            "viewCellPERMean": sum(per) / len(per),
+            "viewCellPERP95": percentile(per, 0.95),
+        }
+    return result
+
+
 def write_report(batch_output: Path, batch_manifest: Path, output_root: Path, expected_batches: list[str]) -> None:
     render_summary_path = batch_output / "true_glb_render" / "render_summary.json"
     if not render_summary_path.exists():
@@ -184,6 +238,7 @@ def write_report(batch_output: Path, batch_manifest: Path, output_root: Path, ex
     missing = [batch_id for batch_id in expected_batches if batch_id not in batch_rows]
     if missing:
         raise RuntimeError(f"M5 browser render omitted batches: {missing[:8]}")
+    viewcell_metrics = load_viewcell_metrics(batch_output, expected_batches)
     rows: list[dict[str, Any]] = []
     for batch_id in expected_batches:
         row = batch_rows[batch_id]
@@ -192,6 +247,7 @@ def write_report(batch_output: Path, batch_manifest: Path, output_root: Path, ex
             "batchId": batch_id,
             "sampleCount": int(row.get("sampleCount", 0)),
             "imageMetrics": metrics,
+            "viewCellImageMetrics": viewcell_metrics[batch_id],
         })
     summary = {
         "schema": "m5-visual-safety-repair-image-batch-summary-v1",
@@ -206,6 +262,12 @@ def write_report(batch_output: Path, batch_manifest: Path, output_root: Path, ex
         "batches": rows,
         "formalImageEvaluationReady": False,
         "note": "Validation/calibration image evidence only; test remains sealed and the renderer reports non-formal until the registered image gates are reviewed.",
+        "qualityGate": {
+            "meanMissPixelRateMax": 0.005,
+            "viewCellMissPixelRateP95Max": 0.01,
+            "selectionUsesTest": False,
+            "thresholdsUntouched": True,
+        },
     }
     (output_root / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     lines = [
@@ -213,16 +275,18 @@ def write_report(batch_output: Path, batch_manifest: Path, output_root: Path, ex
         "",
         "This report contains validation/calibration only. The test split was not read.",
         "",
-        "| Batch | Samples | PER | Miss pixel rate | Wrong-ID pixel rate |",
-        "|---|---:|---:|---:|---:|",
+        "| Batch | Samples | Aggregate miss | View-cell mean miss | View-cell p95 miss | View-cell max miss | Wrong-ID p95 |",
+        "|---|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         metrics = row["imageMetrics"]
         lines.append(
             f"| `{row['batchId']}` | {row['sampleCount']} | "
-            f"{float(metrics.get('PER', 0.0)):.6f} | "
             f"{float(metrics.get('missPixelRate', 0.0)):.6f} | "
-            f"{float(metrics.get('wrongInstancePixelRate', 0.0)):.6f} |"
+            f"{row['viewCellImageMetrics']['viewCellMissPixelRateMean']:.6f} | "
+            f"{row['viewCellImageMetrics']['viewCellMissPixelRateP95']:.6f} | "
+            f"{row['viewCellImageMetrics']['viewCellMissPixelRateMax']:.6f} | "
+            f"{row['viewCellImageMetrics']['viewCellWrongInstancePixelRateP95']:.6f} |"
         )
     lines.extend([
         "",

@@ -729,3 +729,30 @@ M11 Metropolis 5% 适配处于第 `23/40` 个 epoch，当前 epoch 的非有限 
 5%/10% 适配尚未完成，M5 修复队列仍按依赖等待。M10 继续保持
 `No-Go / 真实 Android、ADB 和硬件 WebGPU 证据缺失`。移动设备只保留已冻结的预注册方案，不生成
 移动端 p50/p95/p99，占位或桌面 SwiftShader 结果不进入移动性能结论。
+
+### 2026-08-02 M5 view-cell 图像统计修复
+
+审计 M5 修复队列的图像收尾脚本时发现，浏览器已经保存逐 view-cell 的
+`true_glb_render/sample_image_metrics.json`，但 `run_m5_visual_safety_image_evaluation.py` 只汇总像素总数，
+没有把质量门所需的 view-cell 均值、p95 和最大值写入最终摘要。该缺口会使修复模型无法按预注册的
+`mean miss-pixel < 0.5%`、`view-cell p95 < 1%` 规则进行可复核选择，但没有改变任何预测或阈值。
+
+修改文件：
+
+- `neural_instance_culling/benchmark/run_m5_visual_safety_image_evaluation.py`
+- `neural_instance_culling/benchmark/tests/test_m5_visual_safety_image_evaluation.py`
+
+新汇总器按 batch 读取现有逐 view-cell 记录，使用确定性的线性插值 percentile，写出 view-cell 均值、p95、
+最大漏像素率、错误实例率及 PER，并显式记录 `testRead=false` 和固定质量门。用既有 HKUST validation
+true-GLB 产物回放该逻辑得到 view-cell miss-pixel 均值 `0.540899%`、p95 `3.197310%`、最大值
+`13.142249%`，与已归档失败分析一致；没有读取 test，也没有重算阈值。
+
+验证命令与结果：
+
+```text
+python -m unittest neural_instance_culling.benchmark.tests.test_m5_visual_safety_image_evaluation -v  # 3 tests, OK
+python -m unittest discover -s neural_instance_culling/benchmark/tests -p 'test*.py' -q  # 53 tests, OK
+python -m py_compile run_m5_visual_safety_image_evaluation.py  # OK
+```
+
+该修改保留为 M5 正式评价链路的一部分；M5 训练和图像评价仍等待 M4/M11 依赖完成，质量门尚未通过。
