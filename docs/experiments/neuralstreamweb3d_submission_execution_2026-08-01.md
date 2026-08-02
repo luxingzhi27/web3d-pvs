@@ -818,3 +818,27 @@ seed `20260803` 的 `full` 成员已记录到约 `16/40` 个 epoch，
 M11 Metropolis 5% 少样本适配已记录到约 `29/40` 个 epoch，使用预注册的 AMP 和逐 pose 显存配置；当前 epoch 的
 训练记录没有非有限 loss，历史累计梯度跳过数仍按全程审计口径保留。10% 适配尚未启动，M5 修复矩阵和图像评价
 继续停在依赖门之前。该核验没有读取 test、改变阈值或新增实验。
+
+### 2026-08-02 16:24 当前队列与回归核验
+
+本次核验以文件、进程和 GPU 状态为准，没有停止或重启 M4/M11 正式训练。M4 的 15 个注册成员中已有 `13/15`
+个生成 `calibration_ready_summary.json`；这 13 个完整 `train_history.json` 均通过全程稳定性审计，非有限 loss、
+非有限梯度跳过和非有限指标计数均为 `0`。剩余两个成员为
+`geometry_context_proxy_ray_no_inhibition` 和 `full` 的 seed `20260803`，仍在 CUDA 上训练，分别约记录到
+`11/40` 和 `19/40` epoch，因此不把当前结果写入 M4 结论。M4 evaluator 已完成已有验证输入并等待最后两个校准产物，
+尚未生成矩阵摘要或路线判定，也没有读取 test。
+
+M11 的 Metropolis `5%` 适配仍在训练，约为 `31/40` epoch；1% 适配的完整历史审计结果为 `warning`，非有限 loss
+为 `0`，但累计跳过 `17` 次 AMP 非有限梯度更新。该状态只能如实记录为 warning，不能表述成全程无异常；5% 完成后
+仍需独立校准、冻结清单和一次性 test，10% 由队列顺序启动。
+
+M0 的正式 HKUST/Metropolis frozen-test 产物已由既有不可变 artifact manifest 核对，分别遍历 `722` 和 `2,340`
+个唯一 test pose，均为单一校准阈值、`testEvaluationCount=1`。另一个残留的
+`m0_rebuild_hkust_raw_candidates` tmux 窗口只是辅助数据重建尝试；其命令在 zsh 展开未引用通配符时于启动前失败，
+没有覆盖或修改正式空间 CSR 数据，因此不影响已归档的 M0 证据。该失败保留在窗口中，不将其误报为正式采样或评测失败。
+
+按仓库当前路径重跑静态检查：`slm2viewer/src/InstancePVS.js`、
+`slm2viewer/src/LightweightPVSDispatcher.js`、`slm2viewer/src/LightweightPVSWorker.js` 和
+`slm2viewer/slm2/SLM2Loader.js` 的 `node --check` 全部通过；benchmark 单元测试和相关 Python 文件的语法检查通过。
+此前一次检查使用了不存在的 `slm2viewer/slm2/InstancePVS.js` 路径，已纠正为当前源码目录，不能把路径错误计入代码回归。
+本次没有修改模型、候选集合、阈值或前端默认资产。
