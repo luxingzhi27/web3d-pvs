@@ -581,3 +581,14 @@ M10 仍为 `No-Go / 真实 Android、ADB 和硬件 WebGPU 证据缺失`。移动
 
 本次静态复核通过：`slm2viewer` 当前场景/模型完整性 smoke、M4/M5/M11 队列 Bash 语法检查和
 `git diff --check`。这些检查只证明执行入口没有回归，不改变 M4、M5、M10 或 M13 的质量门状态。
+
+## 2026-08-02 12:26 M4 评测等待器恢复
+
+原 `formal_m4_eval` tmux 会话在 M4 矩阵尚未完成时退出，旧日志末尾仅记录 `Terminated`，没有生成矩阵摘要、
+路线决策或任何 test 结果。训练进程没有被停止，已完成的 11 个 validation 干预文件也没有损坏。
+
+已在同名 `formal_m4_eval` 会话重新启动
+`run_formal_m4_validation_evaluations.sh`，输出追加到
+`neural_instance_culling/benchmark/out/formal_m4_eval_retry1.log`。该脚本会复用已有干预结果，只等待缺失的
+seed-20260803 成员；矩阵完整后仍使用新的 bad-cull 安全路线判定逻辑，明确传入最大允许增量 `0.002`。
+本次恢复不重跑训练、不读取 test、不覆盖旧日志，旧会话退出作为执行故障保留。
