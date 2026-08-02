@@ -1171,6 +1171,8 @@ safety_adjusted_useful_cull = useful_cull * safety_factor
 
 #### 路线判定
 
+为避免“明显下降”在结果产生后临时解释，M4-v2 将 recall/weighted recall 差值 95% 区间下界低于 `-0.01` 登记为安全层失败，bad-cull 差值区间上界固定不超过 `+0.002`；两项均在 pose 宏平均和 aggregate 口径检查。
+
 路线判定分三层。第一层要求方向代理不造成 pose/weighted recall 的明显安全下降，bad-cull 增量满足预注册上限。
 第二层要求在相同安全工作点下，precision、balanced accuracy、F1、useful cull 或预测/GLB 成本至少一项的
 配对区间稳定改善；第三层要求相同视觉效用下 GLB 字节/首屏时间下降，或 miss-pixel/p95 miss-pixel 稳定改善。

@@ -77,6 +77,8 @@ inhibition_with_proxy = D - B
 
 ## 7. 路线判定
 
+为使“明显下降”可执行且在结果产生前固定，本轮将方向代理的 recall 和 weighted recall 差值 95% 区间下界低于 `-0.01` 视为安全层失败；bad-cull 差值区间上界固定为不超过 `+0.002`。两个限制同时在 pose 宏平均和 aggregate 口径检查。
+
 路线脚本不接受任意综合分数。判定顺序为：
 
 1. 安全层：代理不得使 recall/weighted recall 出现预注册的明显下降，bad-cull 增量必须满足上限。
