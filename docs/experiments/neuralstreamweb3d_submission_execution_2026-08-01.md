@@ -468,3 +468,16 @@ Color-ID schema、三角形 HZB 缓存、M4 输入消融序列化、视觉安全
 原始 stdout、stderr、逐 epoch 计数和 checkpoint 均保留。当前 retry3 不中途停止，先完成预注册的 40 epoch
 和安全 calibration；最终报告必须同时给出跳过总数、比例和是否存在非有限 loss。如果安全工作点或正式 test
 失败，再以独立输出目录执行关闭 AMP 的 FP32 重跑，不能覆盖本次证据或将其改写为无异常训练。
+
+### 2026-08-02 M4 可用成员预评估与回归复核
+
+在不改变 M4 训练参数、候选集合、校准阈值或输出目录的前提下，利用空闲的 GPU 0 顺序运行了已经生成
+`calibration_ready_summary.json` 的 `11/15` 个 M4 成员。评估输出使用
+`m4_formal_baseline_<experiment>_validation/interventions.json` 的正式队列命名，严格读取 validation
+split，未读取 test，也未重新选择阈值；剩余四个成员中的两个仍在 seed `20260803` 训练，另外两个等待其
+训练完成，因此没有提前生成矩阵汇总或路线结论。
+
+本轮工具复核结果为：benchmark 回归套件 `39 tests, OK`，`build_artifact_manifest.py --self-test`
+通过，M4/M5/M11 队列脚本 Bash 语法检查和 `git diff --check` 通过。M11 少样本 `retry3` 已记录到
+epoch `37/40`，当前 epoch 的非有限 loss 和梯度跳过均为 `0`；M4 的两个 seed-20260803 运行成员仍
+保持正常 GPU 计算。上述检查只缩短后续评估等待，不改变 M4、M5、M10 或 M13 的质量门状态。
