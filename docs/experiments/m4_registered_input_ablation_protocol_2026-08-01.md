@@ -120,8 +120,9 @@ CUDA_VISIBLE_DEVICES=1 conda run --no-capture-output -n slm_pvs \
 启动时尚无指标结论；必须等待 `calibration_ready_summary.json` 和 `best.pt` 生成后，才可把该成员纳入
 M4 比较。其余变体和随机种子仍需使用不同的稳定输出目录，不能复用该目录或把中间 checkpoint 当成正式结果。
 
-矩阵收尾脚本已在 `formal_m4_matrix` tmux 会话启动，当前等待 HKUST 主线、Metropolis 主线和已登记的
-AABB+ray 训练退出；它尚未启动新的消融训练，也尚无正式指标。
+矩阵收尾脚本已在 `formal_m4_matrix` tmux 会话启动。启动初期它等待 HKUST 主线、Metropolis 主线和已登记的
+AABB+ray 训练退出，当时尚未启动新的消融训练，也没有正式指标；当前进度以本节下方的
+“2026-08-02 当前执行状态”为准。
 
 ## 2026-08-02 当前执行状态
 
