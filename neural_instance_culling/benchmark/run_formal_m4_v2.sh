@@ -195,4 +195,11 @@ PYTHONDONTWRITEBYTECODE=1 conda run --no-capture-output -n "$ENV_NAME" python -u
   --route "$BENCH_ROOT/m4_formal_route_decision_v2.json" \
   >"$V2_ROOT/schema_validation.log" 2>&1
 
+PYTHONDONTWRITEBYTECODE=1 conda run --no-capture-output -n "$ENV_NAME" python -u \
+  neural_instance_culling/benchmark/write_m4_formal_matrix_v2_report.py \
+  --summary "$V2_ROOT/summary.json" \
+  --route "$BENCH_ROOT/m4_formal_route_decision_v2.json" \
+  --output "docs/evaluation/m4_formal_matrix_validation_v2_2026-08-03.md" \
+  >"$V2_ROOT/report_stdout.log" 2>"$V2_ROOT/report_stderr.log"
+
 printf '[m4-v2] complete: %s\n' "$V2_ROOT/summary.json"
