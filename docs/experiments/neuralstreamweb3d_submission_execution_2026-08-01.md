@@ -536,6 +536,18 @@ M11 Metropolis 少样本 `retry3` 的 1% 适配已完成 40 epoch、校准和冻
 通过。该检查只证明当前协议与工具链没有回归，不改变 M4、M5、M10 或 M13 的质量门状态。工作区保持干净，
 默认模型、前端资产、阈值和 `66°` 模型查询 / `60°` 真实渲染 FOV 口径均未改变。
 
+### 2026-08-02 M4 路线判定工具补齐
+
+为避免在三种子矩阵完成后凭人工阅读选择贡献路线，新增
+`neural_instance_culling/benchmark/decide_m4_route.py`。它只读取完整的
+`m4_formal_matrix_validation_summary.json`，要求摘要明确标记为 validation-only、包含三种子和完整变体，
+然后按预注册规则检查完整模型相对 `geometry_context_ray` 的 useful-cull 增益是否至少 `0.02` 且 paired
+bootstrap 95% CI 下界大于 `0`。M4 摘要当前尚未完整生成，因此本节不提前写入路线 A/B 结果。
+
+工具同时明确记录图像/字节替代门尚未包含在 M4 矩阵中，不能从 useful-cull 数字推断下载收益；它拒绝 test-derived
+摘要，输出摘要 SHA-256、阈值来源边界和 `testRead=false`。新增 3 个单元测试通过，formal M4 evaluator 已
+接入该工具作为矩阵汇总后的只读步骤。
+
 ### 2026-08-02 NeuralPVS 官方实现事实更正
 
 复核临时审计副本 `946088616cad18de81cde12fecd6ab204e52eac9` 后，修正文档中“公开资料不足以复现”的表述。
