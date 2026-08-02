@@ -761,3 +761,31 @@ python -m py_compile run_m5_visual_safety_image_evaluation.py  # OK
 M5 图像或 schema 输出，已在不触碰 M4/M11 训练、不覆盖任何结果的前提下重启同名 tmux 等待器；新进程使用
 `db06a8e` 中的 p95 汇总实现，日志继续写入
 `neural_instance_culling/benchmark/out/m5_visual_safety_image_evaluation_queue.log`。
+
+### 2026-08-02 全程训练稳定性审计工具
+
+此前对 AMP 训练的检查容易只读取最后一个 epoch，从而把早期已经跳过的非有限梯度更新误报为零。新增
+`neural_instance_culling/benchmark/audit_training_stability.py` 和对应的
+`test_training_stability_audit.py`，对完整 `train_history.json` 逐 epoch 累加非有限 loss、非有限梯度跳过次数，
+检查所有数值指标是否有限，并按 `pass / warning / fail` 输出可复核状态。`warning` 表示训练器跳过了非有限梯度但
+没有记录非有限 loss；它不能被写成“全程无异常”，若需要该表述必须使用独立的 FP32 重跑证据。工具不修改
+checkpoint、阈值、候选集合或默认模型。
+
+本次对当前 M4/M11 历史做了只读审计：M4 已完成的 13 个成员均为 `pass`，非有限 loss 和梯度跳过累计均为 `0`；
+M4 seed `20260803` 的 `geometry_context_proxy_ray_no_inhibition` 和 `full` 仍在训练，当前分别记录到约第
+`8/40` 和 `14/40` 个 epoch，因此不提前宣称完整稳定性。M11 Metropolis 少样本 1% 已完成 40 epoch，累计跳过
+`17` 个 AMP 非有限梯度更新、非有限 loss 为 `0`；5% 当前约第 `27/40` 个 epoch，累计跳过 `14` 次、非有限
+loss 为 `0`。这两项标为 `warning`，原始训练日志和逐 epoch 计数继续保留，M11 10% 仍按队列等待 5% 完成。
+
+验证命令：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 conda run --no-capture-output -n slm_pvs \
+  python -m unittest neural_instance_culling.benchmark.tests.test_training_stability_audit -v
+bash -n neural_instance_culling/benchmark/run_formal_m4_ablation_matrix.sh
+bash -n neural_instance_culling/benchmark/run_formal_m4_validation_evaluations.sh
+```
+
+结果为稳定性审计单元测试 `3 tests, OK`，两个正式队列脚本语法检查通过。移动端仍保持
+`No-Go / 真实设备证据缺失`；设备到位前只执行并维护 `docs/frontend/m10_device_benchmark_2026-08-01.md` 中的
+预注册方案，不用 SwiftShader、模拟器或服务器 GPU 结果填充移动端性能分布。
