@@ -592,3 +592,11 @@ M10 仍为 `No-Go / 真实 Android、ADB 和硬件 WebGPU 证据缺失`。移动
 `neural_instance_culling/benchmark/out/formal_m4_eval_retry1.log`。该脚本会复用已有干预结果，只等待缺失的
 seed-20260803 成员；矩阵完整后仍使用新的 bad-cull 安全路线判定逻辑，明确传入最大允许增量 `0.002`。
 本次恢复不重跑训练、不读取 test、不覆盖旧日志，旧会话退出作为执行故障保留。
+
+## 2026-08-02 移动端环境核验补充
+
+再次核验移动端执行条件：当前服务器未安装 `adb`，没有实体 Android 设备、Android SDK 或可确认的硬件
+WebGPU 适配器，因此 M10 仍不能进入实测阶段。Playwright 实际位于 `slm2viewer/node_modules`，只能支持
+桌面浏览器 smoke；它不能替代 Android Chrome 的硬件适配器、功耗、温度和长帧证据。移动端仍按
+`docs/frontend/m10_device_benchmark_2026-08-01.md` 中冻结的设备、轨迹、缓存、候选规模和统计方案执行，
+缺失条件只报告为证据缺失，不填充性能数字。

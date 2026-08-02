@@ -19,7 +19,9 @@
 - 没有 Android 设备、ADB、Android SDK 或两个性能档位。
 - 没有正式冷缓存/温缓存、多轨迹、候选规模分桶和真实网络轨迹。
 - 现有采集器没有稳定分离空间候选生成、GPU dispatch、readback、GLB 解码/上传、矩阵更新、主线程附加时间、帧时间、峰值内存和能耗。
-- `playwright` 在当前 node_modules 可用，但尚未作为 fresh clone 的明确依赖冻结。
+- 当前服务器没有 `adb`，无法连接真实 Android 设备；Playwright 可从
+  `slm2viewer/node_modules` 使用，fresh clone 仍必须按项目锁文件安装依赖，不能把服务器现有
+  的浏览器环境当作移动端测试环境。
 
 ## 门控判断
 
