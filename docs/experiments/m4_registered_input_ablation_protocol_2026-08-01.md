@@ -78,7 +78,7 @@ M4 的主比较以 `geometry + context + ray` 为代理增量母基线，按相�
 在正式矩阵摘要生成前，固定以下路线判定，不读取 test，也不在结果出来后改变阈值或比较口径：
 
 1. 主代理增量比较固定为 `full - geometry_context_ray`；两个变体各自使用自身 calibration 冻结的安全工作点，验证 pose 必须逐 pose 对齐。
-2. 路线 A（保留方向代理独立贡献）要求 `useful_cull` 的三种子分层配对 bootstrap 平均增益至少 `+0.02`，且 95% 区间下界大于 `0`。两个模型都必须满足 weighted recall 安全校准规则；若完整模型的 `bad_cull` 或 miss-pixel 明显恶化，路线 A 仍不能成立。
+2. 路线 A（保留方向代理独立贡献）要求 `useful_cull` 的三种子分层配对 bootstrap 平均增益至少 `+0.02`，且 95% 区间下界大于 `0`；同时要求完整模型相对母基线的 `bad_cull` 增量及其 95% 区间上界都不超过预注册的 `+0.002`。两个模型都必须满足 weighted recall 安全校准规则；M4 摘要不包含图像指标，因此 miss-pixel 仍需由 M5 单独门控，不能由 M4 路线工具推断。
 3. 若路线 A 条件不满足，采用路线 B：以 `geometry_context_ray` 作为主可见性架构，方向代理只作为固定场景表征中的辅助消融，不声称其具有独立因果收益。该决定不通过降低阈值、候选补入或前端白名单修正。
 4. `geometry_context_proxy_ray_no_inhibition` 只用于区分“代理输入”和“显式抑制头”的作用，不能替代 `geometry_context_ray` 母基线；`aabb_ray` 和 `geometry_ray` 用于报告逐级输入增益。
 

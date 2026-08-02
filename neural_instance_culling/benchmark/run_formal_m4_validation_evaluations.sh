@@ -105,5 +105,6 @@ PYTHONDONTWRITEBYTECODE=1 conda run --no-capture-output -n "$ENV_NAME" python -u
   --summary "$BENCH_ROOT/m4_formal_matrix_validation_summary.json" \
   --output "$BENCH_ROOT/m4_formal_route_decision.json" \
   --markdown "$BENCH_ROOT/m4_formal_route_decision.md" \
+  --bad-cull-max-delta 0.002 \
   >"$BENCH_ROOT/m4_formal_route_decision.log" 2>&1
 printf '[formal-m4-eval] route decision completed\n'

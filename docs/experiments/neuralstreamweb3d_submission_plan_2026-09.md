@@ -360,7 +360,7 @@ geometry + context + proxy + ray，不含显式 inhibition
 
 所有变体独立在 calibration 按同一安全规则选择阈值。不能共享当前 `0.64`，也不能用 test 为每个变体找最优点。记录基础可见性 logit、代理门控熵、抑制量分布和最终 logit 变化，避免只从最终指标猜测分支是否工作。
 
-代理贡献的 Go 条件为：相对 `geometry + context + ray`，完整模型在安全约束下至少提高 useful cull 2 个百分点，或达到相同图像效用时减少 10% 下载字节，并且三种子 paired bootstrap 95% 置信区间不跨零。未达到时执行路线 B。
+代理贡献的 Go 条件为：相对 `geometry + context + ray`，完整模型在安全约束下至少提高 useful cull 2 个百分点，且三种子 paired bootstrap 95% 置信区间下界大于零；同时 `bad cull` 增量及其区间上界均不超过预注册的 `+0.002`。若 M5 已有同预算图像/字节证据，也可使用达到相同图像效用时减少 10% 下载字节且区间不跨零的替代门。未达到时执行路线 B。
 
 ### 8.2 损失与任务头实验
 
