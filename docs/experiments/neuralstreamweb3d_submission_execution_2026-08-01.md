@@ -800,3 +800,10 @@ bash -n neural_instance_culling/benchmark/run_formal_m4_validation_evaluations.s
 恢复后的队列仍只接受结构化的 validation-only M4 路线文件和完整 M11 5%/10% 队列完成标记，随后才按预注册的
 4 个视觉安全变体、3 个 seed 启动训练；没有改变候选集合、阈值、GPU 分配或质量门。该恢复属于执行编排修复，
 不构成 M5 结果，也不提前改变 M4/M5 路线判断。
+
+同一轮复核还发现 `formal_m4_eval` 等待器在最后两个 checkpoint 生成前退出，旧日志末尾同样为
+`Terminated`，但没有启动评估子进程，也没有写出部分汇总。已在同名 tmux 会话重新启动
+`run_formal_m4_validation_evaluations.sh`，日志追加到
+`neural_instance_culling/benchmark/out/formal_m4_eval_retry2.log`。该脚本会复用已有的 validation
+interventions，仅等待缺失的两个校准产物，随后执行 15 个 validation 评估、预注册路线判定和摘要哈希校验；
+它不读取 test，也不重新训练或覆盖已有输出。
