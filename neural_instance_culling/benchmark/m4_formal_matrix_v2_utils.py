@@ -422,20 +422,23 @@ def bootstrap_effects_by_scope(
     metric_names = tuple(metric_names)
     for scope in ("pose_macro", "aggregate"):
         per_metric: dict[str, Any] = {}
+        # Shape: [original seed, outer seed-draw position, replicate].
+        # The second axis gives independent inner pose resamples when the
+        # same seed is selected more than once by the outer cluster bootstrap.
         per_variant_sample: dict[str, dict[str, np.ndarray]] = {}
         observed: dict[str, dict[str, float]] = {}
         for variant in effect_terms:
-            per_variant_sample[variant] = {metric: np.empty((len(SEEDS), replicates), dtype=np.float64) for metric in metric_names}
+            per_variant_sample[variant] = {metric: np.empty((len(SEEDS), len(SEEDS), replicates), dtype=np.float64) for metric in metric_names}
             observed[variant] = {}
             for seed_index, model_seed in enumerate(SEEDS):
                 rows = members[(variant, model_seed)]["rows"]
                 # The pose resample stream is shared by every variant in this
                 # seed.  Including ``variant`` here would turn a paired
                 # bootstrap into independent resampling and inflate the CI.
-                sampled = _scope_metric_arrays(rows, scope, replicates, stable_seed(seed, scope, model_seed))
+                sampled = _scope_metric_arrays(rows, scope, replicates * len(SEEDS), stable_seed(seed, scope, model_seed))
                 full = summarize_rows(rows.values(), lcb_replicates=0)["poseMacro" if scope == "pose_macro" else "aggregate"]
                 for metric in metric_names:
-                    per_variant_sample[variant][metric][seed_index] = sampled[metric]
+                    per_variant_sample[variant][metric][seed_index] = sampled[metric].reshape(len(SEEDS), replicates)
                     observed[variant][metric] = float(full[metric])
         cluster_rng = np.random.default_rng(stable_seed(seed, scope, "seed_cluster"))
         selected = cluster_rng.integers(0, len(SEEDS), size=(replicates, len(SEEDS)), endpoint=False)
@@ -443,10 +446,14 @@ def bootstrap_effects_by_scope(
             boot_values: dict[str, np.ndarray] = {}
             for variant in effect_terms:
                 values = per_variant_sample[variant][metric]
-                # ``selected[r, s]`` chooses the seed cluster for bootstrap
-                # replicate r; the second index keeps the same pose-resample
-                # replicate r instead of materializing an R-by-S-by-R tensor.
-                boot_values[variant] = values[selected, np.arange(replicates)[:, None]].mean(axis=1)
+                # ``selected[r, s]`` chooses the original seed for outer
+                # draw position s.  The position axis and replicate axis pick
+                # an independently generated inner pose resample.
+                boot_values[variant] = values[
+                    selected,
+                    np.arange(len(SEEDS))[None, :],
+                    np.arange(replicates)[:, None],
+                ].mean(axis=1)
             samples = sum(float(coefficient) * boot_values[variant] for variant, coefficient in effect_terms.items())
             mean_delta = sum(float(coefficient) * observed[variant][metric] for variant, coefficient in effect_terms.items())
             ci = [float(np.quantile(samples, 0.025)), float(np.quantile(samples, 0.975))]
@@ -480,14 +487,14 @@ def bootstrap_all_effects_by_scope(
         sampled_values: dict[str, dict[str, np.ndarray]] = {}
         observed: dict[str, dict[str, float]] = {}
         for variant in variants:
-            sampled_values[variant] = {metric: np.empty((len(SEEDS), replicates), dtype=np.float64) for metric in metric_names}
+            sampled_values[variant] = {metric: np.empty((len(SEEDS), len(SEEDS), replicates), dtype=np.float64) for metric in metric_names}
             observed[variant] = {}
             for seed_index, model_seed in enumerate(SEEDS):
                 rows = members[(variant, model_seed)]["rows"]
-                sampled = _scope_metric_arrays(rows, scope, replicates, stable_seed(seed, scope, model_seed))
+                sampled = _scope_metric_arrays(rows, scope, replicates * len(SEEDS), stable_seed(seed, scope, model_seed))
                 full = summarize_rows(rows.values(), lcb_replicates=0)["poseMacro" if scope == "pose_macro" else "aggregate"]
                 for metric in metric_names:
-                    sampled_values[variant][metric][seed_index] = sampled[metric]
+                    sampled_values[variant][metric][seed_index] = sampled[metric].reshape(len(SEEDS), replicates)
                     observed[variant][metric] = float(full[metric])
         cluster_rng = np.random.default_rng(stable_seed(seed, scope, "seed_cluster"))
         selected = cluster_rng.integers(0, len(SEEDS), size=(replicates, len(SEEDS)), endpoint=False)
@@ -497,7 +504,11 @@ def bootstrap_all_effects_by_scope(
                 mean_delta = 0.0
                 for variant, coefficient in terms.items():
                     values = sampled_values[variant][metric]
-                    samples += float(coefficient) * values[selected, np.arange(replicates)[:, None]].mean(axis=1)
+                    samples += float(coefficient) * values[
+                        selected,
+                        np.arange(len(SEEDS))[None, :],
+                        np.arange(replicates)[:, None],
+                    ].mean(axis=1)
                     mean_delta += float(coefficient) * observed[variant][metric]
                 ci = [float(np.quantile(samples, 0.025)), float(np.quantile(samples, 0.975))]
                 output[effect_name].setdefault("comparisons", {}).setdefault(scope, {})[metric] = {
