@@ -481,3 +481,16 @@ split，未读取 test，也未重新选择阈值；剩余四个成员中的两�
 通过，M4/M5/M11 队列脚本 Bash 语法检查和 `git diff --check` 通过。M11 少样本 `retry3` 已记录到
 epoch `37/40`，当前 epoch 的非有限 loss 和梯度跳过均为 `0`；M4 的两个 seed-20260803 运行成员仍
 保持正常 GPU 计算。上述检查只缩短后续评估等待，不改变 M4、M5、M10 或 M13 的质量门状态。
+
+### 2026-08-02 M4 阈值来源校验修复
+
+对已生成的 M4 validation 输出做结构化审计时发现，汇总器原先把 `thresholdSource` 序列化后进行
+`"test"` 子串匹配。合法的 `calibration_ready_pre_test` 记录本来就包含该单词，导致正式汇总会错误拒绝
+所有 calibration 阈值，形成实验契约层面的阻断。现已在
+`neural_instance_culling/benchmark/summarize_formal_m4_matrix.py` 中改为检查结构化字段：协议必须是
+`calibration_ready_pre_test`、`testEvaluationCount` 必须为 `0`，且不得启用 test threshold override；
+真正的一次性 test 协议会被拒绝。
+
+新增 `test_formal_m4_summary.py` 覆盖合法 pre-test 记录和三种非法 test 来源。新增测试与既有协议测试共
+`7 tests, OK`，并对现有 `11` 个 M4 validation 输出执行了同一 `read_input` 审计。该修复只影响汇总器的
+来源判定，不改变模型、阈值、候选集合或 test 数据。

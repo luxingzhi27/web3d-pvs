@@ -41,6 +41,30 @@ def input_path(root: Path, prefix: str, variant: str, seed: int) -> Path:
     return root / f"{prefix}{experiment_name(variant, seed)}_validation" / "interventions.json"
 
 
+def validate_threshold_provenance(payload: dict[str, Any], path: Path) -> None:
+    """Reject test-derived thresholds using structured provenance fields.
+
+    ``calibration_ready_pre_test`` intentionally contains the word ``test``:
+    it records that the calibration artifact was written before the sealed
+    test run.  A substring search therefore confuses a valid pre-test record
+    with test contamination.
+    """
+    source = payload.get("thresholdSource")
+    if not isinstance(source, dict):
+        raise ValueError(f"M4 validation input lacks structured threshold provenance: {path}")
+    protocol = str(source.get("protocol", ""))
+    if protocol != "calibration_ready_pre_test":
+        raise ValueError(f"M4 validation input has non-calibration threshold provenance: {path}")
+    try:
+        test_count = int(source.get("testEvaluationCount", 0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"M4 validation input has invalid testEvaluationCount: {path}") from exc
+    if test_count != 0:
+        raise ValueError(f"M4 validation input has test-derived threshold provenance: {path}")
+    if bool(source.get("testThresholdOverride", False)):
+        raise ValueError(f"M4 validation input uses a test threshold override: {path}")
+
+
 def read_input(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -49,9 +73,7 @@ def read_input(path: Path) -> dict[str, Any]:
         raise ValueError(f"M4 matrix input must be validation-only: {path}")
     if int(payload.get("posePlan", {}).get("poseCount", 0)) <= 0:
         raise ValueError(f"M4 matrix input has no validation poses: {path}")
-    threshold_source = json.dumps(payload.get("thresholdSource", {}), ensure_ascii=False).lower()
-    if "test" in threshold_source:
-        raise ValueError(f"M4 validation input has test-derived threshold provenance: {path}")
+    validate_threshold_provenance(payload, path)
     baseline = payload.get("interventions", {}).get("baseline")
     rows = payload.get("perPose", {}).get("baseline")
     if not isinstance(baseline, dict) or not isinstance(rows, list) or not rows:
