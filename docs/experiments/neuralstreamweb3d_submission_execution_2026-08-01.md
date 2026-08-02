@@ -518,3 +518,20 @@ recall `0.945077`、pose precision `0.156026`、useful cull `0.279348`、bad cul
 `docs/frontend/m10_device_benchmark_2026-08-01.md`：拿到设备后按高性能/中端两档、三个固定轨迹、冷/温缓存、
 受控 Wi-Fi/4G、`256/512/1k/2k/4k/8k/10k/16k` 候选桶和每条件至少 30 次有效重复执行；先通过 256 候选 schema
 smoke 与 M12 FP16 parity，再进入完整矩阵。缺失设备或缺失候选桶只报告缺失，不能补造统计数字。
+
+### 2026-08-02 11:37 M4/M5/M11 持久任务复核
+
+本次复核以当前文件和进程状态为准，没有停止、重启或修改正在运行的正式任务。M4 消融矩阵已有
+`11/15` 个成员写出 `calibration_ready_summary.json`；seed `20260803` 的
+`geometry_ray` 和 `geometry_context_ray` 仍在 40 epoch 训练，最近分别约为第 `22` 和第 `21` 个 epoch，
+GPU 计算与 checkpoint 更新时间正常，已记录的非有限 loss/gradient 计数为 `0`。M4 validation evaluator
+继续等待这两个成员，尚未生成矩阵汇总，因此方向遮挡代理的路线 A/B 仍未判定。
+
+M11 Metropolis 少样本 `retry3` 的 1% 适配已完成 40 epoch、校准和冻结 test；5% 适配正在第 `2/40` 个 epoch，
+10% 适配尚未启动。5% 当前没有非有限 loss，训练过程仍使用预注册的 AMP 参数；最终报告会保留每个 epoch 的
+梯度跳过统计，不把单个 epoch 的计数误写成全程累计值。M5 修复训练和共享浏览器图像评价分别等待正式 M4/M11
+会话结束，尚未生成新的修复 checkpoint 或图像汇总。
+
+本轮重新执行 benchmark 回归套件，结果为 `43 tests, OK`；M4/M5/M11 队列 Bash 检查和 `git diff --check`
+通过。该检查只证明当前协议与工具链没有回归，不改变 M4、M5、M10 或 M13 的质量门状态。工作区保持干净，
+默认模型、前端资产、阈值和 `66°` 模型查询 / `60°` 真实渲染 FOV 口径均未改变。
