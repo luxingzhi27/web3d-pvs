@@ -1,7 +1,7 @@
 # M11 航向泛化与跨场景适配协议
 
 日期：2026-08-01
-状态：航向数据划分已生成，方向遮挡证据正在重建；正式训练和跨场景适配尚未完成。
+状态：航向数据划分与方向遮挡证据已生成；Metropolis 少样本 1% `retry3` 正在训练，5%/10% 尚未启动，正式泛化汇总尚未完成。
 
 ## 目的
 
@@ -107,12 +107,16 @@ view-cell 子集。选中的训练 pose 数量和摘要会写入 `protocolSplit`
 该选项被重采样或缩减。默认 `--train-pose-fraction 1.0` 和不带 `--allow-scene-transfer` 的行为
 保持原有同场景训练语义。
 
-已登记 Metropolis 少样本队列 `tmux m11_metropolis_fewshot`，入口为
+已登记 Metropolis 少样本队列 `tmux m11_metropolis_fewshot_retry3`，入口为
 `neural_instance_culling/benchmark/run_m11_metropolis_fewshot.sh`。队列等待 HKUST 方向模型完成最终
 calibration 后，在 GPU 3 上依次运行 1%、5%、10% 三个独立输出目录，并在每个模型自身的 calibration
 安全时生成 frozen manifest 和一次完整 test；不安全的比例只保留训练/校准失败证据并继续后续比例。
 该队列尚未产生正式指标，运行日志写入 `neural_instance_culling/benchmark/out/m11_metropolis_fewshot_queue.log`
 及各实验目录，不能把队列启动状态当成泛化结果。
+
+截至 2026-08-02，1% 适配使用单 pose 训练批次、AMP 和较小的离线特征导出批次，训练记录中的非有限 loss/gradient
+跳过计数均为 `0`；只有该比例完成自身 calibration 后，队列才会顺序进入 5% 和 10%。此前资源缓存粒度错误和
+`retry2` 显存不足的失败目录均保留，不纳入正式结果。
 
 ## 2026-08-02 资源语义修正与零样本迁移结果
 
