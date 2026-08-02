@@ -807,3 +807,14 @@ bash -n neural_instance_culling/benchmark/run_formal_m4_validation_evaluations.s
 `neural_instance_culling/benchmark/out/formal_m4_eval_retry2.log`。该脚本会复用已有的 validation
 interventions，仅等待缺失的两个校准产物，随后执行 15 个 validation 评估、预注册路线判定和摘要哈希校验；
 它不读取 test，也不重新训练或覆盖已有输出。
+
+### 2026-08-02 16:01 M4/M11 长任务状态核验
+
+再次以进程、GPU 计算和训练历史为准核验，没有停止或迁移正式任务。M4 矩阵仍有 `13/15` 个成员具备校准摘要；
+seed `20260803` 的 `full` 成员已记录到约 `16/40` 个 epoch，
+`geometry_context_proxy_ray_no_inhibition` 已记录到约 `9/40` 个 epoch，二者均未记录非有限 loss 或梯度跳过。
+最后两个成员仍在 CUDA 上运行，M4 validation 汇总和路线文件尚未生成，评估器继续等待校准产物。
+
+M11 Metropolis 5% 少样本适配已记录到约 `29/40` 个 epoch，使用预注册的 AMP 和逐 pose 显存配置；当前 epoch 的
+训练记录没有非有限 loss，历史累计梯度跳过数仍按全程审计口径保留。10% 适配尚未启动，M5 修复矩阵和图像评价
+继续停在依赖门之前。该核验没有读取 test、改变阈值或新增实验。
