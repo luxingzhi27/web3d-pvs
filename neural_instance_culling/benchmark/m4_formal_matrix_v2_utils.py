@@ -429,7 +429,10 @@ def bootstrap_effects_by_scope(
             observed[variant] = {}
             for seed_index, model_seed in enumerate(SEEDS):
                 rows = members[(variant, model_seed)]["rows"]
-                sampled = _scope_metric_arrays(rows, scope, replicates, stable_seed(seed, scope, variant, model_seed))
+                # The pose resample stream is shared by every variant in this
+                # seed.  Including ``variant`` here would turn a paired
+                # bootstrap into independent resampling and inflate the CI.
+                sampled = _scope_metric_arrays(rows, scope, replicates, stable_seed(seed, scope, model_seed))
                 full = summarize_rows(rows.values(), lcb_replicates=0)["poseMacro" if scope == "pose_macro" else "aggregate"]
                 for metric in metric_names:
                     per_variant_sample[variant][metric][seed_index] = sampled[metric]
@@ -481,7 +484,7 @@ def bootstrap_all_effects_by_scope(
             observed[variant] = {}
             for seed_index, model_seed in enumerate(SEEDS):
                 rows = members[(variant, model_seed)]["rows"]
-                sampled = _scope_metric_arrays(rows, scope, replicates, stable_seed(seed, scope, variant, model_seed))
+                sampled = _scope_metric_arrays(rows, scope, replicates, stable_seed(seed, scope, model_seed))
                 full = summarize_rows(rows.values(), lcb_replicates=0)["poseMacro" if scope == "pose_macro" else "aggregate"]
                 for metric in metric_names:
                     sampled_values[variant][metric][seed_index] = sampled[metric]
