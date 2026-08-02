@@ -1,7 +1,7 @@
 # M11 航向泛化与跨场景适配协议
 
-日期：2026-08-01
-状态：航向数据划分与方向遮挡证据已生成；Metropolis 少样本 1% `retry3` 已完成冻结 test，5%/10% 已按同一协议排队，正式泛化汇总尚未完成。
+日期：2026-08-01（2026-08-02 更新）
+状态：航向数据划分与方向遮挡证据已生成；Metropolis 少样本 1% 和 5% `retry3` 已完成冻结 test，10% 正在训练，正式泛化汇总尚未完成。
 
 ## 目的
 
@@ -215,4 +215,22 @@ FOV 为 `60°`，候选集合采用严格存储候选语义，冻结阈值来自
 在 1% frozen test 完成后，队列脚本支持通过 `SLM_M11_FEWSHOT_LABELS=5pct,10pct` 从指定比例继续执行，避免
 重复训练已完成的 1%。5% 和 10% 使用独立输出目录、同一目标场景、同一 `rvl_strong_v2`、40 epoch、相同
 calibration 安全规则和完整 test 一次性规则；当前队列会话为 `m11_metropolis_fewshot_5_10`，日志为
-`neural_instance_culling/benchmark/out/m11_metropolis_fewshot_5_10_queue.log`，完成前不记录为正式泛化结果。
+`neural_instance_culling/benchmark/out/m11_metropolis_fewshot_5_10_queue.log`。
+
+### 2026-08-02 5% 适配冻结 test
+
+5% 适配已完成 40 epoch、独立 calibration 和一次完整 frozen test。其训练子集为 1,023 个 pose，validation、
+calibration、test 分别为 1,149、2,271、2,271 个 pose；test 使用唯一 pose digest `dd157d2252edf65b`。
+冻结阈值为 `0.05000000074505806`，来自 calibration，test 没有扫描阈值。完整指标报告见
+`docs/evaluation/m11_metropolis_fewshot_5pct_frozen_test_2026-08-02.md`。
+
+| 指标 | 5% frozen test |
+|---|---:|
+| weighted recall | 0.990595 |
+| pose recall / precision | 0.947238 / 0.307265 |
+| useful cull / bad cull | 0.626039 / 0.005463 |
+| 平均 candidate / GT / prediction | 11,481.53 / 1,046.06 / 3,504.58 |
+
+稳定性审计为 `warning`：非有限 loss 和非有限指标均为 0，但完整训练历史累计 19 次 AMP 非有限梯度跳过，
+不能宣称“全程无异常”。该结果满足 weighted-recall 安全约束，普通 pose recall 略低于 0.95；它只支持有限的
+5% 目标场景适配结论，不代表 M11 总门通过。10% 适配已在同一队列中启动，完成后再比较适配比例与有效剔除收益。

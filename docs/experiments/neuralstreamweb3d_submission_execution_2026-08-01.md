@@ -853,3 +853,22 @@ SHA-256，并核对文件字节数和 `testEvaluationCount=1`。结果为 `pass`
 `complete`。该结果只通过完整离线成本索引子门；索引来自 headless Chrome 的 SwiftShader/WebGL 路径，真实网络、
 移动设备解码/上传、图像效用和多种子配对调度门仍未通过。相关口径已同步到
 `docs/experiments/m7_m8_trajectory_replay_2026-08-01.md`。
+
+### 2026-08-02 17:45 M11 5% 少样本冻结评测
+
+Metropolis 5% 少样本适配 `pvs_m11_fewshot_5pct_metropolis_yaw20_rvl_strong_v2_full40_seed20260801_retry3` 已完成 40
+epoch、独立 calibration 和一次完整 frozen test。训练只使用目标场景原生 train split 的 1,023 个适配 pose；
+validation/calibration/test 保持完整，test 遍历 2,271 个唯一 pose，阈值 `0.05000000074505806` 仅来自
+calibration，`testEvaluationCount=1`，候选集合仍为严格保存候选。
+
+关键结果为：weighted recall `0.990595`、pose recall `0.947238`、pose precision `0.307265`、useful cull
+`0.626039`、bad cull `0.005463`，平均 candidate/GT/prediction 为 `11,481.53/1,046.06/3,504.58`，平均
+候选/预测 GLB 字节为 `137.04/30.94 MB`。这满足 weighted-recall 安全约束，普通 recall 略低于 `0.95`，但
+useful cull 显著高于 1% 适配的 `0.279348`，支持“少样本适配比例增加可以恢复部分目标场景剔除能力”的有限
+结论。
+
+完整训练稳定性审计结果为 `warning`：40 epoch、36,000 steps，非有限 loss 和非有限指标均为 0，但累计 19
+次 AMP 非有限梯度跳过，不能写成“全程无异常”。原始 checkpoint、manifest、test summary 和审计文件分别保留在
+模型输出、`neural_instance_culling/benchmark/out/` 和
+`docs/evaluation/m11_metropolis_fewshot_5pct_frozen_test_2026-08-02.md` 中。10% 适配已经由同一队列启动；
+M11 总质量门、按航向分层结果和最终 M13 主表仍未完成。
