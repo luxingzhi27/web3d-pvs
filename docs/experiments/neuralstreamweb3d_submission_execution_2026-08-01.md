@@ -418,6 +418,18 @@ M11 Metropolis 1% 少样本适配 `retry3` 约完成第 `7/40` 个 epoch，非�
 等待 M4 完整矩阵，随后只在固定 validation/calibration 规则下执行汇总，再按预注册门限决定是否保留
 完整方向遮挡代理路线。
 
+### 2026-08-02 M5/M11 队列会话口径修正
+
+复核 M5 视觉安全修复队列时发现，脚本等待列表使用了旧的无后缀会话名
+`m11_metropolis_fewshot`，而当前正式少样本任务实际运行在
+`m11_metropolis_fewshot_retry3`。tmux 的唯一前缀匹配使现有进程暂时仍能等待到该任务，但这一行为依赖
+会话命名唯一性，不适合作为可复现的实验门控。已将 `run_m5_visual_safety_repair.sh` 改为显式等待
+`m11_metropolis_fewshot_retry3`，并同步更新 M5/M11 协议文档和当前状态说明。
+
+本次修改只修正队列资源依赖，不停止或重启 M4/M11，不改变 GPU 分配、数据、训练参数、阈值或输出目录。
+已执行 `bash -n neural_instance_culling/benchmark/run_m5_visual_safety_repair.sh` 和
+`git diff --check`；修改已提交并推送，提交为 `4efff64`（队列脚本）和 `917c071`（M11 文档）。
+
 ### 2026-08-02 M4/M11 长任务进度更新
 
 后续轮询显示 M4 已完成第二个正式 seed 的全部五个变体，当前共有 `10/15` 个
