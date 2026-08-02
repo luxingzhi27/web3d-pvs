@@ -600,3 +600,17 @@ WebGPU 适配器，因此 M10 仍不能进入实测阶段。Playwright 实际位
 桌面浏览器 smoke；它不能替代 Android Chrome 的硬件适配器、功耗、温度和长帧证据。移动端仍按
 `docs/frontend/m10_device_benchmark_2026-08-01.md` 中冻结的设备、轨迹、缓存、候选规模和统计方案执行，
 缺失条件只报告为证据缺失，不填充性能数字。
+
+## 2026-08-02 12:46 Benchmark 回归复核
+
+在不改变正在运行的 M4/M11 训练、评测队列、数据、阈值或前端资产的前提下，重新执行：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 conda run --no-capture-output -n slm_pvs \
+  python -m unittest discover \
+  -s neural_instance_culling/benchmark/tests -p 'test*.py' -v
+```
+
+结果为 `48 tests, OK`。本轮覆盖 M4 路线 bad-cull 安全门、冻结 test 阈值来源、少样本训练划分重建、
+实例级 Color-ID 渲染 schema、候选集合语义、HZB 查询和视觉安全损失。该结果只证明代码契约与回归
+测试通过，不替代 M4 配对 validation 汇总、M5 图像质量门、M11 少样本冻结 test 或 M13 one-shot test。
