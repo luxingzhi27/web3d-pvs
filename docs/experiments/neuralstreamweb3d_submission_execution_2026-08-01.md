@@ -712,3 +712,20 @@ run_formal_m4_ablation_matrix.sh: line 143: unexpected EOF while looking for mat
 `formal_m4_eval` 仍在等待它们的校准产物；因此当前不能把 M4 判定为完成，也不能生成路线结论。
 当前工作树中的脚本通过 `bash -n`，异常根因尚未在不影响运行子进程的前提下确定。完成后将审计 15 个成员、
 评测器退出状态和 stale tmux 会话，并把任何恢复动作单独记录；不覆盖已有 checkpoint 或重跑已完成成员。
+
+### 2026-08-02 15:06 M4/M11 队列与移动端方案复核
+
+本轮没有停止或重启正式任务。M4 seed `20260803` 的五个成员中，`aabb_ray`、`geometry_ray` 和
+`geometry_context_ray` 已完成 40 epoch 并写出校准摘要；`geometry_context_proxy_ray_no_inhibition`
+处于第 `5/40` 个 epoch，`full` 处于第 `9/40` 个 epoch。因此正式 M4 矩阵仍为 `13/15` 个成员具备
+`calibration_ready_summary.json`，validation evaluator 继续等待最后两个成员。当前最后两个训练日志未记录
+新的非有限 loss 或梯度跳过，未读取 test split。
+
+重新执行 benchmark 回归套件，结果为 `50 tests, OK`；M4/M5/M11 队列的 Bash 语法检查和
+`git diff --check` 通过。该回归结果只证明协议实现没有回归，不改变 M4 路线、M5 图像门或 M13
+one-shot test 的状态。
+
+M11 Metropolis 5% 适配处于第 `23/40` 个 epoch，当前 epoch 的非有限 loss/gradient 跳过计数均为 `0`；
+5%/10% 适配尚未完成，M5 修复队列仍按依赖等待。M10 继续保持
+`No-Go / 真实 Android、ADB 和硬件 WebGPU 证据缺失`。移动设备只保留已冻结的预注册方案，不生成
+移动端 p50/p95/p99，占位或桌面 SwiftShader 结果不进入移动性能结论。
