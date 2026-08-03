@@ -80,7 +80,7 @@ def render(summary: dict[str, Any], route: dict[str, Any]) -> str:
         "- 剔除效率：useful cull=TN/candidate，只统计正确剔除的不可见候选；bad cull=FN/candidate，统计错误剔除的真实可见候选。",
         "- 资源诊断：平均预测数、预测/候选、预测/GT。GLB 字节、像素和浏览器延迟必须有同位姿的额外证据，不能由 useful cull 推断。",
         "",
-        "## 成员结果",
+        "## 成员结果：pose 宏平均",
         "",
         "| 变体 | seed | 阈值 | pose recall | weighted recall | weighted LCB | pose precision | pose F1 | pose accuracy | balanced accuracy | useful cull | bad cull | 平均预测数 |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
@@ -93,7 +93,29 @@ def render(summary: dict[str, Any], route: dict[str, Any]) -> str:
             f"{f(macro['f1'])} | {f(macro['accuracy'])} | {f(macro['balanced_accuracy'])} | {f(macro['useful_cull'])} | "
             f"{f(macro['bad_cull'])} | {f(macro['avg_pred_count'], 2)} |"
         )
-    lines.extend(["", "校准诊断工作点（best F1、最高 precision、原始冻结阈值）保存在汇总 JSON 的 `calibrationWorkpoint.diagnosticWorkpoints` 中；它们不是安全主工作点。", ""])
+    lines.extend([
+        "",
+        "## 成员结果：aggregate",
+        "",
+        "aggregate 先合并全部 validation pose 的 TP、FP、FN、TN 和可见重要性权重，再计算比例；它不是 pose 宏平均的替代口径。",
+        "",
+        "| 变体 | seed | 阈值 | aggregate recall | aggregate weighted recall | aggregate weighted LCB | aggregate precision | aggregate F1 | aggregate accuracy | aggregate balanced accuracy | aggregate useful cull | aggregate bad cull | 平均预测数 |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ])
+    for record in member_rows(summary):
+        aggregate = record["aggregate"]
+        lines.append(
+            f"| `{record['variant']}` | {record['seed']} | {f(record['threshold'], 8)} | {f(aggregate['recall'])} | "
+            f"{f(aggregate['weighted_recall'])} | {f(aggregate['weighted_recall_lower_confidence_bound'])} | {f(aggregate['precision'])} | "
+            f"{f(aggregate['f1'])} | {f(aggregate['accuracy'])} | {f(aggregate['balanced_accuracy'])} | {f(aggregate['useful_cull'])} | "
+            f"{f(aggregate['bad_cull'])} | {f(aggregate['avg_pred_count'], 2)} |"
+        )
+    lines.extend([
+        "",
+        "校准诊断工作点（best F1、最高 precision、原始冻结阈值）保存在汇总 JSON 的 `calibrationWorkpoint.diagnosticWorkpoints` 中；它们不是安全主工作点。",
+        "每个成员的平均 TP、FP、FN、TN、预测/候选和预测/GT 已同时保存在汇总 JSON 的 `poseMacro` 与 `aggregate` 对象中；GLB、像素和浏览器成本若为 `not_available`，不参与路线排名。",
+        "",
+    ])
 
     lines.extend(["## 因子差值与置信区间", "", "以下每项均为右侧因子组合减去左侧因子组合；区间由按 seed 聚类、seed 内按 pose 重采样的 10,000 次 paired bootstrap 得到。", ""])
     for effect_name in FACTOR_EFFECTS:

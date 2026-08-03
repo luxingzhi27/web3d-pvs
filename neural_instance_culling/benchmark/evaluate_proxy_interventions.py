@@ -203,30 +203,34 @@ def load_runtime_meta_from_payload(runtime_meta: dict[str, Any]) -> tuple[np.nda
 
 
 def load_threshold(args: argparse.Namespace) -> tuple[float, dict[str, Any]]:
+    # Keep the helper compatible with small programmatic callers that provide
+    # only the pre-existing threshold arguments instead of a full argparse
+    # namespace.
+    threshold_source = getattr(args, "threshold_source", None)
     if args.threshold is not None:
         threshold = float(args.threshold)
         if not np.isfinite(threshold) or threshold < 0.0 or threshold > 1.0:
             raise ValueError(f"threshold must be in [0, 1], got {args.threshold}")
-        if args.threshold_source is None:
+        if threshold_source is None:
             return threshold, {"source": "explicit_argument", "testThresholdOverride": False}
-        if not args.threshold_source.is_file():
-            raise FileNotFoundError(args.threshold_source)
-        provenance = json.loads(args.threshold_source.read_text(encoding="utf-8"))
+        if not threshold_source.is_file():
+            raise FileNotFoundError(threshold_source)
+        provenance = json.loads(threshold_source.read_text(encoding="utf-8"))
         if provenance.get("protocol") != "calibration_ready_pre_test":
-            raise ValueError(f"{args.threshold_source} is not a calibration-ready provenance record")
+            raise ValueError(f"{threshold_source} is not a calibration-ready provenance record")
         if int(provenance.get("testEvaluationCount", -1)) != 0:
-            raise ValueError(f"{args.threshold_source} contains test evaluation data")
+            raise ValueError(f"{threshold_source} contains test evaluation data")
         if bool(provenance.get("testThresholdOverride", False)):
-            raise ValueError(f"{args.threshold_source} marks a test threshold override")
+            raise ValueError(f"{threshold_source} marks a test threshold override")
         return threshold, {
-            "source": str(args.threshold_source),
+            "source": str(threshold_source),
             "protocol": "calibration_ready_pre_test",
             "testEvaluationCount": 0,
             "checkpoint": provenance.get("checkpoint"),
             "testThresholdOverride": False,
             "m4v2CalibrationSelection": provenance,
         }
-    if args.threshold_source is not None:
+    if threshold_source is not None:
         raise ValueError("--threshold-source requires --threshold")
     if args.eval_summary is not None:
         summary_path = args.eval_summary
