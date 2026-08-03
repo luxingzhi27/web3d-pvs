@@ -884,6 +884,8 @@ def run_true_glb_renderer(
     manifest_samples: list[dict[str, Any]],
     glb_paths: dict[int, Path],
     instance_bindings: dict[str, Any],
+    glb_aabbs: np.ndarray,
+    component_aabbs: np.ndarray,
 ) -> dict[str, Any]:
     # A formal reference is full-scene.  Keep every local GLB in the manifest
     # even though the browser instance-reordering implementation is pending;
@@ -912,6 +914,31 @@ def run_true_glb_renderer(
             "postFilter": "active_camera_60deg_aabb_pending",
         },
         "instanceBindings": instance_bindings,
+        "glbAabbs": {
+            str(global_glb_id): {
+                "min": [float(value) for value in glb_aabbs[global_glb_id, :3]],
+                "max": [float(value) for value in glb_aabbs[global_glb_id, 3:]],
+            }
+            for global_glb_id in selected_glbs
+            if np.any(glb_aabbs[global_glb_id, 3:] > glb_aabbs[global_glb_id, :3])
+        },
+        "componentAabbs": {
+            str(component_id): {
+                "min": [float(value) for value in component_aabbs[component_id, :3]],
+                "max": [float(value) for value in component_aabbs[component_id, 3:]],
+            }
+            for component_id in range(component_aabbs.shape[0])
+            if np.any(component_aabbs[component_id, 3:] > component_aabbs[component_id, :3])
+        },
+        "spatialCulling": {
+            "schema": "aabb-frustum-conservative-v1",
+            "source": "runtimeMeta.globalGlbRecords[].aabb",
+            "purpose": "render_submission_only",
+            "renderFovYDeg": float(RENDER_FOV_Y_DEG),
+            "near": float(args.render_near),
+            "far": 20000.0,
+            "completeInventoryRetained": True,
+        },
         "samples": manifest_samples,
         "previewSamples": int(args.preview_samples),
         "saveIdBuffers": bool(args.save_id_buffers),
@@ -1209,6 +1236,8 @@ def main() -> None:
             true_render_manifest_samples,
             glb_paths,
             instance_bindings,
+            glb_aabbs,
+            world_aabbs,
         )
         image_metrics = render_summary.get("imageMetrics") or {
             "schema": "component-id-image-schema-validation-v1",

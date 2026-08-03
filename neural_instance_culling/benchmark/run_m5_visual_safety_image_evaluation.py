@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Evaluate the registered M5 repair matrix with one shared browser page.
+"""Evaluate the registered M5 repair matrix with bounded browser pages.
 
 Each model/split first produces a component-ID manifest without rendering.  The
-manifests are then combined into one browser batch so the complete local GLB
-inventory is loaded once instead of once per model.  This script never trains,
+manifests are then combined into complete-inventory browser batches. With
+``--chunk-samples`` each bounded page releases decoded GLBs before the next
+chunk while preserving the full local inventory contract. This script never trains,
 scans a threshold, changes candidates, or reads the test split.
 """
 from __future__ import annotations
@@ -53,6 +54,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=180)
     parser.add_argument("--subposes-per-viewcell", type=int, default=1)
     parser.add_argument("--output-name", default="m5_visual_safety_repair_image_batch_20260802")
+    parser.add_argument(
+        "--chunk-samples",
+        type=int,
+        default=16,
+        help="bound each source batch per browser page; zero uses one page for all samples",
+    )
+    parser.add_argument("--chrome-arg", action="append", default=[])
     return parser.parse_args()
 
 
@@ -290,7 +298,11 @@ def write_report(batch_output: Path, batch_manifest: Path, output_root: Path, ex
         )
     lines.extend([
         "",
-        "The browser page loads the complete local GLB inventory once and reuses it across all batches.",
+        (
+            "The renderer retains the complete local GLB inventory contract and uses "
+            "bounded browser pages for asset lifetime; same-camera reference reuse is "
+            "local to each page."
+        ),
         "`visible_weights` remains an importance proxy, not exact pixel coverage.",
     ])
     (output_root / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -340,6 +352,10 @@ def main() -> None:
         "--preview-samples",
         "8",
     ]
+    if args.chunk_samples > 0:
+        command.extend(["--chunk-samples", str(args.chunk_samples)])
+    for chrome_arg in args.chrome_arg:
+        command.extend(["--chrome-arg", str(chrome_arg)])
     run_command(
         command,
         batch_output.parent / f"{batch_output.name}_launcher_stdout.log",

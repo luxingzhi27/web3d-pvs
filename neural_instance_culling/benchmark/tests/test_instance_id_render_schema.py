@@ -105,8 +105,16 @@ def make_fixture(root: Path) -> tuple[dict, dict]:
             {"componentGlobalId": 2, "globalGlbId": 1},
         ],
         "globalGlbRecords": [
-            {"globalGlbId": 0, "componentGlobalIds": [0, 1]},
-            {"globalGlbId": 1, "componentGlobalIds": [2]},
+            {
+                "globalGlbId": 0,
+                "componentGlobalIds": [0, 1],
+                "aabb": {"min": [-2.4, -1.0, -0.1], "max": [2.4, 1.0, 0.1]},
+            },
+            {
+                "globalGlbId": 1,
+                "componentGlobalIds": [2],
+                "aabb": {"min": [-1.0, -1.0, -0.1], "max": [1.0, 1.0, 0.1]},
+            },
         ],
     }
     bindings = build_instance_binding_preflight(runtime_meta, glb_index_path, root)
@@ -123,6 +131,19 @@ def make_fixture(root: Path) -> tuple[dict, dict]:
         "reference": {"mode": "full_scene_renderable_instances", "idSource": "componentGlobalId"},
         "prediction": {"field": "predictionComponentIds", "postFilter": "active_camera_60deg_aabb_pending"},
         "instanceBindings": bindings,
+        "glbAabbs": {
+            "0": {"min": [-2.4, -1.0, -0.1], "max": [2.4, 1.0, 0.1]},
+            "1": {"min": [-1.0, -1.0, -0.1], "max": [1.0, 1.0, 0.1]},
+        },
+        "spatialCulling": {
+            "schema": "aabb-frustum-conservative-v1",
+            "source": "runtimeMeta.globalGlbRecords[].aabb",
+            "purpose": "render_submission_only",
+            "renderFovYDeg": RENDER_FOV_Y_DEG,
+            "near": 0.05,
+            "far": 20000.0,
+            "completeInventoryRetained": True,
+        },
         "samples": [
             {
                 "sampleId": "synthetic-0",
@@ -132,7 +153,16 @@ def make_fixture(root: Path) -> tuple[dict, dict]:
                 "renderFovYDeg": RENDER_FOV_Y_DEG,
                 "modelInputFovYDeg": MODEL_INPUT_FOV_Y_DEG,
                 "predictionComponentIds": [1, 2],
-            }
+            },
+            {
+                "sampleId": "synthetic-1",
+                "cameraPosition": [0.0, 0.0, 6.0],
+                "cameraForward": [0.0, 0.0, -1.0],
+                "aspect": 16.0 / 9.0,
+                "renderFovYDeg": RENDER_FOV_Y_DEG,
+                "modelInputFovYDeg": MODEL_INPUT_FOV_Y_DEG,
+                "predictionComponentIds": [0],
+            },
         ],
         "syntheticComponentIdSmoke": {
             "referenceComponentIds": [0, 1],
@@ -247,6 +277,13 @@ class InstanceIdRenderSchemaTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             _runtime_meta, manifest = make_fixture(root)
+            # Exercise the conservative fail-open contract: one instance in
+            # the instanced GLB has no component AABB, so the renderer must
+            # retain the whole GLB in the reference rather than silently
+            # dropping the unknown instance.
+            manifest["componentAabbs"] = {
+                "0": {"min": [-2.4, -1.0, -0.1], "max": [-0.6, 1.0, 0.1]},
+            }
             manifest_path = root / "manifest.json"
             output_dir = root / "render-output"
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -273,8 +310,16 @@ class InstanceIdRenderSchemaTests(unittest.TestCase):
             self.assertEqual(summary["renderStatus"], "rendered_component_id_buffers")
             self.assertTrue(summary["componentIdShaderImplemented"])
             self.assertFalse(summary["formalImageEvaluationReady"])
+            self.assertTrue(summary["spatialCulling"]["enabled"])
+            self.assertEqual(summary["spatialCulling"]["loadedGlbCount"], 2)
+            self.assertEqual(summary["spatialCulling"]["referenceReuseCount"], 1)
             self.assertGreater(summary["imageMetrics"]["missPixels"], 0)
-            self.assertTrue((output_dir / "samples/synthetic-0_reference_u32.bin").exists())
+            reference_path = output_dir / "samples/synthetic-0_reference_u32.bin"
+            self.assertTrue(reference_path.exists())
+            reference_ids = struct.unpack(
+                "<%dI" % (160 * 90), reference_path.read_bytes(),
+            )
+            self.assertIn(2, reference_ids, "missing component AABB must not remove component 1 from reference")
 
 
 if __name__ == "__main__":

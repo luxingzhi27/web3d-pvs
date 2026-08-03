@@ -36,6 +36,7 @@ function parseArgs(argv) {
     timeoutMs: 30 * 60 * 1000,
     validateOnly: false,
     syntheticRenderSmoke: false,
+    chromeArgs: [],
   };
   for (let i = 2; i < argv.length; i += 1) {
     const key = argv[i];
@@ -55,6 +56,7 @@ function parseArgs(argv) {
     else if (key === '--chrome-exe') args.chromeExe = path.resolve(value);
     else if (key === '--port') args.port = Number(value);
     else if (key === '--timeout-ms') args.timeoutMs = Number(value);
+    else if (key === '--chrome-arg') args.chromeArgs.push(String(value));
   }
   if (!args.manifest) throw new Error('--manifest is required');
   if (!args.outputDir) throw new Error('--output-dir is required');
@@ -527,11 +529,14 @@ function makeInstancedIdMaterial() {
     vertexShader: [
       'attribute float componentId;',
       'attribute float componentVisible;',
+      'attribute float componentSpatialVisible;',
       'varying float vComponentId;',
       'varying float vComponentVisible;',
+      'varying float vComponentSpatialVisible;',
       'void main() {',
       '  vComponentId = componentId;',
       '  vComponentVisible = componentVisible;',
+      '  vComponentSpatialVisible = componentSpatialVisible;',
       '  gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);',
       '}',
     ].join('\\n'),
@@ -539,7 +544,9 @@ function makeInstancedIdMaterial() {
       'uniform float maskEnabled;',
       'varying float vComponentId;',
       'varying float vComponentVisible;',
+      'varying float vComponentSpatialVisible;',
       'void main() {',
+      '  if (vComponentSpatialVisible < 0.5) discard;',
       '  if (maskEnabled > 0.5 && vComponentVisible < 0.5) discard;',
       '  float encoded = vComponentId + 1.0;',
       '  float red = mod(encoded, 256.0);',
@@ -700,6 +707,137 @@ function setCamera(camera, sample) {
   camera.lookAt(p[0] + f[0], p[1] + f[1], p[2] + f[2]);
 }
 
+function sampleCameraKey(sample) {
+  return JSON.stringify([
+    ...(sample.cameraPosition || []).map(Number),
+    ...(sample.cameraForward || []).map(Number),
+    Number(sample.aspect || 16 / 9),
+    Number(sample.renderFovYDeg),
+  ]);
+}
+
+function makeRenderFrustum(camera) {
+  camera.updateMatrixWorld(true);
+  const viewProjection = new THREE.Matrix4().multiplyMatrices(
+    camera.projectionMatrix,
+    camera.matrixWorldInverse,
+  );
+  return new THREE.Frustum().setFromProjectionMatrix(viewProjection);
+}
+
+function parseSpatialAabb(value) {
+  if (!value || !Array.isArray(value.min) || !Array.isArray(value.max) ||
+      value.min.length !== 3 || value.max.length !== 3) {
+    return null;
+  }
+  const minimum = value.min.map(Number);
+  const maximum = value.max.map(Number);
+  if ([...minimum, ...maximum].some((coordinate) => !Number.isFinite(coordinate))) {
+    return null;
+  }
+  if (minimum.some((coordinate, index) => coordinate > maximum[index])) {
+    return null;
+  }
+  return new THREE.Box3(
+    new THREE.Vector3(minimum[0], minimum[1], minimum[2]),
+    new THREE.Vector3(maximum[0], maximum[1], maximum[2]),
+  );
+}
+
+function spatialGlbIds(manifest, selected, frustum) {
+  const bounds = manifest.glbAabbs;
+  const componentBounds = manifest.componentAabbs;
+  if (!manifest.spatialCulling || (!bounds && !componentBounds)) {
+    return { glbIds: selected.slice(), componentIds: null };
+  }
+  const result = [];
+  const visibleComponents = new Set();
+  const byGlb = (manifest.instanceBindings && manifest.instanceBindings.byGlobalGlbId) || {};
+  for (const rawGid of selected) {
+    const gid = Number(rawGid);
+    const binding = byGlb[String(gid)] || {};
+    const componentIds = (binding.componentGlobalIds || []).map(Number);
+    // Per-instance spatial filtering is valid only when every bound in the
+    // GLB has been audited. A partial table is not evidence that the missing
+    // instances are outside the frustum: fail open for the whole GLB so the
+    // reference image remains a complete-scene render.
+    const componentBoxes = componentIds.map((componentId) => parseSpatialAabb(
+      componentBounds && componentBounds[String(componentId)],
+    ));
+    const completeComponentBounds = componentIds.length > 0 && componentBoxes.every(Boolean);
+    if (completeComponentBounds) {
+      let hasVisibleComponent = false;
+      for (let index = 0; index < componentIds.length; index += 1) {
+        if (frustum.intersectsBox(componentBoxes[index])) {
+          visibleComponents.add(componentIds[index]);
+          hasVisibleComponent = true;
+        }
+      }
+      if (hasVisibleComponent) result.push(gid);
+      continue;
+    }
+
+    const aabb = bounds[String(gid)];
+    // Missing or partial instance bounds must fail open. Even a valid GLB
+    // bound is not used here because it cannot certify the unknown instances.
+    if (componentIds.length > 0 && !completeComponentBounds) {
+      result.push(gid);
+      for (const componentId of componentIds) visibleComponents.add(componentId);
+      continue;
+    }
+    const box = parseSpatialAabb(aabb);
+    if (!box) {
+      result.push(gid);
+      for (const componentId of componentIds) visibleComponents.add(componentId);
+      continue;
+    }
+    if (frustum.intersectsBox(box)) {
+      result.push(gid);
+      for (const componentId of componentIds) visibleComponents.add(componentId);
+    }
+  }
+  return { glbIds: result, componentIds: visibleComponents };
+}
+
+function setSpatialVisibility(groups, visibleIds) {
+  const visible = new Set(visibleIds.map(Number));
+  for (const [gid, group] of groups.entries()) group.scene.visible = visible.has(Number(gid));
+}
+
+function predictionGlbIds(manifest, requiredGlbIds, predictionComponentIds, spatialComponentIds) {
+  const prediction = new Set((predictionComponentIds || []).map(Number));
+  const spatial = spatialComponentIds ? new Set(spatialComponentIds) : null;
+  const byGlb = (manifest.instanceBindings && manifest.instanceBindings.byGlobalGlbId) || {};
+  const result = [];
+  for (const rawGid of requiredGlbIds) {
+    const binding = byGlb[String(Number(rawGid))] || {};
+    const hasPrediction = (binding.componentGlobalIds || []).some((rawComponentId) => {
+      const componentId = Number(rawComponentId);
+      return prediction.has(componentId) && (spatial === null || spatial.has(componentId));
+    });
+    if (hasPrediction) result.push(Number(rawGid));
+  }
+  return result;
+}
+
+function setSpatialInstanceVisibility(groups, visibleComponentIds) {
+  const visible = visibleComponentIds ? new Set(visibleComponentIds) : null;
+  const dirtyAttributes = new Set();
+  for (const group of groups.values()) {
+    for (const entry of group.instanced) {
+      for (let index = 0; index < entry.componentIds.length; index += 1) {
+        const componentId = entry.componentIds[index];
+        const value = visible === null || visible.has(componentId) ? 1.0 : 0.0;
+        if (entry.spatialVisibleAttribute.array[index] !== value) {
+          entry.spatialVisibleAttribute.array[index] = value;
+          dirtyAttributes.add(entry.spatialVisibleAttribute);
+        }
+      }
+    }
+  }
+  for (const attribute of dirtyAttributes) attribute.needsUpdate = true;
+}
+
 function setVisibilityMaskEnabled(groups, enabled) {
   const value = enabled ? 1.0 : 0.0;
   for (const group of groups.values()) {
@@ -784,71 +922,113 @@ async function main() {
   const groups = new Map();
   const componentSlots = new Map();
   const selected = manifest.selectedGlbs || [];
+  const spatialMode = Boolean(
+    manifest.spatialCulling && (manifest.glbAabbs || manifest.componentAabbs),
+  );
   const loadStarted = performance.now();
-  for (let i = 0; i < selected.length; i += 1) {
-    const gid = Number(selected[i]);
-    const entry = entriesById.get(gid);
-    if (!entry) throw new Error('glbIndex is missing selected GLB ' + gid);
-    const binding = (manifest.instanceBindings.byGlobalGlbId || {})[String(gid)];
-    if (!binding) throw new Error('manifest is missing instance binding for GLB ' + gid);
+  const loadedIds = new Set();
+  const loadingPromises = new Map();
+  let loadCallCount = 0;
+  async function loadGlb(gid) {
+    const numericGid = Number(gid);
+    if (groups.has(numericGid)) return groups.get(numericGid);
+    if (loadingPromises.has(numericGid)) return loadingPromises.get(numericGid);
+    const entry = entriesById.get(numericGid);
+    if (!entry) throw new Error('glbIndex is missing selected GLB ' + numericGid);
+    const binding = (manifest.instanceBindings.byGlobalGlbId || {})[String(numericGid)];
+    if (!binding) throw new Error('manifest is missing instance binding for GLB ' + numericGid);
     const url = '/assets/' + entry.path.replace(/\\\\/g, '/');
-    try {
-      const gltf = await loader.loadAsync(url);
-      const group = { scene: gltf.scene, instanced: [], staticMeshes: [] };
-      let meshCount = 0;
-      gltf.scene.traverse((object) => {
-        object.frustumCulled = false;
-        if (object.isInstancedMesh) {
-          meshCount += 1;
-          if (meshCount > 1) throw new Error('GLB contains more than one mesh node: ' + url);
-          if (object.count !== binding.componentGlobalIds.length) {
-            throw new Error('GLB instance count does not match manifest: ' + url);
+    const promise = (async () => {
+      try {
+        const gltf = await loader.loadAsync(url);
+        const group = { scene: gltf.scene, instanced: [], staticMeshes: [] };
+        let meshCount = 0;
+        gltf.scene.traverse((object) => {
+          // Spatial visibility is applied at the GLB group boundary using
+          // audited world-space AABBs. Keep per-object culling disabled so
+          // the existing instancing transform contract is unchanged.
+          object.frustumCulled = false;
+          if (object.isInstancedMesh) {
+            meshCount += 1;
+            if (meshCount > 1) throw new Error('GLB contains more than one mesh node: ' + url);
+            if (object.count !== binding.componentGlobalIds.length) {
+              throw new Error('GLB instance count does not match manifest: ' + url);
+            }
+            const componentIds = binding.componentGlobalIds.map((value) => Number(value));
+            object.geometry.setAttribute(
+              'componentId',
+              new THREE.InstancedBufferAttribute(new Float32Array(componentIds), 1),
+            );
+            const visibleAttribute = new THREE.InstancedBufferAttribute(
+              new Float32Array(componentIds.length).fill(0),
+              1,
+            );
+            visibleAttribute.setUsage(THREE.DynamicDrawUsage);
+            object.geometry.setAttribute('componentVisible', visibleAttribute);
+            const spatialVisibleAttribute = new THREE.InstancedBufferAttribute(
+              new Float32Array(componentIds.length).fill(0),
+              1,
+            );
+            spatialVisibleAttribute.setUsage(THREE.DynamicDrawUsage);
+            object.geometry.setAttribute('componentSpatialVisible', spatialVisibleAttribute);
+            const material = makeInstancedIdMaterial();
+            object.material = material;
+            const meshEntry = {
+              object,
+              componentIds,
+              visibleAttribute,
+              spatialVisibleAttribute,
+              material,
+            };
+            group.instanced.push(meshEntry);
+            for (let instanceIndex = 0; instanceIndex < componentIds.length; instanceIndex += 1) {
+              componentSlots.set(componentIds[instanceIndex], {
+                kind: 'instanced', entry: meshEntry, instanceIndex,
+              });
+            }
+          } else if (object.isMesh) {
+            meshCount += 1;
+            if (meshCount > 1) throw new Error('GLB contains more than one mesh node: ' + url);
+            if (binding.componentGlobalIds.length !== 1) {
+              throw new Error('non-instanced GLB must bind exactly one component: ' + url);
+            }
+            const componentId = Number(binding.componentGlobalIds[0]);
+            const material = makeStaticIdMaterial(componentId);
+            object.material = material;
+            const meshEntry = { object, componentId, material };
+            group.staticMeshes.push(meshEntry);
+            componentSlots.set(componentId, { kind: 'static', entry: meshEntry, instanceIndex: 0 });
           }
-          const componentIds = binding.componentGlobalIds.map((value) => Number(value));
-          object.geometry.setAttribute(
-            'componentId',
-            new THREE.InstancedBufferAttribute(new Float32Array(componentIds), 1),
-          );
-          const visibleAttribute = new THREE.InstancedBufferAttribute(
-            new Float32Array(componentIds.length).fill(0),
-            1,
-          );
-          visibleAttribute.setUsage(THREE.DynamicDrawUsage);
-          object.geometry.setAttribute('componentVisible', visibleAttribute);
-          const material = makeInstancedIdMaterial();
-          object.material = material;
-          const entry = { object, componentIds, visibleAttribute, material };
-          group.instanced.push(entry);
-          for (let instanceIndex = 0; instanceIndex < componentIds.length; instanceIndex += 1) {
-            componentSlots.set(componentIds[instanceIndex], {
-              kind: 'instanced', entry, instanceIndex,
-            });
-          }
-        } else if (object.isMesh) {
-          meshCount += 1;
-          if (meshCount > 1) throw new Error('GLB contains more than one mesh node: ' + url);
-          if (binding.componentGlobalIds.length !== 1) {
-            throw new Error('non-instanced GLB must bind exactly one component: ' + url);
-          }
-          const componentId = Number(binding.componentGlobalIds[0]);
-          const material = makeStaticIdMaterial(componentId);
-          object.material = material;
-          const entry = { object, componentId, material };
-          group.staticMeshes.push(entry);
-          componentSlots.set(componentId, { kind: 'static', entry, instanceIndex: 0 });
+        });
+        if (meshCount !== 1 && binding.renderable) throw new Error('renderable GLB has no supported mesh: ' + url);
+        gltf.scene.visible = false;
+        scene.add(gltf.scene);
+        groups.set(numericGid, group);
+        loadedIds.add(numericGid);
+        loadCallCount += 1;
+        if (loadCallCount % 25 === 0 || loadCallCount === selected.length) {
+          status('loaded ' + loadCallCount + '/' + selected.length + ' GLBs (spatial lazy load)');
         }
-      });
-      if (meshCount !== 1 && binding.renderable) throw new Error('renderable GLB has no supported mesh: ' + url);
-      gltf.scene.visible = true;
-      scene.add(gltf.scene);
-      groups.set(gid, group);
-    } catch (error) {
-      throw new Error('failed to load/bind ' + url + ': ' + String(error && error.message ? error.message : error));
+        return group;
+      } catch (error) {
+        throw new Error('failed to load/bind ' + url + ': ' + String(error && error.message ? error.message : error));
+      } finally {
+        loadingPromises.delete(numericGid);
+      }
+    })();
+    loadingPromises.set(numericGid, promise);
+    return promise;
+  }
+  async function ensureGlbs(requiredIds) {
+    const missing = requiredIds.filter((gid) => !groups.has(Number(gid)));
+    // Loading in small concurrent waves bounds decoder memory while avoiding
+    // one network/decode round trip per visible GLB.
+    const waveSize = spatialMode ? 8 : 4;
+    for (let offset = 0; offset < missing.length; offset += waveSize) {
+      await Promise.all(missing.slice(offset, offset + waveSize).map((gid) => loadGlb(gid)));
     }
-    if ((i + 1) % 50 === 0 || i + 1 === selected.length) status('loaded ' + (i + 1) + '/' + selected.length + ' GLBs');
   }
 
-  const loadFinished = performance.now();
   const batches = Array.isArray(manifest.batches)
     ? manifest.batches
     : [{ batchId: 'default', samples: manifest.samples || [] }];
@@ -856,6 +1036,16 @@ async function main() {
   for (const batch of batches) {
     for (const sample of batch.samples || []) samples.push({ ...sample, batchId: String(batch.batchId || 'default') });
   }
+  const sampleGroupsByCamera = new Map();
+  for (const sample of samples) {
+    const key = sampleCameraKey(sample);
+    if (!sampleGroupsByCamera.has(key)) {
+      sampleGroupsByCamera.set(key, { key, samples: [] });
+    }
+    sampleGroupsByCamera.get(key).samples.push(sample);
+  }
+  const sampleGroups = Array.from(sampleGroupsByCamera.values())
+    .sort((left, right) => left.key.localeCompare(right.key));
 
   const totals = { totalPixels: 0, validReferencePixels: 0, backgroundReferencePixels: 0, errorPixels: 0, missPixels: 0, wrongInstancePixels: 0, extraPixels: 0 };
   const top = new Map();
@@ -867,58 +1057,107 @@ async function main() {
   }]));
   const started = performance.now();
   let activePrediction = new Set();
-  for (let i = 0; i < samples.length; i += 1) {
-    const sample = samples[i];
-    const batchId = String(sample.batchId || 'default');
-    setCamera(camera, sample);
+  let sampleOrdinal = 0;
+  const spatialStats = {
+    enabled: spatialMode,
+    sampleGroupCount: sampleGroups.length,
+    referenceRenderCount: 0,
+    referenceReuseCount: 0,
+    requiredGlbCountSum: 0,
+    requiredGlbCountMin: null,
+    requiredGlbCountMax: 0,
+    predictionGlbCountSum: 0,
+    predictionGlbCountMin: null,
+    predictionGlbCountMax: 0,
+  };
+  for (const sampleGroup of sampleGroups) {
+    const representative = sampleGroup.samples[0];
+    setCamera(camera, representative);
+    const frustum = makeRenderFrustum(camera);
+    const spatialSelection = spatialGlbIds(manifest, selected, frustum);
+    const requiredGlbs = spatialSelection.glbIds;
+    spatialStats.requiredGlbCountSum += requiredGlbs.length;
+    spatialStats.requiredGlbCountMin = spatialStats.requiredGlbCountMin === null
+      ? requiredGlbs.length
+      : Math.min(spatialStats.requiredGlbCountMin, requiredGlbs.length);
+    spatialStats.requiredGlbCountMax = Math.max(spatialStats.requiredGlbCountMax, requiredGlbs.length);
+    await ensureGlbs(requiredGlbs);
+    setSpatialVisibility(groups, requiredGlbs);
+    setSpatialInstanceVisibility(groups, spatialSelection.componentIds);
     const referenceMaskStarted = performance.now();
     setVisibilityMaskEnabled(groups, false);
     const referenceMaskMs = performance.now() - referenceMaskStarted;
     const referenceStarted = performance.now();
     const reference = renderIds(renderer, scene, camera, target, pixels, width, height);
     const referenceRenderMs = performance.now() - referenceStarted;
-    const visibilityStarted = performance.now();
-    activePrediction = setPredictionComponents(componentSlots, activePrediction, sample.predictionComponentIds);
-    const visibilityUpdateMs = performance.now() - visibilityStarted;
-    const predictionMaskStarted = performance.now();
-    setVisibilityMaskEnabled(groups, true);
-    const predictionMaskMs = performance.now() - predictionMaskStarted;
-    const predictionStarted = performance.now();
-    const test = renderIds(renderer, scene, camera, target, pixels, width, height);
-    const predictionRenderMs = performance.now() - predictionStarted;
-    const { metrics, contributors } = computeMetrics(reference, test);
-    for (const key of Object.keys(totals)) totals[key] += metrics[key] || 0;
-    const batchAggregate = batchTotals.get(batchId);
-    if (!batchAggregate) throw new Error('missing batch accumulator for ' + batchId);
-    for (const key of Object.keys(batchAggregate)) batchAggregate[key] += metrics[key] || 0;
-    for (const [gid, pixels] of contributors.entries()) top.set(gid, (top.get(gid) || 0) + pixels);
-    const diff = diffMask(reference, test);
-    if (manifest.saveIdBuffers || i < manifest.previewSamples) {
-      await postBuffer('/buffer?name=' + encodeURIComponent(sample.sampleId + '_reference_u32.bin'), reference);
-      await postBuffer('/buffer?name=' + encodeURIComponent(sample.sampleId + '_test_u32.bin'), test);
-      await postBuffer('/buffer?name=' + encodeURIComponent(sample.sampleId + '_diff_u8.bin'), diff);
-    }
-    if (i < manifest.previewSamples) await postPreview(sample.sampleId + '_preview.png', reference, test, diff, width, height);
-    if (i === 0) {
-      const self = computeMetrics(reference, reference).metrics;
-      selfConsistencyPER = self.PER;
-    }
-    sampleRows.push({
-      ...sample,
-      batchId,
-      imageMetrics: metrics,
-      timing: {
-        referenceMaskMs,
-        referenceRenderMs,
-        visibilityUpdateMs,
-        predictionMaskMs,
-        predictionRenderMs,
-      },
-    });
-    if ((i + 1) % 16 === 0 || i + 1 === samples.length) {
-      status('rendered ' + (i + 1) + '/' + samples.length + ' samples in ' + ((performance.now() - started) / 1000).toFixed(1) + 's');
+    spatialStats.referenceRenderCount += 1;
+    spatialStats.referenceReuseCount += Math.max(0, sampleGroup.samples.length - 1);
+    for (const sample of sampleGroup.samples) {
+      const batchId = String(sample.batchId || 'default');
+      const visibilityStarted = performance.now();
+      activePrediction = setPredictionComponents(componentSlots, activePrediction, sample.predictionComponentIds);
+      const visibilityUpdateMs = performance.now() - visibilityStarted;
+      const predictionMaskStarted = performance.now();
+      const predictionGlbs = predictionGlbIds(
+        manifest,
+        requiredGlbs,
+        sample.predictionComponentIds,
+        spatialSelection.componentIds,
+      );
+      spatialStats.predictionGlbCountSum += predictionGlbs.length;
+      spatialStats.predictionGlbCountMin = spatialStats.predictionGlbCountMin === null
+        ? predictionGlbs.length
+        : Math.min(spatialStats.predictionGlbCountMin, predictionGlbs.length);
+      spatialStats.predictionGlbCountMax = Math.max(spatialStats.predictionGlbCountMax, predictionGlbs.length);
+      // A prediction render only needs GLBs containing predicted instances.
+      // The reference scene remains the complete conservative frustum scene;
+      // this switch changes draw submission, never prediction membership.
+      setSpatialVisibility(groups, predictionGlbs);
+      setVisibilityMaskEnabled(groups, true);
+      const predictionMaskMs = performance.now() - predictionMaskStarted;
+      const predictionStarted = performance.now();
+      const test = renderIds(renderer, scene, camera, target, pixels, width, height);
+      const predictionRenderMs = performance.now() - predictionStarted;
+      const { metrics, contributors } = computeMetrics(reference, test);
+      for (const key of Object.keys(totals)) totals[key] += metrics[key] || 0;
+      const batchAggregate = batchTotals.get(batchId);
+      if (!batchAggregate) throw new Error('missing batch accumulator for ' + batchId);
+      for (const key of Object.keys(batchAggregate)) batchAggregate[key] += metrics[key] || 0;
+      for (const [gid, pixelCount] of contributors.entries()) {
+        top.set(gid, (top.get(gid) || 0) + pixelCount);
+      }
+      const diff = diffMask(reference, test);
+      if (manifest.saveIdBuffers || sampleOrdinal < manifest.previewSamples) {
+        await postBuffer('/buffer?name=' + encodeURIComponent(sample.sampleId + '_reference_u32.bin'), reference);
+        await postBuffer('/buffer?name=' + encodeURIComponent(sample.sampleId + '_test_u32.bin'), test);
+        await postBuffer('/buffer?name=' + encodeURIComponent(sample.sampleId + '_diff_u8.bin'), diff);
+      }
+      if (sampleOrdinal < manifest.previewSamples) {
+        await postPreview(sample.sampleId + '_preview.png', reference, test, diff, width, height);
+      }
+      if (sampleOrdinal === 0) {
+        const self = computeMetrics(reference, reference).metrics;
+        selfConsistencyPER = self.PER;
+      }
+      sampleRows.push({
+        ...sample,
+        batchId,
+        imageMetrics: metrics,
+        timing: {
+          referenceMaskMs,
+          referenceRenderMs: sample === representative ? referenceRenderMs : 0,
+          visibilityUpdateMs,
+          predictionMaskMs,
+          predictionRenderMs,
+        },
+      });
+      sampleOrdinal += 1;
+      if (sampleOrdinal % 16 === 0 || sampleOrdinal === samples.length) {
+        status('rendered ' + sampleOrdinal + '/' + samples.length + ' samples in ' + ((performance.now() - started) / 1000).toFixed(1) + 's');
+      }
     }
   }
+  const loadFinished = performance.now();
   const valid = Math.max(1, totals.validReferencePixels);
   const total = Math.max(1, totals.totalPixels);
   const topMissedComponents = Array.from(top.entries())
@@ -951,21 +1190,30 @@ async function main() {
     };
   });
   const renderElapsedMs = performance.now() - started;
+  spatialStats.meanRequiredGlbCount = samples.length > 0
+    ? spatialStats.requiredGlbCountSum / sampleGroups.length
+    : 0;
+  spatialStats.meanPredictionGlbCount = samples.length > 0
+    ? spatialStats.predictionGlbCountSum / samples.length
+    : 0;
+  spatialStats.loadedGlbCount = groups.size;
+  spatialStats.loaderCalls = loadCallCount;
   const assetReuse = {
     schema: 'm5-browser-asset-reuse-v1',
     browserPageCount: 1,
     glbLoadPasses: 1,
     selectedGlbCount: selected.length,
     loadedGlbCount: groups.size,
-    glbLoaderCalls: selected.length,
+    glbLoaderCalls: loadCallCount,
     sampleCount: samples.length,
     batchCount: batches.length,
     loadElapsedMs: loadFinished - loadStarted,
     renderElapsedMs,
     totalPageElapsedMs: performance.now() - pageStarted,
     reloadsPerPoseWithinPage: 0,
-    reuseScope: 'all batches and samples in this manifest share the loaded scene and browser page',
-    note: 'A separate Node/Chrome invocation creates a new page and repeats the full GLB load pass.',
+    reuseScope: 'all batches and samples in this manifest share one browser page; same-camera samples reuse one reference render',
+    spatialCulling: spatialStats,
+    note: 'AABB frustum filtering is render-submission-only; selectedGlbs and component predictions remain complete and unchanged.',
   };
   const summary = {
     schema: 'local-true-component-id-browser-summary-v3',
@@ -979,6 +1227,7 @@ async function main() {
     sampleCount: samples.length,
     batchCount: batches.length,
     loadedGlbCount: groups.size,
+    spatialCulling: spatialStats,
     width,
     height,
     elapsedMs: renderElapsedMs,
@@ -1140,6 +1389,7 @@ async function main() {
     '--mute-audio',
     '--enable-webgl',
     '--ignore-gpu-blocklist',
+    ...args.chromeArgs,
     `--user-data-dir=${userDataDir}`,
     `http://127.0.0.1:${port}/`,
   ];

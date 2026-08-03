@@ -337,30 +337,41 @@ L1 方法必须同时报告压缩表示的总字节、首个区域页字节和�
 
 ## 8. 必做实验设计
 
-### 8.1 方向代理因果实验
+### 8.1 M4-v2：方向代理、上下文和显式抑制的正式因子评价
 
-先对同一 checkpoint 做推理期干预，以最低成本判断模型是否依赖代理：
+M4-v2 在执行前固定为 validation-only 的正式矩阵，旧 M4 汇总、路线文件和报告不得覆盖。所有成员必须使用同一组 validation pose、同一后退相机候选集合、同一实例 GT 和同一候选身份摘要；禁止向候选集合补入 GT、改变候选上限或使用前端白名单修复结果。阈值只能在每个 checkpoint 自己的 calibration split 冻结，test split 在路线判定前后均不得读取。
 
-- 代理全部清零；
-- 代理替换为同分布随机值；
-- 八个方向取平均；
-- 方向循环移位；
-- 跨实例随机置换代理；
-- 上下文清零和跨实例置换。
+输入分支使用完整的 2×2 因子设计，每个变体保留相同的训练/评价协议：
 
-再进行三随机种子重训练消融：
+| 变体 | 方向遮挡代理 | 显式遮挡抑制 |
+|---|---|---|
+| A `geometry_context_ray_no_inhibition` | 关闭 | 关闭 |
+| B `geometry_context_proxy_ray_no_inhibition` | 开启 | 关闭 |
+| C `geometry_context_ray` | 关闭 | 开启 |
+| D `full` | 开启 | 开启 |
 
-```text
-AABB + ray
-geometry + ray
-geometry + context + ray
-geometry + context + proxy + ray，不含显式 inhibition
-完整模型
-```
+同时保留 `aabb_ray` 和 `geometry_ray`，用于展示从 AABB、离线几何到上下文表征的逐级增益。每个变体使用三个固定随机种子。方向代理的主效应必须同时报告 `B-A` 和 `D-C`；显式抑制必须报告 `C-A` 和 `D-B`；交互项报告 `D-B-C+A`。不能把 `D-C` 单独解释为方向代理的全部贡献。
 
-所有变体独立在 calibration 按同一安全规则选择阈值。不能共享当前 `0.64`，也不能用 test 为每个变体找最优点。记录基础可见性 logit、代理门控熵、抑制量分布和最终 logit 变化，避免只从最终指标猜测分支是否工作。
+每个 pose 以候选集合 `C`、真实可见集合 `G` 和预测集合 `P` 构造 `TP=P∩G`、`FP=P-G`、`FN=G-P`、`TN=C-(P∪G)`。正式汇总同时输出 pose-level 宏平均和全部 pose 合并的 aggregate 结果。每个工作点至少包括：
 
-代理贡献的 Go 条件为：相对 `geometry + context + ray`，完整模型在安全约束下至少提高 useful cull 2 个百分点，且三种子 paired bootstrap 95% 置信区间下界大于零；同时 `bad cull` 增量及其区间上界均不超过预注册的 `+0.002`。若 M5 已有同预算图像/字节证据，也可使用达到相同图像效用时减少 10% 下载字节且区间不跨零的替代门。未达到时执行路线 B。
+- 画面安全：pose/aggregate recall、weighted recall、visual utility recall、bad cull，以及可用时的 miss-pixel、wrong-ID pixel、extra-pixel；
+- 分类诊断：pose/aggregate precision、F1、Jaccard、instance accuracy、balanced accuracy、specificity；
+- 剔除和资源：useful cull、bad cull、平均 FP/FN/TN/预测数、预测/候选、预测/GT、GLB 数量与字节削减、同等视觉效用下的 GLB 字节；
+- 运行成本：单 pose 前向延迟、固定特征表大小、推理输入大小，以及可用时的 WebGPU 延迟、主线程时间和内存。
+
+`useful cull` 只能表示正确剔除不可见候选，不能单独作为优劣依据；任何“useful cull 较高但 recall/weighted recall 较低且 bad cull 较高”的结果都必须按画面风险解释为退化。
+
+安全工作点要求 pose recall `>=0.95`、weighted recall `>0.99`，并在校准协议支持时要求 weighted recall 单侧 95% 置信下界 `>0.99`。在每个 checkpoint 自己的 calibration 中选安全约束下 useful cull 最高的阈值；不满足条件的成员标记为没有合格安全工作点，不能降级安全要求后参与排名。另报 best-F1、最高 precision 和固定阈值作为诊断工作点，但它们不是安全主工作点。可额外记录 `safety_factor` 和 `safety_adjusted_useful_cull`，但不能替代原始 recall、weighted recall、useful cull 和 bad cull。
+
+统计比较固定三种子，按 seed 聚类、seed 内按相同 pose 重采样的 paired bootstrap 至少 10,000 次。对 precision、recall、weighted recall、accuracy、balanced accuracy、F1、useful cull、bad cull、平均预测数和资源字节报告差值、95% 置信区间、方向及是否跨零。
+
+路线判定分三层：
+
+1. **安全性**：方向代理不能造成 recall 或 weighted recall 的实质下降，且 bad cull 置信区间上界不能超过预登记安全增量；
+2. **分类/剔除效果**：在相同安全工作点下，precision、balanced accuracy、F1 或 useful cull 的置信区间下界大于零，或平均预测数/GLB 字节显著下降且没有安全恶化；
+3. **系统效果**：相同图像效用下 GLB 字节或首屏时间稳定下降，或 miss-pixel/p95 miss-pixel 稳定改善。
+
+只有安全层通过且至少一个后续层通过，方向代理才能作为独立预测贡献；否则降级为辅助表征或转入系统路线。该三层规则取代旧的“full useful cull 提升至少 2 个百分点”单一判定，不能用任意加权分数替代原始指标。
 
 ### 8.2 损失与任务头实验
 
@@ -523,7 +534,7 @@ GLB 聚合比较 max、sum、top-k sum 和 Noisy-OR。训练、阈值和聚合�
 | M1 | HKUST/Metropolis 数据语义审计 | 点云、候选、AABB、映射全部一致 | 08-05 |
 | M2 | 空间块四路 split | manifest 固定，无相邻块跨集合 | 08-07 |
 | M3 | 代理推理期干预 | 得出是否依赖代理的明确诊断 | 08-09 |
-| M4 | 核心消融三种子 | 代理/上下文/RVL 的独立效应与 CI | 08-16 |
+| M4 | M4-v2 核心因子消融三种子 | 2×2 代理/显式抑制、上下文逐级基线、完整指标与 paired CI | 08-16 |
 | M5 | 实例级 60°图像评价管线 | validation/calibration 完整运行，final test 保持封存 | 08-18 |
 | M6 | 可见性主 baseline | keep-all、bitset、频率、AABB/ray、HZB、NeuralPVS | 08-23 |
 | M7 | 级联效用与下载调度 baseline | visibility 聚合、自由/门控级联、GLB 聚合、独立 ranker、oracle | 08-25 |
@@ -748,7 +759,7 @@ I1 和 I2 是最贴合项目目标的核心；I3 失败时可以降级；I4 是�
 | Cold-0 | 第一轮决策前不请求目标 GLB 几何；中位导航 trace 的 net saved bytes 为正，且 first-decision 早于 keep-all 首批关键 GLB 解码完成 | 删除“几何到达前有效”主张或先完成特征分页 |
 | 安全 | 每场景 test weighted recall 点估计 `>0.99`，完整报告普通 recall 和 FN | 不重新扫 test；报告失败并训练新版本 |
 | 图像 | mean miss-pixel `<0.5%`，p95 `<1%`，无系统性 pop-in | test 失败后不得调阈值；当前实验 No-Go，下一实验重新冻结协议 |
-| 代理 | useful cull +2 pp 或同效用字节 -10%，CI 不跨零 | 转路线 B，删除代理主张 |
+| 代理 | 先通过 recall/weighted recall/bad-cull 安全层，再在分类/剔除或系统层至少一项取得 paired CI 稳定收益 | 转路线 B；删除“方向代理已被证明有效”的主张 |
 | 调度 | 相对最佳启发式/独立 ranker 同效用字节或首屏时间 -15% | 下载头降为工程组件 |
 | 系统 | 10k 候选 desktop p95 `<20 ms`、mobile `<50 ms`、主线程 `<2 ms` | 删除移动实时主张；评估期刊系统路线 |
 | 自定义 WGSL | 相对最佳通用 Web 推理框架在包体、启动或 p95 至少一项有显著收益且其余不明显退化 | 仅作为实现细节，不列论文贡献 |
@@ -830,7 +841,7 @@ I1 和 I2 是最贴合项目目标的核心；I3 失败时可以降级；I4 是�
 | M0 | 子门通过，总门未通过 | 固定 validation、独立 calibration、frozen test 和严格候选语义已实现；已修正 `evaluate_frozen_test.py` 与当前统一评估器的调用契约并加入运行期 fixture；HKUST/Metropolis 正式训练仍在运行，完成后还需核对 bootstrap、冻结阈值、逐 pose 明细和 one-shot test |
 | M1 | 正式资源门通过 | `m1_hkust_spatial_resource_audit_2026-08-01.json`、`m1_metropolis_spatial_resource_audit_2026-08-01.json`；旧随机数据审计失败记录仍保留，不能混入正式结果 |
 | M2 | 空间隔离门通过，类别风险已登记 | `m2_spatial_split_execution_2026-08-01.md`；Metropolis sky 物理位置稀疏，M11 需按类别报告限制，K4 稳定性仍待验证 |
-| M3-M4 | M3 未执行正式版本；M4 消融入口已补齐 | 旧模型的推理期干预仍只能作为 exploratory evidence；已加入 checkpoint 可追溯的 `AABB+ray`、`geometry+ray`、`geometry+context+ray` 输入消融及辅助损失屏蔽，正式训练仍须等待 GPU 资源和空间正式 checkpoint 审计后按同一 calibration 规则完成 |
+| M3-M4 | M3 正式干预证据仍需与 M4-v2 分开解释；M4-v2 validation 矩阵已完成并冻结为 Route B | M4-v2 已完成 6 变体 × 3 seed、664 个 validation pose、独立 calibration 阈值和 10,000 次 paired bootstrap；`B-A`、`D-C` 安全层未通过，方向代理降级为辅助表征，详见独立 summary、路线文件和正式报告 |
 | M5 | split/实例语义与 schema smoke 通过，图像质量门未通过 | `docs/evaluation/m5_instance_id_buffer_schema_2026-08-01.md`、`docs/experiments/m5_formal_split_alignment_2026-08-01.md`；正式图像入口现在默认使用 Pose CSR 空间标签并完整遍历 split，真实冻结模型的 validation/calibration/test 图像评价仍待执行 |
 | M6 | L0 子门通过，总门未通过 | 七个 model-free runner、确定性 AABB+ray 和学习型 AABB+ray MLP 已在 HKUST/Metropolis 完整 validation/calibration；真实三角形 HZB 与 NeuralPVS 仍未实现，不能以 depth proxy 代替 |
 | M7-M8 | 协议和 model-free baseline 子门通过，总门未通过 | Metropolis 修正后 calibration 已完成，弱效用 byte 回放可复现；独立 ranker、真实解码时间、真实网络/设备轨迹和联合头质量比较仍缺失 |
@@ -1202,7 +1213,9 @@ M4-v2 已完成三组 A 变体的 40 epoch 训练，以及六变体 × 三 seed 
 
 本轮还修复了三个评价链路问题：原始全局 pose 编号不能按 664 的局部行数截断；六个变体必须统一读取 v2 calibration 阈值下生成的独立 intervention；pose 宏平均的候选/GT 计数需要映射到 bootstrap 注册字段。上述修复均没有改候选集合、GT、阈值选择规则或模型权重。正式产物为 `neural_instance_culling/benchmark/out/m4_formal_matrix_validation_v2/summary.json`、`neural_instance_culling/benchmark/out/m4_formal_route_decision_v2.json` 和 `docs/evaluation/m4_formal_matrix_validation_v2_2026-08-03.md`；GLB、像素和浏览器成本因缺少同位姿记录仍为 `not_available`。
 
-### 21.26 当前后台执行核验（2026-08-03 16:49）
+### 21.26 M4-v2 收尾前后台执行快照（历史记录，2026-08-03 16:49）
+
+本节记录的是正式矩阵收尾前的后台状态，保留用于解释执行过程；当前状态以紧邻的 M4-v2 正式收尾记录和独立正式产物为准。
 
 本条只记录本次核验时已经存在的文件和进程状态，不把中间 checkpoint 或预览渲染当作正式结果：
 

@@ -11,6 +11,7 @@ BENCHMARK_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BENCHMARK_DIR))
 
 import run_m5_visual_safety_image_evaluation as m5_image  # noqa: E402
+import run_m5_component_image_batch as m5_batch  # noqa: E402
 
 
 class M5VisualSafetyImageEvaluationTests(unittest.TestCase):
@@ -65,6 +66,50 @@ class M5VisualSafetyImageEvaluationTests(unittest.TestCase):
             )
             with self.assertRaises(ValueError):
                 m5_image.load_viewcell_metrics(Path(temp_dir), ["validation", "calibration"])
+
+    def test_chunk_manifest_preserves_inventory_and_sample_partition(self) -> None:
+        binding = {
+            "schema": m5_batch.INSTANCE_BINDING_SCHEMA,
+            "byGlobalGlbId": {
+                "0": {
+                    "globalGlbId": 0,
+                    "componentGlobalIds": [0],
+                    "instanceCount": 1,
+                    "renderable": True,
+                }
+            },
+            "componentToBinding": {
+                "0": {"componentGlobalId": 0, "globalGlbId": 0, "instanceIndex": 0}
+            },
+        }
+        base = {
+            "schema": m5_batch.INSTANCE_RENDER_BATCH_MANIFEST_SCHEMA,
+            "idEncoding": m5_batch.INSTANCE_ID_ENCODING,
+            "renderFovYDeg": m5_batch.RENDER_FOV_Y_DEG,
+            "modelInputFovYDeg": m5_batch.MODEL_INPUT_FOV_Y_DEG,
+            "formalImageEvaluationReady": False,
+            "selectedGlbs": [0],
+            "reference": {"mode": "full_scene_renderable_instances", "idSource": "componentGlobalId"},
+            "prediction": {"field": "predictionComponentIds"},
+            "instanceBindings": binding,
+            "glbAabbs": {"0": {"min": [-1.0, -1.0, -1.0], "max": [1.0, 1.0, 1.0]}},
+            "componentAabbs": {"0": {"min": [-1.0, -1.0, -1.0], "max": [1.0, 1.0, 1.0]}},
+            "spatialCulling": {"schema": "aabb-frustum-conservative-v1"},
+            "batches": [
+                {"batchId": "a", "samples": [m5_batch.minimal_sample(f"a-{i}") for i in range(3)]},
+                {"batchId": "b", "samples": [m5_batch.minimal_sample(f"b-{i}") for i in range(3)]},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            chunks = m5_batch.build_chunk_manifests(base, Path(temp_dir), 2)
+            self.assertEqual(len(chunks), 2)
+            for chunk_index, (path, batch_map) in enumerate(chunks):
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(payload["selectedGlbs"], [0])
+                self.assertEqual(payload["chunking"]["chunkNumber"], chunk_index)
+                self.assertTrue(payload["chunking"]["completeInventoryRetained"])
+                self.assertEqual(sum(len(batch["samples"]) for batch in payload["batches"]), 4 if chunk_index == 0 else 2)
+                self.assertEqual(set(batch_map.values()), {"a", "b"})
 
 
 if __name__ == "__main__":

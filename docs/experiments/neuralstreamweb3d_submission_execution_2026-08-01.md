@@ -892,3 +892,78 @@ GLB 字节替代门，因此这些结论继续等待 M5/M7/M8。正式报告为
 
 本次完成的质量记录只修改了 M4 文档和索引，没有修改正在运行的 M11 10% 训练、M5 等待队列、checkpoint、
 候选集合、阈值或前端默认资产。
+
+### 2026-08-03 M5 全场景浏览器批处理诊断
+
+本轮执行没有改变 M5 的数据、预测或阈值。12 个修复 checkpoint 完成后，图像入口按预注册语义生成了
+24 个 validation/calibration 批次，共 `16,248` 个样本；批次 manifest 的候选场景仍是完整的 `3,273`
+个本地 GLB，候选和实例绑定没有被缩减。该 manifest 独立保存在
+`neural_instance_culling/benchmark/out/m5_visual_safety_repair_image_batch_20260802/batch_manifest.json`，
+旧的模型输出和 schema-only manifest 均保留。
+
+首次正式浏览器批处理采用一个页面顺序加载完整 GLB 清单。受控诊断显示该执行边界不可行：运行约六小时后
+仍没有写出 `render_summary.json` 或 `sample_image_metrics.json`，Chrome 的 SwiftShader GPU 进程约占用
+`2.99 GiB` 常驻内存并持续消耗约 `10.9` 个 CPU 核，而 NVIDIA GPU 利用率为 `0%`。本地 GLB 总压缩大小
+约 `563 MiB`，但解码后包含约 `55.6M` 个三角形；当前 renderer 又把所有对象设置为不做视锥裁剪，因此
+每个样本的完整 reference/prediction 渲染都会提交整场景。该现象说明“全量资产一次加载、全量场景逐样本提交”
+是评价工具的性能瓶颈，不是模型结果或候选语义的证据。
+
+该批次登记为 `renderer_execution_failed_full_scene_single_page_v1`，不计入 M5 图像质量结果，也不以缩小
+样本数替代正式评价。原始进程和日志在确认上述证据后停止，未删除或覆盖任何模型、manifest 或历史报告。
+下一次独立实现保持相同的完整场景参考语义，使用 runtime meta 中已审计的 GLB AABB 做保守逐相机裁剪：只有
+与当前 `60°` 渲染相机视锥相交的 GLB 才加载和提交；AABB 在视锥外只能排除不可能贡献像素的几何，不会补入
+GT、删除候选或改变 prediction component ID。相同相机在不同变体之间复用 reference ID buffer，避免重复渲染
+相同的 reference。该实现完成后仍需先通过合成遮挡、AABB 边界和同位姿完整性测试，再重启 validation/calibration
+图像评价；M5 质量门继续保持 `No-Go`。
+
+### 2026-08-03 M5 空间裁剪正确性与分块渲染修复
+
+M5 的全量单页浏览器批处理在上一轮诊断中运行约六小时仍未完成，原因是一个页面持续累积跨全部
+validation/calibration 视点解码后的 GLB 场景；该失败不提供图像质量证据。复查空间裁剪实现又发现，
+当一个 GLB 只有部分实例拥有 AABB 时，旧逻辑会把缺失 AABB 的实例当作视锥外，从而可能改变 reference
+图像语义。该问题属于评价器正确性缺陷，不能用缩小样本或前端白名单绕过。
+
+本轮修改：
+
+- `neural_instance_culling/benchmark/render_local_glb_color_id_browser.mjs`：加入有限值/边界合法性检查；
+  只有一个 GLB 的全部实例 AABB 都可审计时才进行实例级空间裁剪；任一实例 AABB 缺失或非法时，整组
+  GLB 和其全部实例 fail-open。GLB 级空间裁剪同样在 AABB 缺失/非法时 fail-open。
+- `neural_instance_culling/benchmark/run_m5_component_image_batch.py`：新增 `--chunk-samples`，保持完整
+  GLB inventory、实例绑定、候选/预测 ID 和相机契约不变，按源 batch 分块启动独立 Chrome 页面，并按
+  原始像素计数合并结果。分块只限制解码对象生命周期，不改变评价样本或阈值。
+- `neural_instance_culling/benchmark/run_m5_visual_safety_image_evaluation.py`：支持分块参数并在报告中
+  区分“每块页面内复用”与全量单页复用。
+- `neural_instance_culling/benchmark/tests/test_instance_id_render_schema.py`：增加部分实例 AABB 缺失时
+  reference 仍包含未知实例的真实 GLB smoke；`test_m5_visual_safety_image_evaluation.py` 增加分块清单
+  的完整 inventory 和样本分割测试。
+
+验证命令：
+
+```bash
+node --check neural_instance_culling/benchmark/render_local_glb_color_id_browser.mjs
+conda run -n slm_pvs python -m unittest \
+  neural_instance_culling.benchmark.tests.test_instance_id_render_schema \
+  neural_instance_culling.benchmark.tests.test_m5_visual_safety_image_evaluation -v
+conda run -n slm_pvs python neural_instance_culling/benchmark/run_m5_component_image_batch.py --self-test
+```
+
+上述检查通过（真实 GLB smoke 5 项、M5 评价器测试 4 项）。修复后的正式 validation/calibration 运行命令为：
+
+```bash
+conda run --no-capture-output -n slm_pvs python -u \
+  neural_instance_culling/benchmark/run_m5_visual_safety_image_evaluation.py \
+  --output-name m5_visual_safety_repair_image_chunked_20260803 \
+  --chunk-samples 16 --render-timeout-sec 7200 --width 320 --height 180
+```
+
+输出目录为 `neural_instance_culling/benchmark/out/m5_visual_safety_repair_image_chunked_20260803/`，
+当前正在运行，`testRead` 仍为 false。只有全部 44 个分块成功且汇总器检查 16,248 个样本后，才更新 M5
+质量门；在此之前 M5 继续保持 `No-Go`。本轮不读取 test、不重新扫描阈值、不改变候选集合或默认前端资产。
+
+### 2026-08-03 M5 分块图像评价完成
+
+修复后的分块浏览器评价已完成，退出码为 `0`。44 个分块、24 个源 batch 和 `16,248` 个样本全部写出结果；其中 validation 为 `7,968` 个 subpose，calibration 为 `8,280` 个 subpose。完整 GLB inventory 保留为 `3,273` 个，渲染失败数和缺失 GLB 样本数均为 `0`，self-consistency PER 为 `0`，test 未读取。
+
+validation 像素合并 miss-pixel rate 为 `0.8837%`，逐 view-cell 均值为 `0.8958%`，p95 为 `6.0033%`；calibration 对应为 `0.6920%`、`0.6487%` 和 `5.0171%`。预注册门槛为 mean `<0.5%`、p95 `<1%`，因此 M5 视觉安全门仍为 `No-Go`。分块机制和实例 AABB 缺失时的 fail-open 修复保留为评价器正确性改进，但不能把 SwiftShader 浏览器结果解释为硬件 GPU 或移动设备性能，也不能修改默认模型、阈值、候选集合或前端资产。详细结果见 `docs/evaluation/m5_visual_safety_repair_image_chunked_2026-08-03.md`。
+
+浏览器任务结束后在空闲环境重跑 benchmark 回归套件，结果为 `63 tests, OK`；M4-v2 summary/route schema、候选摘要、分块样本数量和 `testRead=false` 自检均通过，Node 语法检查和 `git diff --check` 通过。

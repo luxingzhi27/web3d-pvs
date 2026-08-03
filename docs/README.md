@@ -54,6 +54,7 @@
 46. M5 图像安全修复实验预注册协议：`experiments/m5_visual_safety_repair_protocol_2026-08-02.md`
 47. M4 注册输入分支消融矩阵 validation 评价与路线判定：`evaluation/m4_formal_matrix_validation_2026-08-02.md`
 48. M4-v2 完整 2x2 因子消融协议与独立评价：`experiments/m4_formal_matrix_validation_v2_protocol_2026-08-03.md`；正式报告：`evaluation/m4_formal_matrix_validation_v2_2026-08-03.md`；路线判定为 `route_b_system`
+49. M5 视觉安全修复分块图像评价：`evaluation/m5_visual_safety_repair_image_chunked_2026-08-03.md`；完整 validation/calibration 结果仍为 `No-Go`
 
 ## 当前场景
 
