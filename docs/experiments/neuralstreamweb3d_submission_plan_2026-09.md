@@ -1192,3 +1192,12 @@ safety_adjusted_useful_cull = useful_cull * safety_factor
 6. 生成 M4-v2 正式报告，更新 `docs/README.md`，不改现有 Route B 结论或默认前端模型。
 
 本计划的可复现协议正文见 `docs/experiments/m4_formal_matrix_validation_v2_protocol_2026-08-03.md`。
+
+### 21.26 当前后台执行核验（2026-08-03 16:49）
+
+本条只记录本次核验时已经存在的文件和进程状态，不把中间 checkpoint 或预览渲染当作正式结果：
+
+- M4-v2 的 A 变体 `geometry_context_ray_no_inhibition` 三个 seed 均在独立目录运行 40 epoch 训练，当前进入第 4/40 epoch；三个训练日志的非有限 loss/gradient 跳过计数均为零。`calibration_ready_summary.json` 尚未生成，因此 6 变体 × 3 seed 的正式汇总、10,000 次 bootstrap、路线 JSON 和报告仍未产生，M4-v2 质量门保持未完成。
+- M5 视觉安全修复批处理已经建立同一浏览器页面的 24 个批次，共 16,248 个 validation/calibration 样本；当前仅有预览样本，完整 `render_summary.json` 和图像质量汇总尚未生成。renderer 使用 headless Chrome 的 SwiftShader WebGL，后续只能用于图像语义评价，不能产生硬件 GPU 性能结论。
+- M6 三角形 HZB 的完整 HKUST/Metropolis validation/calibration 缓存和查询摘要已经存在，缓存元数据标记 `formalReady=true`；既有报告显示两个场景均没有同时满足 `weighted recall > 0.99` 的安全工作点，因此只通过完整几何 warm-cache 子门。NeuralPVS 官方网络到实例级 froxel 适配仍缺少真实深度片段、froxel-to-instance 映射和公平冷启动资源核算，继续保持 `No-Go / adaptation not implemented`。
+- 本次执行没有修改默认模型、默认前端资产、旧 M4 文件或旧路线结论；M4-v2 报告聚合口径补全和阈值接口兼容修复已提交到 `e2e64b3` 并推送 `origin/main`。
