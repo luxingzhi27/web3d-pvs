@@ -112,8 +112,66 @@ def render(summary: dict[str, Any], route: dict[str, Any]) -> str:
         )
     lines.extend([
         "",
-        "校准诊断工作点（best F1、最高 precision、原始冻结阈值）保存在汇总 JSON 的 `calibrationWorkpoint.diagnosticWorkpoints` 中；它们不是安全主工作点。",
+        "## 诊断工作点",
+        "",
+        "每个 checkpoint 的 best-F1、最高 precision 和原始冻结阈值都来自该 checkpoint 自己的 calibration 记录。它们只用于诊断阈值敏感性，不参与安全主工作点排名，也没有读取 validation/test 重新选阈值。",
+        "",
+        "| 变体 | seed | 安全工作点状态 | 安全阈值 | best-F1 阈值 | best-F1 precision | best-F1 recall | best-F1 weighted recall | best-F1 F1 | 最高 precision 阈值 | 最高 precision | 对应 recall | 对应 weighted recall | 原始冻结阈值 |",
+        "|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ])
+    for record in member_rows(summary):
+        workpoint = record.get("calibrationWorkpoint") or {}
+        diagnostics = workpoint.get("diagnosticWorkpoints") or {}
+        best = diagnostics.get("bestF1") or {}
+        highest = diagnostics.get("highestPrecision") or {}
+        original = diagnostics.get("originalFrozenThreshold") or {}
+        lines.append(
+            f"| `{record['variant']}` | {record['seed']} | {workpoint.get('status', 'not_available')} | {f(record['threshold'], 8)} | "
+            f"{f(best.get('threshold'), 8)} | {f(best.get('pose_precision'))} | {f(best.get('pose_recall'))} | "
+            f"{f(best.get('pose_weighted_recall'))} | {f(best.get('pose_f1'))} | {f(highest.get('threshold'), 8)} | "
+            f"{f(highest.get('pose_precision'))} | {f(highest.get('pose_recall'))} | {f(highest.get('pose_weighted_recall'))} | "
+            f"{f(original.get('threshold'), 8)} |"
+        )
+    lines.extend([
+        "",
         "每个成员的平均 TP、FP、FN、TN、预测/候选和预测/GT 已同时保存在汇总 JSON 的 `poseMacro` 与 `aggregate` 对象中；GLB、像素和浏览器成本若为 `not_available`，不参与路线排名。",
+        "",
+    ])
+
+    lines.extend([
+        "## 完整成员诊断",
+        "",
+        "下表把每个成员的两种统计口径和完整分类/剔除指标直接列出。`visual utility recall` 没有统一视觉效用监督，因此对所有成员明确记为 `not_available`，不能用 weighted recall 替代。",
+        "",
+        "| 口径 | 变体 | seed | precision | recall | weighted recall | visual utility recall | F1 | Jaccard | accuracy | balanced accuracy | specificity | useful cull | bad cull | avg TP | avg FP | avg FN | avg TN | avg pred | pred/candidate | pred/GT |",
+        "|---|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ])
+    for record in member_rows(summary):
+        for scope_name, scope_label in (("poseMacro", "pose_macro"), ("aggregate", "aggregate")):
+            metrics = record[scope_name]
+            lines.append(
+                f"| {scope_label} | `{record['variant']}` | {record['seed']} | {f(metrics['precision'])} | "
+                f"{f(metrics['recall'])} | {f(metrics['weighted_recall'])} | not_available | {f(metrics['f1'])} | "
+                f"{f(metrics['jaccard'])} | {f(metrics['accuracy'])} | {f(metrics['balanced_accuracy'])} | "
+                f"{f(metrics['specificity'])} | {f(metrics['useful_cull'])} | {f(metrics['bad_cull'])} | "
+                f"{f(metrics['avg_tp_count'], 2)} | {f(metrics['avg_fp_count'], 2)} | {f(metrics['avg_fn_count'], 2)} | "
+                f"{f(metrics['avg_tn_count'], 2)} | {f(metrics['avg_pred_count'], 2)} | "
+                f"{f(metrics['pred_over_candidate'])} | {f(metrics['pred_over_gt'])} |"
+            )
+    lines.extend([
+        "",
+        "## 运行与资源成本",
+        "",
+        "固定特征表字节数和 checkpoint/运行时特征文件来源保存在每个成员的 JSON 记录中；当前 intervention 没有保存逐 pose 前向计时、GLB 集合/字节曲线、同位姿图像或浏览器采样，因此下列系统指标对所有成员均为不可用，不能推断为零收益：",
+        "",
+        "| 指标 | 状态 | 原因 |",
+        "|---|---|---|",
+    ])
+    for name in ("glb_count_reduction", "glb_byte_reduction", "equal_visual_utility_glb_bytes", "forward_latency_ms", "webgpu_latency_ms", "main_thread_ms", "runtime_memory_bytes", "miss_pixel_rate", "wrong_id_pixel_rate", "extra_pixel_rate"):
+        lines.append(f"| `{name}` | not_available | {UNAVAILABLE_METRICS[name]} |")
+    lines.extend([
+        "",
+        "固定特征表大小仍按成员分别记录；它是离线资产体积，不等同于前向延迟或移动设备内存峰值。",
         "",
     ])
 

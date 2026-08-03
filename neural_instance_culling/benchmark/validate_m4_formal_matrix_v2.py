@@ -10,22 +10,36 @@ from pathlib import Path
 from m4_formal_matrix_v2_utils import ALL_VARIANTS, DIAGNOSTIC_METRICS, FACTOR_EFFECTS, FACTOR_VARIANTS, SEEDS, STAGED_EFFECTS
 
 
+EXPECTED_CANDIDATE_DIGEST = "8bd3e6a840c7624e2de459ef8057b24380c91936383c29f2368d93801f4c17bf"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--summary", type=Path, default=None)
     parser.add_argument("--route", type=Path, default=None)
     parser.add_argument("--expected-pose-count", type=int, default=664)
+    parser.add_argument("--expected-candidate-digest", default=EXPECTED_CANDIDATE_DIGEST)
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args()
 
 
-def validate_summary(payload: dict, expected_pose_count: int = 664) -> None:
+def validate_summary(
+    payload: dict,
+    expected_pose_count: int = 664,
+    expected_candidate_digest: str = EXPECTED_CANDIDATE_DIGEST,
+) -> None:
     if payload.get("schema") != "neuralstreamweb3d-formal-m4-matrix-summary-v2":
         raise ValueError("unexpected M4-v2 summary schema")
     if payload.get("split") != "validation" or payload.get("testRead") is not False:
         raise ValueError("summary is not validation-only")
     if int(payload.get("poseCount", -1)) != expected_pose_count:
         raise ValueError("unexpected pose count")
+    candidate_identity = payload.get("candidateIdentity", {})
+    if candidate_identity.get("candidateDigest") != expected_candidate_digest:
+        raise ValueError(
+            "candidate digest drift: "
+            f"expected {expected_candidate_digest}, got {candidate_identity.get('candidateDigest')}"
+        )
     if sorted(payload.get("seeds", [])) != list(SEEDS):
         raise ValueError("registered seed set is incomplete")
     if payload.get("variants", {}).get("all") != list(ALL_VARIANTS):
@@ -90,7 +104,7 @@ def main() -> None:
     if args.summary is None:
         raise ValueError("--summary is required unless --self-test is used")
     summary = json.loads(args.summary.read_text(encoding="utf-8"))
-    validate_summary(summary, args.expected_pose_count)
+    validate_summary(summary, args.expected_pose_count, args.expected_candidate_digest)
     if args.route is not None:
         validate_route(json.loads(args.route.read_text(encoding="utf-8")), args.summary)
     print(json.dumps({"status": "passed", "summary": str(args.summary), "route": str(args.route) if args.route else None}, indent=2))

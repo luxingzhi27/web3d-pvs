@@ -1193,6 +1193,15 @@ safety_adjusted_useful_cull = useful_cull * safety_factor
 
 本计划的可复现协议正文见 `docs/experiments/m4_formal_matrix_validation_v2_protocol_2026-08-03.md`。
 
+### 21.27 M4-v2 正式收尾（2026-08-03）
+
+M4-v2 已完成三组 A 变体的 40 epoch 训练，以及六变体 × 三 seed 的独立 validation 重评。最终矩阵包含 18 个成员和 664 个冻结 pose，候选摘要为
+`8bd3e6a840c7624e2de459ef8057b24380c91936383c29f2368d93801f4c17bf`，所有阈值来自各 checkpoint 的 calibration，`testRead=false`。汇总器、路线判定器和报告生成器已通过 11 项 M4 unittest、self-test、候选摘要和 schema 校验。
+
+最终路线为 `route_b_system`。`B-A` 和 `D-C` 的方向代理安全层均未通过，主要原因是 validation 的 pose/aggregate recall 差值存在超过预登记容忍范围的下降；因此不能依据 useful cull、precision 或 F1 的局部正向结果宣称方向代理具有安全约束下的独立贡献。`C-A`、`D-B`、交互项以及 AABB→几何→上下文的逐级比较仍全部保留在 summary 和正式报告中，用于完整解释各因子的作用，而不改变旧 Route B 结论。
+
+本轮还修复了三个评价链路问题：原始全局 pose 编号不能按 664 的局部行数截断；六个变体必须统一读取 v2 calibration 阈值下生成的独立 intervention；pose 宏平均的候选/GT 计数需要映射到 bootstrap 注册字段。上述修复均没有改候选集合、GT、阈值选择规则或模型权重。正式产物为 `neural_instance_culling/benchmark/out/m4_formal_matrix_validation_v2/summary.json`、`neural_instance_culling/benchmark/out/m4_formal_route_decision_v2.json` 和 `docs/evaluation/m4_formal_matrix_validation_v2_2026-08-03.md`；GLB、像素和浏览器成本因缺少同位姿记录仍为 `not_available`。
+
 ### 21.26 当前后台执行核验（2026-08-03 16:49）
 
 本条只记录本次核验时已经存在的文件和进程状态，不把中间 checkpoint 或预览渲染当作正式结果：

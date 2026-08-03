@@ -28,7 +28,6 @@ from m4_formal_matrix_v2_utils import (
     bootstrap_all_effects_by_scope,
     candidate_digest,
     candidate_identity,
-    old_intervention_path,
     read_member,
     summarize_rows,
     validate_candidate_matrix,
@@ -53,9 +52,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def member_path(args: argparse.Namespace, variant: str, seed: int) -> Path:
-    if variant == "geometry_context_ray_no_inhibition":
-        return v2_intervention_path(args.v2_root, variant, seed)
-    return old_intervention_path(args.benchmark_root, variant, seed)
+    # The v2 runner re-evaluates every member at its own calibration-frozen
+    # threshold and stores the resulting intervention in the independent v2
+    # directory.  The old M4 files remain immutable audit inputs; reading them
+    # here would mix their historical thresholds into the new matrix.
+    return v2_intervention_path(args.v2_root, variant, seed)
 
 
 def load_workpoints(path: Path | None) -> dict[str, Any] | None:

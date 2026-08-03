@@ -62,6 +62,8 @@ class M4FormalMatrixV2Tests(unittest.TestCase):
         rows = {0: fixture_row(0, 1, 1, 0, 2), 1: fixture_row(1, 1, 0, 1, 2)}
         summary = summarize_rows(rows.values(), lcb_replicates=100, lcb_seed=3)
         self.assertEqual(summary["aggregate"]["avg_candidate_count"], 4.0)
+        self.assertEqual(summary["poseMacro"]["avg_candidate_count"], 4.0)
+        self.assertEqual(summary["poseMacro"]["avg_gt_count"], 1.5)
         self.assertAlmostEqual(summary["aggregate"]["accuracy"], 0.75)
         self.assertFalse(summary["safety"]["qualifiedSafetyWorkpoint"])
 
@@ -90,6 +92,13 @@ class M4FormalMatrixV2Tests(unittest.TestCase):
     def test_candidate_digest_is_stable(self) -> None:
         identity = {0: ("a" * 64, 3), 1: ("b" * 64, 4)}
         self.assertEqual(candidate_digest(identity), candidate_digest(dict(reversed(list(identity.items())))))
+
+    def test_sparse_original_pose_ids_are_valid_for_frozen_subset(self) -> None:
+        rows = [fixture_row(2991, 1, 0, 0, 3), fixture_row(193, 1, 0, 0, 3)]
+        from m4_formal_matrix_v2_utils import validate_row
+
+        for row in rows:
+            validate_row(row, Path("<fixture>"), expected_pose_count=2)
 
 
 if __name__ == "__main__":

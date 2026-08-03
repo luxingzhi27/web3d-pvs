@@ -165,8 +165,11 @@ def validate_row(row: Mapping[str, Any], path: Path, expected_pose_count: int | 
             continue
         if isinstance(value, (int, float)):
             finite(value, f"{path}:{pose}:{key}")
-    if expected_pose_count is not None and pose >= expected_pose_count:
-        raise ValueError(f"pose index {pose} exceeds expected count {expected_pose_count} in {path}")
+    # ``pose_index`` is the original dataset pose id, not the zero-based row
+    # position in the frozen validation subset.  A 664-pose evaluation can
+    # therefore legitimately contain ids such as 2991 and 193.  Cardinality
+    # and uniqueness are checked by ``read_member`` after all rows are read;
+    # this row-level validator must not confuse the two domains.
 
 
 def _check_dependency_hash(payload: Mapping[str, Any], path: Path, repo_root: Path) -> dict[str, Any]:
@@ -305,7 +308,14 @@ def summarize_rows(rows: Iterable[Mapping[str, Any]], lcb_replicates: int = 1000
     count = int(arrays["candidate_count"].size)
     pose_macro = {name: float(arrays[name].mean()) for name in CORE_METRICS}
     for name in ("tp", "fp", "fn", "tn", "weighted_tp", "weighted_gt", "avg_pred_count", "candidate_count", "gt_count"):
-        key = {"tp": "avg_tp_count", "fp": "avg_fp_count", "fn": "avg_fn_count", "tn": "avg_tn_count"}.get(name, name)
+        key = {
+            "tp": "avg_tp_count",
+            "fp": "avg_fp_count",
+            "fn": "avg_fn_count",
+            "tn": "avg_tn_count",
+            "candidate_count": "avg_candidate_count",
+            "gt_count": "avg_gt_count",
+        }.get(name, name)
         pose_macro[key] = float(arrays[name].mean())
     pose_macro["pred_over_candidate"] = _safe_div(float(arrays["avg_pred_count"].mean()), float(arrays["candidate_count"].mean()))
     pose_macro["pred_over_gt"] = _safe_div(float(arrays["avg_pred_count"].mean()), float(arrays["gt_count"].mean()))
