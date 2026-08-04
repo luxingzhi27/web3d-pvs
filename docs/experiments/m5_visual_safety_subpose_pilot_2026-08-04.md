@@ -49,3 +49,16 @@ weighted recall、平均预测数量，以及已有 dense 图像结果中困难 
 
 只有在 pilot 对高贡献漏检有明确改善且没有明显安全/资源退化后，才登记独立三 seed 完整训练；完整版本仍需通过
 普通 pose recall、weighted recall 点估计和置信下界、硬件 GPU dense 图像 mean/p95 门，最后才考虑 one-shot test。
+
+## Pilot 结果与决定
+
+pilot 已完成 `10/10` epoch，使用独立 calibration 摘要，`testEvaluationCount=0`。校准选择阈值为
+`0.03`，校准集上的 pose recall 为 `0.9511`，weighted recall 为 `0.99315`，1,000 次 bootstrap 的
+weighted-recall 下置信界为 `0.99141`，平均预测实例数为 `164.10`。但在同一冻结阈值下，validation 的
+pose recall 为 `0.94397`，低于普通安全门 `0.95`，平均预测实例数为 `189.85`，因此不能把 calibration
+结果外推成 validation 安全通过。
+
+本 pilot 没有输出高视觉贡献正例长尾召回、dense view-cell miss-pixel rate 的独立改善证据；与已有视觉质量
+修复实验相比，也没有证明新增视觉安全项能在相同安全约束下减少预测数量或漏像素。结论为“假设未被 pilot
+确认”，不登记新的三 seed 正式架构，不修改默认模型、前端资产或 M5 主线结果。该 pilot 只保留作参数和失败
+分析记录；后续优先等待 `m5_subpose_robust_v1` 三 seed 的正式 calibration 与硬件 dense 图像门。
