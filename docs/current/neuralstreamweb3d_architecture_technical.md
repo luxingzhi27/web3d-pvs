@@ -1,6 +1,6 @@
 # NeuralStreamWeb3D 当前架构与技术说明
 
-更新时间：2026-07-31
+更新时间：2026-08-04
 
 本文描述当前可运行的 NeuralStreamWeb3D 主线。它面向大规模、由大量可下载构件组成的三维场景，把离线几何分析、视点区域可见性学习、浏览器端推理和资源调度组织为一条可复现链路。本文中的“当前版本”只指方向遮挡代理模型及其前端接入；dynamic-pool、旧 Graph U-Net、Triplane、screen-grid 和 froxel 实验属于历史演进，不是默认运行路径。
 
@@ -19,6 +19,14 @@
 - 浏览器端只读取离线导出的固定实例特征、包围盒和轻量推理头，并在 Web Worker 中执行 WebGPU 推理。
 - 当前统一协议规定采样相机、模型后退相机和模型推理使用 66° 垂直视场角，真实渲染相机使用 60°；模型输出的保守预取范围最后由真实视锥收紧。唯一配置源是 `neural_instance_culling/config/neuralpvs_viewcell_protocol.json`，前端运行元数据只保留 `frontendRenderFovYDeg=60` 和 `modelInputFovYDeg=66`，不再回读旧的训练/推理别名或历史 Pose CSR 候选 FOV。
 - 视锥候选仍由 Worker 中的 Three.js `Frustum.intersectsBox` 完成，当前不是 GPU AABB 剔除。WebGPU 只负责候选实例的神经推理。
+
+### 1.1 正式浏览器采样必须使用硬件 GPU
+
+Three.js Color-ID 采样、实例级图像评价和浏览器三角形 HZB 构建的正式结果，必须来自 Chrome 的 NVIDIA Vulkan/ANGLE 硬件 WebGL 光栅化路径。脚本不能因为页面成功创建 WebGL 上下文、成功输出 JSON/PNG，或 `nvidia-smi` 中出现 Chrome 进程，就把任务标记为硬件 GPU 执行。页面必须回报非空的实际 `gpuBackend`，并满足 `gpuGate.required=true`、`gpuGate.hardware=true`；`SwiftShader`、`llvmpipe`、`softpipe`、`swrast` 或其他软件后端会使正式任务失败并停止汇总。
+
+正式入口必须显式使用 `--require-hardware-gpu`，保留 `--enable-gpu`、`--enable-webgl`、`--use-angle=vulkan` 和 `--disable-software-rasterizer` 等启动约束，同时保存 Chrome 日志、页面后端信息以及同一执行窗口的 `nvidia-smi`/`nvidia-smi pmon` 证据。缺少任一项时，结果只能写作“浏览器渲染完成”，不能写作硬件 GPU 采样、图像性能或移动端性能结果。完整规则和证据文件格式见 [`hardware_gpu_execution_policy.md`](hardware_gpu_execution_policy.md)。
+
+`--allow-software-gpu` 只允许用于独立命名的小规模语义调试目录，不能重建正式数据集、填充 GPU 延迟、覆盖硬件输出，或支撑论文中的性能结论。WebGL 硬件门也不能替代 WebGPU 硬件门；WebGPU 推理和 WGSL 性能必须单独核验 `navigator.gpu.requestAdapter()` 的适配器，当前若回报 SwiftShader，只能记录为 WebGL 硬件通过、WebGPU 硬件性能门失败。
 
 ## 2. 端到端数据流
 
