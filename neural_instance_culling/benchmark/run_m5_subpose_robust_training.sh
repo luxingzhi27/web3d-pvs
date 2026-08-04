@@ -15,6 +15,12 @@ RUNTIME_META="hkust-v3/assets/runtimeVisibilityMeta.json"
 GLB_INDEX="hkust-v3/assets/glbIndex.json"
 GLB_ROOT="hkust-v3/assets"
 OUTPUT_ROOT="neural_instance_culling/model/out"
+RUN_TAG="${SLM_M5_SUBPOSE_RUN_TAG:-}"
+if [[ "$RUN_TAG" == */* || "$RUN_TAG" == *..* ]]; then
+  echo "SLM_M5_SUBPOSE_RUN_TAG must not contain '/' or '..'" >&2
+  exit 1
+fi
+VARIANT="pvs_m5_subpose_robust_v1_hkust_spatial_fov66${RUN_TAG}"
 
 [[ -f "$DATASET/visible_hit_counts.bin" ]] || { echo "missing dense subpose hit-count labels" >&2; exit 1; }
 [[ -f "$DATASET/subpose_offsets.bin" ]] || { echo "missing dense subpose offsets" >&2; exit 1; }
@@ -23,7 +29,7 @@ OUTPUT_ROOT="neural_instance_culling/model/out"
 run_one() {
   local gpu="$1"
   local seed="$2"
-  local experiment="pvs_m5_subpose_robust_v1_hkust_spatial_fov66_seed${seed}_full40"
+  local experiment="${VARIANT}_seed${seed}_full40"
   local output_dir="$OUTPUT_ROOT/$experiment"
   local ready="$output_dir/calibration_ready_summary.json"
 

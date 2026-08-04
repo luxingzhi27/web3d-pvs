@@ -10,7 +10,12 @@ cd "$ROOT"
 # training processes were started before the ordinary pose-recall calibration
 # floor was added, so this wrapper first creates independent strict-calibration
 # bundles with the current evaluator before launching image evaluation.
-VARIANT="pvs_m5_subpose_robust_v1_hkust_spatial_fov66"
+RUN_TAG="${SLM_M5_SUBPOSE_RUN_TAG:-}"
+if [[ "$RUN_TAG" == */* || "$RUN_TAG" == *..* ]]; then
+  echo "SLM_M5_SUBPOSE_RUN_TAG must not contain '/' or '..'" >&2
+  exit 1
+fi
+VARIANT="pvs_m5_subpose_robust_v1_hkust_spatial_fov66${RUN_TAG}"
 SEEDS=(20260801 20260802 20260803)
 GPUS=(${SLM_M5_SUBPOSE_GPUS:-0 1 2})
 MODEL_ROOT="neural_instance_culling/model/out"
@@ -23,6 +28,24 @@ GLB_ROOT="hkust-v3/assets"
 ENV_NAME="${SLM_CONDA_ENV:-slm_pvs}"
 
 wait_for_training() {
+  source_process_alive() {
+    local source_dir="$1"
+    local proc_dir pid cmdline
+    # Do not use pgrep -f here: its own command line contains the search
+    # pattern and can make a dead training job look alive forever.
+    for proc_dir in /proc/[0-9]*; do
+      pid="${proc_dir##*/}"
+      [[ "$pid" == "$$" || "$pid" == "$BASHPID" ]] && continue
+      [[ -r "$proc_dir/cmdline" ]] || continue
+      cmdline="$(tr '\0' ' ' <"$proc_dir/cmdline" 2>/dev/null || true)"
+      if [[ "$cmdline" == *"train_directional_occlusion_proxy_encoder.py"* \
+        && "$cmdline" == *"--output-dir $source_dir"* ]]; then
+        return 0
+      fi
+    done
+    return 1
+  }
+
   while true; do
     local missing=0
     for seed in "${SEEDS[@]}"; do
@@ -39,7 +62,7 @@ wait_for_training() {
       # A missing ready summary with no live training process is an error,
       # not a reason to wait forever.  The source command contains the
       # immutable output directory, so this check does not match this wrapper.
-      if [[ -f "$source_dir/train_stdout.log" ]] && ! pgrep -f -- "--output-dir $source_dir" >/dev/null 2>&1; then
+      if [[ -f "$source_dir/train_stdout.log" ]] && ! source_process_alive "$source_dir"; then
         echo "[m5-image] source training exited without calibration summary for seed $seed: $source_dir" >&2
         return 1
       fi
@@ -134,7 +157,7 @@ done
 for pid in "${jobs[@]}"; do wait "$pid"; done
 for seed in "${SEEDS[@]}"; do validate_strict_one "$seed"; done
 
-OUTPUT_NAME="m5_subpose_robust_image_dense_hw_20260804"
+OUTPUT_NAME="m5_subpose_robust_image_dense_hw_20260804${RUN_TAG}"
 SCHEMA_ROOT="neural_instance_culling/benchmark/out/${OUTPUT_NAME}_manifests"
 OUTPUT_DIR="neural_instance_culling/benchmark/out/${OUTPUT_NAME}"
 EVIDENCE_DIR="neural_instance_culling/benchmark/out/.${OUTPUT_NAME}_hardware_evidence"
@@ -182,4 +205,4 @@ conda run --no-capture-output -n "$ENV_NAME" \
   --image-output "neural_instance_culling/benchmark/out/$OUTPUT_NAME" \
   --model-root "$MODEL_ROOT" \
   --variant "$VARIANT" \
-  --report "docs/evaluation/m5_subpose_robust_image_dense_hw_2026-08-04.md"
+  --report "docs/evaluation/m5_subpose_robust_image_dense_hw_2026-08-04${RUN_TAG}.md"

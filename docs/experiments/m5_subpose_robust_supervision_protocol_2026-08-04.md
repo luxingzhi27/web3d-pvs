@@ -93,6 +93,19 @@ neural_instance_culling/model/out/pvs_m5_subpose_robust_v1_hkust_spatial_fov66_s
 
 本记录中的“硬件 GPU”指 CUDA 训练或 Chrome 硬件 Vulkan 光栅化，二者都必须有对应证据；Chrome 的 SwiftShader、llvmpipe、softpipe、swrast 等软件后端只允许显式的小规模语义调试，不能进入本实验的正式数据、图像质量或性能结论。统一规则见 `docs/current/hardware_gpu_execution_policy.md`。
 
+## 2026-08-04 Attempt 1 结果与恢复规则
+
+第一轮三 seed 训练没有形成完整的三 seed formal bundle：seed `20260801` 完成并生成校准摘要；seed `20260802`
+完成 40 epoch 并保存 `checkpoint_epoch_040.pt`，但在完整 validation 的冻结阈值下 weighted recall 为
+`0.98851`，没有登记合格的 `best.pt`；seed `20260803` 在 epoch 40 的 900 steps 中途退出，只保留到
+epoch 38/last checkpoint，日志没有可归因的 Python 异常。三者都没有非有限 loss 或梯度跳过记录，故该失败不是
+软件渲染或 AMP 退化，也不能把 seed 2/3 的中间 checkpoint 当作正式 full40 结果。
+
+这轮失败按“安全门未建立/执行不完整”记录，不降低 `pose recall >= 0.95`、`weighted recall > 0.99`、校准置信
+下界和 dense 图像门，也不覆盖原输出。后续重跑使用显式独立标签 `SLM_M5_SUBPOSE_RUN_TAG=_retry1`，生成
+`...fov66_retry1_seed<seed>_full40` 目录；原始 Attempt 1 目录继续保留作失败诊断。训练和图像 wrapper 均校验
+标签不能包含路径穿越字符，避免重跑误写已有结果。
+
 ## 7. 独立 dense 图像评价入口
 
 三种子训练完成后，独立的图像评价入口会等待三个 `calibration_ready_summary.json`，然后只读取
