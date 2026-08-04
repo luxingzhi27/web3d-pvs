@@ -6,6 +6,20 @@
 主目标：Eurographics 2027，2026-09-25 摘要登记，2026-10-01 全文截止  
 严格九月全文备选：滚动期刊，依据最终成果侧重点选择 The Visual Computer、IEEE Transactions on Multimedia 或 Multimedia Systems
 
+### 执行硬件门（2026-08-04 起生效）
+
+所有正式采样、实例级图像评价、三角形 HZB 构建和浏览器性能实验都必须使用可核验的硬件路径。采样和
+Color-ID 图像评价由系统 Chrome 的 Vulkan/ANGLE WebGL 后端执行，启动时必须保留
+`--enable-gpu`、`--enable-webgl`、`--use-angle=vulkan` 和 `--disable-software-rasterizer`；页面必须回报
+非软件的 `gpuBackend`，并且 `gpuGate.hardware=true`。同一时间窗口还要保存 Chrome 日志以及
+`nvidia-smi`/`nvidia-smi pmon` 证据。训练使用 `slm_pvs` 的 CUDA 环境和固定物理 GPU，CUDA 失败时不得静默切换到
+CPU。WebGPU 推理另行读取 adapter 并单独执行硬件门，不能用 WebGL 的 NVIDIA 结果代替 WebGPU 证据。
+
+检测到 `SwiftShader`、`llvmpipe`、`softpipe`、`swrast`、空 renderer 或缺少 GPU 证据时，正式任务必须失败并记录
+原因；不能通过放宽门、改变 Chrome 参数或把结果混入正式输出目录来继续。只有显式标记的极小规模语义调试才可
+使用软件渲染，且必须使用独立目录、不得重建正式数据集、不得填写硬件延迟或移动端性能表。详细入口、证据字段和
+复核命令统一见 `docs/current/hardware_gpu_execution_policy.md`。
+
 ## 1. 执行结论
 
 NeuralStreamWeb3D 当前已经形成完整原型：对离线预处理的静态实例化三维场景，使用较重的点云和关系编码器生成固定实例特征；浏览器只读取固定特征表，以当前相机到实例的视线方向及少量射线空间标量执行 WebGPU 查询；模型共享实例表征，同时输出实例可见性、视觉效用和可下载 GLB 资源优先级。前端使用 66° 后退相机产生模型候选和预取结果，再以真实 60° 相机按实例收紧最终显示集合。
@@ -599,6 +613,10 @@ Optional 任务不能挤占 M0-M13。论文主结果没有冻结前，不进行�
 6. 任何 test 后参数变化都建立新实验并废弃旧 test，不覆盖结果。
 
 ## 12. 复现入口和待新增命令
+
+复现前先执行硬件门检查。正式浏览器命令必须包含 `--require-hardware-gpu`，训练命令必须指定
+`--device cuda`；如果检查失败，应先修复 Chrome/NVIDIA 驱动或设备权限，再重跑，不能退回软件路径。
+硬件门、页面后端、Chrome 日志和 `nvidia-smi`/`pmon` 证据需要随实验输出一并归档。
 
 当前入口为：
 

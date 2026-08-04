@@ -27,7 +27,22 @@ wait_for_training() {
     local missing=0
     for seed in "${SEEDS[@]}"; do
       local source_dir="$MODEL_ROOT/${VARIANT}_seed${seed}_full40"
-      [[ -f "$source_dir/best.pt" && -f "$source_dir/calibration_ready_summary.json" ]] || missing=$((missing + 1))
+      if [[ -f "$source_dir/best.pt" && -f "$source_dir/calibration_ready_summary.json" ]]; then
+        continue
+      fi
+      missing=$((missing + 1))
+      local stderr_log="$source_dir/train_stderr.log"
+      if [[ -f "$stderr_log" ]] && rg -q "Traceback|RuntimeError:|ValueError:|CUDA out of memory|non-finite" "$stderr_log"; then
+        echo "[m5-image] source training failed for seed $seed; see $stderr_log" >&2
+        return 1
+      fi
+      # A missing ready summary with no live training process is an error,
+      # not a reason to wait forever.  The source command contains the
+      # immutable output directory, so this check does not match this wrapper.
+      if [[ -f "$source_dir/train_stdout.log" ]] && ! pgrep -f -- "--output-dir $source_dir" >/dev/null 2>&1; then
+        echo "[m5-image] source training exited without calibration summary for seed $seed: $source_dir" >&2
+        return 1
+      fi
     done
     (( missing == 0 )) && return 0
     echo "[m5-image] waiting for $missing/${#SEEDS[@]} source checkpoints"
