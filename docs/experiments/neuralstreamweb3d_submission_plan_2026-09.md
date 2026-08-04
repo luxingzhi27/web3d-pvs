@@ -1209,9 +1209,38 @@ safety_adjusted_useful_cull = useful_cull * safety_factor
 M4-v2 已完成三组 A 变体的 40 epoch 训练，以及六变体 × 三 seed 的独立 validation 重评。最终矩阵包含 18 个成员和 664 个冻结 pose，候选摘要为
 `8bd3e6a840c7624e2de459ef8057b24380c91936383c29f2368d93801f4c17bf`，所有阈值来自各 checkpoint 的 calibration，`testRead=false`。汇总器、路线判定器和报告生成器已通过 11 项 M4 unittest、self-test、候选摘要和 schema 校验。
 
+### 21.28 M5 dense subpose 评价协议修正（2026-08-04）
+
+M5 第一轮视觉安全评价已经完成 validation/calibration 的分块浏览器渲染，但执行入口使用了 `--subposes-per-viewcell 1`。数据集中的每个 view-cell 实际包含约 33 个在 cell 范围内、同一后退相机朝向的 dense subpose，因此第一轮结果只能作为固定抽样下的长尾诊断，不能宣称为完整 view-cell 图像安全结论。该问题属于评价协议缺陷，不通过阈值、候选集合或前端白名单修复。
+
+从本节起冻结以下语义：`--subposes-per-viewcell 0` 明确表示选择该 view-cell 的全部 subpose；正整数表示确定性的等距抽样数量；任何小于 0 的值直接报错。schema manifest、浏览器批处理器和汇总报告必须记录实际 `evaluatedSubposeCount`、每个 view-cell 的 subpose 数量以及采样策略。dense 评价继续只读取 validation/calibration，模型 checkpoint 和阈值不变，test split 保持封存。
+
+执行顺序固定为：
+
+1. 为全量 subpose 语义增加单元测试和命令行 self-test，并检查 subpose 数量、相机位置/朝向、60°真实渲染 FOV 与 66°模型输入 FOV；
+2. 用当前最佳视觉修复 checkpoint 做独立 dense pilot，确认组件 ID 绑定、参考图/预测图对应关系、浏览器内存和分块不会改变候选集合或 GT；
+3. pilot 通过后，使用相同的 validation/calibration pose、候选、GT、冻结阈值完成所有登记变体的 dense 评价；
+4. 若 dense 结果仍未通过 `mean miss-pixel <0.5%` 且 view-cell p95 `<1%`，登记为 M5 No-Go，再单独设计视点区域内 subpose 鲁棒的保守视觉安全监督；不得把 dense 评价失败改写为模型或阈值问题。
+
+本次修正前的 M5 结果保留在 `m5_visual_safety_repair_image_chunked_20260803`，标记为 `sampled-subpose diagnostic`；新的 pilot 和正式 dense 结果必须使用独立输出目录，不能覆盖第一轮结果。该记录不改变默认模型、默认前端资产、M4-v2 结果或 Route B 结论。
+
+### 21.29 M5 浏览器硬件 GPU 路径核验（2026-08-04）
+
+采样器的成功路径已核对为 Playwright + Chrome + `--enable-gpu --enable-webgl --use-angle=vulkan --enable-accelerated-2d-canvas --enable-zero-copy`，已有采样日志报告 `ANGLE (NVIDIA, Vulkan 1.3.242 ... RTX A6000 ...)`。M5 的 Color-ID renderer 已复用这组参数，并在页面回报中记录 WebGL vendor、renderer 和版本；正式批处理默认开启 `--require-hardware-gpu`，发现 SwiftShader、llvmpipe 或其他软件标记时直接失败，不再静默生成可被误读的硬件结果。
+
+独立合成 smoke 已通过：浏览器回报 NVIDIA RTX A6000，`gpuGate.hardware=true`；`nvidia-smi pmon` 同时观察到 Chrome GPU 进程处于 `C+G` 状态。此前使用 SwiftShader 的 M5 历史结果保持原样，仅用于图像语义诊断，不用于 GPU 性能结论。硬件 dense 评价必须使用独立输出目录，且保存 Chrome 日志、`gpuBackend`/`gpuGate` 和 `nvidia-smi` 快照。
+
 最终路线为 `route_b_system`。`B-A` 和 `D-C` 的方向代理安全层均未通过，主要原因是 validation 的 pose/aggregate recall 差值存在超过预登记容忍范围的下降；因此不能依据 useful cull、precision 或 F1 的局部正向结果宣称方向代理具有安全约束下的独立贡献。`C-A`、`D-B`、交互项以及 AABB→几何→上下文的逐级比较仍全部保留在 summary 和正式报告中，用于完整解释各因子的作用，而不改变旧 Route B 结论。
 
 本轮还修复了三个评价链路问题：原始全局 pose 编号不能按 664 的局部行数截断；六个变体必须统一读取 v2 calibration 阈值下生成的独立 intervention；pose 宏平均的候选/GT 计数需要映射到 bootstrap 注册字段。上述修复均没有改候选集合、GT、阈值选择规则或模型权重。正式产物为 `neural_instance_culling/benchmark/out/m4_formal_matrix_validation_v2/summary.json`、`neural_instance_culling/benchmark/out/m4_formal_route_decision_v2.json` 和 `docs/evaluation/m4_formal_matrix_validation_v2_2026-08-03.md`；GLB、像素和浏览器成本因缺少同位姿记录仍为 `not_available`。
+
+### 21.30 当前有效的硬件 GPU 执行口径（2026-08-04）
+
+本节覆盖前文所有历史采样和浏览器评价记录中的软件回退描述，是后续执行的有效口径。当前机器已经核验具备四张 NVIDIA RTX A6000，Chrome 的正式路径能够通过 Vulkan/ANGLE 使用硬件光栅化；采样和 M5 dense 评价均保存了 `gpuBackend`、`gpuGate`、Chrome 日志以及 `nvidia-smi`/`nvidia-smi pmon` 证据。当前有效 renderer 示例为 `ANGLE (NVIDIA, Vulkan ... NVIDIA RTX A6000 ...)`，硬件门为 `required=true, hardware=true`。
+
+从本节起，以下任务默认必须通过硬件 GPU 门后才允许产生正式结果：Three.js Color-ID 场景采样、M5 实例级图像评价和三角形 HZB 浏览器光栅化。入口必须使用 Chrome 的 `--enable-gpu`、`--enable-webgl`、`--use-angle=vulkan`、`--enable-accelerated-2d-canvas`、`--enable-zero-copy` 与 `--disable-software-rasterizer`，并从页面实际读取 WebGL vendor/renderer/version。出现 `SwiftShader`、`llvmpipe`、`softpipe`、`swrast`、软件渲染标记或空后端时，任务必须失败并停止汇总；不能通过删除硬件门、改用软件参数或复用旧输出继续执行。
+
+`--allow-software-gpu` 只允许小规模的颜色语义、实例绑定和代码调试，不得用于重建正式数据集，不得填写 GPU/浏览器性能，不得作为移动端性能证据，也不得覆盖同名硬件输出目录。没有完整后端和 `nvidia-smi`/`pmon` 证据时，报告只能写“浏览器渲染完成”，不能写“硬件 GPU 采样/评价”。完整政策见 `docs/current/hardware_gpu_execution_policy.md`；当前 M5 硬件路径证据见 `docs/evaluation/m5_hardware_gpu_renderer_2026-08-04.md`。
 
 ### 21.26 M4-v2 收尾前后台执行快照（历史记录，2026-08-03 16:49）
 
@@ -1220,6 +1249,160 @@ M4-v2 已完成三组 A 变体的 40 epoch 训练，以及六变体 × 三 seed 
 本条只记录本次核验时已经存在的文件和进程状态，不把中间 checkpoint 或预览渲染当作正式结果：
 
 - M4-v2 的 A 变体 `geometry_context_ray_no_inhibition` 三个 seed 均在独立目录运行 40 epoch 训练，当前进入第 4/40 epoch；三个训练日志的非有限 loss/gradient 跳过计数均为零。`calibration_ready_summary.json` 尚未生成，因此 6 变体 × 3 seed 的正式汇总、10,000 次 bootstrap、路线 JSON 和报告仍未产生，M4-v2 质量门保持未完成。
-- M5 视觉安全修复批处理已经建立同一浏览器页面的 24 个批次，共 16,248 个 validation/calibration 样本；当前仅有预览样本，完整 `render_summary.json` 和图像质量汇总尚未生成。renderer 使用 headless Chrome 的 SwiftShader WebGL，后续只能用于图像语义评价，不能产生硬件 GPU 性能结论。
+- M5 视觉安全修复批处理的旧版 24 批次结果仍保留为历史软件渲染语义结果；它们不能产生硬件 GPU 性能结论。2026-08-04 新建的 dense hardware 评价使用独立输出目录 `m5_visual_safety_repair_image_dense_hw_20260804`，由 headless Chrome 的 Vulkan/NVIDIA 路径执行，并通过 `--require-hardware-gpu` 硬件门；浏览器必须回报 NVIDIA RTX A6000 等非软件后端，同时保存 `gpuBackend`、`gpuGate`、Chrome 日志和 `nvidia-smi`/`pmon` 证据。若检测到 SwiftShader、llvmpipe、softpipe、swrast 或无法确认硬件后端，分块直接失败，不得汇总为正式硬件结果。该 dense 评价现已完成：48 个分块、536,256 个 validation/calibration 样本，GLB 加载/渲染失败均为 0；全量 miss-pixel rate 为 0.7488%，超过 0.5% 安全门，故 M5 视觉安全结论为 `No-Go`，详见 `docs/evaluation/m5_visual_safety_repair_image_dense_hw_2026-08-04.md`。
 - M6 三角形 HZB 的完整 HKUST/Metropolis validation/calibration 缓存和查询摘要已经存在，缓存元数据标记 `formalReady=true`；既有报告显示两个场景均没有同时满足 `weighted recall > 0.99` 的安全工作点，因此只通过完整几何 warm-cache 子门。NeuralPVS 官方网络到实例级 froxel 适配仍缺少真实深度片段、froxel-to-instance 映射和公平冷启动资源核算，继续保持 `No-Go / adaptation not implemented`。
 - 本次执行没有修改默认模型、默认前端资产、旧 M4 文件或旧路线结论；M4-v2 报告聚合口径补全和阈值接口兼容修复已提交到 `e2e64b3` 并推送 `origin/main`。
+
+### 21.31 M0–M13 当前状态审计与硬件证据优先级（2026-08-04）
+
+以下状态覆盖本文件早期的计划性或后台快照。后续 agent 应以本节、对应独立产物和 `docs/current/hardware_gpu_execution_policy.md` 为准；历史章节只用于解释执行过程，不能恢复已经被否定的质量结论。
+
+| 阶段 | 当前状态 | 证据与剩余边界 |
+|---|---|---|
+| M0 | 协议子门通过，总投稿门未封存 | validation/calibration/test 隔离和候选语义已实现；最终 one-shot test 的完整主表仍不能由探索性摘要替代 |
+| M1 | 资源语义审计通过 | HKUST/Metropolis 的实例、候选、AABB、特征映射审计已记录；历史随机数据失败记录不进入正式主表 |
+| M2 | 空间隔离 split 子门通过 | 空间块、方向和类别稀疏风险已登记；跨场景/少样本泛化仍属于 M11 |
+| M3 | 代理机制干预诊断完成 | 代理确实参与模型决策，但清零/置换伴随安全退化；独立贡献必须按 M4-v2 因子结果解释 |
+| M4 | M4-v2 正式矩阵完成，路线为 `route_b_system` | 6 变体 × 3 seed、664 pose、10,000 次分层 paired bootstrap 已完成；方向代理安全层未通过，降级为辅助表征 |
+| M5 | 硬件 dense 图像管线完成，视觉安全门 `No-Go` | 536,256 个 validation/calibration dense subpose，硬件门通过；miss-pixel rate `0.7488%`，未达到 `<0.5%`，p95 门也未通过 |
+| M6 | 三角形 HZB warm-cache 子门完成，NeuralPVS 适配 `No-Go` | 当前没有官方 froxel 到实例的公平适配、冷启动资源和同口径结果；AABB depth proxy 不能冒充 NeuralPVS |
+| M7 | 离线调度诊断完成，总系统门未通过 | 已有固定轨迹和弱效用预算结果；真实网络、设备解码/上传、联合级联和完整 paired 统计仍缺失 |
+| M8 | 轨迹回放子门完成，总系统门未通过 | 当前级联与独立排序器可复现，但没有真实网络、设备成本和多种子完整统计 |
+| M9 | 浏览器正确性和空间索引正确性子门通过 | 跨桶 AABB 不漏候选；空间索引在部分规模比全扫描更慢，移动性能不能由服务器计时外推 |
+| M10 | 测试方案完成，真实设备门未通过 | 当前没有可核验的 Android 硬件 WebGPU 设备和 ADB 数据；桌面 SwiftShader smoke 只能证明启动/协议顺序 |
+| M11 | 少样本/方向泛化已有诊断，正式泛化门未封存 | 已有部分 1%/5%/10% 结果和失败重试；仍需按空间、方向和场景完成最终审计 |
+| M12 | 数值 parity 子门通过，硬件/移动性能门未通过 | 16 cases、7,845 候选值的 FP16/WGSL 阈值翻转率为 `0`；历史浏览器适配器是 SwiftShader，不能写成硬件性能结果 |
+| M13 | 未执行正式 one-shot test | 在模型、阈值、数据、前端资产和评价协议全部冻结前，不得读取或扫描 test，也不得把 calibration/validation 结果写成投稿主表 |
+
+#### 硬件 GPU 证据的强制优先级
+
+正式采样、M5 Color-ID 图像评价和三角形 HZB 浏览器构建必须同时满足：页面实际 `gpuBackend` 非软件；`gpuGate.required=true` 且 `gpuGate.hardware=true`；Chrome 使用 Vulkan/NVIDIA 参数；输出目录保存 Chrome 日志以及同时间段的 `nvidia-smi` 和 `nvidia-smi pmon` 证据。当前机器的最新复核结果为四张 RTX A6000、驱动 `535.183.01`，采样 smoke 回报 `ANGLE (NVIDIA, Vulkan 1.3.242 ... RTX A6000 ...)`，硬件门通过。
+
+任何 `SwiftShader`、`llvmpipe`、`softpipe`、`swrast`、`--disable-gpu` 或无法确认后端的结果只能标记为语义调试/历史结果，不得进入正式数据集、GPU 延迟表、移动性能表或硬件采样统计。显式 `--allow-software-gpu` 只允许非正式小规模调试，且不能覆盖硬件输出目录。该规则不是建议，而是正式实验的准入条件；详细执行命令和故障处理见 `docs/current/hardware_gpu_execution_policy.md`。
+
+### 21.33 M5 鲁棒监督入口与回归验证（2026-08-04）
+
+新建的 M5 独立图像评价入口 `run_m5_subpose_robust_image_evaluation.sh` 已通过 shell 语法检查，默认只等待三种
+`pvs_m5_subpose_robust_v1` seed，并使用独立的 `m5_subpose_robust_image_dense_hw_20260804` 输出目录。共享
+评价器的默认旧 M5 四变体矩阵保持不变；新增实验通过 `{variant}`/`{seed}` 模板解析，避免旧目录被新语义复用。
+
+本次变更后的 benchmark unittest 共 `71` 项，通过；M5 专项图像/损失测试共 `15` 项，通过，dense subpose
+self-test 通过。训练日志和图像评价日志均写入明确文件，评价会话当前等待三个 calibration-ready 摘要；在摘要
+出现前不会生成 manifest、启动浏览器或读取 test。
+
+### 21.32 M5 view-cell subpose 鲁棒监督训练已启动（2026-08-04）
+
+为修复上一轮 dense 图像评价中 view-cell 内位置扰动长尾造成的漏像素问题，已按独立协议启动
+`pvs_m5_subpose_robust_v1_hkust_spatial_fov66_seed20260801_full40`、
+`seed20260802_full40` 和 `seed20260803_full40` 三个 40 epoch 训练。三者分别占用物理 GPU 0、1、2，使用
+`slm_pvs` conda 环境、FP32 CUDA 路径、相同的 66°后退相机候选、原生 spatial split 和 dense subpose 标签；
+训练日志写入各自输出目录，当前处于第 1/40 epoch，未出现非有限 loss 或 gradient。
+
+本轮新增的鲁棒监督只对 view-cell 内真实出现的正例使用“视觉贡献 × 低出现频率风险”权重，并通过高风险正例
+边界项增强稳定找回；它不向负例增加“预测可见”奖励，不改变候选集合，不补入 GT，不使用 teacher，也不读取
+test。原有集合分类、RVL、预算、视觉效用和 GLB 成本约束仍保留，用于抑制全量预测。
+
+训练结束后，`run_m5_subpose_robust_image_evaluation.sh` 会等待三个 checkpoint 的校准摘要，使用各自 calibration
+阈值在 validation/calibration 的全部 dense subpose 上进行独立硬件 GPU 图像评价，结果写入
+`m5_subpose_robust_image_dense_hw_20260804`。该评价入口不复用旧 M5 四变体的输出目录，默认启用 Chrome
+Vulkan/NVIDIA 硬件门；发现 SwiftShader、llvmpipe、softpipe、swrast 或空后端时直接失败。训练和图像评价完成前，
+M5 视觉质量门、默认模型、默认前端资产和 one-shot test 均保持冻结。
+
+### 21.34 M5 鲁棒监督后台执行复核（2026-08-04 06:03）
+
+三条登记训练仍在 `m5_subpose_robust_20260804` 持久会话中运行，分别使用物理 GPU 0、1、2；最新复核均已
+进入第 `2/40` 个 epoch，显存和 GPU 利用率正常，`trainSkippedNonFiniteLoss=0`、`trainSkippedNonFiniteGrad=0`。
+三条输出目录都还没有 `calibration_ready_summary.json`，因此校准阈值、固定特征导出和硬件图像评价尚未开始。
+独立图像评价会话继续等待这三个摘要，未读取 test，也没有创建正式图像 manifest。GPU 3 保持空闲，未用软件
+渲染替代硬件路径；硬件 GPU 规则仍以 `docs/current/hardware_gpu_execution_policy.md` 为准。
+
+### 21.35 校准普通召回门补强（2026-08-04）
+
+复核 M5 中间校准行时发现，旧共享选择器只过滤加权召回，可能选择普通 `pose recall < 0.95` 但精度更高的
+阈值。现已为 `threshold_selection.py` 增加可选的普通召回下限，训练器和新的 M5 入口显式使用
+`--calibration-pose-recall-floor 0.95`；图像 manifest 入口也支持 `--minimum-pose-recall 0.95`，对冻结校准摘要
+执行同样的拒绝检查。新增回归测试覆盖“加权召回合格、普通召回不合格”的阈值不会成为安全工作点。
+
+这次修改不回写已有 M4/M5 结果，也不热修改正在运行的训练进程。当前 M5 训练完成后，若其旧进程产生的冻结校准
+行未达到普通召回门，独立图像评价会拒绝该摘要；只有从同一 calibration 行重新选择出的合格阈值才能进入 dense
+图像评价，test 仍保持封存。
+
+### 21.36 M5 旧进程校准兼容与后续质量门审计（2026-08-04）
+
+本轮三条 M5 鲁棒监督训练在普通 pose recall 下限修复提交前启动，因此运行中的 Python 进程不会热加载
+`--calibration-pose-recall-floor 0.95`。为避免把旧选择器生成的“weighted recall 合格、普通 pose recall 不足”
+工作点误写成安全结果，训练入口新增独立的校准导出模式：使用完成训练的 checkpoint，在同一数据集、同一候选集合、
+同一 GT 和同一 calibration/validation split 上重新计算校准与固定 validation，显式要求普通 pose recall、weighted
+recall 点估计和 bootstrap 下置信界同时合格，然后只写入独立输出目录的 `calibration_ready_summary.json` 和运行时
+特征。该模式由 `--export-eval-checkpoint --skip-final-test --checkpoint-alias best.pt` 启动，明确记录
+`testRead=false`、`candidateSetChanged=false` 和 `gtChanged=false`；它不读取 test，也不修改原训练目录。
+
+本次审计还确认：M6 当前只有三角形 HZB warm-cache 对照，尚无 NeuralPVS 官方 froxel 到实例的公平适配；M7/M8
+只有固定网络假设下的离线轨迹 replay，缺真实网络、设备解码/上传成本和按 seed 聚类的 paired bootstrap；M9
+空间索引集合正确性通过但部分规模慢于全量扫描；M10 缺真实 Android WebGPU 证据；M11 的方向、空间和跨场景泛化
+尚未封存；M12 仅 FP16/WGSL 数值 parity 子门通过，历史浏览器为 SwiftShader，不能写成硬件性能证据。以上状态
+保持各自 No-Go 或未封存，不通过阈值调整、软件渲染或前端白名单补齐。
+
+`run_m5_subpose_robust_image_evaluation.sh` 已同步改为先执行严格校准导出，再启动图像评价。三个源训练目录
+完成后，脚本会并行生成 `*_strict_calibration` 独立目录，并验证 `testEvaluationCount=0`、普通 pose recall
+下限、加权召回点估计和 bootstrap 下置信界；任何一项不合格都停止，不创建正式图像 manifest。图像评价随后只读取
+这些严格目录的固定阈值，并继续通过 Chrome 硬件 GPU 门。该等待器不依赖系统 `jq`，使用 `slm_pvs` 环境的标准
+Python 做摘要校验。
+
+M7/M8 还新增了 `summarize_m7_m8_trajectory_paired_bootstrap.py`，对现有六条相同 scene/track 的 current cascade
+与 independent ranker replay 重建每个 pose 的解码完成效用，并执行 10,000 次外层轨迹聚类、内层 pose 重采样。
+结果写入 `m7_m8_trajectory_paired_bootstrap_v2_20260804.json`。独立 ranker 的弱效用召回差值为负且 95% 区间不跨零，
+无效下载字节显著增加，下载字节差值区间跨零；因此 M7/M8 仍不能宣称独立排序或联合调度带来系统收益。由于旧
+replay schema 没有候选集合哈希，该汇总只校验 pose、候选数量和弱效用需求，不能替代候选哈希审计；轨迹聚类也不是
+三种训练 seed，不能冒充 seed-level 统计。
+
+### 21.37 M5-v2 独立图像汇总入口与硬件门复核（2026-08-04）
+
+为避免把浏览器渲染器输出直接当作模型质量结论，新增加
+`neural_instance_culling/benchmark/summarize_m5_subpose_robust_image.py`。该脚本只读取 M5-v2 图像输出和三个
+seed 的严格 calibration 摘要，检查 `testRead=false`、普通 pose recall、加权召回点估计、加权召回下置信界、
+60°/66°相机契约、候选/GT 未改变，以及页面硬件门和同时间的 `nvidia-smi`/`pmon` 证据。它不预测、不扫描阈值、
+不补入 GT，也不修改渲染输出；只有通过这些检查才会写 `m5_v2_summary.json` 和正式报告。
+
+本入口将软件后端的边界写入报告生成逻辑：出现 `SwiftShader`、`llvmpipe`、`softpipe`、`swrast`、空 renderer
+或缺少 GPU 证据时直接拒绝正式汇总。`--allow-software-gpu` 仍只允许小规模语义调试，不能用于正式采样、图像
+质量、GPU 延迟或移动端性能结论。对应单元测试已覆盖严格校准、批次命名和硬件门；当前 M5-v2 的训练和图像质量
+门仍等待后台任务完成，未提前改变 M5 No-Go 状态、默认模型或 one-shot test 策略。
+
+M5-v2 wrapper 在浏览器评价期间启动 `nvidia-smi pmon`，并在独立输出目录保存 GPU 快照；因此后续汇总不会只
+依赖页面的 renderer 字符串，也不会把“创建了 WebGL context”误认为硬件执行。
+
+同日全量 benchmark unittest 首次复核发现一个兼容性回归：旧的 `SimpleNamespace` 调用没有新增的普通 pose recall
+字段。`evaluate_viewcell_image_per.py` 现对该字段使用 `getattr(..., None)`，正式命令仍显式传入 `0.95`，因此没有
+放宽正式质量门。修复后 benchmark tests 为 `78` 项，全部通过；M5-v2 专项汇总器 self-test 与 2 项单元测试也通过。
+
+### 21.38 M12 WebGL/WebGPU 后端分离核验（2026-08-04）
+
+M12 新的硬件门运行使用 `--require-hardware-gpu`，Chrome 页面同时读取 WebGPU adapter 和 WebGL
+renderer。16 个 parity case 的 WebGPU probe 可以执行且页面错误为 0，但 adapter 回报
+`vendor=google, architecture=swiftshader`；同一页面的 WebGL renderer 回报
+`ANGLE (NVIDIA, Vulkan ... NVIDIA RTX A6000 ...)`。因此本次结论是“WebGL 硬件路径通过、WebGPU
+硬件门失败”，不能把 WebGPU 延迟、显存或 WGSL 性能写成硬件结果。输出保留在
+`neural_instance_culling/benchmark/out/m12_webgpu_parity_hkust_strong_v2_hardware_20260804/`，独立记录见
+`docs/evaluation/m12_webgpu_hardware_gate_2026-08-04.md`。
+
+从本节起，WebGL/ANGLE 采样与 WebGPU 推理分别执行硬件门；`nvidia-smi` 中出现 Chrome 进程只能作为
+辅助证据，不能替代被测 API 的实际后端字段。任何 SwiftShader、llvmpipe、softpipe、swrast 或空
+adapter 结果都必须停止正式性能汇总，不能通过删除硬件门或复用旧输出修复。统一执行规则见
+`docs/current/hardware_gpu_execution_policy.md`。
+
+### 21.39 Color-ID 采样 GPU 证据文件化（2026-08-04）
+
+为使“使用硬件 GPU 采样”成为可复核的执行事实，而不是依据输出文件或 WebGL context 的存在进行推断，
+`neural_instance_culling/sampler/run_sampler.mjs` 现在在每个分片旁保存
+`<分片>.jsonl.gpu_evidence.json`。证据包含系统 Chrome 路径、完整启动参数、页面实际 WebGL
+`gpuBackend`/`gpuGate`，以及渲染窗口内的 `nvidia-smi` 和 `nvidia-smi pmon` 快照。
+`run_scene_viewcell_colorid_sampling.mjs` 在所有分片结束后生成 `gpu_execution_summary.json`，逐分片检查
+`formalReady`；缺少系统 Chrome、非软件后端、任一 NVIDIA 证据或出现软件标记时，正式入口失败并停止汇总。
+已有但没有该证据文件的历史 JSONL 不被追认，也不能覆盖成新的正式结果。
+
+独立 HKUST smoke 使用 66°采样 FOV、4 个位置和 8 个 GLB，退出码 `0`；页面回报
+`ANGLE (NVIDIA, Vulkan ... NVIDIA RTX A6000 ...)`、`gpuGate.hardware=true`，证据中的 `nvidia-smi` 和
+`pmon` 均可读取，且 pmon 记录到 Chrome GPU 进程。该 smoke 只验证执行链，不替代正式数据集质量评价。
+Node 语法检查、`git diff --check` 和 benchmark unittest `78 tests, OK` 均通过。该规则同时同步到硬件 GPU
+政策和数据集协议，后续不得使用软件渲染填充正式采样、图像评价或 GPU 性能结果。

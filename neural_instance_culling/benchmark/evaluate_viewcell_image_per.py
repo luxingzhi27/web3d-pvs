@@ -119,7 +119,21 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Maximum view-cells to evaluate; 0 means the complete selected split.",
     )
-    parser.add_argument("--subposes-per-viewcell", type=int, default=2)
+    parser.add_argument(
+        "--subposes-per-viewcell",
+        type=int,
+        default=0,
+        help=(
+            "subposes per view-cell; 0 selects every dense subpose, a positive "
+            "value selects that many deterministic evenly spaced subposes, and "
+            "negative values are invalid"
+        ),
+    )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run the subpose selection contract checks without loading model or scene assets",
+    )
     parser.add_argument("--width", type=int, default=480)
     parser.add_argument("--height", type=int, default=270)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
@@ -140,6 +154,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--target-precision", type=float, default=0.80)
     parser.add_argument("--target-weighted-recall", type=float, default=0.99)
+    parser.add_argument(
+        "--minimum-pose-recall",
+        type=float,
+        default=None,
+        help="Optional ordinary pose-recall floor for calibrated image workpoints.",
+    )
     parser.add_argument("--froxel-grid", default="64,36,64")
     parser.add_argument("--froxel-near", type=float, default=0.05)
     parser.add_argument("--froxel-far", type=float, default=8000.0)
@@ -149,6 +169,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-every", type=int, default=1)
     parser.add_argument("--skip-raw-subpose-gt", action="store_true", help="Skip optional raw subpose labels; this does not create a formal image reference.")
     return parser.parse_args()
+
+
+def subpose_selection_self_test() -> None:
+    """Check the public zero/all and deterministic sampling contract."""
+    all_indices = ViewcellDataset.select_subpose_indices(10, 43, 0)
+    if all_indices.size != 33 or int(all_indices[0]) != 10 or int(all_indices[-1]) != 42:
+        raise AssertionError("count=0 must select all dense subposes")
+    sampled = ViewcellDataset.select_subpose_indices(10, 43, 4)
+    if sampled.tolist() != [10, 20, 31, 42]:
+        raise AssertionError(f"unexpected deterministic subpose sample: {sampled.tolist()}")
+    clipped = ViewcellDataset.select_subpose_indices(10, 13, 99)
+    if clipped.tolist() != [10, 11, 12]:
+        raise AssertionError("count greater than the available subposes must select all")
+    try:
+        ViewcellDataset.select_subpose_indices(10, 43, -1)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("negative subpose count was accepted")
+    print("view-cell dense subpose selection self-test: PASS")
 
 
 def parse_model_spec(value: str) -> tuple[str, dict[str, str]]:
@@ -379,17 +419,25 @@ class ViewcellDataset:
         end = int(self.visible_offsets[row + 1])
         return np.asarray(self.visible_ids[start:end], dtype=np.uint32), np.asarray(self.visible_weights[start:end], dtype=np.float32)
 
-    def selected_subposes(self, row: int, count: int) -> np.ndarray:
-        start = int(self.subpose_offsets[row])
-        end = int(self.subpose_offsets[row + 1])
+    @staticmethod
+    def select_subpose_indices(start: int, end: int, count: int) -> np.ndarray:
+        """Select dense subposes with an explicit zero-means-all contract."""
+        if int(count) < 0:
+            raise ValueError("subposes-per-viewcell must be non-negative; 0 means all subposes")
+        start = int(start)
+        end = int(end)
         if end <= start:
             return np.zeros((0,), dtype=np.int64)
         total = end - start
-        take = min(max(1, int(count)), total)
-        if take == total:
+        if int(count) == 0 or int(count) >= total:
             return np.arange(start, end, dtype=np.int64)
-        local = np.linspace(0, total - 1, num=take, dtype=np.int64)
+        local = np.linspace(0, total - 1, num=int(count), dtype=np.int64)
         return (start + local).astype(np.int64)
+
+    def selected_subposes(self, row: int, count: int) -> np.ndarray:
+        start = int(self.subpose_offsets[row])
+        end = int(self.subpose_offsets[row + 1])
+        return self.select_subpose_indices(start, end, count)
 
 
 def iter_jsonl(path_or_dir: Path):
@@ -726,6 +774,30 @@ def resolve_threshold(args: argparse.Namespace, spec: dict[str, str], runner) ->
             )
         return float(runner.threshold), {"source": "runner fallback", "threshold": float(runner.threshold)}
     data = read_json(Path(eval_summary))
+    # Keep the resolver compatible with older programmatic callers that build
+    # a small SimpleNamespace instead of the current argparse namespace.
+    minimum_pose_recall = getattr(args, "minimum_pose_recall", None)
+
+    def validate_frozen_workpoint(workpoint: Any, threshold: float) -> tuple[float, dict[str, Any]]:
+        if minimum_pose_recall is not None:
+            if not isinstance(workpoint, dict):
+                raise RuntimeError(
+                    f"{eval_summary} does not record the calibration workpoint needed for the "
+                    f"pose-recall floor {float(minimum_pose_recall):.3f}."
+                )
+            observed = float(workpoint.get("pose_recall", -1.0))
+            if observed < float(minimum_pose_recall):
+                raise RuntimeError(
+                    f"{eval_summary} frozen threshold {threshold} has pose_recall={observed:.6f}, "
+                    f"below required {float(minimum_pose_recall):.3f}."
+                )
+        return threshold, {
+            "source": "pre-test calibration summary; no threshold scan",
+            "threshold": threshold,
+            "protocol": data.get("protocol"),
+            "testEvaluationCount": int(data.get("testEvaluationCount", 0)),
+        }
+
     if data.get("protocol") == "calibration_ready_pre_test":
         if int(data.get("testEvaluationCount", 0)) != 0:
             raise RuntimeError(
@@ -734,12 +806,7 @@ def resolve_threshold(args: argparse.Namespace, spec: dict[str, str], runner) ->
         frozen = data.get("frozenThreshold")
         if frozen is None or not np.isfinite(float(frozen)) or not 0.0 <= float(frozen) <= 1.0:
             raise RuntimeError(f"{eval_summary} has no valid calibration frozenThreshold.")
-        return float(frozen), {
-            "source": "pre-test calibration summary; no threshold scan",
-            "threshold": float(frozen),
-            "protocol": data.get("protocol"),
-            "testEvaluationCount": 0,
-        }
+        return validate_frozen_workpoint(data.get("calibration", {}).get("selected"), float(frozen))
     if data.get("protocol") == "frozen_calibration_one_shot_test":
         if int(data.get("testEvaluationCount", 0)) != 1:
             raise RuntimeError(
@@ -748,17 +815,20 @@ def resolve_threshold(args: argparse.Namespace, spec: dict[str, str], runner) ->
         frozen = data.get("frozenThreshold")
         if frozen is None or not np.isfinite(float(frozen)) or not 0.0 <= float(frozen) <= 1.0:
             raise RuntimeError(f"{eval_summary} has no valid frozenThreshold.")
-        return float(frozen), {
-            "source": "frozen calibration summary; no threshold scan",
-            "threshold": float(frozen),
-            "protocol": data.get("protocol"),
-            "testEvaluationCount": int(data.get("testEvaluationCount")),
-        }
+        workpoint = data.get("calibration", {}).get("selected")
+        threshold, resolved = validate_frozen_workpoint(workpoint, float(frozen))
+        resolved["source"] = "frozen calibration summary; no threshold scan"
+        resolved["testEvaluationCount"] = int(data.get("testEvaluationCount"))
+        return threshold, resolved
     rows = data.get("thresholdRows") or []
     if args.threshold_policy == "runner":
         return float(runner.threshold), {"source": "runner eval_summary best", "threshold": float(runner.threshold)}
     if args.threshold_policy in {"weighted_precision", "high_recall"}:
-        workpoint = select_weighted_precision_workpoint(rows, args.target_weighted_recall)
+        workpoint = select_weighted_precision_workpoint(
+            rows,
+            args.target_weighted_recall,
+            minimum_pose_recall=minimum_pose_recall,
+        )
         if workpoint is None:
             raise RuntimeError(
                 "No threshold satisfies the strict weighted-recall rule "
@@ -766,7 +836,10 @@ def resolve_threshold(args: argparse.Namespace, spec: dict[str, str], runner) ->
             )
         threshold = float(workpoint.get("threshold", runner.threshold))
         return threshold, {
-            "source": weighted_precision_selection_rule(args.target_weighted_recall),
+            "source": weighted_precision_selection_rule(
+                args.target_weighted_recall,
+                minimum_pose_recall=minimum_pose_recall,
+            ),
             "threshold": threshold,
             "workpoint": workpoint,
         }
@@ -882,6 +955,7 @@ def run_true_glb_renderer(
     args: argparse.Namespace,
     output_dir: Path,
     manifest_samples: list[dict[str, Any]],
+    subpose_selection: dict[str, Any],
     glb_paths: dict[int, Path],
     instance_bindings: dict[str, Any],
     glb_aabbs: np.ndarray,
@@ -905,6 +979,7 @@ def run_true_glb_renderer(
         "glbIndex": str(args.glb_index.resolve()),
         "runtimeMeta": str(args.runtime_meta.resolve()),
         "selectedGlbs": selected_glbs,
+        "subposeSelection": subpose_selection,
         "reference": {
             "mode": "full_scene_renderable_instances",
             "idSource": "componentGlobalId",
@@ -982,6 +1057,9 @@ def run_true_glb_renderer(
 
 def main() -> None:
     args = parse_args()
+    if args.self_test:
+        subpose_selection_self_test()
+        return
     if len(args.model_spec) > 1:
         raise ValueError("--model-spec may be supplied at most once")
     dynamic_spec = None
@@ -1031,7 +1109,25 @@ def main() -> None:
     glb_aabbs, glb_aabb_meta = load_glb_aabbs(runtime_meta, args.glb_points_meta)
     renderer = GlbAabbColorIdRenderer(glb_aabbs, args.width, args.height, args.render_near)
 
-    chosen_subposes_by_row = {int(row): viewcells.selected_subposes(int(row), args.subposes_per_viewcell) for row in selected_rows.tolist()}
+    chosen_subposes_by_row = {
+        int(row): viewcells.selected_subposes(int(row), args.subposes_per_viewcell)
+        for row in selected_rows.tolist()
+    }
+    selected_subpose_counts = [
+        int(indices.size) for indices in chosen_subposes_by_row.values()
+    ]
+    if any(count <= 0 for count in selected_subpose_counts):
+        raise RuntimeError("selected view-cell has no dense subpose; refusing incomplete image evaluation")
+    subpose_selection = {
+        "schema": "viewcell-subpose-selection-v1",
+        "requestedPerViewcell": int(args.subposes_per_viewcell),
+        "mode": "all" if int(args.subposes_per_viewcell) == 0 else "deterministic_evenly_spaced",
+        "selectedSubposeCount": int(sum(selected_subpose_counts)),
+        "viewcellCount": int(len(selected_subpose_counts)),
+        "minPerViewcell": int(min(selected_subpose_counts)),
+        "maxPerViewcell": int(max(selected_subpose_counts)),
+        "meanPerViewcell": float(np.mean(selected_subpose_counts)),
+    }
     needed_pose_indices = {
         int(viewcells.subpose_pose_indices[subpose_index])
         for subpose_indices in chosen_subposes_by_row.values()
@@ -1234,6 +1330,7 @@ def main() -> None:
             args,
             output_dir,
             true_render_manifest_samples,
+            subpose_selection,
             glb_paths,
             instance_bindings,
             glb_aabbs,
@@ -1313,6 +1410,7 @@ def main() -> None:
         "split": args.split,
         "viewcellCount": int(selected_rows.size),
         "subposesPerViewcell": int(args.subposes_per_viewcell),
+        "subposeSelection": subpose_selection,
         "imageResolution": [int(args.width), int(args.height)],
         "componentSetMetrics": summarize_set_acc(sample_rows, "component"),
         "glbSetMetrics": summarize_set_acc(sample_rows, "glb"),

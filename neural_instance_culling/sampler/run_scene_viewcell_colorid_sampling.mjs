@@ -71,6 +71,10 @@ function lineCount(file) {
   return text.endsWith('\n') ? text.split('\n').length - 1 : text.split('\n').length;
 }
 
+function gpuEvidencePath(outputPath) {
+  return `${outputPath}.gpu_evidence.json`;
+}
+
 function makeJobs(args) {
   const outputDir = args.outputDir;
   const logDir = path.join(outputDir, 'logs');
@@ -86,11 +90,13 @@ function makeJobs(args) {
     const output = path.join(outputDir, `${args.outputPrefix}_${String(start).padStart(6, '0')}_${String(end).padStart(6, '0')}.jsonl`);
     const stdout = path.join(logDir, path.basename(output).replace(/\.jsonl$/i, '_stdout.log'));
     const stderr = path.join(logDir, path.basename(output).replace(/\.jsonl$/i, '_stderr.log'));
-    if (!args.force && fs.existsSync(output) && lineCount(output) === end - start) continue;
+    const skip = !args.force && fs.existsSync(output) && lineCount(output) === end - start;
     jobs.push({
       start,
       end,
       output,
+      gpuEvidence: gpuEvidencePath(output),
+      skip,
       stdout,
       stderr,
       command: 'node',
@@ -104,6 +110,7 @@ function makeJobs(args) {
         '--height', String(args.height),
         '--width', String(args.width),
         '--fov-y-deg', String(args.fovY),
+        '--require-hardware-gpu',
       ],
     });
     if (args.glbIdList) {
@@ -111,6 +118,47 @@ function makeJobs(args) {
     }
   }
   return jobs;
+}
+
+function writeGpuExecutionSummary(args, jobs) {
+  const evidence = jobs.map((job) => {
+    const evidencePath = gpuEvidencePath(job.output);
+    if (!fs.existsSync(evidencePath)) {
+      throw new Error(`Missing sampler GPU evidence: ${evidencePath}`);
+    }
+    const record = JSON.parse(fs.readFileSync(evidencePath, 'utf8'));
+    return {
+      output: job.output,
+      evidencePath,
+      stdout: job.stdout,
+      stderr: job.stderr,
+      poseStart: job.start,
+      poseEndExclusive: job.end,
+      formalReady: Boolean(record.formalReady),
+      gpuBackend: record.gpuBackend || null,
+      gpuGate: record.gpuGate || null,
+      hostGpuDuring: record.hostGpuDuring || null,
+      error: record.error || null,
+    };
+  });
+  const failed = evidence.filter((record) => !record.formalReady || record.error);
+  const summary = {
+    schema: 'viewcell-color-id-sampler-gpu-execution-v1',
+    formalReady: failed.length === 0,
+    scene: args.scene,
+    posePlan: args.posePlan,
+    outputDir: args.outputDir,
+    requireHardwareGpu: true,
+    jobs: evidence,
+    failureCount: failed.length,
+    capturedAt: new Date().toISOString(),
+  };
+  const output = path.join(args.outputDir, 'gpu_execution_summary.json');
+  fs.writeFileSync(output, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
+  if (!summary.formalReady) {
+    throw new Error(`Formal sampler GPU evidence failed for ${failed.length} shard(s); see ${output}`);
+  }
+  return summary;
 }
 
 async function runJobs(scene, jobs, parallel) {
@@ -121,6 +169,12 @@ async function runJobs(scene, jobs, parallel) {
     const launchNext = () => {
       while (active < parallel && cursor < jobs.length) {
         const job = jobs[cursor++];
+        if (job.skip) {
+          finished += 1;
+          console.log(`[skip] ${scene} ${job.start}-${job.end} already has a complete JSONL; GPU evidence will still be audited`);
+          if (finished >= jobs.length) resolve();
+          continue;
+        }
         active += 1;
         const out = fs.openSync(job.stdout, 'w');
         const err = fs.openSync(job.stderr, 'w');
@@ -165,11 +219,17 @@ async function main() {
     height: args.height,
     width: args.width,
     fovY: args.fovY,
+    gpuPolicy: {
+      requireHardwareGpu: true,
+      softwareOverride: 'not exposed by the formal view-cell wrapper',
+    },
     glbIdList: args.glbIdList || null,
   };
   fs.writeFileSync(path.join(args.outputDir, `${args.outputPrefix}_run_summary.json`), JSON.stringify(summary, null, 2), 'utf8');
   console.log(JSON.stringify(summary, null, 2));
   await runJobs(args.scene, jobs, summary.parallel);
+  const gpuSummary = writeGpuExecutionSummary(args, jobs);
+  console.log(JSON.stringify(gpuSummary, null, 2));
 }
 
 main().catch((error) => {

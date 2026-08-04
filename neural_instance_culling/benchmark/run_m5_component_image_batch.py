@@ -90,6 +90,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--renderer-script", type=Path, default=DEFAULT_RENDERER)
     parser.add_argument("--chrome-exe", type=Path, default=None)
     parser.add_argument("--chrome-arg", action="append", default=[])
+    parser.add_argument(
+        "--require-hardware-gpu",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="require the browser WebGL renderer to report a non-software backend (default: enabled)",
+    )
     parser.add_argument("--timeout-sec", type=int, default=1800)
     parser.add_argument(
         "--chunk-samples",
@@ -99,6 +105,17 @@ def parse_args() -> argparse.Namespace:
             "run independent browser pages with at most this many samples per "
             "source batch; zero preserves the one-page runner"
         ),
+    )
+    parser.add_argument(
+        "--max-chunk-manifest-bytes",
+        type=int,
+        default=400_000_000,
+        help="split an otherwise valid chunk until its UTF-8 manifest is below this size (default: 400 MB)",
+    )
+    parser.add_argument(
+        "--resume-existing",
+        action="store_true",
+        help="reuse completed chunk renders after verifying their sample IDs against regenerated manifests",
     )
     parser.add_argument("--preview-samples", type=int, default=8)
     parser.add_argument("--save-id-buffers", action="store_true")
@@ -348,6 +365,10 @@ def run_renderer(batch_manifest_path: Path, output_dir: Path, args: argparse.Nam
         cmd.append("--validate-only")
     if args.chrome_exe is not None:
         cmd.extend(["--chrome-exe", str(args.chrome_exe)])
+    if args.require_hardware_gpu:
+        cmd.append("--require-hardware-gpu")
+    else:
+        cmd.append("--allow-software-gpu")
     for chrome_arg in args.chrome_arg:
         cmd.extend(["--chrome-arg", str(chrome_arg)])
     proc = subprocess.run(cmd, cwd=REPO_ROOT, text=True, capture_output=True, timeout=max(30, int(args.timeout_sec)) + 30)
@@ -393,6 +414,7 @@ def build_chunk_manifests(
     batch_manifest: dict[str, Any],
     output_dir: Path,
     chunk_samples: int,
+    max_manifest_bytes: int = 400_000_000,
 ) -> list[tuple[Path, dict[str, str]]]:
     """Split samples without changing the complete scene contract.
 
@@ -410,14 +432,15 @@ def build_chunk_manifests(
         raise ValueError("batch manifest has no samples")
     chunk_root = output_dir / "chunks"
     chunk_root.mkdir(parents=True, exist_ok=True)
-    result: list[tuple[Path, dict[str, str]]] = []
-    for start in range(0, max_samples, chunk_samples):
-        chunk_number = start // chunk_samples
+    if max_manifest_bytes < 0:
+        raise ValueError("max_manifest_bytes must be non-negative")
+
+    def make_payload(start: int, limit: int, chunk_number: int) -> tuple[dict[str, Any], dict[str, str]]:
         chunk_batches: list[dict[str, Any]] = []
         batch_map: dict[str, str] = {}
         for batch in source_batches:
             original_id = str(batch["batchId"])
-            samples = (batch.get("samples") or [])[start : start + chunk_samples]
+            samples = (batch.get("samples") or [])[start : start + limit]
             if not samples:
                 continue
             chunk_id = f"{original_id}__chunk{chunk_number:04d}"
@@ -436,16 +459,66 @@ def build_chunk_manifests(
             "sourceBatchManifest": str((output_dir / "batch_manifest.json").resolve()),
             "chunkNumber": chunk_number,
             "sampleStart": start,
-            "sampleLimitPerSourceBatch": chunk_samples,
+            "sampleLimitPerSourceBatch": limit,
             "completeInventoryRetained": True,
         }
         validate_instance_render_batch_manifest(payload)
+        return payload, batch_map
+
+    result: list[tuple[Path, dict[str, str]]] = []
+    start = 0
+    chunk_number = 0
+    while start < max_samples:
+        limit = min(chunk_samples, max_samples - start)
+        while True:
+            payload, batch_map = make_payload(start, limit, chunk_number)
+            serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+            size_bytes = len(serialized.encode("utf-8"))
+            if max_manifest_bytes == 0 or size_bytes <= max_manifest_bytes:
+                break
+            if limit <= 1:
+                raise ValueError(
+                    f"single-sample chunk exceeds max manifest size: {size_bytes} > {max_manifest_bytes} bytes"
+                )
+            limit = max(1, limit // 2)
         chunk_dir = chunk_root / f"chunk_{chunk_number:04d}"
         chunk_dir.mkdir(parents=True, exist_ok=True)
         chunk_path = chunk_dir / "batch_manifest.json"
-        chunk_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        chunk_path.write_text(serialized, encoding="utf-8")
         result.append((chunk_path, batch_map))
+        start += limit
+        chunk_number += 1
     return result
+
+
+def reusable_chunk_summary(chunk_path: Path, chunk_dir: Path, resume: bool) -> dict[str, Any] | None:
+    """Reuse only a completed render whose exact batch/sample IDs still match."""
+    if not resume:
+        return None
+    summary_path = chunk_dir / "true_glb_render" / "render_summary.json"
+    metrics_path = chunk_dir / "true_glb_render" / "sample_image_metrics.json"
+    if not summary_path.is_file() or not metrics_path.is_file():
+        return None
+    summary = read_json(summary_path)
+    if summary.get("renderStatus") != "rendered_component_id_buffers":
+        return None
+    manifest = read_json(chunk_path)
+    expected = [
+        (str(batch.get("batchId") or ""), str(sample.get("sampleId") or ""))
+        for batch in manifest.get("batches") or []
+        for sample in batch.get("samples") or []
+    ]
+    rows = json.loads(metrics_path.read_text(encoding="utf-8"))
+    actual = [
+        (str(row.get("batchId") or ""), str(row.get("sampleId") or ""))
+        for row in rows
+        if isinstance(row, dict)
+    ]
+    if len(actual) != len(expected) or set(actual) != set(expected):
+        return None
+    if int(summary.get("sampleCount", -1)) != len(expected):
+        return None
+    return summary
 
 
 def run_chunked_renderer(
@@ -455,7 +528,12 @@ def run_chunked_renderer(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     """Render chunks in separate Chrome processes and aggregate pixel counts."""
-    chunk_infos = build_chunk_manifests(batch_manifest, output_dir, int(args.chunk_samples))
+    chunk_infos = build_chunk_manifests(
+        batch_manifest,
+        output_dir,
+        int(args.chunk_samples),
+        int(args.max_chunk_manifest_bytes),
+    )
     total = _empty_image_totals()
     sample_rows: list[dict[str, Any]] = []
     batch_totals: dict[str, dict[str, Any]] = {}
@@ -475,19 +553,32 @@ def run_chunked_renderer(
     }
     spatial_max = {"requiredGlbCountMax": 0, "predictionGlbCountMax": 0}
     top_missed: dict[int, dict[str, Any]] = {}
+    gpu_backend: dict[str, Any] | None = None
+    gpu_gate: dict[str, Any] | None = None
 
     for chunk_path, batch_map in chunk_infos:
         chunk_dir = chunk_path.parent
-        summary = run_renderer(chunk_path, chunk_dir, args)
+        summary = reusable_chunk_summary(chunk_path, chunk_dir, bool(args.resume_existing))
+        if summary is None:
+            summary = run_renderer(chunk_path, chunk_dir, args)
         if summary.get("renderStatus") != "rendered_component_id_buffers":
             raise RuntimeError(
                 f"M5 chunk did not complete: {chunk_path}: {summary.get('renderStatus')}"
             )
+        current_gpu_backend = summary.get("gpuBackend")
+        current_gpu_gate = summary.get("gpuGate")
+        if gpu_backend is None:
+            gpu_backend = current_gpu_backend
+            gpu_gate = current_gpu_gate
+        elif current_gpu_backend != gpu_backend or current_gpu_gate != gpu_gate:
+            raise RuntimeError("M5 chunks reported inconsistent browser GPU backends")
         chunk_summaries.append({
             "chunkNumber": len(chunk_summaries),
             "manifest": str(chunk_path),
             "outputDir": str(chunk_dir),
             "renderer": summary.get("renderer"),
+            "gpuBackend": current_gpu_backend,
+            "gpuGate": current_gpu_gate,
             "sampleCount": int(summary.get("sampleCount", 0)),
             "renderElapsedMs": float(summary.get("elapsedMs", 0.0)),
             "loadedGlbCount": int(summary.get("loadedGlbCount", 0)),
@@ -538,6 +629,8 @@ def run_chunked_renderer(
     rendered = {
         "schema": "local-true-component-id-browser-summary-v3-chunked",
         "renderer": chunk_summaries[0].get("renderer") if chunk_summaries else None,
+        "gpuBackend": gpu_backend,
+        "gpuGate": gpu_gate,
         "renderStatus": "rendered_component_id_buffers",
         "componentIdShaderImplemented": True,
         "browserInstanceReorderImplemented": False,
@@ -594,6 +687,7 @@ def run_chunked_renderer(
             "sourceBatchManifest": str(batch_manifest_path.resolve()),
             "chunkCount": len(chunk_infos),
             "sampleLimitPerSourceBatch": int(args.chunk_samples),
+            "maxManifestBytes": int(args.max_chunk_manifest_bytes),
             "completeInventoryRetained": True,
             "thresholdsUntouched": True,
         },
@@ -616,12 +710,18 @@ def main() -> None:
         return
     loaded = load_and_validate_inputs(args.input or [])
     output_dir = (args.output_dir or (BENCHMARK_DIR / "out" / "m5_component_image_batch")).resolve()
-    if output_dir.exists() and any(output_dir.iterdir()):
+    batch_manifest_path = output_dir / "batch_manifest.json"
+    if output_dir.exists() and any(output_dir.iterdir()) and not args.resume_existing:
         raise FileExistsError(f"refusing to overwrite non-empty output directory: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    batch_manifest = build_batch_manifest(loaded, args)
-    batch_manifest_path = output_dir / "batch_manifest.json"
-    batch_manifest_path.write_text(json.dumps(batch_manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    if args.resume_existing:
+        if not batch_manifest_path.is_file():
+            raise FileNotFoundError(f"resume requires existing batch manifest: {batch_manifest_path}")
+        batch_manifest = read_json(batch_manifest_path)
+        validate_instance_render_batch_manifest(batch_manifest)
+    else:
+        batch_manifest = build_batch_manifest(loaded, args)
+        batch_manifest_path.write_text(json.dumps(batch_manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     if int(args.chunk_samples) > 0:
         render_summary = run_chunked_renderer(batch_manifest, batch_manifest_path, output_dir, args)
     else:

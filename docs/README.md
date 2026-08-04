@@ -2,7 +2,7 @@
 
 本目录只保留当前运行版本、通用评价口径、前端接入记录、实验记录和当前汇报图示。旧 fixed-geo、contextual U-Net、dynamic-pool、screen-grid、topology、hypergraph、froxel 等实验报告已从当前目录清理，避免后续误读为主线；dynamic-pool 只在阶段总结中作为历史演进背景出现。
 
-截至 2026-07-31，当前事实以本索引、`current/repository_layout_2026-07-31.md`、`current/current_instance_pvs_versions.md` 和 `slm2viewer/assets/config.json` 为准。子目录 README 只提供操作入口，不替代这些当前状态文档。
+截至 2026-08-04，当前事实以本索引、`current/repository_layout_2026-07-31.md`、`current/current_instance_pvs_versions.md`、`current/hardware_gpu_execution_policy.md` 和 `slm2viewer/assets/config.json` 为准。子目录 README 只提供操作入口，不替代这些当前状态文档。
 
 ## 快速阅读路径
 
@@ -55,6 +55,21 @@
 47. M4 注册输入分支消融矩阵 validation 评价与路线判定：`evaluation/m4_formal_matrix_validation_2026-08-02.md`
 48. M4-v2 完整 2x2 因子消融协议与独立评价：`experiments/m4_formal_matrix_validation_v2_protocol_2026-08-03.md`；正式报告：`evaluation/m4_formal_matrix_validation_v2_2026-08-03.md`；路线判定为 `route_b_system`
 49. M5 视觉安全修复分块图像评价：`evaluation/m5_visual_safety_repair_image_chunked_2026-08-03.md`；完整 validation/calibration 结果仍为 `No-Go`
+50. M5 硬件 GPU 渲染路径、Chrome Vulkan 参数和软件回退硬门：`evaluation/m5_hardware_gpu_renderer_2026-08-04.md`
+51. M5 全量 dense subpose 硬件 GPU 图像评价：`evaluation/m5_visual_safety_repair_image_dense_hw_2026-08-04.md`；536,256 个 validation/calibration 样本，硬件门通过，视觉安全门为 `No-Go`
+
+52. 当前正式采样/浏览器光栅化硬件 GPU 执行政策：`current/hardware_gpu_execution_policy.md`
+53. M5 dense subpose 鲁棒监督实验协议：`experiments/m5_subpose_robust_supervision_protocol_2026-08-04.md`
+54. M5 dense subpose 鲁棒监督独立图像评价入口：`neural_instance_culling/benchmark/run_m5_subpose_robust_image_evaluation.sh`；结果目录为 `neural_instance_culling/benchmark/out/m5_subpose_robust_image_dense_hw_20260804/`
+55. M7/M8 同轨迹配对 bootstrap 汇总：`evaluation/m7_m8_trajectory_paired_bootstrap_v2_2026-08-04.md`；独立结果为 `neural_instance_culling/benchmark/out/m7_m8_trajectory_paired_bootstrap_v2_20260804.json`
+56. M5-v2 dense subpose 严格汇总器：`neural_instance_culling/benchmark/summarize_m5_subpose_robust_image.py`；它强制校验硬件 GPU、严格 calibration 和 `testRead=false`，不允许软件渲染结果进入正式汇总
+
+正式采样和图像评价的 GPU 规则：默认必须使用 Chrome 的硬件 Vulkan/NVIDIA 后端，并开启 `--require-hardware-gpu`；结果必须同时保存浏览器 `gpuBackend`/`gpuGate`、Chrome 日志和同一窗口的 `nvidia-smi`/`pmon` 证据。检测到 SwiftShader、llvmpipe、softpipe、swrast 或缺少硬件证据时，只能作为语义调试/历史结果，不能进入硬件性能结论。完整规则见 `current/hardware_gpu_execution_policy.md`。
+注意：WebGL 的硬件门不等于 WebGPU 的硬件门。WebGPU 推理或 WGSL 性能实验必须读取并单独核验 WebGPU adapter；若两种 API 的后端不一致，按 API 分别报告，不能用 WebGL 的 NVIDIA 证据替代 WebGPU 证据。
+
+57. M12 WebGPU 硬件门核验：`evaluation/m12_webgpu_hardware_gate_2026-08-04.md`；本次 WebGL 硬件路径通过，但 WebGPU adapter 为 SwiftShader，因此硬件 WebGPU 性能门失败
+58. M11 泛化矩阵审计：`evaluation/m11_generalization_matrix_2026-08-04.md`；航向与少样本结果已整理，但严格普通召回安全门未封存为通过
+59. M6 三角形 HZB 硬件链路 smoke：`evaluation/m6_hardware_gpu_renderer_2026-08-04.md`；硬件 WebGL 子门通过，完整 M6 仍为 No-Go
 
 ## 当前场景
 

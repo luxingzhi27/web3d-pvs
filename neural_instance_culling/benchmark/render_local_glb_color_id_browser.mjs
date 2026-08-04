@@ -37,6 +37,12 @@ function parseArgs(argv) {
     validateOnly: false,
     syntheticRenderSmoke: false,
     chromeArgs: [],
+    browserMode: process.env.PVS_BROWSER_MODE || 'headless',
+    // Formal image rendering must fail closed when Chrome selects SwiftShader
+    // or another software backend. Use --allow-software-gpu only for explicit
+    // semantic debugging.
+    requireHardwareGpu: true,
+    display: process.env.DISPLAY || '',
   };
   for (let i = 2; i < argv.length; i += 1) {
     const key = argv[i];
@@ -49,6 +55,22 @@ function parseArgs(argv) {
       args.syntheticRenderSmoke = true;
       continue;
     }
+    if (key === '--headed') {
+      args.browserMode = 'headed';
+      continue;
+    }
+    if (key === '--headless') {
+      args.browserMode = 'headless';
+      continue;
+    }
+    if (key === '--require-hardware-gpu') {
+      args.requireHardwareGpu = true;
+      continue;
+    }
+    if (key === '--allow-software-gpu') {
+      args.requireHardwareGpu = false;
+      continue;
+    }
     const value = argv[i + 1];
     i += 1;
     if (key === '--manifest') args.manifest = path.resolve(value);
@@ -56,11 +78,29 @@ function parseArgs(argv) {
     else if (key === '--chrome-exe') args.chromeExe = path.resolve(value);
     else if (key === '--port') args.port = Number(value);
     else if (key === '--timeout-ms') args.timeoutMs = Number(value);
+    else if (key === '--browser-mode') args.browserMode = String(value);
+    else if (key === '--display') args.display = String(value);
     else if (key === '--chrome-arg') args.chromeArgs.push(String(value));
   }
   if (!args.manifest) throw new Error('--manifest is required');
   if (!args.outputDir) throw new Error('--output-dir is required');
+  if (!['headless', 'headed'].includes(args.browserMode)) {
+    throw new Error(`--browser-mode must be headless or headed, got ${args.browserMode}`);
+  }
   return args;
+}
+
+function classifyGpuBackend(gpuBackend) {
+  const value = gpuBackend && typeof gpuBackend === 'object' ? gpuBackend : {};
+  const text = [value.vendor, value.renderer, value.version].filter(Boolean).join(' ');
+  const softwarePattern = /swiftshader|llvmpipe|softpipe|swrast|software(?:\s+webgl|\s+rasterizer)?|no-webgl/i;
+  return {
+    vendor: String(value.vendor || ''),
+    renderer: String(value.renderer || ''),
+    version: String(value.version || ''),
+    hardware: Boolean(text) && !softwarePattern.test(text),
+    softwareMarkers: text.match(softwarePattern)?.[0] || null,
+  };
 }
 
 function validateInstanceRenderManifest(manifest) {
@@ -441,6 +481,15 @@ async function main() {
   renderer.setClearColor(0x000000, 0);
   renderer.toneMapping = THREE.NoToneMapping;
   document.body.appendChild(renderer.domElement);
+  const gl = renderer.getContext();
+  const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+  const gpuBackend = {
+    api: 'WebGL',
+    vendor: debugInfo ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
+    renderer: debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+    version: gl.getParameter(gl.VERSION),
+  };
+  status('WebGL backend vendor="' + gpuBackend.vendor + '" renderer="' + gpuBackend.renderer + '"');
   const target = new THREE.WebGLRenderTarget(width, height, { depthBuffer: true, stencilBuffer: false });
   if (target.texture && 'colorSpace' in target.texture && THREE.NoColorSpace !== undefined) target.texture.colorSpace = THREE.NoColorSpace;
   const scene = new THREE.Scene();
@@ -487,6 +536,7 @@ async function main() {
       formalImageEvaluationReady: false,
       browserInstanceReorderImplemented: false,
       synthetic: true,
+      gpuBackend,
       renderFovYDeg: 60,
       width,
       height,
@@ -905,6 +955,15 @@ async function main() {
   renderer.setClearColor(0x000000, 0);
   renderer.toneMapping = THREE.NoToneMapping;
   document.body.appendChild(renderer.domElement);
+  const gl = renderer.getContext();
+  const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+  const gpuBackend = {
+    api: 'WebGL',
+    vendor: debugInfo ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
+    renderer: debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+    version: gl.getParameter(gl.VERSION),
+  };
+  status('WebGL backend vendor="' + gpuBackend.vendor + '" renderer="' + gpuBackend.renderer + '"');
   const target = new THREE.WebGLRenderTarget(width, height, {
     format: THREE.RGBAFormat,
     type: THREE.UnsignedByteType,
@@ -1222,6 +1281,7 @@ async function main() {
     componentIdShaderImplemented: true,
     browserInstanceReorderImplemented: false,
     formalImageEvaluationReady: false,
+    gpuBackend,
     renderFovYDeg: 60,
     selectedGlbCount: selected.length,
     sampleCount: samples.length,
@@ -1366,11 +1426,22 @@ async function main() {
       }
       if (req.method === 'POST' && url.pathname === '/done') {
         const body = JSON.parse((await readBody(req)).toString('utf8'));
+        if (args.requireHardwareGpu) {
+          const gpuGate = classifyGpuBackend(body.gpuBackend);
+          body.gpuGate = {
+            required: true,
+            ...gpuGate,
+          };
+          if (!gpuGate.hardware && !body.error) {
+            body.error = `hardware GPU required, browser reported ${gpuGate.renderer || 'no WebGL renderer'}`;
+            body.renderStatus = 'failed_hardware_gpu_gate';
+          }
+        }
         fs.writeFileSync(path.join(args.outputDir, 'render_summary.json'), JSON.stringify(body, null, 2), 'utf8');
         fs.writeFileSync(path.join(args.outputDir, 'browser_logs.json'), JSON.stringify(logs, null, 2), 'utf8');
         if (body.error) doneReject(new Error(body.error));
         else doneResolve(body);
-        return writeJson(res, { ok: true });
+        return writeJson(res, { ok: !body.error, error: body.error || null }, body.error ? 409 : 200);
       }
       writeJson(res, { error: 'not found' }, 404);
     } catch (error) {
@@ -1380,21 +1451,31 @@ async function main() {
   await new Promise((resolve) => server.listen(args.port, '127.0.0.1', resolve));
   const port = server.address().port;
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pvs-color-id-chrome-'));
+  if (args.requireHardwareGpu && args.chromeArgs.some((value) => /swiftshader|disable-gpu/i.test(value))) {
+    throw new Error('--require-hardware-gpu cannot be combined with SwiftShader or --disable-gpu');
+  }
   const chromeArgs = [
-    '--headless=new',
+    ...(args.browserMode === 'headless' ? ['--headless=new'] : []),
     '--no-first-run',
     '--disable-background-networking',
     '--disable-extensions',
     '--hide-scrollbars',
     '--mute-audio',
+    '--enable-gpu',
     '--enable-webgl',
     '--ignore-gpu-blocklist',
+    '--use-angle=vulkan',
+    '--enable-accelerated-2d-canvas',
+    '--enable-zero-copy',
+    ...(args.requireHardwareGpu ? ['--disable-software-rasterizer'] : []),
     ...args.chromeArgs,
     `--user-data-dir=${userDataDir}`,
     `http://127.0.0.1:${port}/`,
   ];
   console.log(`[true-glb-render] launching ${chromeExe}`);
-  const chrome = spawn(chromeExe, chromeArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const chromeEnv = { ...process.env };
+  if (args.display) chromeEnv.DISPLAY = args.display;
+  const chrome = spawn(chromeExe, chromeArgs, { env: chromeEnv, stdio: ['ignore', 'pipe', 'pipe'] });
   chrome.stdout.on('data', (chunk) => process.stdout.write(chunk));
   chrome.stderr.on('data', (chunk) => process.stderr.write(chunk));
   const timer = setTimeout(() => doneReject(new Error(`renderer timeout after ${args.timeoutMs} ms`)), args.timeoutMs);

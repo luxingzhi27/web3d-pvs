@@ -26,6 +26,9 @@ function parseArgs(argv) {
     debugStages: false,
     executablePath: process.env.CHROME_PATH || process.env.CHROMIUM_PATH || null,
     timeoutMs: 180000,
+    // Formal parity must prove the browser selected a hardware adapter.  The
+    // software opt-out is retained only for historical semantic debugging.
+    requireHardwareGpu: true,
   };
   const valueOptions = new Set(['cases', 'out', 'port', 'url', 'executable-path', 'timeout-ms']);
   for (let i = 0; i < argv.length; i += 1) {
@@ -33,6 +36,8 @@ function parseArgs(argv) {
     if (token === '--start-server') { options.startServer = true; continue; }
     if (token === '--headed') { options.headed = true; continue; }
     if (token === '--debug-stages') { options.debugStages = true; continue; }
+    if (token === '--require-hardware-gpu') { options.requireHardwareGpu = true; continue; }
+    if (token === '--allow-software-gpu') { options.requireHardwareGpu = false; continue; }
     if (token === '--help' || token === '-h') { options.help = true; continue; }
     const equal = token.indexOf('=');
     const name = token.slice(0, equal >= 0 ? equal : undefined).replace(/^--/, '');
@@ -52,7 +57,27 @@ function parseArgs(argv) {
 }
 
 function usage() {
-  return 'node scripts/benchmark_m12_webgpu_parity.mjs --start-server --cases PATH --out PATH';
+  return 'node scripts/benchmark_m12_webgpu_parity.mjs --start-server --cases PATH --out PATH [--require-hardware-gpu|--allow-software-gpu]';
+}
+
+function classifyGpuBackend(adapterInfo, webglBackend) {
+  const adapter = adapterInfo && typeof adapterInfo === 'object' ? adapterInfo : {};
+  const webgl = webglBackend && typeof webglBackend === 'object' ? webglBackend : {};
+  const text = [
+    adapter.vendor,
+    adapter.architecture,
+    adapter.device,
+    adapter.description,
+    webgl.vendor,
+    webgl.renderer,
+    webgl.version,
+  ].filter(Boolean).join(' ');
+  const softwarePattern = /swiftshader|llvmpipe|softpipe|swrast|software(?:\s+webgpu|\s+webgl|\s+rasterizer)?|no-webgpu|no-webgl/i;
+  return {
+    hardware: Boolean(text) && !softwarePattern.test(text),
+    softwareMarkers: text.match(softwarePattern)?.[0] || null,
+    evidenceText: text,
+  };
 }
 
 function loadPlaywright() {
@@ -125,7 +150,19 @@ async function main() {
     const launchOptions = {
       headless: !options.headed,
       ...(executablePath ? { executablePath } : {}),
-      args: ['--enable-unsafe-webgpu', '--ignore-gpu-blocklist', '--disable-gpu-sandbox', '--no-sandbox'],
+      args: [
+        '--enable-unsafe-webgpu',
+        '--enable-gpu',
+        '--enable-webgpu',
+        '--enable-webgl',
+        '--use-angle=vulkan',
+        '--enable-accelerated-2d-canvas',
+        '--enable-zero-copy',
+        '--ignore-gpu-blocklist',
+        ...(options.requireHardwareGpu ? ['--disable-software-rasterizer'] : []),
+        '--disable-gpu-sandbox',
+        '--no-sandbox',
+      ],
     };
     browser = await playwright.chromium.launch(launchOptions);
     const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
@@ -158,15 +195,38 @@ async function main() {
           description: adapter.info.description || null,
         } : null;
       } catch (_) { /* adapter metadata is optional */ }
-      return { probe, adapterInfo };
+      let webglBackend = null;
+      try {
+        const canvas = document.createElement('canvas');
+        const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+        const extension = gl?.getExtension('WEBGL_debug_renderer_info');
+        webglBackend = gl ? {
+          vendor: extension ? gl.getParameter(extension.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
+          renderer: extension ? gl.getParameter(extension.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+          version: gl.getParameter(gl.VERSION),
+        } : null;
+      } catch (_) { /* WebGL evidence is optional for the WebGPU parity probe. */ }
+      return { probe, adapterInfo, webglBackend };
     }, { probeCases: cases, debugStages: options.debugStages });
+    const gpuGate = {
+      required: options.requireHardwareGpu,
+      ...classifyGpuBackend(result.adapterInfo, result.webglBackend),
+    };
     const payload = {
       schema: 'm12-webgpu-parity-capture-v1',
       cases: options.cases,
       capturedAt: new Date().toISOString(),
-      browser: { version: browser.version(), executablePath: executablePath || 'playwright-managed', headless: !options.headed, launchArgs: launchOptions.args },
+      browser: {
+        version: browser.version(),
+        executablePath: executablePath || 'playwright-managed',
+        headless: !options.headed,
+        launchArgs: launchOptions.args,
+        requireHardwareGpu: options.requireHardwareGpu,
+      },
       frontendReady: ready,
       adapterInfo: result.adapterInfo,
+      webglBackend: result.webglBackend,
+      gpuGate,
       pageErrors,
       debugStages: options.debugStages,
       probe: result.probe,
@@ -174,6 +234,10 @@ async function main() {
     fs.mkdirSync(path.dirname(options.out), { recursive: true });
     fs.writeFileSync(options.out, JSON.stringify(payload, null, 2) + '\n');
     console.log(JSON.stringify({ output: options.out, backend: result.probe?.backend, cases: result.probe?.results?.length || 0, pageErrors: pageErrors.length }, null, 2));
+    if (options.requireHardwareGpu && !gpuGate.hardware) {
+      console.error(`[m12-webgpu-parity] hardware GPU required, evidence=${gpuGate.evidenceText || 'none'}`);
+      process.exitCode = 2;
+    }
     if (String(result.probe?.backend || '') !== 'webgpu') process.exitCode = 2;
   } finally {
     if (browser) await browser.close().catch(() => {});

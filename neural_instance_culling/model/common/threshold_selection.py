@@ -45,6 +45,7 @@ def weighted_recall_safe_rows(
     target_weighted_recall: float = DEFAULT_TARGET_WEIGHTED_RECALL,
     minimum_point_estimate: float | None = None,
     minimum_lower_confidence_bound: float | None = None,
+    minimum_pose_recall: float | None = None,
 ) -> list[dict[str, Any]]:
     """Return rows that strictly satisfy the weighted-recall safety target."""
     target = float(target_weighted_recall)
@@ -61,6 +62,10 @@ def weighted_recall_safe_rows(
             or float(row.get("weighted_recall_lower_confidence_bound", -1.0))
             > float(minimum_lower_confidence_bound)
         )
+        and (
+            minimum_pose_recall is None
+            or float(row.get("pose_recall", -1.0)) >= float(minimum_pose_recall)
+        )
     ]
 
 
@@ -69,6 +74,7 @@ def select_weighted_precision_workpoint(
     target_weighted_recall: float = DEFAULT_TARGET_WEIGHTED_RECALL,
     minimum_point_estimate: float | None = None,
     minimum_lower_confidence_bound: float | None = None,
+    minimum_pose_recall: float | None = None,
 ) -> dict[str, Any] | None:
     """Select the highest pose-precision row after the strict safety filter."""
     safe = weighted_recall_safe_rows(
@@ -76,6 +82,7 @@ def select_weighted_precision_workpoint(
         target_weighted_recall,
         minimum_point_estimate=minimum_point_estimate,
         minimum_lower_confidence_bound=minimum_lower_confidence_bound,
+        minimum_pose_recall=minimum_pose_recall,
     )
     if not safe:
         return None
@@ -109,12 +116,15 @@ def weighted_precision_selection_rule(
     target_weighted_recall: float = DEFAULT_TARGET_WEIGHTED_RECALL,
     minimum_point_estimate: float | None = None,
     minimum_lower_confidence_bound: float | None = None,
+    minimum_pose_recall: float | None = None,
 ) -> str:
     safety = f"pose_weighted_recall > {float(target_weighted_recall):.3f}"
     if minimum_point_estimate is not None:
         safety += f" and point estimate >= {float(minimum_point_estimate):.4f}"
     if minimum_lower_confidence_bound is not None:
         safety += f" and one-sided lower bound > {float(minimum_lower_confidence_bound):.3f}"
+    if minimum_pose_recall is not None:
+        safety += f" and pose_recall >= {float(minimum_pose_recall):.3f}"
     return (
         safety + "; "
         "among safe rows maximize pose_precision, then pose_f1, weighted_recall, and minimize avg_pred_count"

@@ -4,6 +4,14 @@
 依据：[neuralstreamweb3d_submission_plan_2026-09.md](neuralstreamweb3d_submission_plan_2026-09.md)
 状态：执行中，尚未形成可投稿结论
 
+## 2026-08-04 硬件 GPU 执行口径
+
+当前正式 Color-ID 采样、M5 实例级图像评价和三角形 HZB 浏览器构建必须通过 Chrome 的硬件 Vulkan/NVIDIA 门；出现 `SwiftShader`、`llvmpipe`、`softpipe`、`swrast`、空 renderer 或无法核验后端时，任务必须失败并停止汇总。正式结果需要同时保存页面 `gpuBackend`/`gpuGate`、Chrome 日志和同时间段的 `nvidia-smi` 与 `nvidia-smi pmon` 证据。`--allow-software-gpu` 仅用于小规模语义调试，不能重建正式数据集、填写 GPU/浏览器性能或覆盖硬件输出目录。
+
+WebGL 与 WebGPU 分别核验：WebGL 页面回报 NVIDIA 只证明采样/Color-ID 的 WebGL 光栅化路径，不能替代 WebGPU adapter 的硬件证据。WebGPU/WGSL 实验必须单独读取 adapter；若 WebGPU 仍回报 SwiftShader，则只记录 WebGL 硬件通过、WebGPU 硬件门失败。详细执行规则见 `docs/current/hardware_gpu_execution_policy.md`。
+
+M12 独立探针进一步测试了当前 Vulkan 参数、`--use-vulkan`/`Vulkan` feature 和高性能 GPU 参数组合，三种 headless Chrome 组合均回报 WebGL NVIDIA RTX A6000、WebGPU `google/swiftshader`。该排查未修改正式输出，也未放宽硬件门；M12 仍只能作为数值 parity 子门通过、WebGPU 硬件性能门失败。
+
 ## 记录规则
 
 本文件只记录已经由当前工作区、日志、模型产物或可复核脚本证明的状态。计划中的目标不作为实验结果；探索性结果、失败结果和正式结果分别标记。任何阈值、checkpoint、候选集合、图像评价和设备结论都必须能追溯到具体文件、命令和数据哈希。
@@ -967,3 +975,32 @@ conda run --no-capture-output -n slm_pvs python -u \
 validation 像素合并 miss-pixel rate 为 `0.8837%`，逐 view-cell 均值为 `0.8958%`，p95 为 `6.0033%`；calibration 对应为 `0.6920%`、`0.6487%` 和 `5.0171%`。预注册门槛为 mean `<0.5%`、p95 `<1%`，因此 M5 视觉安全门仍为 `No-Go`。分块机制和实例 AABB 缺失时的 fail-open 修复保留为评价器正确性改进，但不能把 SwiftShader 浏览器结果解释为硬件 GPU 或移动设备性能，也不能修改默认模型、阈值、候选集合或前端资产。详细结果见 `docs/evaluation/m5_visual_safety_repair_image_chunked_2026-08-03.md`。
 
 浏览器任务结束后在空闲环境重跑 benchmark 回归套件，结果为 `63 tests, OK`；M4-v2 summary/route schema、候选摘要、分块样本数量和 `testRead=false` 自检均通过，Node 语法检查和 `git diff --check` 通过。
+
+### 2026-08-04 采样硬件 GPU 证据闭环
+
+为避免后续把软件光栅化误记为 GPU 采样，Color-ID 采样入口完成了证据链补强。单分片
+`run_sampler.mjs` 现在固定使用系统 Chrome 的 Vulkan/ANGLE 启动参数，要求页面回报非软件 WebGL 后端，并在
+采样结果旁保存 `*.gpu_evidence.json`；view-cell 分片入口在完成后写出 `gpu_execution_summary.json`，逐分片检查
+`gpuBackend`、`gpuGate`、Chrome 参数以及同一执行窗口的 `nvidia-smi`/`nvidia-smi pmon`。正式模式缺少系统 Chrome、
+硬件后端、任一 NVIDIA 快照或检测到 SwiftShader/llvmpipe/softpipe/swrast 时直接失败，不会继续生成可被误用的
+正式 GPU 采样汇总。已有但没有这些证据的历史 JSONL 不被追认，重新采样必须使用独立输出目录。
+
+本机硬件复核结果为 NVIDIA RTX A6000；已有硬件浏览器评价回报
+`ANGLE (NVIDIA, Vulkan ... NVIDIA RTX A6000 ...)` 且 `gpuGate.hardware=true`。这证明当前 Color-ID/WebGL
+路径可以使用硬件 GPU，但不替代 WebGPU adapter 的独立硬件门；WebGPU 仍按单独报告处理。该规则同步写入
+`AGENTS.md`、`docs/current/hardware_gpu_execution_policy.md` 和数据集协议，后续采样、图像评价与 HZB 构建不得
+通过“能创建 WebGL context”或“有输出文件”作为 GPU 依据。
+
+本次不覆盖任何正式数据的独立 smoke 命令为：
+
+```bash
+node neural_instance_culling/sampler/run_sampler.mjs \
+  --assets-dir hkust-v3/assets \
+  --output /tmp/slm_sampler_gpu_smoke.<run>/instance_vis_samples.jsonl \
+  --smoke --require-hardware-gpu
+```
+
+该 smoke 采样 4 个位置、加载 8 个 GLB，使用模型/采样 FOV `66°`，退出码为 `0`。旁路证据中的
+`formalReady=true`、`gpuGate.hardware=true`，页面 renderer 为
+`ANGLE (NVIDIA, Vulkan 1.3.242 ... NVIDIA RTX A6000 ...)`，`nvidia-smi` 与 `nvidia-smi pmon` 均可读取；
+后者在采样窗口记录到 Chrome GPU 进程。该结果只验证执行链，不替代正式数据集质量评价。

@@ -396,6 +396,12 @@ async function runInstanceSampler(options = {}) {
     loadedGlbSubset,
     avgVisible: visibleSum / Math.max(1, poses.length),
     elapsedMs: performance.now() - startedAt,
+    gpuBackend: {
+      api: 'WebGL',
+      vendor: webglVendor,
+      renderer: webglRenderer,
+      version: gl.getParameter(gl.VERSION),
+    },
   };
 }
 

@@ -20,6 +20,9 @@
 - 文档和新脚本中的可复现命令默认使用 Linux shell 口径，例如 `conda run -n slm_pvs python ... --device cuda`。
 - 如果必须保留历史 Windows/ROCm 命令，只能放在历史说明中并明确标注“历史迁移前命令，不作为当前推荐运行方式”。
 - 长时间训练、导出和 benchmark 仍必须写入明确 stdout/stderr 日志；Linux 下推荐使用 `> train_stdout.log 2> train_stderr.log` 或等价的日志方案。
+- 正式浏览器采样、实例级 Color-ID 图像评价和三角形 HZB 光栅化必须使用 Chrome 的硬件 GPU 路径，默认开启 `--use-angle=vulkan` 与 `--disable-software-rasterizer`，并保存页面 `gpuBackend`、`gpuGate` 以及同一执行窗口的 `nvidia-smi`/`pmon` 证据。检测到 SwiftShader、llvmpipe、softpipe、swrast 或无法确认后端时必须失败；只有显式 `--allow-software-gpu` 的小规模语义调试可以使用软件后端，不能进入正式数据集、GPU 性能或移动端性能结论。详细政策见 `docs/current/hardware_gpu_execution_policy.md`。
+- WebGL/ANGLE 与 WebGPU adapter 是两条独立的硬件证据链：WebGL 回报 NVIDIA 不能替代 WebGPU adapter 核验，`nvidia-smi` 中出现 Chrome 进程也不能替代被测 API 的后端字段。凡是 WebGPU/WGSL 性能实验都必须单独读取 adapter；若 adapter 回报 SwiftShader 或其他软件后端，必须停止硬件性能汇总。
+- Color-ID 正式采样还必须保留分片旁的 `*.jsonl.gpu_evidence.json` 和 view-cell 总目录的 `gpu_execution_summary.json`；其中要有页面 `gpuBackend`/`gpuGate`、Chrome 参数及同一窗口的 `nvidia-smi`/`pmon`。没有这些证据的历史 JSONL 不能追认为硬件采样。
 
 ## 1.2 当前核心研究目标
 

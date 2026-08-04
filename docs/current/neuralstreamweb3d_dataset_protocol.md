@@ -1,6 +1,6 @@
 # NeuralStreamWeb3D 数据集与采样协议
 
-更新时间：2026-07-31
+更新时间：2026-08-04
 
 本文定义当前训练数据如何从场景资产生成，以及每个二进制文件的语义。核心目标是让采样语义和 NeuralPVS 的 view-cell 思路一致：一个 view-cell 固定相机朝向和视场，在局部空间盒内随机生成多个位置不同但方向相同的子相机，最终可见集合取这些子相机结果的并集。
 
@@ -32,7 +32,7 @@
 
 ## 3. Color-ID 光栅化
 
-当前没有把 rvcServer 作为所有场景的必要依赖。Three.js Color-ID 采样器为每个实例分配可解码颜色，在离屏画布上使用 GPU 或 CPU 后端进行光栅化。读取颜色缓冲后，统计每个实例出现的像素数，并将结果写入 JSONL。
+当前没有把 rvcServer 作为所有场景的必要依赖。正式数据集采样使用 Three.js Color-ID 采样器在浏览器硬件 GPU 上进行离屏光栅化：每个实例分配一个可解码颜色，GPU 将颜色写入离屏缓冲，CPU 只负责资源加载、相机组织和颜色统计。采样器默认启用硬件 GPU 门，必须回报非软件 WebGL 后端；检测到 SwiftShader、llvmpipe、softpipe、swrast 或无法确认后端时直接失败。只有显式传入 `--allow-software-gpu` 才能进行非正式语义调试，这类输出不能作为正式采样性能或硬件 GPU 证据。
 
 每条原始采样记录通常包含：
 
@@ -44,7 +44,15 @@
 
 Color-ID 的权重可以用于视觉重要性监督，但它不是深度缓冲，也不能表达实例之间的遮挡深度。当前方向遮挡证据由后续离线几何投影步骤构建，而不是从 Color-ID 颜色计数直接推断。
 
-采样脚本支持按 pose plan 分片并行执行，每个分片独立写 JSONL、stdout 和 stderr 日志。运行前要确保不同分片的 `pose_index` 不重叠，运行后要检查每个分片行数与计划范围一致。
+### 3.1 正式硬件 GPU 门
+
+正式采样、实例级 Color-ID 图像评价和浏览器三角形 HZB 构建都必须使用 Chrome 的硬件 Vulkan/NVIDIA 光栅化路径。入口默认带有 `--enable-gpu`、`--enable-webgl`、`--use-angle=vulkan`、`--enable-accelerated-2d-canvas`、`--enable-zero-copy` 和 `--disable-software-rasterizer`；页面必须通过 `WEBGL_debug_renderer_info` 回报实际 vendor、renderer 和 version。
+
+任何出现 `SwiftShader`、`llvmpipe`、`softpipe`、`swrast`、软件光栅化标记或无法确认后端的运行，都必须直接失败，不能继续生成或汇总为正式数据集、图像性能或 GPU 性能结果。正式摘要必须同时保存 `gpuBackend`、`gpuGate`、Chrome stdout/stderr，以及对应时间段的 `nvidia-smi` 和 `nvidia-smi pmon` 证据。`run_sampler.mjs` 会在每个分片旁写出 `<分片>.jsonl.gpu_evidence.json`，view-cell wrapper 会进一步写出 `gpu_execution_summary.json` 并逐分片复核；缺少任一证据时不得把采样标记为正式硬件结果。只有显式传入 `--allow-software-gpu` 的小规模语义调试才允许放宽硬件门；该结果必须标记为非正式，不能覆盖正式输出。
+
+完整的命令、证据清单和故障处理见 [`hardware_gpu_execution_policy.md`](hardware_gpu_execution_policy.md)。
+
+采样脚本支持按 pose plan 分片并行执行，每个分片独立写 JSONL、GPU 证据、stdout 和 stderr 日志。运行前要确保不同分片的 `pose_index` 不重叠，运行后要同时检查每个分片行数与计划范围一致，以及 `gpu_execution_summary.json` 的 `formalReady=true`。
 
 ## 4. 从 subpose 聚合到 view-cell
 

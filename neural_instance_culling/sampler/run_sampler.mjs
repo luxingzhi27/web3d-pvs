@@ -12,12 +12,15 @@
  * 重要参数：
  *   --grid-step 控制 XZ 采样密度；--width/--height 控制离屏 tile 分辨率；
  *   --yaws/--pitches 控制每个位置采样多少方向；--smoke 用于小规模测试。
+ *   默认要求浏览器回报硬件 WebGL 后端；只有显式传入 --allow-software-gpu
+ *   才允许软件后端进行非正式语义调试。
  *   完整参数表见 INSTANCE_PVS_SCENE_MIGRATION_GUIDE.md 的“14.2 GPU Color-ID 备用采样器参数”。
  */
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import readline from 'node:readline';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { MODEL_FOV_Y_DEG } from './neuralpvs_fov_protocol.mjs';
 
@@ -71,6 +74,7 @@ function parseArgs(argv) {
     roadMinNeighbors: 2,
     headless: true,
     smoke: false,
+    requireHardwareGpu: true,
   };
   for (let i = 2; i < argv.length; i += 1) {
     const key = argv[i];
@@ -93,6 +97,14 @@ function parseArgs(argv) {
       args.maxGlbs = 8;
       args.gridStep = 500;
       args.directionTilesPerAtlas = 36;
+      continue;
+    }
+    if (key === '--require-hardware-gpu' || key === '--no-allow-software-gpu') {
+      args.requireHardwareGpu = true;
+      continue;
+    }
+    if (key === '--allow-software-gpu' || key === '--no-require-hardware-gpu') {
+      args.requireHardwareGpu = false;
       continue;
     }
     const value = argv[i + 1];
@@ -241,6 +253,57 @@ function readNumericIdList(filePath) {
   return Array.from(new Set(values));
 }
 
+function classifyGpuBackend(gpuBackend) {
+  const value = gpuBackend && typeof gpuBackend === 'object' ? gpuBackend : {};
+  const text = [value.vendor, value.renderer, value.version].filter(Boolean).join(' ');
+  const softwarePattern = /swiftshader|llvmpipe|softpipe|swrast|software(?:\s+webgl|\s+rasterizer)?|no-webgl/i;
+  return {
+    vendor: String(value.vendor || ''),
+    renderer: String(value.renderer || ''),
+    version: String(value.version || ''),
+    hardware: Boolean(text) && !softwarePattern.test(text),
+    software: softwarePattern.test(text),
+  };
+}
+
+function captureCommand(command, commandArgs) {
+  try {
+    return {
+      available: true,
+      output: execFileSync(command, commandArgs, {
+        encoding: 'utf8',
+        timeout: 10000,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).trim(),
+    };
+  } catch (error) {
+    return {
+      available: false,
+      output: '',
+      error: String(error?.message || error),
+    };
+  }
+}
+
+function captureHostGpuEvidence() {
+  return {
+    capturedAt: new Date().toISOString(),
+    nvidiaSmi: captureCommand('nvidia-smi', [
+      '--query-gpu=index,name,driver_version,utilization.gpu,memory.used,memory.total',
+      '--format=csv,noheader,nounits',
+    ]),
+    nvidiaSmiPmon: captureCommand('nvidia-smi', ['pmon', '-c', '1', '-s', 'um']),
+  };
+}
+
+function gpuEvidencePath(outputPath) {
+  return `${outputPath}.gpu_evidence.json`;
+}
+
+function writeGpuEvidence(outputPath, evidence) {
+  fs.writeFileSync(gpuEvidencePath(outputPath), `${JSON.stringify(evidence, null, 2)}\n`, 'utf8');
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   const posePlan = await readJsonl(args.posePlan, args.poseStart, args.poseCount);
@@ -250,41 +313,50 @@ async function main() {
   const { server, url } = await createServer(args);
   const { chromium } = await loadPlaywright();
   const executablePath = SYSTEM_CHROME_CANDIDATES.find((candidate) => fs.existsSync(candidate));
-  const browser = await chromium.launch({
+  const chromeArgs = [
+    '--disable-dev-shm-usage',
+    '--ignore-gpu-blocklist',
+    '--enable-gpu',
+    '--enable-webgl',
+    '--use-angle=vulkan',
+    '--enable-accelerated-2d-canvas',
+    '--enable-zero-copy',
+    ...(args.requireHardwareGpu ? ['--disable-software-rasterizer'] : []),
+  ];
+  const hostGpuBefore = captureHostGpuEvidence();
+  let browser = null;
+  let result = null;
+  try {
+    if (args.requireHardwareGpu && !executablePath) {
+      throw new Error('hardware GPU required, but no system Chrome executable was found');
+    }
+    browser = await chromium.launch({
     headless: args.headless,
     executablePath,
-    args: [
-      '--disable-dev-shm-usage',
-      '--ignore-gpu-blocklist',
-      '--enable-gpu',
-      '--enable-webgl',
-      '--use-angle=vulkan',
-      '--enable-accelerated-2d-canvas',
-      '--enable-zero-copy',
-    ],
-  });
-  const page = await browser.newPage({
+    args: chromeArgs,
+    });
+    const page = await browser.newPage({
     viewport: { width: Math.max(640, args.width), height: Math.max(360, args.height) },
-  });
-  page.on('console', (msg) => {
+    });
+    page.on('console', (msg) => {
     const type = msg.type();
     console.log(`[browser:${type}] ${msg.text()}`);
-  });
-  page.on('pageerror', (err) => {
+    });
+    page.on('pageerror', (err) => {
     console.error('[browser:pageerror]', err);
-  });
-  page.on('requestfailed', (request) => {
+    });
+    page.on('requestfailed', (request) => {
     const urlText = request.url();
     const errorText = request.failure()?.errorText || '';
     if (/\/assets\/.*\.glb(?:$|\?)/i.test(urlText) && /ERR_ABORTED/i.test(errorText)) return;
     console.error('[browser:requestfailed]', urlText, errorText);
-  });
+    });
 
-  let lastLog = 0;
-  await page.exposeFunction('emitInstanceSample', (record) => {
+    let lastLog = 0;
+    await page.exposeFunction('emitInstanceSample', (record) => {
     output.write(`${JSON.stringify(record)}\n`);
-  });
-  await page.exposeFunction('emitInstanceProgress', (progress) => {
+    });
+    await page.exposeFunction('emitInstanceProgress', (progress) => {
     const now = Date.now();
     if (now - lastLog > 1000 || progress.poseIndex === progress.poseCount) {
       lastLog = now;
@@ -295,9 +367,8 @@ async function main() {
         `[sampler] ${progress.poseIndex}/${progress.poseCount} positions | visible=${progress.visibleCount} | ${rate.toFixed(2)} pos/s | eta=${eta.toFixed(1)}s`,
       );
     }
-  });
+    });
 
-  try {
     page.setDefaultTimeout(0);
     await page.goto(url, { waitUntil: 'domcontentloaded' });
     try {
@@ -306,7 +377,7 @@ async function main() {
       const bodyText = await page.locator('body').innerText().catch(() => '');
       throw new Error(`Sampler page did not expose runInstanceSampler within 30s. Body: ${bodyText}`);
     }
-    const result = await page.evaluate((options) => window.runInstanceSampler(options), {
+    result = await page.evaluate((options) => window.runInstanceSampler(options), {
       width: args.width,
       height: args.height,
       fovYDeg: args.fovYDeg,
@@ -338,10 +409,72 @@ async function main() {
       roadSearchCells: args.roadSearchCells,
       roadMinNeighbors: args.roadMinNeighbors,
     });
+    const gpuGate = classifyGpuBackend(result.gpuBackend);
+    result.gpuGate = {
+      required: args.requireHardwareGpu,
+      ...gpuGate,
+    };
+    if (args.requireHardwareGpu && !gpuGate.hardware) {
+      throw new Error(`hardware GPU required, sampler reported ${gpuGate.renderer || 'no WebGL renderer'}`);
+    }
+    const hostGpuDuring = captureHostGpuEvidence();
+    if (args.requireHardwareGpu && (!hostGpuDuring.nvidiaSmi.available || !hostGpuDuring.nvidiaSmiPmon.available)) {
+      throw new Error('hardware GPU required, but nvidia-smi/pmon evidence was unavailable');
+    }
+    const gpuEvidence = {
+      schema: 'color-id-sampler-gpu-evidence-v1',
+      formalReady: Boolean(
+        args.requireHardwareGpu
+        && gpuGate.hardware
+        && hostGpuDuring.nvidiaSmi.available
+        && hostGpuDuring.nvidiaSmiPmon.available,
+      ),
+      output: args.output,
+      posePlan: args.posePlan || null,
+      poseStart: args.poseStart,
+      poseCount: args.poseCount,
+      fovYDeg: args.fovYDeg,
+      width: args.width,
+      height: args.height,
+      chrome: {
+        executablePath: executablePath || null,
+        args: chromeArgs,
+      },
+      gpuBackend: result.gpuBackend || null,
+      gpuGate,
+      hostGpuBefore,
+      hostGpuDuring,
+      capturedAt: new Date().toISOString(),
+    };
+    writeGpuEvidence(args.output, gpuEvidence);
     console.log(JSON.stringify({ output: args.output, ...result }, null, 2));
+  } catch (error) {
+    const hostGpuFailure = captureHostGpuEvidence();
+    writeGpuEvidence(args.output, {
+      schema: 'color-id-sampler-gpu-evidence-v1',
+      formalReady: false,
+      output: args.output,
+      posePlan: args.posePlan || null,
+      poseStart: args.poseStart,
+      poseCount: args.poseCount,
+      fovYDeg: args.fovYDeg,
+      width: args.width,
+      height: args.height,
+      chrome: {
+        executablePath: executablePath || null,
+        args: chromeArgs,
+      },
+      gpuBackend: result?.gpuBackend || null,
+      gpuGate: result?.gpuGate || null,
+      hostGpuBefore,
+      hostGpuDuring: hostGpuFailure,
+      error: String(error?.message || error),
+      capturedAt: new Date().toISOString(),
+    });
+    throw error;
   } finally {
     await new Promise((resolve) => output.end(resolve));
-    await browser.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
     await new Promise((resolve) => server.close(resolve));
   }
 }

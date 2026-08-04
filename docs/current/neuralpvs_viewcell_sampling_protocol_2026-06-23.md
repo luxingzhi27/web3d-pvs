@@ -2,7 +2,7 @@
 
 日期：2026-06-23
 
-> 当前协议：前端真实渲染使用 60°，模型采样、后退候选相机和推理使用 66°（60° × 1.1）。实际运行时不读取旧数据中的候选 FOV 字段。
+> 当前协议：前端真实渲染使用 60°，模型采样、后退候选相机和推理使用 66°（60° × 1.1）。实际运行时不读取旧数据中的候选 FOV 字段。本文早期的“rvcServer 或软件回退”描述不再适用于正式采样；正式浏览器采样必须通过硬件 GPU 门，详见 [`hardware_gpu_execution_policy.md`](hardware_gpu_execution_policy.md)。
 
 ## 目的
 
@@ -47,9 +47,9 @@
 
    对每个 view cell 生成 `K` 个子视点。位置不是围绕代表相机做临时 jitter，而是在该 view cell 的空间范围内随机采样；首版使用相机局部坐标系对齐的盒状 view cell，即沿相机右方向、前方向和竖直方向分别给出半尺寸。所有子视点朝向默认与代表相机相同。若后续需要模拟手持转头，可加入很小 yaw/pitch 扰动，但必须在 meta 中记录扰动范围，并重新计算后退扩大视锥能否覆盖该范围。
 
-4. 用 rvcServer 或 Three.js color-id 渲染每个子视点。
+4. 用当前登记的 GPU 光栅化入口渲染每个子视点。
 
-   每个子视点以 `66°` FOV 渲染，输出可见实例 id 和屏幕覆盖权重。若 rvcServer 可通过 Wine 在本机启动，优先使用 rvcServer 进行 GPU 加速采样；如果 Wine 不可用，再退回 Three.js color-id 的离屏渲染链路。
+   每个子视点以 `66°` FOV 渲染，输出可见实例 id 和屏幕覆盖权重。当前正式入口是 Three.js Color-ID 浏览器采样器，并且必须确认 Chrome 使用硬件 Vulkan/NVIDIA 后端。历史上尝试过通过 Wine 启动 rvcServer，但这不是当前正式数据集的默认依赖；不能因为 rvcServer 不可用就静默退回软件光栅化。
 
 5. 聚合潜在可见集。
 
@@ -101,7 +101,8 @@
 ## 后续实施任务
 
 - 新增 viewcell-level pose plan 生成脚本，输出代表相机和 `K` 个同朝向子视点。
-- 优先尝试通过 Wine 启动三个场景自带 rvcServer，使用 GPU 加速渲染每个子视点。
+- 正式使用 Three.js Color-ID 硬件 GPU 采样器；每个分片保存 `gpuBackend`、`gpuGate` 和 Chrome 日志，并在检测到软件后端时失败。
+- rvcServer/Wine 仅作为另行登记的对照实现，不能替代当前正式采样协议。
 - 新增 `build_rvc_viewcell_pose_csr.py`，不要复用当前单 pose CSR 名称。
 - 对三个场景重建 `viewcell-csr-rvc-fov66-v1` 数据集。
 - 重建遮挡证据表，因为 `visible_ids` 语义从单 pose 可见集变为 view cell 潜在可见集。

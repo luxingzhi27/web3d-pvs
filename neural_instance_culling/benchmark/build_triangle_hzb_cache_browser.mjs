@@ -46,11 +46,20 @@ function parseArgs(argv) {
     port: 0,
     timeoutMs: 60 * 60 * 1000,
     force: false,
+    requireHardwareGpu: true,
   };
   for (let index = 2; index < argv.length; index += 1) {
     const key = argv[index];
     if (key === '--force') {
       args.force = true;
+      continue;
+    }
+    if (key === '--require-hardware-gpu') {
+      args.requireHardwareGpu = true;
+      continue;
+    }
+    if (key === '--allow-software-gpu') {
+      args.requireHardwareGpu = false;
       continue;
     }
     const value = argv[index + 1];
@@ -108,6 +117,19 @@ function findChrome(explicit) {
     if (fs.existsSync(candidate)) return candidate;
   }
   throw new Error('Chrome/Chromium executable not found; pass --chrome-exe or set CHROME_EXE');
+}
+
+function classifyGpuBackend(gpuBackend) {
+  const value = gpuBackend && typeof gpuBackend === 'object' ? gpuBackend : {};
+  const text = [value.vendor, value.renderer, value.version].filter(Boolean).join(' ');
+  const softwarePattern = /swiftshader|llvmpipe|softpipe|swrast|software(?:\s+webgl|\s+rasterizer)?|no-webgl/i;
+  return {
+    vendor: String(value.vendor || ''),
+    renderer: String(value.renderer || ''),
+    version: String(value.version || ''),
+    hardware: Boolean(text) && !softwarePattern.test(text),
+    softwareMarkers: text.match(softwarePattern)?.[0] || null,
+  };
 }
 
 function contentType(filePath) {
@@ -421,7 +443,14 @@ async function main() {
   }
   const loadElapsedMs = performance.now() - loadStarted;
   const gl = renderer.getContext();
-  const rendererName = gl && gl.getParameter(gl.RENDERER) ? String(gl.getParameter(gl.RENDERER)) : 'unknown';
+  const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+  const gpuBackend = {
+    api: 'WebGL',
+    vendor: debugInfo ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
+    renderer: debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+    version: gl.getParameter(gl.VERSION),
+  };
+  const rendererName = gpuBackend.renderer || 'unknown';
   const started = performance.now();
   for (let index = 0; index < manifest.poses.length; index += 1) {
     const pose = manifest.poses[index];
@@ -476,6 +505,7 @@ async function main() {
       loadElapsedMs,
       renderElapsedMs: performance.now() - started,
       totalElapsedMs: performance.now() - loadStarted,
+      gpuBackend,
       webglRenderer: rendererName,
     }),
   });
@@ -592,6 +622,14 @@ async function main() {
       }
       if (request.method === 'POST' && url.pathname === '/done') {
         const body = JSON.parse((await readBody(request)).toString('utf8'));
+        if (args.requireHardwareGpu) {
+          const gpuGate = classifyGpuBackend(body.gpuBackend);
+          body.gpuGate = { required: true, ...gpuGate };
+          if (!gpuGate.hardware && !body.error) {
+            body.error = `hardware GPU required, browser reported ${gpuGate.renderer || 'no WebGL renderer'}`;
+            body.status = 'failed_hardware_gpu_gate';
+          }
+        }
         if (body.status === 'failed' || body.error) doneReject(new Error(body.error || 'browser HZB build failed'));
         else doneResolve(body);
         writeJson(response, { ok: true });
@@ -620,6 +658,7 @@ async function main() {
     '--enable-accelerated-2d-canvas',
     '--enable-zero-copy',
     '--ignore-gpu-blocklist',
+    ...(args.requireHardwareGpu ? ['--disable-software-rasterizer'] : []),
     '--disable-gpu-sandbox',
     '--no-sandbox',
     `--user-data-dir=${userDataDir}`,
@@ -635,6 +674,7 @@ async function main() {
     height: args.height,
     fovYDeg: args.fovYDeg,
     cameraFar,
+    hardwareGpuRequired: args.requireHardwareGpu,
     valueCountPerPose: valueCount,
     output: args.output,
   }, null, 2));

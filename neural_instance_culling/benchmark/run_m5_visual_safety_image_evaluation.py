@@ -20,6 +20,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from evaluate_viewcell_image_per import subpose_selection_self_test
+
 
 ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK = ROOT / "neural_instance_culling" / "benchmark"
@@ -41,27 +43,85 @@ SEEDS = (20260801, 20260802, 20260803)
 SPLITS = ("validation", "calibration")
 
 
-def experiment_name(variant: str, seed: int) -> str:
-    return f"{variant}_rvl_strong_v2_hkust_spatial_fov66_seed{seed}_full40"
+DEFAULT_EXPERIMENT_TEMPLATE = "{variant}_rvl_strong_v2_hkust_spatial_fov66_seed{seed}_full40"
+
+
+def experiment_name(variant: str, seed: int, template: str = DEFAULT_EXPERIMENT_TEMPLATE) -> str:
+    """Resolve a registered model directory without changing the old default matrix."""
+    return str(template).format(variant=variant, seed=int(seed))
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env", default=os.environ.get("SLM_CONDA_ENV", "slm_pvs"))
     parser.add_argument("--poll-seconds", type=int, default=60)
+    parser.add_argument(
+        "--variants",
+        default=",".join(VARIANTS),
+        help="Comma-separated registered variant names; the default preserves the original M5 repair matrix.",
+    )
+    parser.add_argument(
+        "--experiment-template",
+        default=DEFAULT_EXPERIMENT_TEMPLATE,
+        help="Directory template containing {variant} and {seed}; use an independent template for a new experiment.",
+    )
+    parser.add_argument(
+        "--minimum-pose-recall",
+        type=float,
+        default=None,
+        help="Optional ordinary pose-recall floor for calibrated image workpoints.",
+    )
     parser.add_argument("--render-timeout-sec", type=int, default=12 * 60 * 60)
     parser.add_argument("--width", type=int, default=320)
     parser.add_argument("--height", type=int, default=180)
-    parser.add_argument("--subposes-per-viewcell", type=int, default=1)
-    parser.add_argument("--output-name", default="m5_visual_safety_repair_image_batch_20260802")
+    parser.add_argument(
+        "--subposes-per-viewcell",
+        type=int,
+        default=0,
+        help="0 evaluates every dense subpose in each view-cell; positive values are deterministic samples",
+    )
+    parser.add_argument("--output-name", default="m5_visual_safety_repair_image_dense_20260804")
     parser.add_argument(
         "--chunk-samples",
         type=int,
-        default=16,
+        default=128,
         help="bound each source batch per browser page; zero uses one page for all samples",
     )
+    parser.add_argument(
+        "--max-chunk-manifest-bytes",
+        type=int,
+        default=400_000_000,
+        help="split oversized chunk manifests below this UTF-8 size (default: 400 MB)",
+    )
+    parser.add_argument(
+        "--resume-render",
+        action="store_true",
+        help="resume an incomplete batch output and reuse only exact completed chunk sample IDs",
+    )
+    parser.add_argument(
+        "--schema-root",
+        type=Path,
+        default=None,
+        help="independent directory for schema manifests; defaults to a directory derived from --output-name",
+    )
+    parser.add_argument(
+        "--schema-only",
+        action="store_true",
+        help="generate and validate all frozen validation/calibration manifests without launching Chrome",
+    )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run the shared dense-subpose contract self-test without waiting for checkpoints",
+    )
     parser.add_argument("--chrome-arg", action="append", default=[])
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.variant_names = tuple(name.strip() for name in str(args.variants).split(",") if name.strip())
+    if not args.variant_names:
+        parser.error("--variants must contain at least one non-empty name")
+    if "{variant}" not in args.experiment_template or "{seed}" not in args.experiment_template:
+        parser.error("--experiment-template must contain both {variant} and {seed}")
+    return args
 
 
 def run_command(command: list[str], stdout_path: Path, stderr_path: Path) -> None:
@@ -75,7 +135,11 @@ def run_command(command: list[str], stdout_path: Path, stderr_path: Path) -> Non
 
 
 def wait_for_checkpoints(args: argparse.Namespace) -> None:
-    expected = [MODEL_ROOT / experiment_name(variant, seed) / "calibration_ready_summary.json" for seed in SEEDS for variant in VARIANTS]
+    expected = [
+        MODEL_ROOT / experiment_name(variant, seed, args.experiment_template) / "calibration_ready_summary.json"
+        for seed in SEEDS
+        for variant in args.variant_names
+    ]
     while True:
         missing = [path for path in expected if not path.exists()]
         if not missing:
@@ -100,6 +164,14 @@ def schema_manifest(args: argparse.Namespace, experiment: str, split: str, outpu
     output_dir = output_root / f"{experiment}_{split}"
     manifest_path = output_dir / "true_glb_render_manifest.json"
     if manifest_path.exists():
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        selection = payload.get("subposeSelection") or {}
+        requested = int(args.subposes_per_viewcell)
+        if int(selection.get("requestedPerViewcell", -1)) != requested:
+            raise RuntimeError(
+                f"existing schema manifest has subpose selection "
+                f"{selection.get('requestedPerViewcell')!r}, expected {requested}: {manifest_path}"
+            )
         return manifest_path
     if output_dir.exists() and any(output_dir.iterdir()):
         raise RuntimeError(f"refusing to reuse incomplete M5 schema output: {output_dir}")
@@ -147,6 +219,8 @@ def schema_manifest(args: argparse.Namespace, experiment: str, split: str, outpu
         "--output-dir",
         str(output_dir),
     ]
+    if args.minimum_pose_recall is not None:
+        command.extend(["--minimum-pose-recall", str(args.minimum_pose_recall)])
     run_command(
         command,
         output_root / f"{experiment}_{split}_schema_stdout.log",
@@ -266,6 +340,8 @@ def write_report(batch_output: Path, batch_manifest: Path, output_root: Path, ex
         "modelInputFovYDeg": 66,
         "scene": "hkust-v3",
         "browserRenderer": render_summary.get("renderer"),
+        "browserGpuBackend": render_summary.get("gpuBackend"),
+        "browserGpuGate": render_summary.get("gpuGate"),
         "browserAssetReuse": render_summary.get("assetReuse"),
         "batches": rows,
         "formalImageEvaluationReady": False,
@@ -275,6 +351,7 @@ def write_report(batch_output: Path, batch_manifest: Path, output_root: Path, ex
             "viewCellMissPixelRateP95Max": 0.01,
             "selectionUsesTest": False,
             "thresholdsUntouched": True,
+            "hardwareGpuRequired": bool((render_summary.get("gpuGate") or {}).get("required", False)),
         },
     }
     (output_root / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -311,27 +388,52 @@ def write_report(batch_output: Path, batch_manifest: Path, output_root: Path, ex
 
 def main() -> None:
     args = parse_args()
+    if args.self_test:
+        subpose_selection_self_test()
+        return
     wait_for_checkpoints(args)
-    schema_root = BENCHMARK / "out" / "m5_visual_safety_repair_image_manifests_20260802"
+    schema_root = (
+        args.schema_root.resolve()
+        if args.schema_root is not None
+        else BENCHMARK / "out" / f"{args.output_name}_manifests"
+    )
     prefixed_root = schema_root / "prefixed"
     batch_output = BENCHMARK / "out" / args.output_name
     if (batch_output / "summary.json").exists():
         print(f"[m5-image] existing completed summary: {batch_output / 'summary.json'}", flush=True)
         return
-    if batch_output.exists() and any(batch_output.iterdir()):
+    if batch_output.exists() and any(batch_output.iterdir()) and not args.resume_render:
         raise RuntimeError(f"refusing to reuse incomplete batch output: {batch_output}")
 
     inputs: list[str] = []
     expected_batches: list[str] = []
     for seed in SEEDS:
-        for variant in VARIANTS:
-            experiment = experiment_name(variant, seed)
+        for variant in args.variant_names:
+            experiment = experiment_name(variant, seed, args.experiment_template)
             for split in SPLITS:
                 batch_id = f"{variant}_seed{seed}_{split}"
                 source = schema_manifest(args, experiment, split, schema_root)
                 destination = prefix_manifest(source, prefixed_root / f"{batch_id}.json", batch_id)
                 inputs.extend(["--input", f"{batch_id}={destination}"])
                 expected_batches.append(batch_id)
+
+    if args.schema_only:
+        print(
+            json.dumps(
+                {
+                    "status": "schema_completed",
+                    "schemaRoot": str(schema_root),
+                    "manifestCount": len(inputs) // 2,
+                    "expectedBatches": expected_batches,
+                    "subposesPerViewcell": int(args.subposes_per_viewcell),
+                    "testRead": False,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            flush=True,
+        )
+        return
 
     command = [
         "conda",
@@ -354,6 +456,9 @@ def main() -> None:
     ]
     if args.chunk_samples > 0:
         command.extend(["--chunk-samples", str(args.chunk_samples)])
+        command.extend(["--max-chunk-manifest-bytes", str(args.max_chunk_manifest_bytes)])
+        if args.resume_render:
+            command.append("--resume-existing")
     for chrome_arg in args.chrome_arg:
         command.extend(["--chrome-arg", str(chrome_arg)])
     run_command(

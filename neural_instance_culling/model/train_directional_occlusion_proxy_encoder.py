@@ -20,6 +20,7 @@ from common.occlusion_edges import glb_priority_loss, load_glb_costs
 from common.pose_set_loss import (
     pose_set_visibility_loss_with_calibration,
     pose_set_visibility_loss_with_importance,
+    pose_subpose_robust_safety_loss,
     pose_visual_safety_loss,
 )
 from common.runtime_meta import load_runtime_meta, scene_min_max
@@ -55,7 +56,10 @@ def select_target_recall_workpoints(rows: list[dict[str, Any]], target_recall: f
         "metTargetRecall": primary_recall is not None,
         "metTargetWeightedRecall": primary_weighted is not None,
         "selectionStatus": "weighted_recall_safe" if primary_weighted is not None else "weighted_recall_target_unmet",
-        "selectionRule": weighted_precision_selection_rule(target_weighted_recall),
+        "selectionRule": weighted_precision_selection_rule(
+            target_weighted_recall,
+            minimum_pose_recall=target_recall,
+        ),
         "targetRecall": float(target_recall),
         "targetWeightedRecall": float(target_weighted_recall),
     }
@@ -277,6 +281,7 @@ def evaluate_calibration_and_validation(
     seed: int,
     target_weighted_recall: float,
     calibration_point_floor: float,
+    calibration_pose_recall_floor: float | None = None,
     calibration_lcb_floor: float | None = None,
     calibration_bootstrap_replicates: int = 0,
     calibration_bootstrap_confidence: float = 0.95,
@@ -314,6 +319,7 @@ def evaluate_calibration_and_validation(
         target_weighted_recall,
         minimum_point_estimate=calibration_point_floor,
         minimum_lower_confidence_bound=calibration_lcb_floor if calibration_bootstrap_replicates > 0 else None,
+        minimum_pose_recall=calibration_pose_recall_floor,
     )
     diagnostic_fallback = None
     if calibration_workpoint is None:
@@ -360,6 +366,7 @@ def evaluate_calibration_and_validation(
             target_weighted_recall,
             minimum_point_estimate=calibration_point_floor,
             minimum_lower_confidence_bound=calibration_lcb_floor if calibration_bootstrap_replicates > 0 else None,
+            minimum_pose_recall=calibration_pose_recall_floor,
         ),
         "bootstrap": {
             "replicates": int(calibration_bootstrap_replicates),
@@ -543,6 +550,7 @@ def visibility_supervision_loss(
     target: torch.Tensor,
     pose_offsets: torch.Tensor,
     visible_weights: torch.Tensor,
+    visible_hit_rates: torch.Tensor | None,
     evidence: torch.Tensor,
     instance_ids: torch.Tensor,
     instance_to_glb: torch.Tensor,
@@ -617,7 +625,20 @@ def visibility_supervision_loss(
         tail_weight=args.visual_safety_tail_weight,
     )
     scaled_visual_safety = float(args.visual_safety_loss_weight) * visual_safety_value
-    loss = set_loss + scaled_rvl + scaled_budget + scaled_proxy_rank + scaled_visual_safety
+    subpose_robust_value, subpose_robust_parts = pose_subpose_robust_safety_loss(
+        logits,
+        target,
+        pose_offsets,
+        visible_weights,
+        visible_hit_rates,
+        rare_weight=args.subpose_robust_rare_weight,
+        frequency_power=args.subpose_robust_frequency_power,
+        tail_k=args.subpose_robust_tail_k,
+        tail_margin=args.subpose_robust_tail_margin,
+        tail_weight=args.subpose_robust_tail_weight,
+    )
+    scaled_subpose_robust = float(args.subpose_robust_loss_weight) * subpose_robust_value
+    loss = set_loss + scaled_rvl + scaled_budget + scaled_proxy_rank + scaled_visual_safety + scaled_subpose_robust
     return loss, {
         **set_parts,
         **rvl_parts,
@@ -629,6 +650,8 @@ def visibility_supervision_loss(
         "lossVisibilityProxyRankScaled": float(scaled_proxy_rank.detach().cpu()),
         **visual_safety_parts,
         "lossVisibilityVisualSafetyScaled": float(scaled_visual_safety.detach().cpu()),
+        **subpose_robust_parts,
+        "lossVisibilitySubposeRobustScaled": float(scaled_subpose_robust.detach().cpu()),
         "lossVisibility": float(loss.detach().cpu()),
     }
 
@@ -749,6 +772,41 @@ def apply_loss_profile(args: argparse.Namespace) -> dict[str, Any]:
             "proxy_rank_weight": 0.12,
             "utility_loss_weight": 0.18,
             "glb_priority_loss_weight": 0.20,
+        },
+        "m5_subpose_robust_v1": {
+            "visibility_loss_mode": "calibrated",
+            "set_bce_weight": 0.70,
+            "set_tversky_weight": 0.85,
+            "set_count_weight": 0.06,
+            "set_rank_weight": 0.35,
+            "positive_margin_weight": 0.45,
+            "hard_negative_margin_weight": 0.55,
+            "pos_class_weight": 1.0,
+            "neg_class_weight": 1.0,
+            "pose_tversky_alpha": 1.0,
+            "pose_tversky_beta": 6.0,
+            "calibration_rank_margin": 0.50,
+            "positive_logit_margin": 1.50,
+            "hard_negative_logit_margin": -4.00,
+            "hard_negative_top_k": 1024,
+            "rvl_mode": "evidence",
+            "rvl_loss_weight": 0.12,
+            "rvl_fn_weight": 0.25,
+            "rvl_fp_weight": 1.0,
+            "budget_loss_weight": 0.30,
+            "budget_safety_multiplier": 2.15,
+            "proxy_evidence_weight": 0.16,
+            "proxy_visible_guard_weight": 0.06,
+            "proxy_sparsity_weight": 0.015,
+            "proxy_rank_weight": 0.16,
+            "utility_loss_weight": 0.18,
+            "glb_priority_loss_weight": 0.20,
+            "subpose_robust_loss_weight": 0.35,
+            "subpose_robust_rare_weight": 1.0,
+            "subpose_robust_frequency_power": 0.5,
+            "subpose_robust_tail_k": 8,
+            "subpose_robust_tail_margin": 1.5,
+            "subpose_robust_tail_weight": 0.5,
         },
     }
     overrides = profiles.get(args.loss_profile, {})
@@ -905,7 +963,7 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument(
         "--loss-profile",
-        choices=["legacy", "balanced_v2", "rvl_strong_v2", "rvl_calibrated_v3", "budget_tight_v2", "proxy_light_v2"],
+        choices=["legacy", "balanced_v2", "rvl_strong_v2", "rvl_calibrated_v3", "budget_tight_v2", "proxy_light_v2", "m5_subpose_robust_v1"],
         default="balanced_v2",
         help="Named loss preset. Use legacy to keep raw CLI weights unchanged.",
     )
@@ -961,6 +1019,17 @@ def main() -> None:
         default=0.5,
         help="Relative weight of the high-contribution positive margin inside the visual safety loss.",
     )
+    parser.add_argument(
+        "--subpose-robust-loss-weight",
+        type=float,
+        default=0.0,
+        help="Weight for dense view-cell subpose robust safety loss; zero preserves the registered baseline.",
+    )
+    parser.add_argument("--subpose-robust-rare-weight", type=float, default=1.0)
+    parser.add_argument("--subpose-robust-frequency-power", type=float, default=0.5)
+    parser.add_argument("--subpose-robust-tail-k", type=int, default=8)
+    parser.add_argument("--subpose-robust-tail-margin", type=float, default=1.5)
+    parser.add_argument("--subpose-robust-tail-weight", type=float, default=0.5)
     parser.add_argument("--proxy-evidence-weight", type=float, default=0.25)
     parser.add_argument("--proxy-visible-guard-weight", type=float, default=0.08)
     parser.add_argument("--proxy-sparsity-weight", type=float, default=0.02)
@@ -985,6 +1054,12 @@ def main() -> None:
     parser.add_argument("--feature-export-batch-size", type=int, default=512)
     parser.add_argument("--target-recall", type=float, default=0.95)
     parser.add_argument("--target-weighted-recall", type=float, default=0.99)
+    parser.add_argument(
+        "--calibration-pose-recall-floor",
+        type=float,
+        default=0.95,
+        help="Minimum ordinary pose recall required for a calibration safety workpoint.",
+    )
     parser.add_argument(
         "--calibration-fraction",
         type=float,
@@ -1029,7 +1104,11 @@ def main() -> None:
         action="store_true",
         help="Exploratory-only escape hatch for legacy point caches or post-union candidate files; formal runs must leave this disabled.",
     )
-    parser.add_argument("--export-eval-checkpoint", default="", help="Load this checkpoint, export runtime features, run test evaluation, and exit.")
+    parser.add_argument(
+        "--export-eval-checkpoint",
+        default="",
+        help="Load this checkpoint, export runtime features, calibrate, and optionally run the one-shot test.",
+    )
     parser.add_argument("--eval-summary-name", default="eval_summary.json")
     parser.add_argument("--checkpoint-alias", default="", help="Optional checkpoint copy written under output-dir before export/eval.")
     parser.add_argument(
@@ -1041,8 +1120,6 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=20260610)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     args = parser.parse_args()
-    if args.skip_final_test and args.export_eval_checkpoint:
-        parser.error("--skip-final-test cannot be combined with --export-eval-checkpoint")
     if not 0.0 < float(args.train_pose_fraction) <= 1.0:
         parser.error("--train-pose-fraction must be in (0, 1]")
     if args.allow_scene_transfer and not args.init_checkpoint:
@@ -1068,6 +1145,11 @@ def main() -> None:
         strict_semantics=not args.allow_invalid_resource_semantics,
     )
     dataset = PoseCSRDataset(args.dataset_dir, num_instances=world_aabbs.shape[0])
+    if args.subpose_robust_loss_weight > 0 and not dataset.has_subpose_robust_labels:
+        raise ValueError(
+            "subpose-robust supervision requires visible_hit_counts.bin and subpose_offsets.bin; "
+            "refusing to silently train without dense view-cell labels"
+        )
     train_split, val_split, calibration_split, test_split, protocol_split = build_protocol_splits(
         dataset,
         seed=args.seed,
@@ -1175,6 +1257,7 @@ def main() -> None:
         "dataSemantics": {
             "visibleIds": "pose-level GT visible instance set",
             "visibleWeights": dataset.visible_weight_semantics,
+            "subposeRobustLabels": dataset.subpose_robust_label_semantics,
             "occlusionEvidence": "projection-geometry weak supervision from visible sources and invisible candidate targets; no dynamic-pool teacher",
         },
         "imageEvaluation": {
@@ -1182,8 +1265,10 @@ def main() -> None:
             "script": "neural_instance_culling/benchmark/evaluate_viewcell_image_per.py",
         },
     }
-    if not args.export_eval_checkpoint:
-        (output_dir / "model_meta.json").write_text(json.dumps(model_meta_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output_dir / "model_meta.json").write_text(
+        json.dumps(model_meta_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     (output_dir / "protocol_split.json").write_text(
         json.dumps(protocol_split, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -1213,6 +1298,7 @@ def main() -> None:
             max_candidates_per_pose=args.max_candidates_per_pose,
             seed=args.seed + 100,
             target_weighted_recall=args.target_weighted_recall,
+            calibration_pose_recall_floor=args.calibration_pose_recall_floor,
             calibration_point_floor=args.calibration_point_floor,
             calibration_lcb_floor=args.calibration_lcb_floor,
             calibration_bootstrap_replicates=args.calibration_bootstrap_replicates,
@@ -1240,10 +1326,61 @@ def main() -> None:
                     args.target_weighted_recall,
                     minimum_point_estimate=args.calibration_point_floor,
                     minimum_lower_confidence_bound=args.calibration_lcb_floor,
+                    minimum_pose_recall=args.calibration_pose_recall_floor,
                 ),
             }
             checkpoint["finalCalibration"] = calibration_summary
             torch.save(checkpoint, output_dir / args.checkpoint_alias)
+        if args.skip_final_test:
+            if not args.checkpoint_alias:
+                raise RuntimeError(
+                    "--skip-final-test with --export-eval-checkpoint requires --checkpoint-alias "
+                    "so the independent calibration bundle has a checkpoint."
+                )
+            calibration_ready = {
+                "protocol": "calibration_ready_pre_test",
+                "frozenThreshold": float(calibration_workpoint["threshold"]),
+                "calibration": calibration_summary,
+                "validationAtFrozenThreshold": validation_workpoint,
+                "calibrationThresholdRows": calibration_rows,
+                "testEvaluationCount": 0,
+                "protocolSplit": protocol_split,
+                "args": vars(args),
+                "featureMeta": feature_meta,
+                "selectionRule": weighted_precision_selection_rule(
+                    args.target_weighted_recall,
+                    minimum_point_estimate=args.calibration_point_floor,
+                    minimum_lower_confidence_bound=args.calibration_lcb_floor,
+                    minimum_pose_recall=args.calibration_pose_recall_floor,
+                ),
+                "testPolicy": (
+                    "Use evaluate_frozen_test.py prepare/evaluate exactly once; "
+                    "this file contains no test result."
+                ),
+                "provenance": {
+                    "sourceCheckpoint": str(checkpoint_path.resolve()),
+                    "mode": "independent calibration-only export",
+                    "testRead": False,
+                    "candidateSetChanged": False,
+                    "gtChanged": False,
+                },
+            }
+            ready_path = output_dir / "calibration_ready_summary.json"
+            ready_path.write_text(json.dumps(calibration_ready, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(
+                json.dumps(
+                    {
+                        "outputDir": str(output_dir),
+                        "calibrationReadySummary": str(ready_path),
+                        "frozenThreshold": float(calibration_workpoint["threshold"]),
+                        "testEvaluationCount": 0,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                flush=True,
+            )
+            return
         frozen_threshold = float(calibration_workpoint["threshold"])
         test_row = evaluate_thresholds(
             model,
@@ -1281,7 +1418,12 @@ def main() -> None:
                 "requiredForFormalReport": True,
                 "script": "neural_instance_culling/benchmark/evaluate_viewcell_image_per.py",
             },
-            "selectionRule": weighted_precision_selection_rule(args.target_weighted_recall),
+            "selectionRule": weighted_precision_selection_rule(
+                args.target_weighted_recall,
+                minimum_point_estimate=args.calibration_point_floor,
+                minimum_lower_confidence_bound=args.calibration_lcb_floor,
+                minimum_pose_recall=args.calibration_pose_recall_floor,
+            ),
         }
         summary_path = output_dir / args.eval_summary_name
         summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1345,6 +1487,7 @@ def main() -> None:
                 offsets = torch.from_numpy(batch["pose_offsets"]).to(device)
                 target = torch.from_numpy(batch["target"][:, None]).to(device)
                 visible_weights = torch.from_numpy(batch["visible_weights"][:, None]).to(device)
+                visible_hit_rates = torch.from_numpy(batch["visible_hit_rates"][:, None]).to(device)
                 logits, aux = model.compute_logits_with_aux(
                     camera,
                     view,
@@ -1358,6 +1501,7 @@ def main() -> None:
                     target,
                     offsets,
                     visible_weights,
+                    visible_hit_rates,
                     aux["evidence_target"],
                     ids,
                     model.instance_to_glb,
@@ -1450,6 +1594,7 @@ def main() -> None:
                 max_candidates_per_pose=args.max_candidates_per_pose,
                 seed=args.seed + 100,
                 target_weighted_recall=args.target_weighted_recall,
+                calibration_pose_recall_floor=args.calibration_pose_recall_floor,
                 calibration_point_floor=args.calibration_point_floor,
                 calibration_lcb_floor=None,
                 calibration_bootstrap_replicates=0,
@@ -1466,6 +1611,7 @@ def main() -> None:
                 "selectionRule": weighted_precision_selection_rule(
                     args.target_weighted_recall,
                     minimum_point_estimate=args.calibration_point_floor,
+                    minimum_pose_recall=args.calibration_pose_recall_floor,
                 ),
             }
             if calibration_summary["selectionStatus"] == "safe":
@@ -1565,6 +1711,7 @@ def main() -> None:
         max_candidates_per_pose=args.max_candidates_per_pose,
         seed=args.seed + 100,
         target_weighted_recall=args.target_weighted_recall,
+        calibration_pose_recall_floor=args.calibration_pose_recall_floor,
         calibration_point_floor=args.calibration_point_floor,
         calibration_lcb_floor=args.calibration_lcb_floor,
         calibration_bootstrap_replicates=args.calibration_bootstrap_replicates,
@@ -1602,6 +1749,7 @@ def main() -> None:
                 args.target_weighted_recall,
                 minimum_point_estimate=args.calibration_point_floor,
                 minimum_lower_confidence_bound=args.calibration_lcb_floor,
+                minimum_pose_recall=args.calibration_pose_recall_floor,
             ),
         }
         checkpoint["finalCalibration"] = calibration_summary
@@ -1616,7 +1764,12 @@ def main() -> None:
             "protocolSplit": protocol_split,
             "args": vars(args),
             "featureMeta": feature_meta,
-            "selectionRule": weighted_precision_selection_rule(args.target_weighted_recall),
+            "selectionRule": weighted_precision_selection_rule(
+                args.target_weighted_recall,
+                minimum_point_estimate=args.calibration_point_floor,
+                minimum_lower_confidence_bound=args.calibration_lcb_floor,
+                minimum_pose_recall=args.calibration_pose_recall_floor,
+            ),
             "testPolicy": "Use evaluate_frozen_test.py prepare/evaluate exactly once; this file contains no test result.",
         }
         ready_path = output_dir / "calibration_ready_summary.json"
@@ -1667,6 +1820,7 @@ def main() -> None:
             args.target_weighted_recall,
             minimum_point_estimate=args.calibration_point_floor,
             minimum_lower_confidence_bound=args.calibration_lcb_floor,
+            minimum_pose_recall=args.calibration_pose_recall_floor,
         ),
     }
     checkpoint["finalCalibration"] = calibration_summary
@@ -1692,7 +1846,12 @@ def main() -> None:
             "requiredForFormalReport": True,
             "script": "neural_instance_culling/benchmark/evaluate_viewcell_image_per.py",
         },
-        "selectionRule": weighted_precision_selection_rule(args.target_weighted_recall),
+        "selectionRule": weighted_precision_selection_rule(
+            args.target_weighted_recall,
+            minimum_point_estimate=args.calibration_point_floor,
+            minimum_lower_confidence_bound=args.calibration_lcb_floor,
+            minimum_pose_recall=args.calibration_pose_recall_floor,
+        ),
     }
     (output_dir / "eval_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({"best": summary["best"], "outputDir": str(output_dir), "imageEvaluation": summary["imageEvaluation"]}, ensure_ascii=False, indent=2), flush=True)

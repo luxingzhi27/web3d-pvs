@@ -12,6 +12,7 @@ from train_directional_occlusion_proxy_encoder import (  # noqa: E402
     resolve_loss_profile,
     select_diagnostic_calibration_workpoint,
 )
+from common.threshold_selection import select_weighted_precision_workpoint  # noqa: E402
 from current_pvs_utils import threshold_grid  # noqa: E402
 
 
@@ -57,6 +58,34 @@ class TrainingCalibrationControlTests(unittest.TestCase):
         args = SimpleNamespace(loss_profile="rvl_strong_v2", rvl_mode=None)
         resolve_loss_profile(args)
         self.assertEqual(args.rvl_mode, "evidence")
+
+    def test_safety_workpoint_can_require_ordinary_pose_recall(self) -> None:
+        rows = [
+            {
+                "threshold": 0.2,
+                "pose_recall": 0.94,
+                "pose_weighted_recall": 0.997,
+                "pose_precision": 0.80,
+                "pose_f1": 0.85,
+                "avg_pred_count": 30.0,
+            },
+            {
+                "threshold": 0.1,
+                "pose_recall": 0.95,
+                "pose_weighted_recall": 0.993,
+                "pose_precision": 0.60,
+                "pose_f1": 0.70,
+                "avg_pred_count": 50.0,
+            },
+        ]
+        selected = select_weighted_precision_workpoint(
+            rows,
+            target_weighted_recall=0.99,
+            minimum_point_estimate=0.9925,
+            minimum_pose_recall=0.95,
+        )
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["threshold"], 0.1)
 
 
 if __name__ == "__main__":

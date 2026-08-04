@@ -331,6 +331,7 @@ class PoseCSRSplit:
         instances: list[np.ndarray] = []
         targets: list[np.ndarray] = []
         visible_weight_targets: list[np.ndarray] = []
+        visible_hit_rate_targets: list[np.ndarray] = []
         batch_pose_indices: list[int] = []
         offsets = [0]
         visible_counts = []
@@ -340,6 +341,8 @@ class PoseCSRSplit:
         for pose_index in pose_indices:
             pose_index = int(pose_index)
             visible_ids, visible_weights = self.dataset.visible_slice(pose_index)
+            visible_hit_counts = self.dataset.visible_hit_count_slice(pose_index)
+            subpose_count = self.dataset.subpose_count(pose_index)
             if visible_ids.size == 0 and not include_empty:
                 continue
 
@@ -400,6 +403,17 @@ class PoseCSRSplit:
             label = np.isin(candidate_ids, visible_unique, assume_unique=True).astype(np.float32)
             weight_map = {int(idx): float(weight) for idx, weight in zip(visible_ids.tolist(), visible_weights.tolist())}
             weight_target = np.asarray([weight_map.get(int(idx), 0) for idx in candidate_ids.tolist()], dtype=np.float32)
+            if visible_hit_counts.size:
+                hit_map = {
+                    int(idx): float(hit) / max(1, subpose_count)
+                    for idx, hit in zip(visible_ids.tolist(), visible_hit_counts.tolist())
+                }
+                hit_rate_target = np.asarray(
+                    [hit_map.get(int(idx), 0.0) for idx in candidate_ids.tolist()],
+                    dtype=np.float32,
+                )
+            else:
+                hit_rate_target = np.zeros((candidate_ids.size,), dtype=np.float32)
             count = int(candidate_ids.size)
             cameras.append(np.repeat(self.dataset.poses["camera_norm"][pose_index][None, :], count, axis=0).astype(np.float32, copy=False))
             cameras_world.append(np.repeat(camera_world[None, :], count, axis=0).astype(np.float32, copy=False))
@@ -409,6 +423,7 @@ class PoseCSRSplit:
             instances.append(candidate_ids.astype(np.int64, copy=False))
             targets.append(label)
             visible_weight_targets.append(weight_target)
+            visible_hit_rate_targets.append(hit_rate_target)
             offsets.append(offsets[-1] + count)
             visible_counts.append(int(visible_unique.size))
             candidate_counts.append(count)
@@ -422,6 +437,7 @@ class PoseCSRSplit:
                 "instance": np.zeros((0,), dtype=np.int64),
                 "target": np.zeros((0,), dtype=np.float32),
                 "visible_weights": np.zeros((0,), dtype=np.float32),
+                "visible_hit_rates": np.zeros((0,), dtype=np.float32),
                 "visible_pixels": np.zeros((0,), dtype=np.float32),
                 "pose_offsets": np.asarray(offsets, dtype=np.int64),
                 "visible_counts": np.asarray(visible_counts, dtype=np.int64),
@@ -436,6 +452,7 @@ class PoseCSRSplit:
             "instance": np.concatenate(instances, axis=0),
             "target": np.concatenate(targets, axis=0),
             "visible_weights": np.concatenate(visible_weight_targets, axis=0),
+            "visible_hit_rates": np.concatenate(visible_hit_rate_targets, axis=0),
             # 兼容旧训练脚本。新模型不要把这个字段当真实像素覆盖。
             "visible_pixels": np.concatenate(visible_weight_targets, axis=0),
             "pose_offsets": np.asarray(offsets, dtype=np.int64),
@@ -541,6 +558,36 @@ class PoseCSRDataset:
         else:
             raise FileNotFoundError(f"Expected visible_weights.bin or legacy visible_pixels.bin in {self.dataset_dir}")
         self.visible_pixels = self.visible_weights
+        hit_counts_path = self.dataset_dir / "visible_hit_counts.bin"
+        subpose_offsets_path = self.dataset_dir / "subpose_offsets.bin"
+        self.visible_hit_counts = None
+        self.subpose_offsets = None
+        self.subpose_counts = None
+        if hit_counts_path.exists():
+            if hit_counts_path.stat().st_size % np.dtype(np.uint16).itemsize:
+                raise ValueError(f"{hit_counts_path} has a non-integral uint16 length")
+            self.visible_hit_counts = np.memmap(hit_counts_path, dtype=np.uint16, mode="r")
+            if self.visible_hit_counts.size != self.visible_ids.size:
+                raise ValueError(
+                    f"{hit_counts_path} has {self.visible_hit_counts.size} entries, "
+                    f"but visible_ids.bin has {self.visible_ids.size}"
+                )
+        if subpose_offsets_path.exists():
+            self.subpose_offsets = np.memmap(subpose_offsets_path, dtype=np.uint64, mode="r")
+            if self.subpose_offsets.size != self.poses.size + 1:
+                raise ValueError(
+                    f"{subpose_offsets_path} has {self.subpose_offsets.size} entries, "
+                    f"expected {self.poses.size + 1}"
+                )
+            self.subpose_counts = np.diff(self.subpose_offsets).astype(np.int64, copy=False)
+        if self.visible_hit_counts is not None and self.subpose_counts is None:
+            raise ValueError("visible_hit_counts.bin requires subpose_offsets.bin")
+        self.has_subpose_robust_labels = self.visible_hit_counts is not None and self.subpose_counts is not None
+        self.subpose_robust_label_semantics = (
+            "visible_hit_counts divided by successful dense subpose count; max-pooled screen weight remains separate"
+            if self.has_subpose_robust_labels
+            else "unavailable"
+        )
         mvp_path = self.dataset_dir / "mvp.bin"
         self.mvp = None
         if mvp_path.exists() and mvp_path.stat().st_size > 0:
@@ -579,6 +626,20 @@ class PoseCSRDataset:
     def visible_weight_slice(self, pose_index: int) -> tuple[np.ndarray, np.ndarray]:
         """Return visible ids and rvcServer importance weights for one pose."""
         return self.visible_slice(pose_index)
+
+    def visible_hit_count_slice(self, pose_index: int) -> np.ndarray:
+        """Return per-instance dense-subpose hit counts for one view-cell."""
+        if self.visible_hit_counts is None:
+            return np.zeros((0,), dtype=np.uint16)
+        start = int(self.visible_offsets[pose_index])
+        end = int(self.visible_offsets[pose_index + 1])
+        return self.visible_hit_counts[start:end]
+
+    def subpose_count(self, pose_index: int) -> int:
+        """Return the number of successful dense subposes represented by a pose."""
+        if self.subpose_counts is None:
+            return 0
+        return int(self.subpose_counts[pose_index])
 
     def frustum_slice(self, pose_index: int) -> np.ndarray:
         start = int(self.frustum_offsets[pose_index])
