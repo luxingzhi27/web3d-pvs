@@ -63,13 +63,14 @@
 54. M5 dense subpose 鲁棒监督独立图像评价入口：`neural_instance_culling/benchmark/run_m5_subpose_robust_image_evaluation.sh`；结果目录为 `neural_instance_culling/benchmark/out/m5_subpose_robust_image_dense_hw_20260804/`
 55. M7/M8 同轨迹配对 bootstrap 汇总：`evaluation/m7_m8_trajectory_paired_bootstrap_v2_2026-08-04.md`；独立结果为 `neural_instance_culling/benchmark/out/m7_m8_trajectory_paired_bootstrap_v2_20260804.json`
 56. M5-v2 dense subpose 严格汇总器：`neural_instance_culling/benchmark/summarize_m5_subpose_robust_image.py`；它强制校验硬件 GPU、严格 calibration 和 `testRead=false`，不允许软件渲染结果进入正式汇总
+57. M5 视觉贡献安全损失诊断 pilot：`experiments/m5_visual_safety_subpose_pilot_2026-08-04.md`；单 seed、10 epoch，仅用于判断高视觉贡献漏检是否改善，不是正式质量门结果
 
 正式采样和图像评价的 GPU 规则：默认必须使用 Chrome 的硬件 Vulkan/NVIDIA 后端，并开启 `--require-hardware-gpu`；结果必须同时保存浏览器 `gpuBackend`/`gpuGate`、Chrome 日志和同一窗口的 `nvidia-smi`/`pmon` 证据。检测到 SwiftShader、llvmpipe、softpipe、swrast 或缺少硬件证据时，只能作为语义调试/历史结果，不能进入硬件性能结论。完整规则见 `current/hardware_gpu_execution_policy.md`。
 注意：WebGL 的硬件门不等于 WebGPU 的硬件门。WebGPU 推理或 WGSL 性能实验必须读取并单独核验 WebGPU adapter；若两种 API 的后端不一致，按 API 分别报告，不能用 WebGL 的 NVIDIA 证据替代 WebGPU 证据。
 
-57. M12 WebGPU 硬件门核验：`evaluation/m12_webgpu_hardware_gate_2026-08-04.md`；本次 WebGL 硬件路径通过，但 WebGPU adapter 为 SwiftShader，因此硬件 WebGPU 性能门失败
-58. M11 泛化矩阵审计：`evaluation/m11_generalization_matrix_2026-08-04.md`；航向与少样本结果已整理，但严格普通召回安全门未封存为通过
-59. M6 三角形 HZB 硬件链路 smoke：`evaluation/m6_hardware_gpu_renderer_2026-08-04.md`；硬件 WebGL 子门通过，完整 M6 仍为 No-Go
+58. M12 WebGPU 硬件门核验：`evaluation/m12_webgpu_hardware_gate_2026-08-04.md`；本次 WebGL 硬件路径通过，但 WebGPU adapter 为 SwiftShader，因此硬件 WebGPU 性能门失败
+59. M11 泛化矩阵审计：`evaluation/m11_generalization_matrix_2026-08-04.md`；航向与少样本结果已整理，但严格普通召回安全门未封存为通过
+60. M6 三角形 HZB 硬件链路 smoke：`evaluation/m6_hardware_gpu_renderer_2026-08-04.md`；硬件 WebGL 子门通过，完整 M6 仍为 No-Go
 
 ## 当前场景
 
