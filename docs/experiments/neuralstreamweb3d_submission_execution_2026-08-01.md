@@ -12,6 +12,22 @@ WebGL 与 WebGPU 分别核验：WebGL 页面回报 NVIDIA 只证明采样/Color-
 
 M12 独立探针进一步测试了当前 Vulkan 参数、`--use-vulkan`/`Vulkan` feature 和高性能 GPU 参数组合，三种 headless Chrome 组合均回报 WebGL NVIDIA RTX A6000、WebGPU `google/swiftshader`。该排查未修改正式输出，也未放宽硬件门；M12 仍只能作为数值 parity 子门通过、WebGPU 硬件性能门失败。
 
+### 2026-08-04 当前执行状态更正
+
+早期审计表中的 M4“运行中”只代表当时的历史快照。M4-v2 已完成并封存到
+`neural_instance_culling/benchmark/out/m4_formal_matrix_validation_v2/summary.json`，包含六个变体、三个
+随机种子、664 个固定 validation pose 和 10,000 次按 seed 聚类的 paired bootstrap；路线文件为
+`neural_instance_culling/benchmark/out/m4_formal_route_decision_v2.json`，结论为 `route_b_system`。正式报告和
+执行记录分别见 `docs/evaluation/m4_formal_matrix_validation_v2_2026-08-03.md` 与
+`docs/experiments/m4_formal_matrix_validation_v2_execution_2026-08-03.md`。该结果没有修改旧 M4 文件、默认模型或前端资产。
+
+当前正在运行的是独立的 M5 dense-subpose 鲁棒监督 retry1：三个 seed 分别使用物理 GPU 0、1、2，输出目录为
+`neural_instance_culling/model/out/pvs_m5_subpose_robust_v1_hkust_spatial_fov66_retry1_seed2026080{1,2,3}_full40`。
+训练入口和图像评价等待器分别由 `run_m5_subpose_robust_training.sh` 与
+`run_m5_subpose_robust_image_evaluation.sh` 管理。训练完成后，等待器只会创建独立 strict-calibration 目录，并在
+`testEvaluationCount=0`、pose recall、weighted recall 点估计及其置信下界均通过登记门槛后，才启动硬件 GPU dense
+图像评价；未完成 checkpoint、软件浏览器结果和旧 M5 输出都不会被自动纳入汇总。
+
 ### 2026-08-04 Color-ID 采样硬件证据封存
 
 本机已复用正式采样入口 `neural_instance_culling/sampler/run_sampler.mjs` 的 Chrome 启动参数完成硬件 smoke。页面回报 `WebGL / Google Inc. (NVIDIA) / ANGLE (NVIDIA, Vulkan ... NVIDIA RTX A6000 ...)`，`gpuGate.hardware=true`；同一执行窗口的 `nvidia-smi pmon` 观察到 Chrome GPU 进程。正式采样因此可以确认使用 NVIDIA 硬件光栅化，CPU 仅负责读取 Color-ID 缓冲和聚合结果。采样器与 view-cell wrapper 已将 `--require-hardware-gpu` 作为显式正式参数，并在缺失页面后端、NVIDIA 快照、`pmon` 或发现软件标记时失败关闭。
