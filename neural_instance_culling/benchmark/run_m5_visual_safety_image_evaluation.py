@@ -453,6 +453,7 @@ def main() -> None:
         str(max(30, args.render_timeout_sec)),
         "--preview-samples",
         "8",
+        "--require-hardware-gpu",
     ]
     if args.chunk_samples > 0:
         command.extend(["--chunk-samples", str(args.chunk_samples)])

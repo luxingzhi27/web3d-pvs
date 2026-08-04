@@ -102,3 +102,33 @@ WebGL 的硬件门只证明 WebGL/ANGLE 的光栅化路径；它不能推断 Web
 对正式 Color-ID 采样，`nvidia-smi` 和 `nvidia-smi pmon` 均必须可读取；只存在其中一个时仍视为证据不完整。
 
 模型质量门和硬件门是两件事。硬件门通过只说明执行后端可信，不代表模型的 recall、miss-pixel rate、延迟或移动端性能已经达标；这些指标必须按各自的评价协议单独判断。历史 SwiftShader 结果可以保留作语义诊断，但必须与硬件结果分目录、分报告，不能混合汇总。
+
+## 后续执行硬性清单
+
+为避免后续 agent 或脚本维护者把软件结果误当成正式 GPU 结果，正式任务在启动和提交时都必须执行下面的清单：
+
+1. 正式命令显式写出 `--require-hardware-gpu`，不要依赖脚本默认值；禁止使用
+   `--allow-software-gpu` 或 `--no-require-hardware-gpu`。
+2. 正式输出目录使用独立的硬件标识，例如 `_hw` 或 `_hardware`，不能复用软件调试目录，也不能用软件结果补齐硬件目录。
+3. 启动参数必须保留 `--enable-gpu`、`--enable-webgl`、`--use-angle=vulkan` 和
+   `--disable-software-rasterizer`。不得加入 `--disable-gpu`、`--use-angle=swiftshader*`、
+   `--use-gl=swiftshader` 或其他软件后端参数。
+4. 提交结果前逐项检查：页面后端非空且无软件标记、`gpuGate.required=true`、
+   `gpuGate.hardware=true`、Chrome 日志存在、同一执行窗口的 `nvidia-smi` 和
+   `nvidia-smi pmon` 证据存在。任一项缺失都只能标记为“浏览器渲染完成”，不能进入正式汇总。
+5. 只有显式登记为小规模语义调试的输出才可以使用软件后端。此类输出必须放在独立的
+   `*_software_debug` 或 `/tmp` 目录，并在元数据和报告中写明“不可用于正式数据、GPU 延迟或移动端性能结论”。
+
+正式提交前可用以下命令做最小硬件门复核；它不会覆盖已有数据：
+
+```bash
+node neural_instance_culling/sampler/run_sampler.mjs \
+  --assets-dir hkust-v3/assets \
+  --output /tmp/slm_gpu_gate_smoke.<run>/instance_vis_samples.jsonl \
+  --smoke --require-hardware-gpu
+```
+
+必须检查旁路生成的
+`/tmp/slm_gpu_gate_smoke.<run>/instance_vis_samples.jsonl.gpu_evidence.json` 中
+`formalReady=true`、`gpuGate.hardware=true`，并确认 renderer 包含实际硬件名称。仅命令退出码为零、
+存在 JSON/PNG，或 `nvidia-smi` 中出现 Chrome 进程，都不足以通过硬件门。

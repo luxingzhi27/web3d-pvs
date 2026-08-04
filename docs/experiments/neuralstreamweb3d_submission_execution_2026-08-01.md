@@ -1004,3 +1004,18 @@ node neural_instance_culling/sampler/run_sampler.mjs \
 `formalReady=true`、`gpuGate.hardware=true`，页面 renderer 为
 `ANGLE (NVIDIA, Vulkan 1.3.242 ... NVIDIA RTX A6000 ...)`，`nvidia-smi` 与 `nvidia-smi pmon` 均可读取；
 后者在采样窗口记录到 Chrome GPU 进程。该结果只验证执行链，不替代正式数据集质量评价。
+
+### 2026-08-04 后续正式任务禁止软件回退
+
+为防止后续实验再次把 SwiftShader 或其他 CPU 软件光栅化误记为硬件 GPU 采样，今后的正式
+Color-ID 采样、M5 实例级图像评价和三角形 HZB 构建统一执行以下准入规则：正式命令必须显式带
+`--require-hardware-gpu`，输出必须使用独立的 `_hw`/`_hardware` 目录，并保留页面
+`gpuBackend`、`gpuGate`、Chrome 日志和同一窗口的 `nvidia-smi`/`nvidia-smi pmon`。页面后端为空、
+包含 `SwiftShader`/`llvmpipe`/`softpipe`/`swrast`、硬件门字段不通过，或任一系统证据缺失时，
+入口必须失败并停止正式汇总；不能通过降低阈值、缩小样本、复用旧输出或前端规则绕过。
+
+`--allow-software-gpu` 和 `--no-require-hardware-gpu` 只允许用于明确登记的小规模语义调试，必须
+使用独立的 `*_software_debug`/`/tmp` 输出并在报告中标注不可用于正式数据集、GPU 延迟或移动端性能。
+正式命令不得加入 `--disable-gpu`、`--use-angle=swiftshader*` 或 `--use-gl=swiftshader`。后续
+接手者首先阅读 `docs/current/hardware_gpu_execution_policy.md`，并用其中的硬件门 smoke 复核后再启动
+长时间采样或评价；没有证据的历史 JSONL/图像输出不能事后追认为硬件结果。
