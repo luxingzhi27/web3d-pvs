@@ -71,6 +71,7 @@
 58. M12 WebGPU 硬件门核验：`evaluation/m12_webgpu_hardware_gate_2026-08-04.md`；本次 WebGL 硬件路径通过，但 WebGPU adapter 为 SwiftShader，因此硬件 WebGPU 性能门失败
 59. M11 泛化矩阵审计：`evaluation/m11_generalization_matrix_2026-08-04.md`；航向与少样本结果已整理，但严格普通召回安全门未封存为通过
 60. M6 三角形 HZB 硬件链路 smoke：`evaluation/m6_hardware_gpu_renderer_2026-08-04.md`；硬件 WebGL 子门通过，完整 M6 仍为 No-Go
+61. M9 全量 pose 空间 AABB 候选审计：`evaluation/m9_spatial_aabb_index_full_2026-08-04.md`；候选集合正确，但强制空间索引未通过加速门
 
 ## 当前场景
 

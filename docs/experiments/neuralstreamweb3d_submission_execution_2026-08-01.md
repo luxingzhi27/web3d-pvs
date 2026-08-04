@@ -28,6 +28,11 @@ M12 独立探针进一步测试了当前 Vulkan 参数、`--use-vulkan`/`Vulkan`
 `testEvaluationCount=0`、pose recall、weighted recall 点估计及其置信下界均通过登记门槛后，才启动硬件 GPU dense
 图像评价；未完成 checkpoint、软件浏览器结果和旧 M5 输出都不会被自动纳入汇总。
 
+M9 已完成 HKUST 全部 `7,999` 个 pose 的空间 AABB 候选审计：默认 `maxQueryCells=100000` 路径实际全部安全回退到
+全量扫描，平均 `0.889 ms`；强制允许空间索引时平均 `10.316 ms`。两条路径候选集合均为零 mismatch，但当前
+64 米字符串桶加 overflow 的索引没有通过加速门，因此不修改默认前端路径，也不把“有索引结构”写成“索引带来
+性能提升”。详细结果见 `docs/evaluation/m9_spatial_aabb_index_full_2026-08-04.md`。
+
 ### 2026-08-04 Color-ID 采样硬件证据封存
 
 本机已复用正式采样入口 `neural_instance_culling/sampler/run_sampler.mjs` 的 Chrome 启动参数完成硬件 smoke。页面回报 `WebGL / Google Inc. (NVIDIA) / ANGLE (NVIDIA, Vulkan ... NVIDIA RTX A6000 ...)`，`gpuGate.hardware=true`；同一执行窗口的 `nvidia-smi pmon` 观察到 Chrome GPU 进程。正式采样因此可以确认使用 NVIDIA 硬件光栅化，CPU 仅负责读取 Color-ID 缓冲和聚合结果。采样器与 view-cell wrapper 已将 `--require-hardware-gpu` 作为显式正式参数，并在缺失页面后端、NVIDIA 快照、`pmon` 或发现软件标记时失败关闭。
