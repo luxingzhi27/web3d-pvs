@@ -33,6 +33,11 @@ M9 已完成 HKUST 全部 `7,999` 个 pose 的空间 AABB 候选审计：默认 
 64 米字符串桶加 overflow 的索引没有通过加速门，因此不修改默认前端路径，也不把“有索引结构”写成“索引带来
 性能提升”。详细结果见 `docs/evaluation/m9_spatial_aabb_index_full_2026-08-04.md`。
 
+同日完成空间特征页的全量语义审计：45 个特征页覆盖 18,831 个实例和全部 7,999 个 pose，页查询与完整 AABB
+扫描的候选集合零 mismatch；平均每个 pose 选中 `20.74` 页，首批页字节 `9,849,252`，累计页字节
+`13,785,552`。该结果只证明分页语义和资源目录正确，不包含浏览器网络、WebGPU 或主线程性能计时。详细结果见
+`docs/evaluation/m9_spatial_feature_page_audit_full_2026-08-04.md`。
+
 ### 2026-08-04 Color-ID 采样硬件证据封存
 
 本机已复用正式采样入口 `neural_instance_culling/sampler/run_sampler.mjs` 的 Chrome 启动参数完成硬件 smoke。页面回报 `WebGL / Google Inc. (NVIDIA) / ANGLE (NVIDIA, Vulkan ... NVIDIA RTX A6000 ...)`，`gpuGate.hardware=true`；同一执行窗口的 `nvidia-smi pmon` 观察到 Chrome GPU 进程。正式采样因此可以确认使用 NVIDIA 硬件光栅化，CPU 仅负责读取 Color-ID 缓冲和聚合结果。采样器与 view-cell wrapper 已将 `--require-hardware-gpu` 作为显式正式参数，并在缺失页面后端、NVIDIA 快照、`pmon` 或发现软件标记时失败关闭。
