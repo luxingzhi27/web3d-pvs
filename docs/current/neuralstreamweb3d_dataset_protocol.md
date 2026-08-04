@@ -54,6 +54,23 @@ Color-ID 的权重可以用于视觉重要性监督，但它不是深度缓冲�
 
 采样脚本支持按 pose plan 分片并行执行，每个分片独立写 JSONL、GPU 证据、stdout 和 stderr 日志。运行前要确保不同分片的 `pose_index` 不重叠，运行后要同时检查每个分片行数与计划范围一致，以及 `gpu_execution_summary.json` 的 `formalReady=true`。
 
+### 3.2 本机硬件核验记录（2026-08-04）
+
+本机已经用与正式采样相同的 Chrome 启动链路完成硬件核验，不能再把“采样成功”作为 GPU 证据的替代品。系统 Chrome 为 `/usr/bin/google-chrome`，页面返回：
+
+```text
+api      = WebGL
+vendor   = Google Inc. (NVIDIA)
+renderer = ANGLE (NVIDIA, Vulkan ... NVIDIA RTX A6000 ...)
+gpuGate  = required=true, hardware=true, software=false
+```
+
+采样期间的 `nvidia-smi`/`nvidia-smi pmon` 快照还观察到 Chrome GPU 进程；完整的参数、页面后端和主机快照保存在 `docs/evaluation/m5_hardware_gpu_renderer_2026-08-04.md` 所引用的硬件 smoke 与 M5 硬件输出中。由此可以确认，当前 Color-ID 采样链路是 Three.js WebGL 在 NVIDIA 硬件上完成离屏光栅化，CPU 只读取颜色 ID 并汇总实例集合和覆盖权重。
+
+后续任何正式数据集重建都必须逐分片检查旁路的 `*.jsonl.gpu_evidence.json` 和总目录的 `gpu_execution_summary.json`。旧采样目录如果没有这些旁路证据，只能记录为“后端无法事后核验”，不能因为有 JSONL、PNG 或浏览器退出码就追认为硬件 GPU 采样，也不能用软件后端补齐正式数据。`--allow-software-gpu` 仅允许用于单独命名的小规模语义调试目录。
+
+这里的硬件结论只适用于 WebGL Color-ID 光栅化。WebGPU 推理仍需读取并单独核验 `navigator.gpu.requestAdapter()`；WebGL 返回 NVIDIA 不能推导 WebGPU 使用硬件。当前 WebGPU 探针回报 SwiftShader 的结果继续按“WebGL 硬件通过、WebGPU 硬件门失败”记录。
+
 ## 4. 从 subpose 聚合到 view-cell
 
 `build_rvc_viewcell_pose_csr.py` 负责把同一 view-cell 的多个 subpose 聚合成一个训练 pose。它的行为是：

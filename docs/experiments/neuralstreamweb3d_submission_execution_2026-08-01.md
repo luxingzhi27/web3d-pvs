@@ -12,6 +12,12 @@ WebGL 与 WebGPU 分别核验：WebGL 页面回报 NVIDIA 只证明采样/Color-
 
 M12 独立探针进一步测试了当前 Vulkan 参数、`--use-vulkan`/`Vulkan` feature 和高性能 GPU 参数组合，三种 headless Chrome 组合均回报 WebGL NVIDIA RTX A6000、WebGPU `google/swiftshader`。该排查未修改正式输出，也未放宽硬件门；M12 仍只能作为数值 parity 子门通过、WebGPU 硬件性能门失败。
 
+### 2026-08-04 Color-ID 采样硬件证据封存
+
+本机已复用正式采样入口 `neural_instance_culling/sampler/run_sampler.mjs` 的 Chrome 启动参数完成硬件 smoke。页面回报 `WebGL / Google Inc. (NVIDIA) / ANGLE (NVIDIA, Vulkan ... NVIDIA RTX A6000 ...)`，`gpuGate.hardware=true`；同一执行窗口的 `nvidia-smi pmon` 观察到 Chrome GPU 进程。正式采样因此可以确认使用 NVIDIA 硬件光栅化，CPU 仅负责读取 Color-ID 缓冲和聚合结果。采样器与 view-cell wrapper 已将 `--require-hardware-gpu` 作为显式正式参数，并在缺失页面后端、NVIDIA 快照、`pmon` 或发现软件标记时失败关闭。
+
+本记录同时固定后续交接规则：正式采样结果必须随分片保存 `*.jsonl.gpu_evidence.json`，并在总目录保存 `gpu_execution_summary.json`；没有旁路证据的历史 JSONL 不得追认为硬件采样。软件后端只可进入独立的语义调试目录，不能重建正式数据集、填写 GPU 性能表或覆盖硬件输出。该结论仅针对 WebGL Color-ID；WebGPU 仍按 adapter 单独核验，当前 SwiftShader adapter 不得写成硬件 WebGPU 结果。
+
 ## 记录规则
 
 本文件只记录已经由当前工作区、日志、模型产物或可复核脚本证明的状态。计划中的目标不作为实验结果；探索性结果、失败结果和正式结果分别标记。任何阈值、checkpoint、候选集合、图像评价和设备结论都必须能追溯到具体文件、命令和数据哈希。
