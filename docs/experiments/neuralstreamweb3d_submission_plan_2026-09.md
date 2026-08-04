@@ -1406,3 +1406,26 @@ adapter 结果都必须停止正式性能汇总，不能通过删除硬件门或
 `pmon` 均可读取，且 pmon 记录到 Chrome GPU 进程。该 smoke 只验证执行链，不替代正式数据集质量评价。
 Node 语法检查、`git diff --check` 和 benchmark unittest `78 tests, OK` 均通过。该规则同时同步到硬件 GPU
 政策和数据集协议，后续不得使用软件渲染填充正式采样、图像评价或 GPU 性能结果。
+
+### 21.40 M5 dense 漏像素长尾定位与 v2 训练执行状态（2026-08-04）
+
+对上一轮 `m5_visual_safety_repair_image_dense_hw_20260804` 的 `536,256` 个 validation/calibration
+dense subpose 逐样本结果进行了只读诊断。漏像素并非均匀噪声，而是集中在少数空间 view-cell：validation 中
+`vc00482`、`vc01485`、`vc02034`、`vc01360`、`vc00065` 和 `vc04584` 的跨变体/跨 seed 平均漏像素率约为
+`16.4%`--`21.1%`，明显高于总体 `0.7488%`；calibration 中 `vc04234`、`vc03184`、`vc03181` 和
+`vc03559` 同样构成长尾。该分析读取的是已经保存的实例级 Color-ID 结果，没有重新选择阈值，也没有改变候选
+集合或 GT。
+
+一个可复核的失败案例是 validation `vc00524`。该 view-cell 有 `32` 个同方向 subpose、`66` 个候选和
+`5` 个真实可见实例；实例 `4169` 在所有 `32` 个 subpose 中出现，`visible_weights` 为 `496,596`，是该
+pose 的主要画面贡献，但旧模型在 `visual_mass_soft` seed `20260801` 的每个 subpose 都漏掉它，单 pose
+miss-pixel rate 约为 `50.34%`。这说明仅提高平均 weighted recall 或 useful cull 不能证明画面安全；该错误
+更接近固定实例表征在空间隔离区域的泛化失败，而不是软件渲染、实例绑定或候选生成错误。
+
+针对上述机制问题，当前独立实验
+`pvs_m5_subpose_robust_v1_hkust_spatial_fov66_seed20260801_full40`、`seed20260802` 和 `seed20260803`
+继续使用同一候选 CSR、GT、FOV 和 spatial split，新增的 view-cell subpose 出现频率风险监督用于保护低频
+但高视觉贡献的 union 正例；它不补入 GT、不使用 dynamic-pool teacher、不读取 test。2026-08-04 08:41
+核验时三路分别约在 `23/40`、`22/40`、`22/40` epoch，CUDA GPU 0/1/2 持续运行，严格校准摘要和 dense
+图像 manifest 尚未生成。当前记录只能作为执行状态，不能提前宣称 v2 改善了上述长尾；待三路完成后仍须通过
+独立严格 calibration、硬件 GPU dense 图像评价和已登记的 mean/p95 安全门。
