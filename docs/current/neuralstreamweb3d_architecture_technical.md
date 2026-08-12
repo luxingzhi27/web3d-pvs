@@ -1,8 +1,8 @@
 # NeuralStreamWeb3D 当前架构与技术说明
 
-更新时间：2026-08-04
+更新时间：2026-08-10
 
-本文描述当前可运行的 NeuralStreamWeb3D 主线。它面向大规模、由大量可下载构件组成的三维场景，把离线几何分析、视点区域可见性学习、浏览器端推理和资源调度组织为一条可复现链路。本文中的“当前版本”只指方向遮挡代理模型及其前端接入；dynamic-pool、旧 Graph U-Net、Triplane、screen-grid 和 froxel 实验属于历史演进，不是默认运行路径。
+本文描述当前可运行的 NeuralStreamWeb3D 主线。它面向大规模、由大量可下载构件组成的三维场景，把离线几何分析、视点区域可见性学习、浏览器端推理和资源调度组织为一条可复现链路。本文中的“当前版本”只指方向遮挡代理模型及其前端接入；dynamic-pool、旧 Graph U-Net、Triplane、screen-grid 和 froxel 实验属于历史演进，不是默认运行路径。最新模型优化结果和后续实验边界见 [`optimization_restart_2026-08-10.md`](optimization_restart_2026-08-10.md)。
 
 ## 1. 系统目标与边界
 
@@ -112,7 +112,7 @@ Three.js Color-ID 采样、实例级图像评价和浏览器三角形 HZB 构建
 - 资源效率：平均预测数、GLB 数量/字节削减、预算内 GLB utility recall；
 - 运行成本：Worker 推理延迟、总调度延迟、固定特征大小和实际绘制实例数。
 
-正式阈值和 checkpoint 选择统一为：先要求 `weighted recall > 0.99`，再在合格工作点中选择最高 `pose precision`。普通 pose recall、F1、accuracy、useful cull、bad cull、GLB 字节削减和图像级指标继续完整报告，但不改变这条主选择规则。
+正式阈值和 checkpoint 选择统一为：先要求 `weighted recall > 0.99` 及其单侧 95% 置信下界 `> 0.99`，再在合格工作点中选择最高 `pose precision`。普通 pose recall、F1、accuracy、useful cull、bad cull、GLB 字节削减和图像级指标继续完整报告，但不改变这条主选择规则；本阶段暂不使用 bad-cull 置信区间上界否决路线。
 
 裸的 `1 - average(prediction) / average(candidate)` 不能替代有效剔除，因为它把正确剔除的不可见实例和错误剔除的可见实例混在一起。正式 test split 必须遍历全部唯一测试 view-cell，并在报告中写明候选集合、可见权重语义和阈值工作点。
 

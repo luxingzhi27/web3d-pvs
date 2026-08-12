@@ -42,11 +42,13 @@ from common.threshold_selection import (
 )  # noqa: E402
 from compute_color_id_per import compute_metrics  # noqa: E402
 from instance_id_render_schema import (  # noqa: E402
+    FORMAL_INSTANCE_RENDER_MANIFEST_SCHEMA,
     INSTANCE_ID_ENCODING,
     MODEL_INPUT_FOV_Y_DEG,
     INSTANCE_RENDER_MANIFEST_SCHEMA,
     RENDER_FOV_Y_DEG,
     build_instance_binding_preflight,
+    validate_formal_instance_render_manifest,
     validate_instance_render_manifest,
 )
 from model_runners import load_runner, selected_default_specs, select_device  # noqa: E402
@@ -82,7 +84,11 @@ def parse_args() -> argparse.Namespace:
         "--model-spec",
         action="append",
         default=[],
-        help="Explicit dynamic model spec name|checkpoint|runtime_features|calibration_summary; repeat is rejected.",
+        help=(
+            "Explicit dynamic model spec. Legacy syntax is "
+            "name|checkpoint|runtime_features|calibration_summary; "
+            "new syntax is name|kind|checkpoint|runtime_features|calibration_summary."
+        ),
     )
     parser.add_argument("--runtime-meta", type=Path, default=Path("hkust-v3/assets/runtimeVisibilityMeta.json"))
     parser.add_argument(
@@ -146,6 +152,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Validate and write the component-ID render manifest without starting Chrome.",
     )
+    parser.add_argument(
+        "--formal-image-evaluation",
+        action="store_true",
+        help="Require the complete hardware-GPU component-ID image protocol and emit a formal-ready result.",
+    )
     parser.add_argument("--threshold", type=float, default=None)
     parser.add_argument(
         "--threshold-policy",
@@ -193,11 +204,20 @@ def subpose_selection_self_test() -> None:
 
 def parse_model_spec(value: str) -> tuple[str, dict[str, str]]:
     parts = [part.strip() for part in str(value).split("|")]
-    if len(parts) != 4 or any(not part for part in parts):
-        raise ValueError("--model-spec must use name|checkpoint|runtime_features|calibration_summary")
-    name, checkpoint, runtime_features, eval_summary = parts
+    if len(parts) == 4:
+        name, checkpoint, runtime_features, eval_summary = parts
+        kind = "directional_occlusion_proxy_encoder"
+    elif len(parts) == 5:
+        name, kind, checkpoint, runtime_features, eval_summary = parts
+    else:
+        raise ValueError(
+            "--model-spec must use name|checkpoint|runtime_features|calibration_summary "
+            "or name|kind|checkpoint|runtime_features|calibration_summary"
+        )
+    if any(not part for part in parts):
+        raise ValueError("--model-spec contains an empty field")
     return name, {
-        "kind": "directional_occlusion_proxy_encoder",
+        "kind": kind,
         "checkpoint": checkpoint,
         "runtime_features": runtime_features,
         "eval_summary": eval_summary,
@@ -915,6 +935,8 @@ def write_summary_md(path: Path, summary: dict[str, Any]) -> None:
         f"- Split alignment: `{s.get('splitAlignment', {}).get('validated', False)}`",
         f"- Local GLB root: `{s['localGlbCheck']['glbRoot']}`",
         f"- Renderer: `{s['renderer']['schema']}`",
+        f"- Formal image gate: `{bool(s.get('formalImageEvaluationReady', False))}`",
+        f"- WebGL hardware gate: `{bool((s.get('renderer', {}).get('gpuGate') or {}).get('hardware', False))}`",
         "",
         "## Metrics",
         "",
@@ -929,6 +951,7 @@ def write_summary_md(path: Path, summary: dict[str, Any]) -> None:
         f"- Frustum-cell IoU: `{f['frustumCellIoU']:.6f}`",
         f"- Image PER: `{float(i.get('PER', 0.0)):.6f}`",
         f"- Miss pixel rate: `{float(i.get('missPixelRate', 0.0)):.6f}`",
+        f"- P95 miss pixel rate: `{float(i.get('p95MissPixelRate', 0.0) or 0.0):.6f}`",
         f"- Wrong-ID pixel rate: `{float(i.get('wrongInstancePixelRate', 0.0)):.6f}`",
         f"- Extra pixel rate over image: `{float(i.get('extraPixelRateOverImage', 0.0)):.6f}`",
         f"- Self-consistency PER: `{float(s.get('selfConsistencyPER') or 0.0):.6f}`",
@@ -968,8 +991,9 @@ def run_true_glb_renderer(
     missing = [gid for gid in selected_glbs if gid not in glb_paths or not glb_paths[gid].exists()]
     if missing:
         raise RuntimeError(f"True GLB renderer refuses to run because local GLBs are missing: {missing[:16]}")
+    formal = bool(args.formal_image_evaluation)
     manifest = {
-        "schema": INSTANCE_RENDER_MANIFEST_SCHEMA,
+        "schema": FORMAL_INSTANCE_RENDER_MANIFEST_SCHEMA if formal else INSTANCE_RENDER_MANIFEST_SCHEMA,
         "created": datetime.now().isoformat(timespec="seconds"),
         "width": int(args.width),
         "height": int(args.height),
@@ -983,10 +1007,12 @@ def run_true_glb_renderer(
         "reference": {
             "mode": "full_scene_renderable_instances",
             "idSource": "componentGlobalId",
+            "geometrySource": "original_local_glb_meshes",
+            "completeInventory": True,
         },
         "prediction": {
             "field": "predictionComponentIds",
-            "postFilter": "active_camera_60deg_aabb_pending",
+            "postFilter": "component_visibility_mask_after_conservative_render_submission",
         },
         "instanceBindings": instance_bindings,
         "glbAabbs": {
@@ -1013,19 +1039,30 @@ def run_true_glb_renderer(
             "near": float(args.render_near),
             "far": 20000.0,
             "completeInventoryRetained": True,
+            "componentLevelMask": True,
         },
         "samples": manifest_samples,
         "previewSamples": int(args.preview_samples),
         "saveIdBuffers": bool(args.save_id_buffers),
         "localOnly": True,
         "idEncoding": INSTANCE_ID_ENCODING,
-        "formalImageEvaluationReady": False,
-        "limitations": [
+        "formalImageEvaluationReady": formal,
+        "formalRequirements": {
+            "requiresHardwareWebGL": formal,
+            "syntheticSmokeAllowed": False,
+            "completeGlbInventory": True,
+            "renderFovYDeg": float(RENDER_FOV_Y_DEG),
+            "modelInputFovYDeg": float(MODEL_INPUT_FOV_Y_DEG),
+        },
+        "limitations": [] if formal else [
             "The browser uses the original loaded GLB scene and an instance-level visibility mask; it does not compact instance matrices.",
             "This manifest is for validation/calibration smoke and remains non-formal until the registered image gates are met.",
         ],
     }
-    validate_instance_render_manifest(manifest)
+    if formal:
+        validate_formal_instance_render_manifest(manifest)
+    else:
+        validate_instance_render_manifest(manifest)
     manifest_path = output_dir / "true_glb_render_manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     cmd = [
@@ -1060,6 +1097,8 @@ def main() -> None:
     if args.self_test:
         subpose_selection_self_test()
         return
+    if args.formal_image_evaluation and args.image_renderer != "true_glb":
+        raise ValueError("formal image evaluation requires --image-renderer true_glb")
     if len(args.model_spec) > 1:
         raise ValueError("--model-spec may be supplied at most once")
     dynamic_spec = None
@@ -1336,9 +1375,15 @@ def main() -> None:
             glb_aabbs,
             world_aabbs,
         )
+        if args.formal_image_evaluation:
+            gpu_gate = render_summary.get("gpuGate") or {}
+            if render_summary.get("formalImageEvaluationReady") is not True or gpu_gate.get("hardware") is not True:
+                raise RuntimeError(
+                    "formal image evaluation did not pass the browser instance-ID and hardware-GPU gates"
+                )
         image_metrics = render_summary.get("imageMetrics") or {
             "schema": "component-id-image-schema-validation-v1",
-            "formalImageEvaluationReady": False,
+            "formalImageEvaluationReady": bool(args.formal_image_evaluation),
             "evaluatedSubposeCount": 0,
             "reason": "browser instance renderer is not implemented; validation only",
         }
@@ -1348,7 +1393,9 @@ def main() -> None:
         self_consistency_per = render_summary.get("selfConsistencyPER")
         renderer_meta = {
             "schema": "local-true-component-id-browser-v3",
-            "description": "浏览器一次加载完整本地 GLB 清单，将 componentGlobalId 和逐实例可见性绑定到 InstancedMesh 的 ID shader，并在同一页面顺序处理所有样本；当前 manifest 仍标记为非正式图像评价。",
+            "description": "浏览器一次加载完整本地 GLB 清单，将 componentGlobalId 和逐实例可见性绑定到 InstancedMesh 的 ID shader，并在同一页面顺序处理所有样本。",
+            "formalImageEvaluationReady": bool(render_summary.get("formalImageEvaluationReady", False)),
+            "gpuGate": render_summary.get("gpuGate"),
             "renderSummary": str(output_dir / "true_glb_render" / "render_summary.json"),
             "limitations": [
                 "The browser path uses a per-instance visibility mask rather than matrix compaction; it preserves component semantics but still submits the complete loaded scene.",
@@ -1427,6 +1474,9 @@ def main() -> None:
         "rawSubposeGt": raw_summary,
         "localGlbCheck": local_glb_check,
         "renderer": renderer_meta,
+        "formalImageEvaluationReady": bool(
+            args.formal_image_evaluation and renderer_meta.get("formalImageEvaluationReady", False)
+        ),
         "instanceBindingPreflight": instance_bindings,
         "sampleLog": str(samples_jsonl),
         "previewDir": str(output_dir / "previews"),

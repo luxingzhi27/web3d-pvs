@@ -1,6 +1,6 @@
 # Viewcell Image PER Evaluation
 
-Date: 2026-08-01
+Date: 2026-08-10
 
 图像级评价用于回答：模型在实例集合上满足安全约束后，真实 GLB 渲染画面仍会损失多少像素。它不是新的 PVS 模型，也不能替代集合 precision / recall / useful cull / bad cull。
 
@@ -62,8 +62,8 @@ PYTHONDONTWRITEBYTECODE=1 python \
 该 runner 只合并已有 component-level prediction，不运行模型、不扫描或修改阈值，
 并在一个 Chrome 页面中复用已加载的 GLB。它会在 summary 中记录
 `browserPageCount`、`glbLoadPasses`、`glbLoaderCalls`、加载耗时和页面内重载次数。
-独立 Node/Chrome 调用之间仍没有常驻对象缓存，完整审计见
-`m5_component_image_batch_reuse_2026-08-01.md`。
+独立 Node/Chrome 调用之间仍没有常驻对象缓存；正式浏览器硬件门统一遵循
+`../current/hardware_gpu_execution_policy.md`。
 
 ## Metrics
 

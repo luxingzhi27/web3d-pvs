@@ -1,6 +1,6 @@
 # 正式浏览器采样与评价的硬件 GPU 执行政策
 
-更新时间：2026-08-04
+更新时间：2026-08-12
 
 ## 目的
 
@@ -44,8 +44,9 @@ gpuGate  = required=true, hardware=true
 |---|---|---|
 | 单场景 Color-ID 采样 | `neural_instance_culling/sampler/run_sampler.mjs` | 默认要求硬件 GPU |
 | NeuralPVS view-cell 分片采样 | `neural_instance_culling/sampler/run_scene_viewcell_colorid_sampling.mjs` | wrapper 强制传入 `--require-hardware-gpu` |
-| M5 实例级 Color-ID 图像评价 | `neural_instance_culling/benchmark/render_local_glb_color_id_browser.mjs` 与 `run_m5_component_image_batch.py` | 默认要求硬件 GPU |
+| 实例级 Color-ID 图像评价 | `neural_instance_culling/benchmark/render_local_glb_color_id_browser.mjs` 与 `run_m5_component_image_batch.py` | 默认要求硬件 GPU |
 | 三角形 HZB 浏览器构建 | `neural_instance_culling/benchmark/build_triangle_hzb_cache_browser.mjs` | 默认要求硬件 GPU |
+| 方向深度关系实验的三角形深度层采集 | `neural_instance_culling/benchmark/build_triangle_depth_layer_evidence_browser.mjs` | 默认要求硬件 GPU，并保存 Chrome 日志与 GPU 证据 |
 
 正式采样的典型命令：
 
@@ -57,7 +58,7 @@ node neural_instance_culling/sampler/run_sampler.mjs \
   --require-hardware-gpu
 ```
 
-M5 renderer 的正式命令必须包含：
+图像评价 renderer 的正式命令必须包含：
 
 ```bash
 node neural_instance_culling/benchmark/render_local_glb_color_id_browser.mjs \
@@ -78,6 +79,10 @@ node neural_instance_culling/benchmark/render_local_glb_color_id_browser.mjs \
 因此，正式采样结果不能只依据 JSONL 行数或“浏览器成功输出”判定。若旧采样目录没有这些证据文件，不能事后
 推断它使用了硬件 GPU；需要在独立输出目录中按当前入口重新采样，不能覆盖旧结果。
 
+三角形深度层入口同样必须保存 `<output>.gpu_evidence.json`、`<output>.chrome_stdout.log` 和
+`<output>.chrome_stderr.log`，并在 `layer_cache_meta.json` 中写入 `gpuBackend`/`gpuGate`。这些文件由
+`pvs_direction_depth_relation_survival_constrained_v1` 的执行记录统一说明；没有完整旁路证据的深度缓存不能作为正式遮挡监督。
+
 ## 软件路径边界
 
 `--allow-software-gpu` 只允许用于小规模的颜色语义、实例绑定或代码调试。它必须在日志和输出元数据中明确标记为非正式；不得用它重建正式数据集，不得用它填写 GPU/浏览器性能，不得覆盖同名硬件输出目录，也不得作为移动设备性能证据。
@@ -89,6 +94,42 @@ node neural_instance_culling/benchmark/render_local_glb_color_id_browser.mjs \
 WebGL 的硬件门只证明 WebGL/ANGLE 的光栅化路径；它不能推断 WebGPU 适配器也使用硬件 GPU。凡是涉及 WebGPU 推理、WGSL 延迟或 WebGPU buffer/dispatch 的实验，必须额外读取 `navigator.gpu.requestAdapter()` 返回的适配器信息，并对该 API 单独执行软件后端拒绝规则。若 WebGL 报告 NVIDIA、但 WebGPU 报告 `SwiftShader`、`software` 或空适配器，结果只能记为“WebGL 硬件路径通过、WebGPU 硬件门失败”，不得把 WebGPU 延迟或显存结论写成硬件结果。
 
 同理，`nvidia-smi` 看到 Chrome 进程只能作为辅助证据，不能替代页面实际回报的 API 后端字段。正式报告必须注明被测 API（WebGL 或 WebGPU）、对应的 renderer/adapter、硬件门结果和同时间段的 NVIDIA 进程证据。
+
+### 无头 Playwright 的 WebGPU Vulkan 路径
+
+无头模式本身不是软件回退的充分条件。当前 OWRB parity 入口在 Playwright 启动 Chrome 时使用：
+
+```text
+--headless=new --enable-gpu --enable-unsafe-webgpu --enable-webgpu
+--enable-features=Vulkan --use-vulkan --use-angle=vulkan
+--enable-webgl --enable-accelerated-2d-canvas --enable-zero-copy
+--ignore-gpu-blocklist --disable-gpu-sandbox
+--disable-software-rasterizer
+```
+
+Color-ID 采样不需要 WebGPU 专用的 `--enable-unsafe-webgpu` 和 `--enable-webgpu`，但仍使用
+`--enable-gpu --enable-webgl --use-angle=vulkan`，正式模式使用
+`--disable-software-rasterizer`。两条路径都使用 Playwright 启动系统 Chrome，不在 CPU 中模拟光栅化。
+
+如果 Vulkan loader 选择错误的 ICD，可以在不修改系统配置的前提下用用户级环境变量做诊断，例如：
+
+```bash
+VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json \
+node slm2viewer/scripts/benchmark_ray_context_survival_owrb_webgpu_parity.mjs \
+  --bundle <exported-runtime-bundle> --cases <parity-cases.json> \
+  --out <parity-capture.json> --require-hardware-gpu
+```
+
+该变量只是选择 Vulkan ICD 的尝试，不能直接证明硬件成功。最终仍必须看到
+`navigator.gpu.requestAdapter({powerPreference: "high-performance"})` 返回的适配器包含 NVIDIA
+信息，并通过 `gpuGate.hardware=true`；若返回 `google/swiftshader`，即使 WebGL renderer 是 NVIDIA，
+也只能登记为 WebGPU 软件数值 parity。2026-08-12 使用 Playwright 无头 Chrome 追加
+`--ozone-platform=headless`、`--ozone-override-screen-size=1280,720`，并指定
+`VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json` 复核；当前 Chrome `146.0.7680.177`
+仍返回 `google/swiftshader`。Chrome CDP 的 `SystemInfo.getInfo` 同时显示 WebGL 为 NVIDIA
+Vulkan/ANGLE，但 WebGPU 的硬件门仍失败。因此无头 Playwright 可以继续用于正式 WebGL 采样、图像评价
+和软件 WebGPU 数值 parity；在本机未出现 NVIDIA WebGPU adapter 之前，不能报告 WebGPU 硬件延迟，
+也不能用 `nvidia-smi` 中出现 Chrome 进程来替代 adapter 证据。
 
 ## 结果验收
 

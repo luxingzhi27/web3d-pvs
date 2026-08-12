@@ -29,7 +29,6 @@ DEFAULT_IMAGE_OUTPUT = (
 )
 DEFAULT_MODEL_ROOT = ROOT / "neural_instance_culling" / "model" / "out"
 DEFAULT_VARIANT = "pvs_m5_subpose_robust_v1_hkust_spatial_fov66"
-DEFAULT_REPORT = ROOT / "docs" / "evaluation" / "m5_subpose_robust_image_dense_hw_2026-08-04.md"
 
 IMAGE_COUNT_FIELDS = (
     "totalPixels",
@@ -327,7 +326,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-root", type=Path, default=DEFAULT_MODEL_ROOT)
     parser.add_argument("--variant", default=DEFAULT_VARIANT)
     parser.add_argument("--seeds", default="20260801,20260802,20260803")
-    parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
+    parser.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        help="Markdown output path; defaults to m5_v2_summary.md beside --image-output.",
+    )
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args()
 
@@ -340,9 +344,10 @@ def main() -> None:
     seeds = tuple(int(value) for value in str(args.seeds).split(",") if value.strip())
     summary = summarize(args.image_output, args.model_root, args.variant, seeds)
     output = args.image_output / "m5_v2_summary.json"
+    report = args.report or (args.image_output / "m5_v2_summary.md")
     output.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    write_report(summary, args.report)
-    print(json.dumps({"summary": str(output), "report": str(args.report), "status": summary["qualityGate"]["status"]}, ensure_ascii=False, indent=2))
+    write_report(summary, report)
+    print(json.dumps({"summary": str(output), "report": str(report), "status": summary["qualityGate"]["status"]}, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

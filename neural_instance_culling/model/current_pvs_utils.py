@@ -144,6 +144,129 @@ def threshold_grid() -> np.ndarray:
     return np.unique(np.concatenate([low, mid, high]))
 
 
+def weighted_recall_lower_confidence_bound(
+    weighted_tp: np.ndarray,
+    weighted_gt: np.ndarray,
+    replicates: int = 10000,
+    seed: int = 0,
+) -> float:
+    """Return the percentile lower bound used by calibration safety gates.
+
+    The resampling unit is a pose.  ``weighted_tp`` and ``weighted_gt`` are
+    therefore per-pose weighted hit and GT mass, not already aggregated
+    ratios.  A zero replicate count is reserved for lightweight diagnostics;
+    formal calibration always passes at least 10,000.
+    """
+    tp = np.asarray(weighted_tp, dtype=np.float64).reshape(-1)
+    gt = np.asarray(weighted_gt, dtype=np.float64).reshape(-1)
+    if tp.size == 0 or tp.size != gt.size:
+        return 0.0
+    if int(replicates) <= 0:
+        return float(tp.sum() / max(1e-12, gt.sum()))
+    rng = np.random.default_rng(int(seed))
+    # Keep memory bounded for larger calibration sets while retaining exactly
+    # the requested number of bootstrap draws.
+    values = np.empty((int(replicates),), dtype=np.float64)
+    chunk = max(1, min(int(replicates), 1_000_000 // max(1, tp.size)))
+    for start in range(0, int(replicates), chunk):
+        end = min(int(replicates), start + chunk)
+        indices = rng.integers(0, tp.size, size=(end - start, tp.size), endpoint=False)
+        numerator = tp[indices].sum(axis=1)
+        denominator = gt[indices].sum(axis=1)
+        values[start:end] = numerator / np.maximum(1e-12, denominator)
+    return float(np.quantile(values, 0.05))
+
+
+def _weighted_quantile(values: np.ndarray, weights: np.ndarray, quantile: float) -> float:
+    """Return a finite weighted quantile for score-distribution diagnostics."""
+    value_array = np.asarray(values, dtype=np.float64).reshape(-1)
+    weight_array = np.asarray(weights, dtype=np.float64).reshape(-1)
+    if value_array.size == 0 or value_array.size != weight_array.size:
+        return float("nan")
+    valid = np.isfinite(value_array) & np.isfinite(weight_array) & (weight_array > 0.0)
+    value_array = value_array[valid]
+    weight_array = weight_array[valid]
+    if value_array.size == 0:
+        return float("nan")
+    order = np.argsort(value_array, kind="mergesort")
+    ordered_values = value_array[order]
+    ordered_weights = weight_array[order]
+    cumulative = np.cumsum(ordered_weights)
+    target = float(np.clip(quantile, 0.0, 1.0)) * float(cumulative[-1])
+    index = int(np.searchsorted(cumulative, target, side="left"))
+    return float(ordered_values[min(index, ordered_values.size - 1)])
+
+
+def score_distribution_summary(
+    scores: np.ndarray,
+    target: np.ndarray,
+    visible_weights: np.ndarray,
+    calibration_bins: int = 10,
+) -> dict[str, Any]:
+    """Summarize score separation without selecting a threshold.
+
+    Positive scores use their visible-weight mass; negative scores use unit
+    candidate mass.  This keeps the summary aligned with the safety metric
+    while still exposing whether the model only becomes safe after moving the
+    threshold into the numerical tail.
+    """
+    values = np.asarray(scores, dtype=np.float64).reshape(-1)
+    labels = np.asarray(target, dtype=np.float64).reshape(-1)
+    visible = np.asarray(visible_weights, dtype=np.float64).reshape(-1)
+    if not (values.size == labels.size == visible.size):
+        raise ValueError("score, target, and visible weight arrays must have equal length")
+    if values.size == 0:
+        return {
+            "scoreCount": 0,
+            "positiveCount": 0,
+            "negativeCount": 0,
+            "positiveWeightedQ05": None,
+            "negativeQ95": None,
+            "positiveNegativeGapQ05Q95": None,
+            "brierScore": None,
+            "expectedCalibrationError": None,
+        }
+    if not np.isfinite(values).all() or not np.isfinite(labels).all() or not np.isfinite(visible).all():
+        raise FloatingPointError("score distribution contains non-finite values")
+    positive = labels > 0.5
+    negative = ~positive
+    positive_weights = np.maximum(visible, 1e-6)
+    positive_q05 = _weighted_quantile(values[positive], positive_weights[positive], 0.05)
+    negative_q95 = _weighted_quantile(values[negative], np.ones(np.count_nonzero(negative)), 0.95)
+    gap = positive_q05 - negative_q95 if np.isfinite(positive_q05) and np.isfinite(negative_q95) else float("nan")
+
+    evaluation_weights = np.where(positive, positive_weights, 1.0)
+    brier = float(
+        np.sum(evaluation_weights * np.square(values - labels))
+        / max(1e-12, float(np.sum(evaluation_weights)))
+    )
+    bin_count = max(1, int(calibration_bins))
+    bin_index = np.minimum((np.clip(values, 0.0, 1.0) * bin_count).astype(np.int64), bin_count - 1)
+    ece = 0.0
+    for current_bin in range(bin_count):
+        selected = bin_index == current_bin
+        if not np.any(selected):
+            continue
+        bin_weights = evaluation_weights[selected]
+        total = float(np.sum(bin_weights))
+        ece += (total / max(1e-12, float(np.sum(evaluation_weights)))) * abs(
+            float(np.sum(bin_weights * values[selected]) / max(1e-12, total))
+            - float(np.sum(bin_weights * labels[selected]) / max(1e-12, total))
+        )
+    return {
+        "scoreCount": int(values.size),
+        "positiveCount": int(np.count_nonzero(positive)),
+        "negativeCount": int(np.count_nonzero(negative)),
+        "positiveWeightedQ05": None if not np.isfinite(positive_q05) else float(positive_q05),
+        "negativeQ95": None if not np.isfinite(negative_q95) else float(negative_q95),
+        "positiveNegativeGapQ05Q95": None if not np.isfinite(gap) else float(gap),
+        "positiveMean": float(np.mean(values[positive])) if np.any(positive) else None,
+        "negativeMean": float(np.mean(values[negative])) if np.any(negative) else None,
+        "brierScore": brier,
+        "expectedCalibrationError": float(ece),
+    }
+
+
 def validate_training_resources(
     dataset_dir: Path,
     runtime_meta: Path,
@@ -197,12 +320,13 @@ def validate_training_resources(
             dataset_meta.get("rawCandidateFile")
             or dataset_meta.get("rawCandidateIds")
             or (dataset_dir / "raw_candidate_ids.bin").exists()
+            or ((dataset_dir / "frustum_ids.bin").exists() and (dataset_dir / "frustum_offsets.bin").exists())
         )
         if bool(dataset_meta.get("candidateVisibleUnionAllowed", False)):
             strict_failures.append("dataset metadata explicitly allows GT-visible candidate union")
         if int(dataset_meta.get("stats", {}).get("candidateVisibleUnionAdded", 0)) > 0:
             strict_failures.append("dataset metadata reports GT-visible candidates were added")
-        if "union" in candidate_semantics and "no gt" not in candidate_semantics:
+        if "union" in candidate_semantics and "no gt" not in candidate_semantics and not has_raw_candidate:
             strict_failures.append("candidate semantics describe a GT-visible union rather than raw candidates")
         if "plus" in candidate_semantics and "visible" in candidate_semantics and not has_raw_candidate:
             strict_failures.append(
@@ -262,6 +386,8 @@ def evaluate_thresholds(
     thresholds: np.ndarray,
     collect_pose_stats: bool = False,
     allow_candidate_visible_union: bool = False,
+    bootstrap_replicates: int = 0,
+    collect_score_stats: bool = False,
 ) -> list[dict[str, Any]]:
     model.eval()
     rng = np.random.default_rng(seed)
@@ -272,13 +398,24 @@ def evaluate_thresholds(
     pose_f1s = np.zeros((n_th,), dtype=np.float64)
     pose_jaccards = np.zeros((n_th,), dtype=np.float64)
     pose_weighted_recalls = np.zeros((n_th,), dtype=np.float64)
+    pose_specificities = np.zeros((n_th,), dtype=np.float64)
+    pose_accuracies = np.zeros((n_th,), dtype=np.float64)
+    pose_balanced_accuracies = np.zeros((n_th,), dtype=np.float64)
+    pose_useful_culls = np.zeros((n_th,), dtype=np.float64)
+    pose_bad_culls = np.zeros((n_th,), dtype=np.float64)
     pred_counts = np.zeros((n_th,), dtype=np.float64)
     gt_count_sum = 0.0
     candidate_count_sum = 0.0
     agg_tp = np.zeros((n_th,), dtype=np.float64)
     agg_fp = np.zeros((n_th,), dtype=np.float64)
     agg_fn = np.zeros((n_th,), dtype=np.float64)
+    agg_tn = np.zeros((n_th,), dtype=np.float64)
     pose_weighted_recall_values: list[list[float]] = [[] for _ in range(n_th)]
+    pose_weighted_tp_values: list[list[float]] = [[] for _ in range(n_th)]
+    pose_weighted_gt_values: list[list[float]] = [[] for _ in range(n_th)]
+    score_values: list[np.ndarray] = []
+    score_targets: list[np.ndarray] = []
+    score_weights: list[np.ndarray] = []
     pose_count = 0
     for pose_indices in split.pose_set_batches(poses_per_batch, rng, max_steps, include_empty=True):
         batch = split.build_pose_set_batch(
@@ -303,9 +440,15 @@ def evaluate_thresholds(
             pose_f1s += 1.0
             pose_jaccards += 1.0
             pose_weighted_recalls += 1.0
+            pose_specificities += 1.0
+            pose_accuracies += 1.0
+            pose_balanced_accuracies += 1.0
+            pose_useful_culls += 1.0
             if collect_pose_stats:
                 for threshold_index in range(n_th):
                     pose_weighted_recall_values[threshold_index].append(1.0)
+                    pose_weighted_tp_values[threshold_index].append(0.0)
+                    pose_weighted_gt_values[threshold_index].append(0.0)
             pose_count += 1
         if batch["instance"].size == 0:
             continue
@@ -317,6 +460,10 @@ def evaluate_thresholds(
         scores = torch.sigmoid(logits).detach().cpu().numpy().reshape(-1)
         target = batch["target"].astype(bool, copy=False)
         weights = batch.get("visible_weights", np.zeros_like(batch["target"], dtype=np.float32)).astype(np.float64, copy=False)
+        if collect_score_stats:
+            score_values.append(scores.astype(np.float64, copy=True))
+            score_targets.append(batch["target"].astype(np.float64, copy=True))
+            score_weights.append(weights.astype(np.float64, copy=True))
         offsets = batch["pose_offsets"]
         for i in range(offsets.size - 1):
             start = int(offsets[i])
@@ -329,6 +476,7 @@ def evaluate_thresholds(
             local_tp = np.logical_and(pred, yy).sum(axis=0).astype(np.float64)
             local_fp = np.logical_and(pred, ~yy).sum(axis=0).astype(np.float64)
             local_fn = np.logical_and(~pred, yy).sum(axis=0).astype(np.float64)
+            local_tn = np.logical_and(~pred, ~yy).sum(axis=0).astype(np.float64)
             precision = np.divide(
                 local_tp,
                 local_tp + local_fp,
@@ -341,6 +489,13 @@ def evaluate_thresholds(
                 out=np.ones_like(local_tp),
                 where=(local_tp + local_fn) > 0.0,
             )
+            specificity = np.divide(
+                local_tn,
+                local_tn + local_fp,
+                out=np.ones_like(local_tn),
+                where=(local_tn + local_fp) > 0.0,
+            )
+            accuracy = (local_tp + local_tn) / max(1.0, float(end - start))
             f1 = 2.0 * precision * recall / np.maximum(1e-8, precision + recall)
             pose_precisions += precision
             pose_recalls += recall
@@ -352,7 +507,11 @@ def evaluate_thresholds(
                 where=(local_tp + local_fp + local_fn) > 0.0,
             )
             weighted_tp = (np.logical_and(pred, yy) * ww).sum(axis=0)
-            weighted_gt = (yy * ww).sum(axis=0)
+            # The GT weight mass does not depend on the threshold.  Expand
+            # the scalar to the threshold axis so pose-level bootstrap rows
+            # have the same shape for both one and many thresholds.
+            weighted_gt_scalar = float((yy * ww).sum())
+            weighted_gt = np.full((n_th,), weighted_gt_scalar, dtype=np.float64)
             weighted_recall = np.divide(
                 weighted_tp,
                 weighted_gt,
@@ -360,20 +519,36 @@ def evaluate_thresholds(
                 where=weighted_gt > 0.0,
             )
             pose_weighted_recalls += weighted_recall
+            pose_specificities += specificity
+            pose_accuracies += accuracy
+            pose_balanced_accuracies += 0.5 * (recall + specificity)
+            pose_useful_culls += local_tn / max(1.0, float(end - start))
+            pose_bad_culls += local_fn / max(1.0, float(end - start))
             if collect_pose_stats:
                 for threshold_index in range(n_th):
                     pose_weighted_recall_values[threshold_index].append(float(weighted_recall[threshold_index]))
+                    pose_weighted_tp_values[threshold_index].append(float(weighted_tp[threshold_index]))
+                    pose_weighted_gt_values[threshold_index].append(float(weighted_gt[threshold_index]))
             pred_counts += pred.sum(axis=0).astype(np.float64)
             gt_count_sum += float(yy.sum())
             candidate_count_sum += float(end - start)
             agg_tp += local_tp
             agg_fp += local_fp
             agg_fn += local_fn
+            agg_tn += local_tn
             pose_count += 1
     rows = []
+    distribution = None
+    if collect_score_stats:
+        distribution = score_distribution_summary(
+            np.concatenate(score_values) if score_values else np.zeros((0,), dtype=np.float64),
+            np.concatenate(score_targets) if score_targets else np.zeros((0,), dtype=np.float64),
+            np.concatenate(score_weights) if score_weights else np.zeros((0,), dtype=np.float64),
+        )
     for i, value in enumerate(th):
         agg_precision = agg_tp[i] / max(1.0, agg_tp[i] + agg_fp[i])
         agg_recall = agg_tp[i] / max(1.0, agg_tp[i] + agg_fn[i])
+        agg_specificity = agg_tn[i] / max(1.0, agg_tn[i] + agg_fp[i])
         avg_candidate = float(candidate_count_sum / max(1, pose_count))
         avg_pred = float(pred_counts[i] / max(1, pose_count))
         row = {
@@ -383,8 +558,18 @@ def evaluate_thresholds(
             "pose_f1": float(pose_f1s[i] / max(1, pose_count)),
             "pose_jaccard": float(pose_jaccards[i] / max(1, pose_count)),
             "pose_weighted_recall": float(pose_weighted_recalls[i] / max(1, pose_count)),
+            "pose_specificity": float(pose_specificities[i] / max(1, pose_count)),
+            "pose_accuracy": float(pose_accuracies[i] / max(1, pose_count)),
+            "pose_balanced_accuracy": float(pose_balanced_accuracies[i] / max(1, pose_count)),
+            "pose_useful_cull": float(pose_useful_culls[i] / max(1, pose_count)),
+            "pose_bad_cull": float(pose_bad_culls[i] / max(1, pose_count)),
             "agg_precision": float(agg_precision),
             "agg_recall": float(agg_recall),
+            "agg_specificity": float(agg_specificity),
+            "agg_accuracy": float((agg_tp[i] + agg_tn[i]) / max(1.0, agg_tp[i] + agg_fp[i] + agg_fn[i] + agg_tn[i])),
+            "agg_balanced_accuracy": float(0.5 * (agg_recall + agg_specificity)),
+            "agg_useful_cull": float(agg_tn[i] / max(1.0, agg_tp[i] + agg_fp[i] + agg_fn[i] + agg_tn[i])),
+            "agg_bad_cull": float(agg_fn[i] / max(1.0, agg_tp[i] + agg_fp[i] + agg_fn[i] + agg_tn[i])),
             "agg_f1": float(2.0 * agg_precision * agg_recall / max(1e-8, agg_precision + agg_recall)),
             "avg_pred_count": avg_pred,
             "avg_gt_count": float(gt_count_sum / max(1, pose_count)),
@@ -393,10 +578,19 @@ def evaluate_thresholds(
             "tp": int(agg_tp[i]),
             "fp": int(agg_fp[i]),
             "fn": int(agg_fn[i]),
+            "tn": int(agg_tn[i]),
             "eval_pose_count": int(pose_count),
         }
         if collect_pose_stats:
             row["_pose_weighted_recall_values"] = pose_weighted_recall_values[i]
+            row["weighted_recall_lower_confidence_bound"] = weighted_recall_lower_confidence_bound(
+                np.asarray(pose_weighted_tp_values[i]),
+                np.asarray(pose_weighted_gt_values[i]),
+                replicates=bootstrap_replicates,
+                seed=int(seed) + i,
+            )
+        if distribution is not None:
+            row["scoreDistribution"] = distribution
         rows.append(row)
     return rows
 

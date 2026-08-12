@@ -286,10 +286,17 @@ def main() -> None:
 
             candidates = frustum_candidate_ids(camera_world[i], camera_forward[i], float(tan_x[i]), float(tan_y[i]), aabbs, args.near)
             candidate_set = set(int(v) for v in candidates.tolist())
-            for vid in visible.tolist():
-                if int(vid) not in candidate_set:
-                    stats["candidateMissVisible"] += 1
-                    candidate_set.add(int(vid))
+            missing_visible = np.setdiff1d(visible, candidates, assume_unique=False)
+            if missing_visible.size:
+                stats["candidateMissVisible"] += int(missing_visible.size)
+                raise RuntimeError(
+                    "Color-ID visible instances fall outside the native back-camera "
+                    f"AABB candidate set at pose {pose_indices[i]}: "
+                    f"{missing_visible.size} missing IDs; first IDs="
+                    f"{missing_visible[:16].tolist()}. Rebuild the sample with the "
+                    "same FOV/near-plane and candidate convention instead of "
+                    "augmenting candidates with GT-visible instances."
+                )
             candidates = np.asarray(sorted(candidate_set), dtype=np.uint32)
             if candidates.size == 0:
                 stats["emptyCandidate"] += 1
@@ -331,7 +338,7 @@ def main() -> None:
         "mvpStrideBytes": 64,
         "visibleCount": int(len(visible_ids_all)),
         "candidateCount": int(candidate_offsets[-1]),
-        "candidateSemantics": "AABB candidates under the sampled 66 degree model camera, plus all color-id visible positives",
+        "candidateSemantics": "native AABB candidates under the sampled 66 degree model camera; visible IDs are checked as a subset and never added",
         "cameraSemantics": "camera_world/camera_forward/fov are copied from Three.js color-id sampling poses",
         "gtSemantics": "visible_ids are exact color-id rasterized visible componentGlobalId values for one sampled pose",
         "visibleWeightSemantics": "Three.js color-id screen coverage in parts per million",

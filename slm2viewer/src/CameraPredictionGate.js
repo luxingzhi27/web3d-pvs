@@ -1,10 +1,17 @@
 import { Vector3, Quaternion } from 'three';
-import { FRONTEND_RENDER_FOV_Y_DEG } from './neuralPvsFovProtocol.js';
+import {
+  FRONTEND_RENDER_FOV_Y_DEG,
+  MODEL_INPUT_FOV_Y_DEG,
+} from './neuralPvsFovProtocol.js';
 
 const _pos = new Vector3();
 const _quat = new Quaternion();
 const _forward = new Vector3();
 const RAD_TO_DEG = 180 / Math.PI;
+const HKUST_VIEWCELL_RADIUS_M = 2;
+const VIEWCELL_VERTICAL_EPSILON_M = 1e-4;
+const VIEWCELL_ORIENTATION_EPSILON_DEG = 1e-4;
+const VIEWCELL_FOV_EPSILON_DEG = 1e-4;
 
 function finiteNumber(value, fallback) {
   const numeric = Number(value);
@@ -31,7 +38,14 @@ export class CameraPredictionGate {
 
   configure(options = {}) {
     this.mode = String(options.mode || this.mode || 'delta').toLowerCase();
-    this.positionDelta = finiteNumber(options.positionDelta !== undefined ? options.positionDelta : this.positionDelta, 8);
+    const requestedPositionDelta = finiteNumber(
+      options.positionDelta !== undefined ? options.positionDelta : this.positionDelta,
+      8,
+    );
+    // HKUST uses a horizontal view-cell disk with a fixed 2 m radius.
+    this.positionDelta = this.mode === 'viewcell'
+      ? HKUST_VIEWCELL_RADIUS_M
+      : requestedPositionDelta;
     this.angleDeltaDeg = finiteNumber(options.angleDeltaDeg !== undefined ? options.angleDeltaDeg : this.angleDeltaDeg, 5);
     this.yawDeltaDeg = finiteNumber(options.yawDeltaDeg !== undefined ? options.yawDeltaDeg : this.yawDeltaDeg, this.angleDeltaDeg);
     this.pitchDeltaDeg = finiteNumber(options.pitchDeltaDeg !== undefined ? options.pitchDeltaDeg : this.pitchDeltaDeg, this.angleDeltaDeg);
@@ -75,24 +89,34 @@ export class CameraPredictionGate {
       return true;
     }
 
-    if (nowMs - this.lastPredictionAt < this.minIntervalMs) {
-      return false;
-    }
-
     const moved = this.lastPosition.distanceTo(current.position);
     const angleRad = 2 * Math.acos(Math.min(1, Math.abs(this.lastQuaternion.dot(current.quaternion))));
     const angleDeg = angleRad * 180 / Math.PI;
     const fovDelta = Math.abs(current.fov - finiteNumber(this.lastFov, current.fov));
     const aspectDelta = Math.abs(current.aspect - finiteNumber(this.lastAspect, current.aspect));
     if (this.mode === 'viewcell') {
-      const yawDelta = wrappedAngleDeltaDeg(current.yawDeg, finiteNumber(this.lastYawDeg, current.yawDeg));
-      const pitchDelta = Math.abs(current.pitchDeg - finiteNumber(this.lastPitchDeg, current.pitchDeg));
-      return moved >= this.positionDelta ||
-        yawDelta >= this.yawDeltaDeg ||
-        pitchDelta >= this.pitchDeltaDeg ||
-        fovDelta >= this.fovDeltaDeg ||
+      const horizontalMoved = Math.hypot(
+        current.position.x - this.lastPosition.x,
+        current.position.z - this.lastPosition.z,
+      );
+      const verticalMoved = Math.abs(current.position.y - this.lastPosition.y);
+      // The offline HKUST subposes keep one fixed orientation. Use the full
+      // quaternion so roll cannot silently widen the registered cell either.
+      const orientationChanged = angleDeg > VIEWCELL_ORIENTATION_EPSILON_DEG;
+      const fovChanged = fovDelta > VIEWCELL_FOV_EPSILON_DEG;
+      // A cell boundary must trigger immediately; minIntervalMs cannot make
+      // an out-of-cell prediction look valid.
+      return horizontalMoved >= this.positionDelta ||
+        verticalMoved > VIEWCELL_VERTICAL_EPSILON_M ||
+        orientationChanged ||
+        fovChanged ||
         aspectDelta >= this.aspectDelta;
     }
+
+    if (nowMs - this.lastPredictionAt < this.minIntervalMs) {
+      return false;
+    }
+
     return moved >= this.positionDelta ||
       angleDeg >= this.angleDeltaDeg ||
       fovDelta >= this.fovDeltaDeg ||
@@ -121,6 +145,12 @@ export class CameraPredictionGate {
       fovDeltaDeg: this.fovDeltaDeg,
       aspectDelta: this.aspectDelta,
       minIntervalMs: this.minIntervalMs,
+      positionShape: this.mode === 'viewcell' ? 'horizontal_disk' : 'euclidean',
+      verticalPositionEpsilonM: this.mode === 'viewcell' ? VIEWCELL_VERTICAL_EPSILON_M : null,
+      orientationMode: this.mode === 'viewcell' ? 'fixed_quaternion' : 'delta',
+      orientationEpsilonDeg: this.mode === 'viewcell' ? VIEWCELL_ORIENTATION_EPSILON_DEG : null,
+      renderFovYDeg: FRONTEND_RENDER_FOV_Y_DEG,
+      modelInputFovYDeg: MODEL_INPUT_FOV_Y_DEG,
       hasCommittedPrediction: Boolean(this.lastPosition && this.lastQuaternion),
     };
   }

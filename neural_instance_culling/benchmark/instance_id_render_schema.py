@@ -15,6 +15,7 @@ from typing import Any
 
 
 INSTANCE_RENDER_MANIFEST_SCHEMA = "local-true-component-id-render-manifest-v2"
+FORMAL_INSTANCE_RENDER_MANIFEST_SCHEMA = "local-true-component-id-formal-render-manifest-v1"
 INSTANCE_RENDER_BATCH_MANIFEST_SCHEMA = "local-true-component-id-render-batch-manifest-v1"
 INSTANCE_BINDING_SCHEMA = "component-instance-binding-preflight-v1"
 INSTANCE_ID_ENCODING = "componentGlobalId + 1, RGB24, 0 background"
@@ -412,3 +413,58 @@ def validate_instance_render_batch_manifest(manifest: dict[str, Any]) -> None:
     legacy_manifest["schema"] = INSTANCE_RENDER_MANIFEST_SCHEMA
     legacy_manifest["samples"] = flattened
     validate_instance_render_manifest(legacy_manifest)
+
+
+def validate_formal_instance_render_manifest(manifest: dict[str, Any]) -> None:
+    """Validate the stricter real-mesh, hardware-GPU image protocol.
+
+    The legacy validator remains intentionally non-formal for historical
+    smoke manifests.  This validator reuses its component/GLB consistency
+    checks on a private legacy-shaped copy, then enforces the additional
+    evidence that a formal image result cannot be a synthetic render, a GLB
+    coarse mask, a partial inventory, or a pending browser implementation.
+    """
+    if manifest.get("schema") != FORMAL_INSTANCE_RENDER_MANIFEST_SCHEMA:
+        raise InstanceBindingError(
+            "refusing non-formal image manifest; expected "
+            f"{FORMAL_INSTANCE_RENDER_MANIFEST_SCHEMA}"
+        )
+    if manifest.get("formalImageEvaluationReady") is not True:
+        raise InstanceBindingError("formal image manifest must set formalImageEvaluationReady=true")
+    if manifest.get("syntheticComponentIdSmoke") is not None:
+        raise InstanceBindingError("synthetic component-ID smoke cannot be formal")
+
+    legacy = dict(manifest)
+    legacy["schema"] = INSTANCE_RENDER_MANIFEST_SCHEMA
+    legacy["formalImageEvaluationReady"] = False
+    validate_instance_render_manifest(legacy)
+
+    requirements = manifest.get("formalRequirements") or {}
+    if requirements.get("requiresHardwareWebGL") is not True:
+        raise InstanceBindingError("formal image manifest must require hardware WebGL")
+    if requirements.get("syntheticSmokeAllowed") is not False:
+        raise InstanceBindingError("formal image manifest must disallow synthetic smoke")
+    if requirements.get("completeGlbInventory") is not True:
+        raise InstanceBindingError("formal image manifest must retain the complete GLB inventory")
+
+    reference = manifest.get("reference") or {}
+    if reference.get("geometrySource") != "original_local_glb_meshes":
+        raise InstanceBindingError("formal reference must use original local GLB meshes")
+    if reference.get("completeInventory") is not True:
+        raise InstanceBindingError("formal reference must declare a complete inventory")
+
+    prediction = manifest.get("prediction") or {}
+    if prediction.get("postFilter") != "component_visibility_mask_after_conservative_render_submission":
+        raise InstanceBindingError("formal prediction must use an instance-level visibility mask")
+    spatial = manifest.get("spatialCulling") or {}
+    if spatial.get("completeInventoryRetained") is not True or spatial.get("componentLevelMask") is not True:
+        raise InstanceBindingError("formal spatial submission must retain complete inventory and component masks")
+
+    samples = manifest.get("samples") or []
+    if not samples:
+        raise InstanceBindingError("formal image evaluation requires at least one real sample")
+    for index, sample in enumerate(samples):
+        if sample.get("referenceMode") != "full_scene_renderable_instances":
+            raise InstanceBindingError(f"formal sample {index} is not a full-scene reference")
+        if sample.get("predictionComponentIds") is None:
+            raise InstanceBindingError(f"formal sample {index} has no component prediction list")

@@ -1,6 +1,6 @@
 # Lightweight Frontend PVS Scheduler
 
-Date: 2026-07-31
+Date: 2026-08-12
 
 本文只记录当前前端运行路径。旧 fixed-geo viewcell、dynamic-pool、epoch24 过渡资产和其它历史前端模型已从部署资产中清理。
 
@@ -47,14 +47,17 @@ slm2viewer/src/neuralCullingBackendMode.js
 
 | Trigger | Default | Meaning |
 |---|---:|---|
-| position movement | `2.0m` | 离开上次预测的空间包络 |
-| yaw change | `6 deg` | 视线方向超出上次预测包络 |
-| pitch change | `5 deg` | 俯仰方向超出上次预测包络 |
-| FOV change | `2 deg` | 投影参数明显变化 |
+| position movement | `2.0m` | HKUST 水平 XZ 圆盘半径；Y 方向无扰动，越界即重新预测 |
+| orientation | fixed | 与上次预测的四元数方向保持一致，不使用 yaw/pitch 容差 |
+| FOV | render `60 deg`, model `66 deg` | 显示相机保持 60°；Worker 查询相机固定 66° |
 | aspect change | `0.08` | 视口比例明显变化 |
-| minimum interval | `350ms` | 避免鼠标或触摸抖动造成重复预测 |
+| minimum interval | `350ms` | 仅作状态记录/并发保护；view-cell 越界优先于该时间值 |
 
 两次模型预测之间不允许低频刷新预测结果或实例集合。
+
+HKUST 的正式 view-cell 是半径 `2 m`、垂直扰动 `0 m` 的水平圆盘，所有 subpose 使用同一朝向。`CameraPredictionGate` 以一次当前相机查询作为预测锚点：只要相机仍在该水平圆盘和固定朝向内，就复用一次模型结果；越过位置、朝向、FOV 或 aspect 边界后才建立新锚点。浏览器不展开 subpose，也不为一个 view-cell 增加多次模型推理。
+
+2026-08-12 验证：`node slm2viewer/scripts/test_camera_prediction_gate.mjs`。
 
 ## Strict Render Residency
 

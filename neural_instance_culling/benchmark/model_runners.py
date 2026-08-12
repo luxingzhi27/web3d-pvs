@@ -1348,7 +1348,7 @@ def load_directional_occlusion_proxy_encoder_runner(
     model.set_instance_to_glb(torch.from_numpy(instance_to_glb).to(device))
     model.load_state_dict(checkpoint["model"], strict=True)
     model.eval()
-    return DirectionalOcclusionProxyEncoderRunner(
+    runner = DirectionalOcclusionProxyEncoderRunner(
         name=name,
         kind="directional_occlusion_proxy_encoder",
         model=model,
@@ -1360,6 +1360,9 @@ def load_directional_occlusion_proxy_encoder_runner(
         device=device,
         runtime_features=torch.from_numpy(runtime_np).to(device),
     )
+    runner.runtime_feature_file_bytes = int(Path(runtime_features_path).stat().st_size)
+    runner.checkpoint_file_bytes = int(Path(checkpoint_path).stat().st_size)
+    return runner
 
 
 def load_independent_utility_ranker_runner(

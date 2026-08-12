@@ -205,4 +205,4 @@ conda run --no-capture-output -n "$ENV_NAME" \
   --image-output "neural_instance_culling/benchmark/out/$OUTPUT_NAME" \
   --model-root "$MODEL_ROOT" \
   --variant "$VARIANT" \
-  --report "docs/evaluation/m5_subpose_robust_image_dense_hw_2026-08-04${RUN_TAG}.md"
+  --report "neural_instance_culling/benchmark/out/$OUTPUT_NAME/m5_v2_summary.md"

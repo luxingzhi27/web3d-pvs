@@ -9,9 +9,12 @@
 - 不允许用旧实验名称复用新含义。例如同一个目录名不能先表示 PointNet++ 原始版，后又表示高召回版。
 - 不允许把失败实验伪装成当前主线；失败实验可以记录，但不能污染默认 runner、README 或前端默认资产。
 - 不允许用 sample-level 二分类指标替代 pose-level 集合指标作为主结论。
-- 当前主要验收目标是：在画面安全约束下最大化有效剔除和资源节省。普通集合 recall 应尽量接近或超过 `0.95`，weighted recall 应尽量接近或超过 `0.99`；在满足安全约束后，优先比较 `useful cull = TN / candidate`、`bad cull = FN / candidate`、平均预测数量、GLB 字节削减和前端延迟。普通 precision、F1 和逐实例 accuracy 必须报告，但不能单独作为主结论。
+- 当前主要验收目标是：以 `weighted recall` 及其置信下界作为画面安全主门，在安全约束下最大化有效剔除和资源节省。普通 pose recall 必须报告，用于诊断均匀实例覆盖，但不能单独否决或证明画面安全；除非实验协议另有登记，不得把 pose recall `0.95` 当作 weighted recall 的替代门。满足 weighted recall 安全约束后，优先比较 `useful cull = TN / candidate`、`bad cull = FN / candidate`、平均预测数量、GLB 字节削减和前端延迟。普通 precision、F1、逐实例 accuracy 和 balanced accuracy 必须报告，但不能单独作为主结论。
+- `precision` 受候选集合中的正负样本比例影响：在真正率和假正率相同的情况下，加入更多不可见候选仍会增加 FP 并降低 precision。因此跨候选规模、跨场景或跨候选生成策略比较时，必须同时报告平均候选数、GT/候选比例、specificity、instance accuracy 和 balanced accuracy。普通 accuracy 可能被大量 TN 抬高；`balanced accuracy = (recall + specificity) / 2` 对正负样本比例更稳健，是安全门之后的重要分类参考，不能只在附录中出现。
+- 新优化模型必须区分“安全工作点”和“分布健康诊断”。安全工作点只由 checkpoint 自己的 calibration 阈值是否满足 weighted recall 及其置信下界决定；固定概率边界 `0.5` 或 `[0.4, 0.6]` 不能作为额外硬门。低阈值必须结合正负尾部、阈值扰动和校准误差解释；禁止用 bias、temperature 或其他后处理把阈值移动到中间后伪装成模型效果提升。
 - 不允许把 `recall_high` 当作额外变体后缀来逃避主目标；每个正式 PVS 实验默认就必须按高召回目标训练和选 checkpoint。若一个模型需要降低召回才能得到好看的 F1，它不能作为合格主线版本。历史路径或旧 benchmark 中出现的 PointNet / Triplane / dynamic-pool 命名只作为已删除旧实验理解，不能作为当前默认路径。
 - 向用户解释模型、训练流程或前端推理时，必须优先使用可读的中文概念和数据流描述；内部类名、函数名、变量名只能作为定位参考放在括号中，不能用一串代码英文名代替解释。每个新名词都要说明“它输入什么、输出什么、为什么需要它”。
+- 发现当前安全口径、代码实现或文档结论错误时，必须直接修正主线并删除错误的旧代码、旧文档和旧结果；不得增加兼容开关、双重默认路径、别名脚本或“旧逻辑仍可用”的过渡层。只有明确标注且仍有复现实验价值的原始数据或模型权重可以保留。
 
 ## 1.1 当前运行环境
 
@@ -23,6 +26,36 @@
 - 正式浏览器采样、实例级 Color-ID 图像评价和三角形 HZB 光栅化必须使用 Chrome 的硬件 GPU 路径，默认开启 `--use-angle=vulkan` 与 `--disable-software-rasterizer`，并保存页面 `gpuBackend`、`gpuGate` 以及同一执行窗口的 `nvidia-smi`/`pmon` 证据。检测到 SwiftShader、llvmpipe、softpipe、swrast 或无法确认后端时必须失败；只有显式 `--allow-software-gpu` 的小规模语义调试可以使用软件后端，不能进入正式数据集、GPU 性能或移动端性能结论。详细政策见 `docs/current/hardware_gpu_execution_policy.md`。
 - WebGL/ANGLE 与 WebGPU adapter 是两条独立的硬件证据链：WebGL 回报 NVIDIA 不能替代 WebGPU adapter 核验，`nvidia-smi` 中出现 Chrome 进程也不能替代被测 API 的后端字段。凡是 WebGPU/WGSL 性能实验都必须单独读取 adapter；若 adapter 回报 SwiftShader 或其他软件后端，必须停止硬件性能汇总。
 - Color-ID 正式采样还必须保留分片旁的 `*.jsonl.gpu_evidence.json` 和 view-cell 总目录的 `gpu_execution_summary.json`；其中要有页面 `gpuBackend`/`gpuGate`、Chrome 参数及同一窗口的 `nvidia-smi`/`pmon`。没有这些证据的历史 JSONL 不能追认为硬件采样。
+
+### 浏览器 Vulkan 硬件路径（采样与 WebGPU）
+
+以下参数来自当前实际入口代码，后续新增脚本必须沿用这套口径，不能凭记忆删减或改成软件后端：
+
+- Three.js Color-ID 采样入口 `neural_instance_culling/sampler/run_sampler.mjs` 使用系统 Chrome/Chromium，并传入：
+  `--disable-dev-shm-usage`、`--ignore-gpu-blocklist`、`--enable-gpu`、`--enable-webgl`、`--use-angle=vulkan`、`--enable-accelerated-2d-canvas`、`--enable-zero-copy`。正式采样必须再传 `--require-hardware-gpu`，脚本据此追加 `--disable-software-rasterizer`。
+- view-cell 采样入口 `run_scene_viewcell_colorid_sampling.mjs` 不自行启动渲染器，而是为每个分片调用上述 `run_sampler.mjs`，强制传递 `--require-hardware-gpu`；所有分片都必须生成 GPU evidence，最后由 `gpu_execution_summary.json` 汇总检查。
+- WebGPU/WGSL parity 入口 `slm2viewer/scripts/benchmark_ray_context_survival_owrb_webgpu_parity.mjs` 使用：
+  `--headless=new`、`--ozone-platform=headless`、`--ozone-override-screen-size=1280,720`、`--no-sandbox`、`--no-first-run`、`--disable-dev-shm-usage`、`--disable-background-networking`、`--disable-extensions`、`--enable-gpu`、`--enable-unsafe-webgpu`、`--enable-webgpu`、`--enable-webgl`、`--enable-features=Vulkan`、`--use-vulkan`、`--use-angle=vulkan`、`--enable-accelerated-2d-canvas`、`--enable-zero-copy`、`--ignore-gpu-blocklist` 和 `--disable-gpu-sandbox`；正式模式再追加 `--disable-software-rasterizer`。脚本还记录 `VK_ICD_FILENAMES` 和 Chrome DevTools `SystemInfo.getInfo`，用于区分 WebGL ANGLE 后端与 WebGPU adapter 后端。`--enable-unsafe-webgpu`、`--enable-webgpu`、`--enable-features=Vulkan` 和 `--use-vulkan` 是 WebGPU 路径的额外参数，不能误加到只做 WebGL 采样的脚本中作为替代证据。
+- WebGPU 页面必须调用 `navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })`，保存 `adapter.info.vendor`、`architecture`、`device`、`description`，并同时保存 WebGL renderer 作为辅助诊断。适配器或 renderer 文本含 `SwiftShader`、`llvmpipe`、`softpipe`、`swrast`、`software` 或为空时，硬件门失败。
+- 硬件门不是由命令退出码决定：采样和 WebGPU parity 都必须保存 API 后端字段、Chrome 启动参数，以及浏览器执行窗口的 `nvidia-smi` 和 `nvidia-smi pmon` before/during/after 证据。WebGL 的 NVIDIA/ANGLE 证据只能证明 WebGL 光栅化硬件路径，不能证明 WebGPU adapter 使用 NVIDIA 硬件。
+
+正式入口示例：
+
+```bash
+node neural_instance_culling/sampler/run_sampler.mjs \
+  --assets-dir <scene-assets> \
+  --pose-plan <pose-plan.jsonl> \
+  --output <formal-output.jsonl> \
+  --require-hardware-gpu
+
+node slm2viewer/scripts/benchmark_ray_context_survival_owrb_webgpu_parity.mjs \
+  --bundle <exported-runtime-bundle> \
+  --cases <parity-cases.json> \
+  --out <parity-capture.json> \
+  --require-hardware-gpu
+```
+
+若 WebGPU 当前只能返回 SwiftShader，必须记录为“WebGPU 软件数值 parity 通过、硬件门失败”，不能写成硬件 WebGPU 延迟或移动端性能结果；不得通过删除 `--disable-software-rasterizer`、加入 SwiftShader 参数或复用 WebGL 证据绕过该门。
 
 ## 1.2 当前核心研究目标
 
@@ -43,6 +76,16 @@
 - 如果一个方案无法把普通 precision 提升到目标值，但能证明“大部分误判来自低视觉效用、低像素贡献、低成本或可延迟下载的细小构件”，并且图像 PER、miss utility、预算内 GLB utility、字节节省和移动端耗时均优于或不弱于主线基线，则可以作为论文主线候选；反之，如果新指标只是在统计上淡化错误，而最终画面或下载体验没有改善，必须降级为失败实验。
 - 论文叙事允许把任务从“每个实例等权二分类”提升为“预算约束下的可见效用最大化”：目标是在不影响最终画面和加载体验的前提下，用轻量模型选择最有显示价值和下载价值的实例/GLB。这个叙事必须和训练 loss、阈值选择、GLB priority、图像指标和前端调度保持一致。
 
+### 当前优化阶段覆盖（2026-08-10）
+
+- 当前阶段以 `docs/current/optimization_restart_2026-08-10.md` 为后续实验入口。
+- 当前唯一模型优化计划是 `docs/experiments/pvs_hierarchical_occlusion_survival_viewcell_spectral_query_2026-08-13.md`，统一实验前缀为 `pvs_hierarchical_relation_survival_integrated_spectral_quality_rvl_v1`。后续不得重新启用已失败的关系残差、固定 `0.5` 锚点、选择性纠错或旧 boundary 路线。
+- 本阶段暂不把 `bad cull` 置信区间上界作为路线否决条件，但仍必须报告 `bad cull`、漏检数量和图像级漏检指标；不得用减少预测数量掩盖画面风险。
+- 画面安全主门仍是每个 checkpoint 在 calibration 上冻结的 `weighted recall > 0.99` 及其单侧 95% 置信下界大于 `0.99`。普通 pose recall 只作诊断。
+- 安全阈值的位置只作分布健康诊断，不作固定 `p=0.5` 硬门。必须同时记录安全阈值区间、阈值扰动稳定性、正样本加权 q01/q005、负样本 q99/q99.5、logit 间隔、Brier/ECE 和可靠性图；低阈值本身不能否决模型，因为 bias 或温度缩放可以移动概率阈值而不改变排序。不得用这种后处理伪装模型改进，主线资格仍由 calibration 的 weighted recall 安全门，以及同一安全门下的 precision、accuracy、balanced accuracy、specificity、useful cull、图像和资源指标共同决定。
+- 如果启用按最差 pose 加权的锚点风险项，训练批次必须包含至少两个 pose；单 pose 批次只能报告普通锚点项，不能宣称完成尾部风险约束。关系系数反向传播的显存峰值必须单独记录，不能为了尾部统计扩大到超出单卡预算。
+- 2026-08-09 以前的 M4/M5/M6 路线结论属于历史记录，不回写、不改名；后续新实验不得继续引用旧路线名称作为默认主线。
+
 ## 2. 实验版本管理
 
 - 每个正式实验必须有清晰稳定名称，推荐格式为：
@@ -56,6 +99,7 @@
   - `neural_instance_culling/dataset/out/<dataset_name>`
 - 如果实验被废弃，必须清理默认 runner 引用、README 引用和文档中的主线描述。
 - 如果只调阈值，不得命名成新架构；必须标注为同一 checkpoint 的 threshold calibration。
+- 口径修正不建立兼容版本：先确认新口径的输入和输出，再原地替换主线入口；旧口径产生的错误汇总、路线判定、阈值清单和报告必须删除，不能继续被 runner 或 README 引用。
 
 ## 3. 资源依赖检查
 
@@ -182,6 +226,9 @@
 ## 9. 采样与数据集准则
 
 - 新采样必须先写清楚 pose 分布目标，不能盲目全场均匀采样。
+- View-cell PVS 的运行契约必须保持唯一：多个同朝向 `subpose` 只用于离线采样、保守 GT/候选并集构造和图像评价；浏览器不得展开这些 `subpose` 或对一个 view-cell 多次运行网络。前端以当前相机建立预测锚点，构造一次后退扩展候选并执行一次批量查询，输出该 view-cell 内任一合法位置可能可见的实例并集；结果只在相机仍处于已登记的空间和方向范围内复用。
+- 只在 view-cell 边缘某个 `subpose` 可见的实例属于合法区域正例，不能标记为标签歧义、采样噪声或 false positive。正式负例必须在该 view-cell 的全部成功 `subpose` 中均不可见。
+- View-cell 半径、形状、朝向范围、前端位置/角度复用门限、后退距离、模型 FOV 和真实渲染 FOV 是同一保守契约。修改其中任一项都必须先验证新候选仍覆盖整个 cell，并重建不再匹配的数据集；不能通过增加在线 `subpose` 查询或降低阈值掩盖口径错误。
 - 采样点必须避免建筑内部穿模，除非实验目标明确需要内部点。
 - rvcServer 采样完成或失败后都必须清理服务进程。
 - 数据集构建必须保留 raw 来源、采样脚本参数、split 规则和候选生成逻辑。
@@ -217,10 +264,12 @@
 
 - 当前保留模型名：
   - `baseline_aabb_hzb`
-  - `pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_best`
-- 当前训练与导出输出保留在 `neural_instance_culling/model/out/pvs_directional_occlusion_proxy_encoder_rvl_w042_full40` 和 `neural_instance_culling/model/out/pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_best_eval`，包括 `best.pt`、`last.pt`、epoch 快照、训练日志、导出特征和评测摘要；清理旧实验时不能删除这些结果。
-- `pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_best` 运行时读取离线固定实例特征表，不在前端运行 PointNet++、Graph U-Net、Triplane、dynamic-pool 或任何动态图传播。
-- 当前前端资产默认路径为 `slm2viewer/public/assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_best`，并同步保留 `slm2viewer/assets/` 与已构建部署目录中的同名资产。
+  - `pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best`
+- 当前 HKUST 前端默认训练输出为 `neural_instance_culling/model/out/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_hkust_spatial_fov66_seed20260801_protocolfix_retry2`，包括 `best.pt`、`last.pt`、epoch 快照、训练日志、导出特征和校准摘要；清理旧实验时不能删除。
+- 当前默认模型运行时读取离线固定实例特征表，不在前端运行 PointNet++、Graph U-Net、Triplane、dynamic-pool 或任何动态图传播。
+- 当前 HKUST 前端资产默认路径为 `slm2viewer/public/assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best`，冻结阈值约为 `0.02`，并同步保留 `slm2viewer/assets/` 与已构建部署目录中的同名资产。`pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_best` 只作为历史 benchmark，不是当前前端默认模型。
+- 必须保留 2026-08-11 修正正式矩阵、2026-08-12 Fourier 补充矩阵的 model/benchmark 输出，以及 `neural_instance_culling/benchmark/out/pvs_ray_context_survival_owrb_v1_subpose5_20260811_directchrome` 三角形深度层硬件缓存；后者是新分层关系网络构建 train-only 遮挡关系 CSR 的数据依赖。
+- 当前唯一待实施论文模型由三项候选创新组成：真实遮挡边驱动的分层关系网络直接生成生存场、视点区域积分的关系条件化频谱查询、视点区域质量风险与 GLB 资源排斥 RVL。唯一计划和实验前缀分别是 `docs/experiments/pvs_hierarchical_occlusion_survival_viewcell_spectral_query_2026-08-13.md` 与 `pvs_hierarchical_relation_survival_integrated_spectral_quality_rvl_v1`；快速验证和 80 epoch 三种子消融完成前不得改默认 checkpoint、阈值或前端资产。
 - 历史字段 `visible_pixels.bin` 当前按 `visible_weights` 处理，不能宣称是真实 pixel coverage。
 - 后退扩大视锥候选上的 no-hash 主线相机输入必须参考 `Neural Visibility of Point Sets` 的视角条件化方式：以“当前相机到实例中心的单位视线方向 / ray direction”及轻量 ray-space 标量查询固定实例特征，不能把 raw camera xyz 或 raw world-space delta xyz 直接作为 visibility MLP 的主要输入。camera hash 只能作为消融或辅助，不得替代这种 view-ray 查询叙事。
 

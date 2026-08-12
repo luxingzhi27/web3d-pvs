@@ -1,8 +1,8 @@
 # NeuralStreamWeb3D 数据集与采样协议
 
-更新时间：2026-08-04
+更新时间：2026-08-12
 
-本文定义当前训练数据如何从场景资产生成，以及每个二进制文件的语义。核心目标是让采样语义和 NeuralPVS 的 view-cell 思路一致：一个 view-cell 固定相机朝向和视场，在局部空间盒内随机生成多个位置不同但方向相同的子相机，最终可见集合取这些子相机结果的并集。
+本文定义当前训练数据如何从场景资产生成，以及每个二进制文件的语义。核心目标是让采样语义和 NeuralPVS 的 view-cell 思路一致：一个 view-cell 固定相机朝向和视场，在局部空间盒内随机生成多个位置不同但方向相同的子相机，最终可见集合取这些子相机结果的并集。参考论文：[NeuralPVS](https://arxiv.org/abs/2509.24677)。
 
 ## 1. 相机口径
 
@@ -26,7 +26,7 @@
 4. 第一个 subpose 保留 view-cell 中心，便于保留代表点；
 5. 每个 subpose 写出独立世界坐标，但共用 `viewcell_id` 和方向信息。
 
-不同场景使用不同 view-cell 尺寸：HKUST 默认半尺寸约为右向 4m、前向 4m、上向 1.5m；IFCBench Metropolis 默认约为 2.5m、2.5m、1m。实际使用时可以通过命令行覆盖，不能把一个场景的 cell 尺寸直接套到另一个场景。
+不同场景可以使用不同 view-cell 尺寸，但必须以实际 pose plan 和数据集 meta 为准。当前 HKUST 正式数据 `hkust_v3_viewcell_fov66` 使用水平圆盘，半径为 `2 m`、垂直扰动为 `0 m`，每个 cell 平均约 `34.88` 个成功 subpose。前端 `CameraPredictionGate` 已按同一契约判断：使用世界 XZ 平面位移、拒绝 Y 方向扰动、要求四元数朝向固定；越过边界时不受最小间隔抑制。显示相机保持 `60°`，Worker 的模型查询相机保持 `66°`，浏览器不展开 subpose。其他场景的尺寸必须单独登记，不能把一个场景的 cell 尺寸直接套到另一个场景。
 
 采样计划中的类别用于保证空间分布覆盖，包括街道缝隙、建筑近旁、广场、外围、天空俯视和远景等。采样点需要在场景空隙或可行走区域，避免大面积落在实体模型内部；如果需要建筑内部采样，必须在实验说明中单独声明。
 
@@ -65,7 +65,7 @@ renderer = ANGLE (NVIDIA, Vulkan ... NVIDIA RTX A6000 ...)
 gpuGate  = required=true, hardware=true, software=false
 ```
 
-采样期间的 `nvidia-smi`/`nvidia-smi pmon` 快照还观察到 Chrome GPU 进程；完整的参数、页面后端和主机快照保存在 `docs/evaluation/m5_hardware_gpu_renderer_2026-08-04.md` 所引用的硬件 smoke 与 M5 硬件输出中。由此可以确认，当前 Color-ID 采样链路是 Three.js WebGL 在 NVIDIA 硬件上完成离屏光栅化，CPU 只读取颜色 ID 并汇总实例集合和覆盖权重。
+采样期间的 `nvidia-smi`/`nvidia-smi pmon` 快照还观察到 Chrome GPU 进程；参数、页面后端和主机快照按 [`hardware_gpu_execution_policy.md`](hardware_gpu_execution_policy.md) 归档。由此可以确认，当前 Color-ID 采样链路是 Three.js WebGL 在 NVIDIA 硬件上完成离屏光栅化，CPU 只读取颜色 ID 并汇总实例集合和覆盖权重。
 
 后续任何正式数据集重建都必须逐分片检查旁路的 `*.jsonl.gpu_evidence.json` 和总目录的 `gpu_execution_summary.json`。旧采样目录如果没有这些旁路证据，只能记录为“后端无法事后核验”，不能因为有 JSONL、PNG 或浏览器退出码就追认为硬件 GPU 采样，也不能用软件后端补齐正式数据。`--allow-software-gpu` 仅允许用于单独命名的小规模语义调试目录。
 
@@ -84,6 +84,8 @@ gpuGate  = required=true, hardware=true, software=false
 7. 保存 view-cell 中心作为模型查询相机。
 
 因此，候选集合不是“中心相机一次视锥的候选”，而是所有位置扰动 subpose 的候选并集；可见集合也不是某个 subpose 的可见集合，而是整个 view-cell 内潜在可见集合的并集。正式数据必须直接证明 `visible_ids ⊆ candidate_ids`，不能用标签补入制造这个关系；这样训练标签与 NeuralPVS 的 from-region PVS 语义一致，也能把候选生成错误暴露出来。
+
+这些 subpose 不进入浏览器运行时。前端以当前相机建立一个 view-cell 预测锚点，通过一次后退扩展候选和一次模型批查询输出整个区域的保守潜在可见集；相机仍在该 cell 的空间与方向门限内时复用结果，越界后才建立新锚点并重新查询。真实 `60` 度视锥随后只对保守集合做当前帧实例级过滤。因而，只在某个边缘 subpose 可见的实例是合法正例，不是中心点的误报。
 
 脚本支持将一个源 view-cell 划分为 4 个空间子组。划分时按 subpose 相对中心在右向和前向的正负侧分配象限，从而减少一个 cell 过大造成的过度并集；只有在数据量和候选规模需要时才启用，不能把它解释为新的相机扰动语义。
 

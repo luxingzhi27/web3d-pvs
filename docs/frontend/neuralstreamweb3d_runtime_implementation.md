@@ -17,16 +17,15 @@
 
 ## 2. 相机与预测触发
 
-主循环约每 80ms 调用一次场景剔除流程。`CameraPredictionGate` 比较当前相机与上一次已提交预测的状态：
+主循环约每 80ms 调用一次场景剔除流程。`CameraPredictionGate` 比较当前相机与上一次已提交预测的状态。HKUST view-cell 的复用契约为：
 
-- 位置变化约 2m；
-- 偏航变化约 6°；
-- 俯仰变化约 5°；
-- FOV 变化约 2°；
+- 水平 XZ 位移小于 `2 m`，且 Y 方向保持不变；
+- 四元数朝向固定，不使用 yaw/pitch 容差；
+- 显示相机保持 `60°`，模型查询相机固定为 `66°`；
 - aspect 变化约 0.08；
 - 两次预测的最小间隔约 350ms。
 
-这些阈值是“是否重新推理”的门控，不是“是否更新真实视锥显示”的门控。未超过门控时，旧预测结果会继续使用；新资源到达或实际相机过滤变化仍可触发渲染状态处理。当前 `neuralRenderRetainMs=0`，应用新结果时不会因为历史驻留时间把已隐藏实例长期保留。
+这些条件是“是否重新推理”的门控，不是“是否更新真实视锥显示”的门控。未超过门控时，旧预测结果会继续使用；越过 view-cell 边界时，边界判断优先于最小间隔，避免在越界后继续复用旧区域结果。新资源到达或实际相机过滤变化仍可触发渲染状态处理。当前 `neuralRenderRetainMs=0`，应用新结果时不会因为历史驻留时间把已隐藏实例长期保留。
 
 Dispatcher 将相机位置、四元数、FOV、aspect、near/far 以及矩阵快照发送给 Worker。Worker 自己构造预测相机，不直接依赖主线程中的旧 `backCamera` 对象。
 
@@ -53,7 +52,7 @@ Dispatcher 将相机位置、四元数、FOV、aspect、near/far 以及矩阵快
 
 因此，后退视锥输出用于“安全候选和预取”，真实 60° 视锥输出用于“当前显示”。模型预测结果不能直接绕过真实视锥。
 
-当前 FOV 契约只有两项：真实渲染相机为 60°，模型查询相机为 66°。唯一配置源是 `neural_instance_culling/config/neuralpvs_viewcell_protocol.json`；Worker 和实例候选过滤直接使用这两个固定值，只读取 `modelInputFovYDeg`，不再读取旧的 PVS、buffer、training 或 runtime inference FOV 字段；两个场景均遵循这一口径。
+当前 FOV 契约只有两项：真实渲染相机为 60°，模型查询相机为 66°。唯一配置源是 `neural_instance_culling/config/neuralpvs_viewcell_protocol.json`；Worker 和实例候选过滤直接使用这两个固定值，只读取 `modelInputFovYDeg`，不再读取旧的 PVS、buffer、training 或 runtime inference FOV 字段。Gate 比较的是显示相机的 60°变化，不能把显示相机误当成 66°模型查询相机；浏览器仍只执行一次批量查询，不展开 subpose。
 
 ## 4. WebGPU 运行协议
 

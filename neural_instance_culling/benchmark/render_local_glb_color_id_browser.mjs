@@ -21,6 +21,7 @@ const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const SLM2_ROOT = path.join(REPO_ROOT, 'slm2viewer');
 const INSTANCE_RENDER_MANIFEST_SCHEMA = 'local-true-component-id-render-manifest-v2';
+const FORMAL_INSTANCE_RENDER_MANIFEST_SCHEMA = 'local-true-component-id-formal-render-manifest-v1';
 const INSTANCE_RENDER_BATCH_MANIFEST_SCHEMA = 'local-true-component-id-render-batch-manifest-v1';
 const INSTANCE_BINDING_SCHEMA = 'component-instance-binding-preflight-v1';
 const INSTANCE_ID_ENCODING = 'componentGlobalId + 1, RGB24, 0 background';
@@ -210,6 +211,41 @@ function validateInstanceRenderManifest(manifest) {
     formalImageEvaluationReady: false,
     browserInstanceReorderImplemented: false,
   };
+}
+
+function validateFormalInstanceRenderManifest(manifest) {
+  if (!manifest || manifest.schema !== FORMAL_INSTANCE_RENDER_MANIFEST_SCHEMA) {
+    throw new Error(`refusing non-formal image manifest; expected ${FORMAL_INSTANCE_RENDER_MANIFEST_SCHEMA}`);
+  }
+  if (manifest.formalImageEvaluationReady !== true) {
+    throw new Error('formal image manifest must set formalImageEvaluationReady=true');
+  }
+  if (manifest.syntheticComponentIdSmoke) throw new Error('synthetic component-ID smoke cannot be formal');
+  const legacy = { ...manifest, schema: INSTANCE_RENDER_MANIFEST_SCHEMA, formalImageEvaluationReady: false };
+  const base = validateInstanceRenderManifest(legacy);
+  const requirements = manifest.formalRequirements || {};
+  if (requirements.requiresHardwareWebGL !== true || requirements.syntheticSmokeAllowed !== false || requirements.completeGlbInventory !== true) {
+    throw new Error('formal image requirements must require hardware WebGL, disallow synthetic smoke, and retain complete inventory');
+  }
+  if (manifest.reference?.geometrySource !== 'original_local_glb_meshes' || manifest.reference?.completeInventory !== true) {
+    throw new Error('formal image reference must use the complete original local GLB mesh inventory');
+  }
+  if (manifest.prediction?.postFilter !== 'component_visibility_mask_after_conservative_render_submission') {
+    throw new Error('formal image prediction must use an instance-level visibility mask');
+  }
+  if (manifest.spatialCulling?.completeInventoryRetained !== true || manifest.spatialCulling?.componentLevelMask !== true) {
+    throw new Error('formal spatial submission must retain complete inventory and component-level masks');
+  }
+  if (!Array.isArray(manifest.samples) || manifest.samples.length === 0) {
+    throw new Error('formal image evaluation requires real samples');
+  }
+  for (let index = 0; index < manifest.samples.length; index += 1) {
+    const sample = manifest.samples[index];
+    if (sample.referenceMode !== 'full_scene_renderable_instances') {
+      throw new Error(`formal sample ${index} is not a full-scene reference`);
+    }
+  }
+  return { ...base, schema: 'formal-component-id-render-schema-validation-v1', formalImageEvaluationReady: true };
 }
 
 function validateInstanceRenderBatchManifest(manifest) {
@@ -466,6 +502,7 @@ async function postBuffer(name, typedArray) {
 
 async function main() {
   const manifest = await (await fetch('/manifest', { cache: 'no-store' })).json();
+  const formalManifest = manifest.schema === 'local-true-component-id-formal-render-manifest-v1';
   const smoke = manifest.syntheticComponentIdSmoke;
   if (!smoke) throw new Error('manifest.syntheticComponentIdSmoke is required');
   const width = 160;
@@ -945,6 +982,7 @@ function renderIds(renderer, scene, camera, target, pixels, width, height) {
 async function main() {
   const pageStarted = performance.now();
   const manifest = await (await fetch('/manifest', { cache: 'no-store' })).json();
+  const formalManifest = manifest.schema === 'local-true-component-id-formal-render-manifest-v1';
   const glbIndex = await (await fetch('/glb-index', { cache: 'no-store' })).json();
   const entriesById = new Map((glbIndex.entries || []).map((entry) => [Number(entry.globalId), entry]));
   const width = Number(manifest.width);
@@ -1108,6 +1146,7 @@ async function main() {
 
   const totals = { totalPixels: 0, validReferencePixels: 0, backgroundReferencePixels: 0, errorPixels: 0, missPixels: 0, wrongInstancePixels: 0, extraPixels: 0 };
   const top = new Map();
+  const imageRateSamples = [];
   let selfConsistencyPER = null;
   const sampleRows = [];
   const batchTotals = new Map(batches.map((batch) => [String(batch.batchId || 'default'), {
@@ -1178,6 +1217,11 @@ async function main() {
       const test = renderIds(renderer, scene, camera, target, pixels, width, height);
       const predictionRenderMs = performance.now() - predictionStarted;
       const { metrics, contributors } = computeMetrics(reference, test);
+      imageRateSamples.push({
+        missPixelRate: metrics.missPixelRate,
+        wrongInstancePixelRate: metrics.wrongInstancePixelRate,
+        extraPixelRateOverImage: metrics.extraPixelRateOverImage,
+      });
       for (const key of Object.keys(totals)) totals[key] += metrics[key] || 0;
       const batchAggregate = batchTotals.get(batchId);
       if (!batchAggregate) throw new Error('missing batch accumulator for ' + batchId);
@@ -1249,6 +1293,18 @@ async function main() {
     };
   });
   const renderElapsedMs = performance.now() - started;
+  const percentile = (key, value) => {
+    const values = imageRateSamples.map((row) => Number(row[key])).filter(Number.isFinite).sort((a, b) => a - b);
+    if (values.length === 0) return null;
+    const position = (values.length - 1) * (Number(value) / 100);
+    const lower = Math.floor(position);
+    const upper = Math.ceil(position);
+    if (lower === upper) return values[lower];
+    return values[lower] + (values[upper] - values[lower]) * (position - lower);
+  };
+  const meanRate = (key) => imageRateSamples.length === 0
+    ? null
+    : imageRateSamples.reduce((sum, row) => sum + Number(row[key]), 0) / imageRateSamples.length;
   spatialStats.meanRequiredGlbCount = samples.length > 0
     ? spatialStats.requiredGlbCountSum / sampleGroups.length
     : 0;
@@ -1280,7 +1336,7 @@ async function main() {
     renderStatus: 'rendered_component_id_buffers',
     componentIdShaderImplemented: true,
     browserInstanceReorderImplemented: false,
-    formalImageEvaluationReady: false,
+    formalImageEvaluationReady: Boolean(formalManifest && sampleOrdinal === samples.length),
     gpuBackend,
     renderFovYDeg: 60,
     selectedGlbCount: selected.length,
@@ -1303,6 +1359,12 @@ async function main() {
       missPixelRate: totals.missPixels / valid,
       wrongInstancePixelRate: totals.wrongInstancePixels / valid,
       extraPixelRateOverImage: totals.extraPixels / total,
+      meanMissPixelRate: meanRate('missPixelRate'),
+      p95MissPixelRate: percentile('missPixelRate', 95),
+      meanWrongInstancePixelRate: meanRate('wrongInstancePixelRate'),
+      p95WrongInstancePixelRate: percentile('wrongInstancePixelRate', 95),
+      meanExtraPixelRateOverImage: meanRate('extraPixelRateOverImage'),
+      p95ExtraPixelRateOverImage: percentile('extraPixelRateOverImage', 95),
       evaluatedSubposeCount: samples.length,
       renderFailedSubposeCount: 0,
       missingGlbSubposeCount: 0,
@@ -1335,9 +1397,15 @@ async function main() {
   }
   const manifest = JSON.parse(fs.readFileSync(args.manifest, 'utf8'));
   const isBatchManifest = manifest.schema === INSTANCE_RENDER_BATCH_MANIFEST_SCHEMA;
+  const isFormalManifest = manifest.schema === FORMAL_INSTANCE_RENDER_MANIFEST_SCHEMA;
+  if (isFormalManifest && args.syntheticRenderSmoke) {
+    throw new Error('formal image manifests cannot be used with synthetic render smoke');
+  }
   const validation = isBatchManifest
     ? validateInstanceRenderBatchManifest(manifest)
-    : validateInstanceRenderManifest(manifest);
+    : (isFormalManifest
+      ? validateFormalInstanceRenderManifest(manifest)
+      : validateInstanceRenderManifest(manifest));
   if (args.validateOnly) {
     const summary = {
       schema: isBatchManifest
@@ -1435,6 +1503,15 @@ async function main() {
           if (!gpuGate.hardware && !body.error) {
             body.error = `hardware GPU required, browser reported ${gpuGate.renderer || 'no WebGL renderer'}`;
             body.renderStatus = 'failed_hardware_gpu_gate';
+          }
+        }
+        if (isFormalManifest && !body.error) {
+          if (body.formalImageEvaluationReady !== true || body.componentIdShaderImplemented !== true ||
+              body.renderStatus !== 'rendered_component_id_buffers' ||
+              Number(body.sampleCount) !== Number((manifest.samples || []).length)) {
+            body.error = 'formal image gate failed: complete real component-ID render was not reported';
+            body.renderStatus = 'failed_formal_image_gate';
+            body.formalImageEvaluationReady = false;
           }
         }
         fs.writeFileSync(path.join(args.outputDir, 'render_summary.json'), JSON.stringify(body, null, 2), 'utf8');
