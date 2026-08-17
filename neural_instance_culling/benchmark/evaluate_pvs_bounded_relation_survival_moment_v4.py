@@ -590,7 +590,7 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         collect_pose_stats=True,
         allow_candidate_visible_union=False,
         bootstrap_replicates=0,
-        collect_score_stats=False,
+        collect_score_stats=True,
         collect_per_pose=True,
     )
     if len(rows) != 1 or not isinstance(rows[0].get("_per_pose"), list):
@@ -658,6 +658,7 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         "poseMacroWeightedRecallLowerConfidenceBound": summary["poseMacro"].get("poseMacroWeightedRecallLowerConfidenceBound"),
         "poseMacro": summary["poseMacro"],
         "aggregate": summary["aggregate"],
+        "scoreDistribution": rows[0].get("scoreDistribution"),
         "perPose": per_pose,
         "runtime": {
             "device": str(device),

@@ -21,6 +21,7 @@ from common.safety_reserve_operating_utility_loss import (  # noqa: E402
     sample_train_operating_thresholds,
     soft_request_probability,
 )
+from common.safety_constraint_utility_loss import rvl_strong_v2_visibility_loss  # noqa: E402
 
 
 class SafetyReserveOperatingUtilityLossTest(unittest.TestCase):
@@ -62,6 +63,48 @@ class SafetyReserveOperatingUtilityLossTest(unittest.TestCase):
             sample_train_operating_thresholds(20260801, 8, split="calibration")
         with self.assertRaisesRegex(ValueError, "train-only"):
             sample_train_operating_thresholds(20260801, 8, split="test")
+
+    def test_rvl_diagnostic_controls_change_only_requested_terms(self) -> None:
+        logits = torch.zeros(4)
+        target = torch.tensor([1.0, 0.0, 0.0, 0.0])
+        offsets = torch.tensor([0, 4], dtype=torch.long)
+        weights = torch.ones(4)
+        evidence = torch.zeros(4)
+        default_loss, default_parts = rvl_strong_v2_visibility_loss(
+            logits, target, offsets, weights, evidence
+        )
+        no_count_loss, no_count_parts = rvl_strong_v2_visibility_loss(
+            logits, target, offsets, weights, evidence, count_weight=0.0
+        )
+        negative_normalized_loss, negative_parts = rvl_strong_v2_visibility_loss(
+            logits,
+            target,
+            offsets,
+            weights,
+            evidence,
+            fp_normalization="negative",
+        )
+        self.assertTrue(torch.allclose(default_parts["lossCount"], no_count_parts["lossCount"]))
+        self.assertTrue(
+            torch.allclose(
+                default_loss - no_count_loss,
+                0.10 * default_parts["lossCount"],
+            )
+        )
+        self.assertGreater(float(default_parts["lossRvlFp"]), float(negative_parts["lossRvlFp"]))
+        self.assertLess(float(negative_normalized_loss), float(default_loss))
+
+        focused_rank_loss, focused_rank_parts = rvl_strong_v2_visibility_loss(
+            logits,
+            target,
+            offsets,
+            weights,
+            evidence,
+            rank_weight=0.90,
+            rank_negative_top_k=1,
+        )
+        self.assertTrue(torch.allclose(default_parts["lossRank"], focused_rank_parts["lossRank"]))
+        self.assertGreater(float(focused_rank_loss), float(default_loss))
 
     def test_bounded_smooth_max_does_not_saturate_when_low_logits_are_copied(self) -> None:
         single = bounded_topk_smooth_max(torch.tensor([-8.0]))
@@ -116,6 +159,49 @@ class SafetyReserveOperatingUtilityLossTest(unittest.TestCase):
         gradient = torch.autograd.grad(efficiency, inputs[0], retain_graph=True)[0]
         self.assertEqual(float(efficiency), 0.0)
         self.assertTrue(torch.equal(gradient, torch.zeros_like(gradient)))
+
+    def test_softplus_negative_band_avoids_high_score_sigmoid_saturation(self) -> None:
+        inputs = list(self._inputs(requires_grad=False))
+        inputs[0] = torch.zeros_like(inputs[0], requires_grad=True)
+        _sigmoid_total, sigmoid_parts = safety_reserve_operating_utility_loss(
+            *inputs,
+            train_seed=20260801,
+            global_step=0,
+            total_optimizer_steps=10,
+            boundary_tail_weight=0.0,
+            negative_band_weight=1.0,
+            glb_resource_weight=0.0,
+            warmup_fraction=0.0,
+            negative_band_shape="sigmoid",
+        )
+        sigmoid_gradient = torch.autograd.grad(
+            torch.as_tensor(sigmoid_parts["lossEfficiency"]), inputs[0], retain_graph=False
+        )[0]
+
+        softplus_inputs = list(self._inputs(requires_grad=False))
+        softplus_inputs[0] = torch.zeros_like(softplus_inputs[0], requires_grad=True)
+        _softplus_total, softplus_parts = safety_reserve_operating_utility_loss(
+            *softplus_inputs,
+            train_seed=20260801,
+            global_step=0,
+            total_optimizer_steps=10,
+            boundary_tail_weight=0.0,
+            negative_band_weight=1.0,
+            glb_resource_weight=0.0,
+            warmup_fraction=0.0,
+            negative_band_shape="softplus",
+        )
+        softplus_gradient = torch.autograd.grad(
+            torch.as_tensor(softplus_parts["lossEfficiency"]),
+            softplus_inputs[0],
+            retain_graph=False,
+        )[0]
+        self.assertGreater(
+            float(softplus_gradient.norm()),
+            100.0 * float(sigmoid_gradient.norm()),
+        )
+        self.assertGreater(float(sigmoid_parts["negativeBandSaturationFraction"]), 0.0)
+        self.assertEqual(float(softplus_parts["negativeBandSaturationFraction"]), 0.0)
 
     def test_reserve_gate_opens_monotonically_and_is_stop_gradient(self) -> None:
         weights = torch.tensor([1.0, 0.5])

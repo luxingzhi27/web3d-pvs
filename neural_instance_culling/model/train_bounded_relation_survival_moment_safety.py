@@ -698,7 +698,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--instance-calibration-regularization-weight", type=float, default=0.02)
     parser.add_argument("--boundary-tail-weight", type=float, default=0.30)
     parser.add_argument("--negative-band-weight", type=float, default=0.03)
+    parser.add_argument("--negative-band-temperature", type=float, default=0.10)
+    parser.add_argument(
+        "--negative-band-shape", choices=("sigmoid", "softplus"), default="sigmoid"
+    )
     parser.add_argument("--glb-resource-weight", type=float, default=0.015)
+    parser.add_argument("--rvl-bce-positive-weight", type=float, default=14.0)
+    parser.add_argument("--rvl-tversky-fn-weight", type=float, default=7.0)
+    parser.add_argument("--rvl-count-weight", type=float, default=0.10)
+    parser.add_argument(
+        "--rvl-fp-normalization",
+        choices=("positive", "negative", "candidate"),
+        default="positive",
+    )
+    parser.add_argument("--efficiency-warmup-fraction", type=float, default=0.10)
+    parser.add_argument("--efficiency-primary-fraction", type=float, default=0.0)
+    parser.add_argument("--rvl-rank-weight", type=float, default=0.45)
+    parser.add_argument("--rvl-rank-negative-top-k", type=int, default=256)
     parser.add_argument("--relation-gradient-cap", type=float, default=0.25)
     parser.add_argument("--schedule-gradient-cap", type=float, default=0.25)
     parser.add_argument("--efficiency-gradient-cap", type=float, default=0.25)
@@ -724,6 +740,17 @@ def main() -> None:
         or args.instance_calibration_regularization_weight < 0.0
     ):
         raise ValueError("instance calibration magnitude and regularization arguments are invalid")
+    if (
+        args.rvl_bce_positive_weight <= 0.0
+        or args.rvl_tversky_fn_weight <= 0.0
+        or args.rvl_count_weight < 0.0
+        or not 0.0 <= args.efficiency_warmup_fraction <= 1.0
+        or not 0.0 <= args.efficiency_primary_fraction <= 1.0
+        or args.rvl_rank_weight < 0.0
+        or args.rvl_rank_negative_top_k <= 0
+        or args.negative_band_temperature <= 0.0
+    ):
+        raise ValueError("RVL diagnostic weights or efficiency warmup are invalid")
     _instance_calibration_blend(
         0,
         int(args.epochs) * int(args.steps_per_epoch),
@@ -857,6 +884,18 @@ def main() -> None:
         "experiment": args.experiment_name,
         "variant": args.variant,
         "lossVariant": args.loss_variant,
+        "rvlDiagnostics": {
+            "bcePositiveWeight": float(args.rvl_bce_positive_weight),
+            "tverskyFnWeight": float(args.rvl_tversky_fn_weight),
+            "countWeight": float(args.rvl_count_weight),
+            "fpNormalization": str(args.rvl_fp_normalization),
+            "efficiencyWarmupFraction": float(args.efficiency_warmup_fraction),
+            "efficiencyPrimaryFraction": float(args.efficiency_primary_fraction),
+            "rankWeight": float(args.rvl_rank_weight),
+            "rankNegativeTopK": int(args.rvl_rank_negative_top_k),
+            "negativeBandTemperature": float(args.negative_band_temperature),
+            "negativeBandShape": str(args.negative_band_shape),
+        },
         "seed": int(args.seed),
         "testRead": False,
         "thresholdSource": "checkpoint-own-calibration-only",
@@ -1036,10 +1075,27 @@ def main() -> None:
                 split="train",
                 boundary_tail_weight=args.boundary_tail_weight if use_safety_reserve else 0.0,
                 negative_band_weight=args.negative_band_weight if use_safety_reserve else 0.0,
+                threshold_temperature=args.negative_band_temperature,
+                negative_band_shape=args.negative_band_shape,
                 glb_resource_weight=args.glb_resource_weight if use_safety_reserve else 0.0,
+                warmup_fraction=args.efficiency_warmup_fraction,
+                rvl_bce_positive_weight=args.rvl_bce_positive_weight,
+                rvl_tversky_fn_weight=args.rvl_tversky_fn_weight,
+                rvl_count_weight=args.rvl_count_weight,
+                rvl_fp_normalization=args.rvl_fp_normalization,
+                rvl_rank_weight=args.rvl_rank_weight,
+                rvl_rank_negative_top_k=args.rvl_rank_negative_top_k,
             )
-            safety_objective = visibility_parts["lossSafety"]
-            efficiency_objective = visibility_parts["lossEfficiency"]
+            efficiency_primary_fraction = float(args.efficiency_primary_fraction)
+            safety_objective = (
+                visibility_parts["lossSafety"]
+                + efficiency_primary_fraction
+                * visibility_parts["lossEfficiencyUngated"]
+            )
+            efficiency_objective = (
+                (1.0 - efficiency_primary_fraction)
+                * visibility_parts["lossEfficiency"]
+            )
             assert isinstance(safety_objective, torch.Tensor)
             assert isinstance(efficiency_objective, torch.Tensor)
 

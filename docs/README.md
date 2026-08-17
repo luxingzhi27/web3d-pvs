@@ -2,7 +2,7 @@
 
 更新时间：2026-08-17
 
-这里的文档只服务于当前可运行版本、正式保留证据和唯一的 v4 实验执行链。重复路线报告和被修正的旧汇总已经清理；当前前端资产、正式训练权重、正式 benchmark、采样数据和硬件证据保持不变。v2 `formal80` 及 v3 纠错设计只作为历史诊断依据，不再作为 runner 或训练入口。v4 已完成共享关系先验、逐实例校准残差、checkpoint 专属运行表、validation weighted recall 评价、图像指标回填协议和真实 CUDA smoke；执行链已收敛为八组快速扫描及五变体三种子长训，当前没有相关实验进程。本轮只登记后处理计划，不启动新任务。
+这里的文档只服务于当前可运行版本、正式保留证据和 v4 实验执行链。重复路线报告和被修正的旧汇总已经清理；当前前端资产、正式训练权重、正式 benchmark、采样数据和硬件证据保持不变。v2 `formal80` 及 v3 纠错设计只作为历史诊断依据，不再作为 runner 或训练入口。v4 已完成共享关系先验、逐实例校准残差、checkpoint 专属运行表和五变体三种子长训；最新分数尾部诊断确认全局排序尚可，但极端正负尾部交叠且负例工作带梯度饱和。三轮单种子短训只用于原因定位，没有产生可晋级模型，默认 checkpoint、阈值和前端资产未改变。
 
 ## 先读这几份
 
@@ -39,6 +39,7 @@
 | [`evaluation/unified_pvs_metrics_evaluation.md`](evaluation/unified_pvs_metrics_evaluation.md) | pose/aggregate、weighted recall、accuracy、balanced accuracy、useful cull 和资源指标定义 |
 | [`evaluation/test_split_benchmark_protocol.md`](evaluation/test_split_benchmark_protocol.md) | calibration、validation、test 的冻结关系 |
 | [`evaluation/viewcell_image_per_evaluation.md`](evaluation/viewcell_image_per_evaluation.md) | Color-ID 图像漏检、错误实例和额外实例指标 |
+| [`evaluation/pvs_bounded_relation_survival_moment_v4_score_separation_diagnosis_2026-08-17.md`](evaluation/pvs_bounded_relation_survival_moment_v4_score_separation_diagnosis_2026-08-17.md) | v4 三 seed 正式结果、极端分数尾部、RVL 梯度动力学和三轮单种子最小原因实验；未晋级新模型 |
 | [`evaluation/pvs_direction_depth_relation_survival_constrained_v1_surface_fallback_owrb_formal40_pooled_context_20260811_formal_validation.md`](evaluation/pvs_direction_depth_relation_survival_constrained_v1_surface_fallback_owrb_formal40_pooled_context_20260811_formal_validation.md) | 2026-08-11 修正 pooled-context 定义后的正式 8×3×40 validation 汇总、因子效应、图像评价和硬件门状态 |
 | [`evaluation/pvs_direction_depth_relation_survival_constrained_v1_surface_fallback_owrb_formal40_pooled_context_20260811_conclusion.md`](evaluation/pvs_direction_depth_relation_survival_constrained_v1_surface_fallback_owrb_formal40_pooled_context_20260811_conclusion.md) | 同一正式矩阵的路线判定、冻结成员、test 结果和论文结论 |
 | [`evaluation/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_formal_validation.md`](evaluation/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_formal_validation.md) | 5 个补充机制变体、15 个成员、10,000 次 paired bootstrap 和硬件 Color-ID 图像评价 |

@@ -19,9 +19,34 @@ from neural_instance_culling.model.train_bounded_relation_survival_moment_safety
     _save_safe_checkpoint_alias,
     _v4_objective_groups,
 )
+from neural_instance_culling.model.current_pvs_utils import score_distribution_summary
 
 
 class BoundedRelationSurvivalMomentSafetyTrainingTest(unittest.TestCase):
+    def test_score_distribution_reports_extreme_safety_tails(self) -> None:
+        summary = score_distribution_summary(
+            np.asarray([0.01, 0.60, 0.90, 0.20, 0.80, 0.99]),
+            np.asarray([1.0, 1.0, 1.0, 0.0, 0.0, 0.0]),
+            np.asarray([10.0, 1.0, 1.0, 0.0, 0.0, 0.0]),
+        )
+        for key in (
+            "positiveWeightedQ005",
+            "positiveWeightedQ01",
+            "negativeQ99",
+            "negativeQ995",
+            "positiveNegativeGapQ01Q99",
+            "positiveNegativeGapQ005Q995",
+            "rocAuc",
+            "averagePrecision",
+            "weightedRocAuc",
+        ):
+            self.assertIn(key, summary)
+            self.assertIsNotNone(summary[key])
+        self.assertLess(summary["positiveNegativeGapQ005Q995"], 0.0)
+        self.assertAlmostEqual(summary["rocAuc"], 1.0 / 3.0)
+        self.assertAlmostEqual(summary["averagePrecision"], 0.5)
+        self.assertAlmostEqual(summary["weightedRocAuc"], 1.0 / 12.0)
+
     def test_test_split_is_rejected_without_reading_it(self) -> None:
         dataset = SimpleNamespace(split_ids={"train", "calibration", "validation", "test"})
         with self.assertRaisesRegex(ValueError, "test is forbidden"):

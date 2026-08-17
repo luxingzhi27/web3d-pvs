@@ -13,6 +13,7 @@ import math
 from typing import Any, Sequence
 
 import torch
+import torch.nn.functional as F
 
 from common.safety_constraint_utility_loss import rvl_strong_v2_visibility_loss
 
@@ -300,6 +301,7 @@ def safety_reserve_operating_utility_loss(
     negative_tail_fraction: float = 0.02,
     glb_resource_weight: float = 0.05,
     threshold_temperature: float = 0.10,
+    negative_band_shape: str = "sigmoid",
     group_temperature: float = 0.10,
     request_temperature: float = 0.10,
     reserve_quantile: float = 0.01,
@@ -308,6 +310,12 @@ def safety_reserve_operating_utility_loss(
     warmup_fraction: float = 0.10,
     threshold_sample_count: int = 2,
     threshold_anchor_period: int = 4,
+    rvl_bce_positive_weight: float = 14.0,
+    rvl_tversky_fn_weight: float = 7.0,
+    rvl_count_weight: float = 0.10,
+    rvl_fp_normalization: str = "positive",
+    rvl_rank_weight: float = 0.45,
+    rvl_rank_negative_top_k: int = 256,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor | float]]:
     """Compute RVL safety, boundary protection, and reserve-gated efficiency."""
     if str(split) != "train":
@@ -322,6 +330,8 @@ def safety_reserve_operating_utility_loss(
             raise ValueError(f"{name} must be non-negative")
     if float(threshold_temperature) <= 0.0:
         raise ValueError("threshold_temperature must be positive")
+    if str(negative_band_shape) not in {"sigmoid", "softplus"}:
+        raise ValueError("negative_band_shape must be sigmoid or softplus")
 
     flat_logits = logits.float().reshape(-1)
     labels = target.float().reshape(-1)
@@ -368,6 +378,12 @@ def safety_reserve_operating_utility_loss(
         pose_offsets_cpu,
         normalized_weights,
         torch.zeros_like(flat_logits),
+        bce_positive_weight=rvl_bce_positive_weight,
+        tversky_fn_weight=rvl_tversky_fn_weight,
+        count_weight=rvl_count_weight,
+        fp_normalization=rvl_fp_normalization,
+        rank_weight=rvl_rank_weight,
+        rank_negative_top_k=rvl_rank_negative_top_k,
     )
     thresholds = sample_train_operating_thresholds(
         train_seed,
@@ -387,6 +403,7 @@ def safety_reserve_operating_utility_loss(
     margins: list[torch.Tensor] = []
     boundary_count = 0
     negative_count = 0
+    negative_saturation_terms: list[torch.Tensor] = []
     no_demand_glb_count = flat_logits.new_zeros(())
 
     for _pose, start, end in _pose_slices(pose_offsets_cpu, flat_logits.numel()):
@@ -428,9 +445,17 @@ def safety_reserve_operating_utility_loss(
         for threshold in thresholds:
             if bool(negative.any()):
                 boundary_logit = flat_logits.new_tensor(math.log(threshold / (1.0 - threshold)))
-                soft_keep = torch.sigmoid(
-                    (flat_logits[start:end][negative] - boundary_logit) / float(threshold_temperature)
-                )
+                normalized_margin = (
+                    flat_logits[start:end][negative] - boundary_logit
+                ) / float(threshold_temperature)
+                if negative_band_shape == "sigmoid":
+                    soft_keep = torch.sigmoid(normalized_margin)
+                    negative_saturation_terms.append((soft_keep > 0.999).float().mean())
+                else:
+                    soft_keep = (
+                        F.softplus(normalized_margin) * float(threshold_temperature)
+                    )
+                    negative_saturation_terms.append(torch.zeros((), device=soft_keep.device))
                 negative_loss, count = _upper_tail_cvar(soft_keep, negative_tail_fraction)
                 negative_count += count
             else:
@@ -478,6 +503,11 @@ def safety_reserve_operating_utility_loss(
     total = safety_loss + efficiency_loss
     gate_mean = torch.stack(gates).mean() if gates else zero.detach()
     margin_mean = torch.stack(margins).mean() if margins else zero.detach()
+    negative_saturation = (
+        torch.stack(negative_saturation_terms).mean()
+        if negative_saturation_terms
+        else zero.detach()
+    )
     parts: dict[str, torch.Tensor | float] = {
         **{f"rvl_{key}": value for key, value in rvl_parts.items()},
         "lossSafetyRvl": rvl_loss,
@@ -494,6 +524,7 @@ def safety_reserve_operating_utility_loss(
         "operatingThresholds": flat_logits.new_tensor(thresholds).detach(),
         "boundaryTailPositiveCount": float(boundary_count),
         "thresholdNegativeTailCount": float(negative_count),
+        "negativeBandSaturationFraction": negative_saturation,
         "noDemandGlbCount": no_demand_glb_count,
         "normalizedVisibleWeightMean": normalized_weights.mean(),
         "normalizedVisibleWeightMax": normalized_weights.max(),
