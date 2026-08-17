@@ -247,6 +247,8 @@ class PoseCSRSplit:
         )
         camera = np.zeros((max_examples, 3), dtype=np.float32)
         camera_world = np.zeros((max_examples, 3), dtype=np.float32)
+        query_center_world = np.zeros((max_examples, 3), dtype=np.float32)
+        viewcell_radius_m = np.zeros((max_examples,), dtype=np.float32)
         camera_view = np.zeros((max_examples, 5), dtype=np.float32)
         instance = np.zeros((max_examples,), dtype=np.int64)
         target = np.zeros((max_examples,), dtype=np.float32)
@@ -260,7 +262,9 @@ class PoseCSRSplit:
                 continue
             frustum_ids = self.dataset.frustum_slice(int(pose_index))
             camera_norm = self.dataset.poses["camera_norm"][pose_index]
-            camera_world_pose = self.dataset.poses["camera_world"][pose_index]
+            camera_world_pose = self.dataset.candidate_camera_world(int(pose_index))
+            query_center_pose = self.dataset.query_center_world(int(pose_index))
+            query_radius = self.dataset.viewcell_radius_m(int(pose_index))
             view = self.dataset.camera_view(int(pose_index))
             hard_negatives = np.setdiff1d(frustum_ids, visible_ids, assume_unique=True)
             visible_set = set(int(v) for v in visible_ids.tolist())
@@ -273,6 +277,8 @@ class PoseCSRSplit:
                 pos_pick = int(visible_ids[pixel_idx])
                 camera[cursor] = camera_norm
                 camera_world[cursor] = camera_world_pose
+                query_center_world[cursor] = query_center_pose
+                viewcell_radius_m[cursor] = query_radius
                 camera_view[cursor] = view
                 instance[cursor] = pos_pick
                 target[cursor] = 1.0
@@ -289,6 +295,8 @@ class PoseCSRSplit:
                         next_cursor = cursor + count
                         camera[cursor:next_cursor] = camera_norm
                         camera_world[cursor:next_cursor] = camera_world_pose
+                        query_center_world[cursor:next_cursor] = query_center_pose
+                        viewcell_radius_m[cursor:next_cursor] = query_radius
                         camera_view[cursor:next_cursor] = view
                         instance[cursor:next_cursor] = selected.astype(np.int64)
                         cursor = next_cursor
@@ -300,6 +308,8 @@ class PoseCSRSplit:
                     neg = self.dataset.random_non_visible_instance(visible_set, rng)
                     camera[cursor] = camera_norm
                     camera_world[cursor] = camera_world_pose
+                    query_center_world[cursor] = query_center_pose
+                    viewcell_radius_m[cursor] = query_radius
                     camera_view[cursor] = view
                     instance[cursor] = neg
                     cursor += 1
@@ -307,6 +317,9 @@ class PoseCSRSplit:
         return {
             "camera": camera[:cursor],
             "camera_world": camera_world[:cursor],
+            "candidate_camera_world": camera_world[:cursor],
+            "query_center_world": query_center_world[:cursor],
+            "viewcell_radius_m": viewcell_radius_m[:cursor],
             "camera_view": camera_view[:cursor],
             "instance": instance[:cursor],
             "target": target[:cursor],
@@ -326,6 +339,8 @@ class PoseCSRSplit:
         # 这更接近前端真实需求：一次预测输出的整个可见实例集合要和 GT 对齐。
         cameras: list[np.ndarray] = []
         cameras_world: list[np.ndarray] = []
+        query_centers_world: list[np.ndarray] = []
+        viewcell_radii_m: list[np.ndarray] = []
         views: list[np.ndarray] = []
         mvps: list[np.ndarray] = []
         instances: list[np.ndarray] = []
@@ -346,7 +361,9 @@ class PoseCSRSplit:
             if visible_ids.size == 0 and not include_empty:
                 continue
 
-            camera_world = np.asarray(self.dataset.poses["camera_world"][pose_index], dtype=np.float32)
+            camera_world = self.dataset.candidate_camera_world(pose_index)
+            query_center_world = self.dataset.query_center_world(pose_index)
+            viewcell_radius_m = self.dataset.viewcell_radius_m(pose_index)
             forward = np.asarray(self.dataset.poses["camera_forward"][pose_index], dtype=np.float32)
             tan_x, tan_y = np.asarray(self.dataset.poses["camera_view"][pose_index], dtype=np.float32)
             # v3 CSR 已经把“与前端一致的候选集合”写进 frustum_ids/candidate_ids。
@@ -417,6 +434,8 @@ class PoseCSRSplit:
             count = int(candidate_ids.size)
             cameras.append(np.repeat(self.dataset.poses["camera_norm"][pose_index][None, :], count, axis=0).astype(np.float32, copy=False))
             cameras_world.append(np.repeat(camera_world[None, :], count, axis=0).astype(np.float32, copy=False))
+            query_centers_world.append(np.repeat(query_center_world[None, :], count, axis=0).astype(np.float32, copy=False))
+            viewcell_radii_m.append(np.full((count,), viewcell_radius_m, dtype=np.float32))
             views.append(np.repeat(self.dataset.camera_view(pose_index)[None, :], count, axis=0).astype(np.float32, copy=False))
             if self.dataset.mvp is not None:
                 mvps.append(np.repeat(self.dataset.mvp_slice(pose_index)[None, :], count, axis=0).astype(np.float32, copy=False))
@@ -433,6 +452,9 @@ class PoseCSRSplit:
             return {
                 "camera": np.zeros((0, 3), dtype=np.float32),
                 "camera_world": np.zeros((0, 3), dtype=np.float32),
+                "candidate_camera_world": np.zeros((0, 3), dtype=np.float32),
+                "query_center_world": np.zeros((0, 3), dtype=np.float32),
+                "viewcell_radius_m": np.zeros((0,), dtype=np.float32),
                 "camera_view": np.zeros((0, 5), dtype=np.float32),
                 "instance": np.zeros((0,), dtype=np.int64),
                 "target": np.zeros((0,), dtype=np.float32),
@@ -448,6 +470,9 @@ class PoseCSRSplit:
         out = {
             "camera": np.concatenate(cameras, axis=0),
             "camera_world": np.concatenate(cameras_world, axis=0),
+            "candidate_camera_world": np.concatenate(cameras_world, axis=0),
+            "query_center_world": np.concatenate(query_centers_world, axis=0),
+            "viewcell_radius_m": np.concatenate(viewcell_radii_m, axis=0),
             "camera_view": np.concatenate(views, axis=0),
             "instance": np.concatenate(instances, axis=0),
             "target": np.concatenate(targets, axis=0),
@@ -497,7 +522,9 @@ class PoseCSRSplit:
                 ]
             )
             camera_norm = self.dataset.poses["camera_norm"][pose_index]
-            camera_world = self.dataset.poses["camera_world"][pose_index]
+            camera_world = self.dataset.candidate_camera_world(int(pose_index))
+            query_center_world = self.dataset.query_center_world(int(pose_index))
+            viewcell_radius_m = self.dataset.viewcell_radius_m(int(pose_index))
             view = self.dataset.camera_view(int(pose_index))
             for start in range(0, total, batch_size):
                 end = min(total, start + batch_size)
@@ -505,6 +532,9 @@ class PoseCSRSplit:
                 yield {
                     "camera": np.repeat(camera_norm[None, :], count, axis=0).astype(np.float32, copy=False),
                     "camera_world": np.repeat(camera_world[None, :], count, axis=0).astype(np.float32, copy=False),
+                    "candidate_camera_world": np.repeat(camera_world[None, :], count, axis=0).astype(np.float32, copy=False),
+                    "query_center_world": np.repeat(query_center_world[None, :], count, axis=0).astype(np.float32, copy=False),
+                    "viewcell_radius_m": np.full((count,), viewcell_radius_m, dtype=np.float32),
                     "camera_view": np.repeat(view[None, :], count, axis=0).astype(np.float32, copy=False),
                     "instance": candidate_ids[start:end],
                     "target": targets[start:end],
@@ -525,7 +555,12 @@ class PoseCSRDataset:
     `visible_pixels` 别名，但新模型必须按 `visible_weights` 解释。
     """
 
-    def __init__(self, dataset_dir: str | Path, num_instances: int):
+    def __init__(
+        self,
+        dataset_dir: str | Path,
+        num_instances: int,
+        subpose_sidecar: str | Path | None = None,
+    ):
         self.dataset_dir = Path(dataset_dir)
         self.meta = self._read_json("dataset_meta.json")
         self.split_ids = self.meta.get("splitIds", {"train": 0, "val": 1, "test": 2})
@@ -534,7 +569,11 @@ class PoseCSRDataset:
         self.pose_dtype = DIRECTIONAL_POSE_DTYPE if pose_stride == DIRECTIONAL_POSE_DTYPE.itemsize else POSE_DTYPE
         self.poses = np.memmap(self.dataset_dir / "poses.bin", dtype=self.pose_dtype, mode="r")
         self.visible_offsets = np.memmap(self.dataset_dir / "visible_offsets.bin", dtype=np.uint64, mode="r")
-        self.visible_ids = np.memmap(self.dataset_dir / "visible_ids.bin", dtype=np.uint32, mode="r")
+        visible_ids_path = self.dataset_dir / "visible_ids.bin"
+        if visible_ids_path.stat().st_size == 0:
+            self.visible_ids = np.zeros((0,), dtype=np.uint32)
+        else:
+            self.visible_ids = np.memmap(visible_ids_path, dtype=np.uint32, mode="r")
         weights_path = self.dataset_dir / "visible_weights.bin"
         legacy_pixels_path = self.dataset_dir / "visible_pixels.bin"
         self.visible_weight_source = "visible_weights.bin"
@@ -542,7 +581,9 @@ class PoseCSRDataset:
             "visibleWeightSemantics",
             "rvcServer component_weights, not pixel count",
         )
-        if weights_path.exists():
+        if weights_path.exists() and weights_path.stat().st_size == 0:
+            self.visible_weights = np.zeros((0,), dtype=np.float32)
+        elif weights_path.exists():
             weight_dtype_name = str(self.meta.get("visibleWeightDtype", "float32")).lower()
             weight_dtype = np.float32 if weight_dtype_name in {"float", "float32", "f4", "<f4"} else np.uint32
             self.visible_weights = np.memmap(weights_path, dtype=weight_dtype, mode="r")
@@ -558,8 +599,25 @@ class PoseCSRDataset:
         else:
             raise FileNotFoundError(f"Expected visible_weights.bin or legacy visible_pixels.bin in {self.dataset_dir}")
         self.visible_pixels = self.visible_weights
-        hit_counts_path = self.dataset_dir / "visible_hit_counts.bin"
-        subpose_offsets_path = self.dataset_dir / "subpose_offsets.bin"
+        self.subpose_sidecar = None if subpose_sidecar is None else Path(subpose_sidecar).resolve()
+        self.subpose_sidecar_meta = None
+        sidecar_root = self.subpose_sidecar
+        if sidecar_root is not None:
+            manifest_path = sidecar_root / "sidecar_manifest.json"
+            if not manifest_path.is_file():
+                raise FileNotFoundError(f"subpose sidecar is missing sidecar_manifest.json: {sidecar_root}")
+            import json
+            sidecar_meta = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if sidecar_meta.get("schema") != "pvs-viewcell-subpose-supervision-sidecar-v1":
+                raise ValueError("unexpected subpose sidecar schema")
+            if int(sidecar_meta.get("poseCount", -1)) != int(self.poses.size):
+                raise ValueError("subpose sidecar pose count does not match the pose CSR")
+            declared_csr = sidecar_meta.get("mainCsrDataset")
+            if declared_csr and Path(declared_csr).resolve() != self.dataset_dir.resolve():
+                raise ValueError("subpose sidecar was built for a different pose CSR dataset")
+            self.subpose_sidecar_meta = sidecar_meta
+        hit_counts_path = (sidecar_root / "visible_hit_counts.bin") if sidecar_root is not None else self.dataset_dir / "visible_hit_counts.bin"
+        subpose_offsets_path = (sidecar_root / "subpose_offsets.bin") if sidecar_root is not None else self.dataset_dir / "subpose_offsets.bin"
         self.visible_hit_counts = None
         self.subpose_offsets = None
         self.subpose_counts = None
@@ -600,6 +658,39 @@ class PoseCSRDataset:
             self.frustum_ids = np.memmap(frustum_path, dtype=np.uint32, mode="r")
         self.visible_counts = np.diff(self.visible_offsets).astype(np.int64, copy=False)
         self.frustum_counts = np.diff(self.frustum_offsets).astype(np.int64, copy=False)
+        files = self.meta.get("files", {})
+        query_center_name = files.get("queryCenterWorld", "query_center_world.bin")
+        candidate_camera_name = files.get("candidateCameraWorld", "candidate_camera_world.bin")
+        radius_name = files.get("viewcellRadiusM", "viewcell_radius_m.bin")
+        query_center_path = self.dataset_dir / query_center_name
+        candidate_camera_path = self.dataset_dir / candidate_camera_name
+        radius_path = self.dataset_dir / radius_name
+        self.query_centers_world = None
+        self.candidate_cameras_world = None
+        self.viewcell_radii_m = None
+        if query_center_path.exists():
+            values = np.memmap(query_center_path, dtype=np.float32, mode="r")
+            if values.size != self.poses.size * 3:
+                raise ValueError("query_center_world.bin does not match pose count")
+            self.query_centers_world = values.reshape(-1, 3)
+        if candidate_camera_path.exists():
+            values = np.memmap(candidate_camera_path, dtype=np.float32, mode="r")
+            if values.size != self.poses.size * 3:
+                raise ValueError("candidate_camera_world.bin does not match pose count")
+            values = values.reshape(-1, 3)
+            pose_camera = np.asarray(self.poses["camera_world"], dtype=np.float32)
+            if not np.allclose(values, pose_camera, rtol=0.0, atol=1e-5):
+                raise ValueError("candidate_camera_world.bin disagrees with poses.bin")
+            self.candidate_cameras_world = values
+        if radius_path.exists():
+            values = np.memmap(radius_path, dtype=np.float32, mode="r")
+            if values.size != self.poses.size:
+                raise ValueError("viewcell_radius_m.bin does not match pose count")
+            if np.any(~np.isfinite(values)) or np.any(values < 0.0):
+                raise ValueError("viewcell_radius_m.bin contains invalid radii")
+            self.viewcell_radii_m = values
+        if (self.query_centers_world is None) != (self.viewcell_radii_m is None):
+            raise ValueError("query center and view-cell radius files must be provided together")
 
     def _read_json(self, name: str) -> dict:
         import json
@@ -655,6 +746,35 @@ class PoseCSRDataset:
         tan_y = np.float32(math.tan(math.radians(66.0) * 0.5))
         tan_x = np.float32(tan_y * (16.0 / 9.0))
         return np.asarray([0.0, 0.0, -1.0, tan_x, tan_y], dtype=np.float32)
+
+    def query_center_world(self, pose_index: int, *, required: bool = False) -> np.ndarray:
+        """Return the view-cell query center, distinct from the candidate camera."""
+        if self.query_centers_world is None:
+            if required:
+                raise ValueError(
+                    "this model requires query_center_world.bin; rebuild the PoseCSR with the v3 view-cell schema"
+                )
+            return np.asarray(self.poses["camera_world"][pose_index], dtype=np.float32)
+        return np.asarray(self.query_centers_world[pose_index], dtype=np.float32)
+
+    def candidate_camera_world(self, pose_index: int, *, required: bool = False) -> np.ndarray:
+        """Return the back-camera center used only to define candidates."""
+        if self.candidate_cameras_world is None:
+            if required:
+                raise ValueError(
+                    "this model requires candidate_camera_world.bin; rebuild the PoseCSR with the v3 view-cell schema"
+                )
+            return np.asarray(self.poses["camera_world"][pose_index], dtype=np.float32)
+        return np.asarray(self.candidate_cameras_world[pose_index], dtype=np.float32)
+
+    def viewcell_radius_m(self, pose_index: int, *, required: bool = False) -> float:
+        if self.viewcell_radii_m is None:
+            if required:
+                raise ValueError(
+                    "this model requires viewcell_radius_m.bin; rebuild the PoseCSR with the v3 view-cell schema"
+                )
+            return 0.0
+        return float(self.viewcell_radii_m[pose_index])
 
     def mvp_slice(self, pose_index: int) -> np.ndarray:
         if self.mvp is None:

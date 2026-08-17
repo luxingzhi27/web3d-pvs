@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parents[1]
@@ -44,6 +45,19 @@ class M5VisualSafetyImageEvaluationTests(unittest.TestCase):
     def test_negative_subpose_count_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             viewcell_image.ViewcellDataset.select_subpose_indices(10, 43, -1)
+
+    def test_gpu_snapshot_writes_both_host_observations(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.object(
+                viewcell_image.subprocess,
+                "run",
+                return_value=SimpleNamespace(returncode=0, stdout="gpu evidence\n", stderr=""),
+            ) as run:
+                evidence = viewcell_image._capture_gpu_snapshot(Path(temp_dir), "during")
+            self.assertTrue(evidence["complete"])
+            self.assertEqual(run.call_count, 2)
+            self.assertTrue((Path(temp_dir) / "nvidia_smi_during.txt").is_file())
+            self.assertTrue((Path(temp_dir) / "nvidia_smi_pmon_during.txt").is_file())
 
     def test_image_threshold_rejects_frozen_workpoint_below_pose_recall_floor(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

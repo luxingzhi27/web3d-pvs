@@ -1,13 +1,13 @@
-# 分层遮挡关系生存网络、视点区域积分频谱查询与质量风险损失实施计划
+# 分层遮挡关系生存网络、视点区域积分频谱查询与质量风险损失实施记录
 
 日期：2026-08-13
-状态：当前唯一实施计划；先快速验证，晋级后执行 80 epoch 长训与核心消融；验证完成前不修改当前默认模型、阈值或前端资产
+状态：v1 架构、实现、pilot 和 32 epoch 学习曲线的历史记录；当前行动只以[论文全创新组合扫参、长训与消融执行计划](pvs_full_innovation_hyperparameter_scan_longtrain_ablation_2026-08-13.md)为准。默认模型、阈值和前端资产保持不变。
 
 ## 研究目的
 
 当前正式实验已经证明两个基础事实。第一，实例可见性确实依赖场景中的遮挡关系，但把关系压缩成普通上下文向量后，它与遮挡生存场表达的信息高度重叠。第二，117 维固定 Fourier 视角编码明显优于九维直接视角输入，说明可见性边界包含小型多层感知机难以直接学习的高频变化。RVL 主干也已表现出稳定的高召回作用，但尚未直接约束 view-cell 内稀有可见情况和无需求 GLB 字节。
 
-本计划把后续论文方案收敛为三个相互配合、可以独立验证的候选创新点：
+本路线把论文方案收敛为三个相互配合、可以独立验证的候选创新点：
 
 1. 借用 Graph U-Net 的多尺度编码、逐实例解码和跳跃连接思想，构造由真实三角形遮挡边驱动的分层关系网络，并让它直接生成逐实例遮挡生存场；
 2. 把固定、逐坐标展开的 Fourier 输入改成视点区域感知、方向可学习且由遮挡关系场约束的紧凑频谱查询，用较少频率表达尖锐边界，同时抑制 view-cell 内的混叠和不稳定振荡。
@@ -17,9 +17,9 @@
 
 三个创新点分别回答三个问题：离线阶段怎样把“谁在什么方向和深度遮挡谁”烘焙成紧凑实例资产；前端怎样用一次 view-cell 查询稳定读取这份遮挡分布；训练怎样在保护重要画面的前提下减少误报实例和无需求 GLB 下载。只有快速验证和正式长训均支持的模块，才写入论文贡献和默认模型。
 
-## 唯一实验身份与保护边界
+## v1 实验身份与保护边界
 
-本路线统一使用实验前缀 `pvs_hierarchical_relation_survival_integrated_spectral_quality_rvl_v1`。pilot、复验和正式长训只能在该前缀下使用清晰后缀，不能继续创建 `boundary`、`selective_correction`、`anchorstrong` 或 `tailrisk` 等旧路线名称。
+本记录覆盖的 v1 实验统一使用前缀 `pvs_hierarchical_relation_survival_integrated_spectral_quality_rvl_v1`。该身份只用于复现已经完成的实现、pilot 和学习曲线，不再承载后续扫参或正式长训。
 
 统一输出根固定为：
 
@@ -27,15 +27,15 @@
 - checkpoint 与导出中间结果：`neural_instance_culling/model/out/pvs_hierarchical_relation_survival_integrated_spectral_quality_rvl_v1/`；
 - calibration、validation、图像评价与统计：`neural_instance_culling/benchmark/out/pvs_hierarchical_relation_survival_integrated_spectral_quality_rvl_v1/`；
 - pilot 报告：`docs/evaluation/pvs_hierarchical_relation_survival_integrated_spectral_quality_rvl_v1_pilot.md`；
-- 正式报告：`docs/evaluation/pvs_hierarchical_relation_survival_integrated_spectral_quality_rvl_v1_formal80_validation.md` 与 `docs/evaluation/pvs_hierarchical_relation_survival_integrated_spectral_quality_rvl_v1_conclusion.md`。
+- v1 正式长训报告未创建，因为旧 Formal80 未达到启动门；不能把计划文件名当作已有结果。
 
-这些路径在对应阶段开始前才创建，runner 必须拒绝覆盖已有完整或 partial 成员。不得为同一语义另建临时根目录。
+这些路径记录 v1 产物的来源。现有完整或 partial 成员均不得覆盖，也不得换名后冒充 v2 结果。
 
-计划实施期间保持以下边界：
+该路线实施期间保持以下边界：
 
 - 当前 HKUST 前端模型 `pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best`、阈值 `0.02` 和部署资产保持不变；
 - 历史强参考使用已冻结的 `rvl_strong_v2`、自由逐实例生存场和 Fourier117 查询定义，不能悄然修改后仍沿用同名；
-- 新实验使用相同的空间隔离 train/calibration/validation、相同后退相机候选 CSR、相同实例 GT、相同 `visible_weights`、相同实例到 GLB 映射和候选哈希；
+- 新实验使用相同的空间隔离 train/calibration/validation、相同后退相机候选 CSR、相同实例 GT、相同 `visible_weights`、相同实例到 GLB 映射和候选口径；
 - `test` 在模型结构、checkpoint、阈值、资产和论文对比均冻结前不得读取；
 - 不补入 GT 可见实例，不改变候选集合，不使用前端白名单或运行时多 subpose 查询修复结果；
 - 所有训练从头开始。pilot 结果只能筛选实现和参数，不能作为正式论文统计结论。
@@ -124,7 +124,7 @@ Graph U-Net 值得保留的核心思想有三项：编码端逐层扩大感受�
 - 两实例中心差、尺度比和几何特征组合；
 - 证据来自深度剥离还是 GLB 表面点补全。
 
-正式图不能直接使用当前 `sourceK=8` 的 top-k 关系表。现有审计已经记录其丢弃了 2,258,881 个超出 top-k 的唯一来源实例。后续需要从 train-only 深度缓存构建“在已登记采样、最多六层深度剥离和表面补全覆盖内，不按来源 top-k 截断”的关系 CSR 摘要，并记录 render pose、候选哈希、深度层范围和表面补全来源。该摘要仍不是无限深度、全视角的完整场景遮挡图。当前丢失 source identity 的 target-level 压缩关系场也不能作为图网络输入。
+正式图不能直接使用当前 `sourceK=8` 的 top-k 关系表。现有审计已经记录其丢弃了 2,258,881 个超出 top-k 的唯一来源实例。后续需要从 train-only 深度缓存构建“在已登记采样、最多六层深度剥离和表面补全覆盖内，不按来源 top-k 截断”的关系 CSR 摘要，并记录 render pose、候选口径、深度层范围和表面补全来源。该摘要仍不是无限深度、全视角的完整场景遮挡图。当前丢失 source identity 的 target-level 压缩关系场也不能作为图网络输入。
 
 ### 方向保持的分层编码
 
@@ -188,11 +188,11 @@ S_i(\mathbf d,\rho)=P(\text{在方向 }\mathbf d\text{、归一化距离 }\rho\t
 - 行索引按 `target instance → spherical direction → depth shell` 排列；
 - CSR 项保留 `source instance`、render pose 支持、像素支持、深度间隔一阶/二阶统计、相对中心和尺度统计、证据置信度与来源类型；
 - 在同一 render pose 内先对来源—目标关系去重，再跨 pose 聚合；在已登记的六层深度剥离与表面补全覆盖内不做来源 top-k 截断；
-- 元数据必须保存 train split、实际 render pose 顺序摘要、canonical/render candidate digest、FOV、分辨率、深度层数、surface fallback 摘要及所有输入 SHA-256；
+- 元数据必须保存 train split、实际 render pose 顺序、canonical/render candidate 语义、FOV、分辨率、深度层数、surface fallback 摘要及输入路径、schema 和 shape；
 - “不做 top-k”只描述已观测深度层与补全范围，不能命名成完整全场景遮挡图；
 - 图分层映射和原始 CSR 只用于离线训练，不导出到浏览器。
 
-构建后先执行覆盖和语义门：`source/target` ID 有效、深度事件严格递增、关系只来自 train、候选哈希一致、右删失与遮挡事件不混用。任何一项失败都停止训练，不通过兼容分支回退到旧 top-k 表。
+构建后先执行覆盖和语义检查：`source/target` ID 有效、深度事件严格递增、关系只来自 train、候选口径一致、右删失与遮挡事件不混用。任何一项失败都停止训练，不通过兼容分支回退到旧 top-k 表。
 
 ## 候选创新二：视点区域积分的关系条件化频谱查询
 
@@ -306,7 +306,7 @@ a_{ik}\cos t_{ik},
 - `visible_hit_counts / successful_subpose_count`，表示该实例在多少合法 subpose 中出现，仅用于保护 view-cell 并集中的稀有正例；
 - 实例到 GLB 的映射和真实 GLB 字节成本。
 
-先用现有 source view-cell 数据生成只读 sidecar，将 `visible_hit_counts` 对齐到正式空间 CSR。sidecar 必须验证可见 ID、权重、pose 顺序、split 和候选哈希，不修改主 CSR、候选集合或 GT。
+先用现有 source view-cell 数据生成只读 sidecar，将 `visible_hit_counts` 对齐到正式空间 CSR。sidecar 必须验证可见 ID、权重、pose 顺序、split 和候选口径，不修改主 CSR、候选集合或 GT。
 
 ### 质量尾部风险
 
@@ -403,143 +403,45 @@ train-only 三角形深度层与表面深度补全
 
 这条路径形成清晰分工：分层关系网络离线回答“场景中哪些结构会在不同方向和深度挡住该实例”；频谱查询在线回答“当前 view-cell 应当如何读取这份遮挡分布”；统一输出头负责在 weighted recall 安全约束下决定显示和下载。
 
-## 快速验证方案
+## v1 验证协议摘要
 
-所有快速实验使用相同 train/calibration/validation、候选集合、GT、质量权重、subpose sidecar 和候选哈希，不读取 test。每一阶段先用 seed `20260801` 训练 8 epoch；未通过数值和方向门的成员立即停止。晋级成员再用 seed `20260801/20260802` 从头训练 16 epoch，排除单种子偶然性。四张 GPU 同时运行四个独立成员。
+v1 依次实现并快速检查了关系来源、频谱查询和质量/资源损失三个矩阵。关系矩阵包含自由生存场、单尺度真实关系、分层真实关系和来源置乱；频谱矩阵包含 Fourier117、可学习中心点查询和区域积分查询；损失矩阵包含 RVL、质量尾部以及两档资源项。完整成员定义、命令和冻结 manifest 保留在对应代码与结果目录中，不再复制为后续待办。
 
-### 实施顺序
+该协议最初使用单 seed、8 epoch pilot，随后对 R0/R2 执行双 seed、32 epoch 学习曲线。结果已经证明“继续增加 epoch”不能稳定解决分层关系模型的过预测，因此旧 `module_recheck16` 和旧 `formal80` 均未启动。后续代码修复、超参数扫描、全组合长训和消融只按新的 v2 执行计划进行。
 
-第一阶段先完成公共数据和算子，不训练完整模型：
+## 2026-08-13 公共频谱查询模块实现记录
 
-1. 构建不截断来源的 observed-relation CSR、三层图映射和 subpose 质量 sidecar；
-2. 实现分层关系编码/解码、生存场系数头、区域积分频谱和新损失；
-3. 完成 split 泄漏、候选哈希、关系来源、单调生存、积分频谱、梯度投影及导出数值单测；
-4. 用 2 pose、最多 512 候选执行一次前后向 smoke，检查显存、有限 loss、各分支非零梯度和日志字段。
+本次先实现候选创新二的独立公共算子，不接入当前默认模型、训练 runner、旧 exporter 或前端资产。实现文件为 `neural_instance_culling/model/common/viewcell_integrated_spectral_query.py`，公共 schema 为 `view-cell-integrated-spectral-query-v1`。
 
-第二阶段只验证关系生存网络，视角和损失固定为 Fourier117 + `rvl_strong_v2`：
+- 输入：一次候选批次的九维中心视角量，以及由当前 view-cell 半径和实例距离解析得到的九维对角方差；默认遵循半径 `2 m`、固定朝向、模型 FOV `66°` 的现行契约。
+- 频谱：固定 `K=16` 个共享可学习九维联合频率；每个频率输出 Gaussian 积分后的 sin、cos 和未解析相位能量，完整频谱维度为 `9 + 16 * 3 = 57`。
+- 查询：低频主体、中频过渡和高频边界分支由连续 sigmoid 门控合并，关系生存场语义可作为八维条件输入；可选的 `R x 7` 生存系数只做一次单批次字段查询。
+- 运行边界：模块没有 subpose 展开、邻居搜索、图传播或 AABB 八角点投影；零方差严格退化为中心相位查询。
+- 测试：`neural_instance_culling/model/common/tests/test_viewcell_integrated_spectral_query.py` 覆盖有限性、零不确定度、积分单调性、解析方差、关系生存条件、频率分组和导出 schema。
 
-| 成员 | 生存场来源 | 图尺度 | 目的 |
-|---|---|---|---|
-| `R0_free_survival` | 等容量逐实例自由参数 | 无 | 强参考；确认新结构是否至少保留当前生存场信号 |
-| `R1_single_scale_relation` | 真实有向遮挡边 | 单尺度 | 判断真实关系生成生存场是否有基本信号 |
-| `R2_hierarchical_relation` | 真实有向遮挡边 | 三尺度编码/解码 | 验证多尺度传播与逐实例恢复 |
-| `R3_hierarchical_shuffled_source` | 来源 ID 置乱、边度数/方向/权重保持 | 三尺度 | 机制干预；验证模型是否真正使用“谁遮挡谁” |
+该记录只证明当时的公共算子和单元测试，不证明模型训练收益、weighted recall 安全门、浏览器 WebGPU parity 或移动端性能；后续验证以 v2 唯一执行计划为准。
 
-第三阶段固定胜出的生存网络和 `rvl_strong_v2`，验证频谱查询：
+## 2026-08-13 训练专用关系 CSR 与最小分层编码器实现记录
 
-| 成员 | 视角查询 | 目的 |
-|---|---|---|
-| `S0_fourier117` | 当前固定 Fourier117 | 精度上界和成本参考 |
-| `S1_learned_spectral_point` | 16 个联合频率，不做区域积分 | 分离“可学习频率”和“区域积分”的作用 |
-| `S2_integrated_spectral` | 16 个联合频率 + 区域衰减 + 未解析能量 | 完整频谱创新候选 |
+本次先完成候选创新一的独立训练代码线，不接入当前默认模型、训练 runner、旧 `ray-context-relation-evidence-v2` 接口、旧 exporter 或前端资产。实现文件为 `neural_instance_culling/model/common/train_observed_relation_csr.py`、`neural_instance_culling/model/common/hierarchical_relation_survival.py`，测试为 `neural_instance_culling/model/tests/test_train_observed_relation_csr_hierarchy.py`。
 
-第四阶段固定胜出的完整结构，只比较损失：
+- **CSR/schema 输入与输出：** 输入显式的候选 ID、pose 顺序和 CSR offsets，以及 train-only 三角形深度层/表面补全的有向关系行；输出按 `target instance → direction bin → depth shell` 排列的独立二进制 CSR。每条边保留 source instance、pose/像素支持、前后深度间隔及其统计、相对中心/尺度、证据置信度和来源类型；同一行不允许重复 source，且当前 schema 明确不做 source top-k 截断。
+- **校验边界：** 元数据必须声明 `pvs-viewcell-train-observed-relation-csr-v1`、`trainOnly=true`、仅含 `train` split、候选 canonical/render 语义、输入路径与 shape、深度层数、FOV 和字段语义。校验器拒绝 split 泄漏、候选口径不一致、source/target 越界、自环、非正深度间隔、非法方向/深度桶以及把 event 与 right-censored observation 混用；候选校验只读取 native candidate CSR，不读取或并入 GT visible IDs。
+- **分层编码器输入与输出：** 输入固定实例几何特征、经过 schema 校验的 CSR，以及 `instance → local group → structural group` 的连续映射；先按 target/direction/depth segment 聚合有向 source→target 消息，再做实例层、局部遮挡群层、结构群层编码和逐实例解码，固定输出 `[N, 4, 7]` 生存场系数。方向和深度桶在实例更新前保持显式，避免把相反方向或不同深度顺序混成无向池化。
+- **依赖资源与运行命令：** 依赖当前已登记的 train 深度缓存、surface fallback 关系、candidate CSR 和实例几何表；本次只运行 `conda run -n slm_pvs python -m unittest neural_instance_culling.model.tests.test_train_observed_relation_csr_hierarchy -v`、旧证据回归测试和 `conda run -n slm_pvs python -m py_compile ...`，没有启动训练、导出、浏览器采样或 benchmark。
+- **测试结果：** 新增关系/分层测试 `8/8` 通过；既有 `test_triangle_depth_layer_evidence.py` 与 `test_ray_context_relation_evidence.py` 回归测试 `10/10` 通过。schema 测试中的“候选摘要/候选顺序”是候选一致性指标，“source/target 深度顺序”是关系语义校验；编码器输出形状、有限性、分层 segment 计数、方向反转后的 target 归属、反向传播和生存概率随距离单调不增是网络结构测试，不是画面安全指标。
 
-| 成员 | 可见性损失 | 目的 |
-|---|---|---|
-| `L0_rvl_strong_v2` | 原 RVL | 纯损失控制组 |
-| `L1_quality_risk` | RVL + 质量尾部风险 | 判断危险正例保护是否提高安全与分类平衡 |
-| `L2_quality_resource_r005` | L1 + 资源排斥 `lambda_r=0.05` | 保守资源配置 |
-| `L3_quality_resource_r010` | L1 + 资源排斥 `lambda_r=0.10` | 中等资源配置 |
+该阶段之后已经完成关系 CSR builder 接线、三层图映射、关系生存删失损失、统一训练入口和 R0--R3 pilot。仍未完成的正式验证包括容量匹配关系消融、正确的下载头评价、修正后的导出 schema、Color-ID 图像评价和硬件 WebGPU 性能；因此不能据此修改默认 checkpoint、阈值或前端资产。
 
-资源成员默认启用安全门控和梯度投影。仅在单元测试及最多 2 epoch 的梯度诊断中运行一次“无投影”对照，证明投影确实阻止冲突梯度；它不占用正式 pilot 成员，也不能晋级长训。
+## 2026-08-13 Pilot 执行结果与阶段判定
 
-### 额外诊断
+本轮已完成三个独立 pilot：关系来源矩阵（R0--R3）、频谱查询矩阵（S0--S2）和损失矩阵（L0--L3）。每个矩阵使用 seed `20260801`、8 epoch、相同的 213 个 validation pose 和相同的原生候选集合；三个汇总均保留 10,000 次配对 bootstrap 字段。本轮没有读取 test split，完整数据与指标见独立的 [pilot 诊断报告](../evaluation/pvs_hierarchical_relation_survival_integrated_spectral_quality_rvl_v1_pilot.md)。
 
-- 对分层关系成员执行来源 ID 置乱干预：保持节点度数、方向层和边权分布，只置乱来源实例。真实边明显优于置乱边，才能说明模型使用了“谁遮挡谁”。
-- 单独统计子位姿间可见状态发生变化的边界实例，报告该子集的 weighted recall、precision、balanced accuracy、bad cull 和 miss-pixel rate。
-- 在同一 view-cell 内对未参与训练的合法位置扰动进行重复查询，报告分数标准差、集合 Jaccard 和安全阈值两侧翻转率。
-- 报告正负分数尾部、阈值扰动稳定性和校准误差，不能通过 bias 或温度缩放把阈值位置移动后冒充分布改善。
-- 记录 FP16 固定表大小、查询头参数量、CUDA p50/p95；浏览器硬件 WebGPU 可用后再记录 10k 候选延迟、主线程时间和内存。
-- 记录质量风险成员在高质量实例、稀有 subpose 实例及其交集上的 weighted recall、普通 recall、分数尾部和 FN 质量；不能只看总体 weighted recall。
-- 记录候选 GLB 总字节、GT-required GLB 字节、预测绝对 GLB 字节、额外无需求 GLB 字节和预算内效用；比例型 reduction 不能代替绝对字节。
+训练入口在 pilot 阶段用 32 个 calibration pose 快速冻结阈值，因此 calibration 中若干成员的 weighted recall 及其下界超过 `0.99` 只表示快速筛选通过，不能推广到完整 validation。冻结各自阈值后重放全部 213 个 validation pose，最高 weighted recall 为单尺度关系 `R1_single_scale_relation` 的 `0.883763`；积分频谱 `S2_integrated_spectral` 为 `0.878301`。关系、频谱和损失矩阵所有成员均低于 `0.99`，所以没有合格的正式安全工作点。本轮不能直接进入 `formal80`，也不能据此替换默认模型、阈值或前端资产。
 
-### Pilot 保留条件
+快速结果仍有诊断价值：分层关系版本 `R2` 相比自由生存场 `R0` 提升 aggregate precision `+0.0366`，但 weighted recall 下降 `-0.0216`；区域积分频谱 `S2` 相比可学习频谱点查询 `S1` 的 weighted recall 仅提升 `+0.00088`，precision 下降 `-0.00168`；质量尾部风险 `L1` 相比 RVL 控制的 weighted recall 提升 `+0.00184`，precision 差异未形成稳定证据；资源排斥版本 `L2/L3` 虽提高 weighted recall 约 `+0.052`，却显著增加平均预测数和预测 GLB 字节。useful cull、precision 或平均预测数的单项变化不能抵消完整 validation 安全门失败。
 
-候选首先必须在自己的 calibration 阈值下满足 weighted recall `>0.99` 且单侧 95% 下界 `>0.99`。满足安全门后，再比较 validation 的 precision、instance accuracy、balanced accuracy、useful cull、bad cull、平均预测数和绝对 GLB 字节。
-
-快速阶段不做论文显著性检验，但晋级规则必须可机械执行。8 epoch 单种子只负责数值淘汰：存在非有限 loss/梯度、候选哈希不一致、没有合格 calibration 工作点、固定表超过 5.88 MB 或 CUDA p95 比 Fourier117 强参考高 `10%` 以上即淘汰。16 epoch 双种子复验要求两个 seed 都有合格安全工作点；所有“改善”均按两个 seed 的 validation 差值同号判断，所有“不恶化”定义为 weighted recall 差值不低于 `-0.001`、bad cull 不高于 `+0.002`、平均 miss-pixel 与 p95 miss-pixel 均不高于对照 `+0.001`。若两成员满足同一门，按两个 seed 平均的 balanced accuracy、precision、绝对预测 GLB 字节、CUDA p95 依次比较。这里的容忍值只用于低成本筛选，正式结论仍来自 80 epoch 三种子和 10,000 次 paired bootstrap。
-
-分层关系网络只有在下列条件下进入正式训练：
-
-- 相比逐实例自由参数生存场，两个 seed 的 precision 或 balanced accuracy 至少一项均为正差值，或在上述安全不恶化门内使绝对预测 GLB 字节均下降至少 `3%`；
-- 相比来源置乱边，两个 seed 的 balanced accuracy、precision 或 useful cull 至少一项均为正差值，且没有安全恶化；
-- 相比分层单尺度版本，两个 seed 的 balanced accuracy 或 precision 至少一项均不下降，并且 useful cull、绝对预测 GLB 字节或边界实例 miss-pixel 至少一项均改善；
-- 固定实例表不超过当前 156 维实验表。
-
-视点区域积分频谱只有在下列条件下进入正式训练：
-
-- 相比 Fourier117，两个 seed 的 precision 和 balanced accuracy 差值均不低于 `-0.01`，bad cull 增量均不高于 `+0.002`；
-- 边界实例的 weighted recall 差值均不低于 `-0.001`，平均和 p95 miss-pixel 增量均不高于 `+0.001`；
-- 同一 view-cell 内安全阈值两侧翻转率至少下降 `10%`，或集合 Jaccard 至少提高 `0.01`；
-- CUDA 查询 p95 低于当前 Fourier117 约 3.45 ms，且浏览器实现不需要在线子位姿循环。
-
-新损失只有在下列条件下进入正式训练：
-
-- 相同结构下两个 seed 的 validation weighted recall 差值均不低于 `-0.001`，且高质量/稀有 subpose 正例 FN 质量增量均不高于 `+0.001`；
-- precision、instance accuracy、balanced accuracy 中至少两项在两个 seed 上均不下降，或绝对预测 GLB 字节/额外无需求字节均下降至少 `5%`；
-- 资源门确实开启且资源梯度不是长期被投影为零；若门从未开启，不能宣称资源项有效；
-- 资源收益不能越过上述 bad cull、平均 miss-pixel 或 p95 miss-pixel 容忍门。
-
-8 epoch 只用于淘汰明显失败成员。16 epoch 双种子复验按下列顺序选择完整组合：先过 calibration weighted recall 安全门，再比较 validation weighted recall、precision、instance accuracy、balanced accuracy、useful cull、bad cull、平均预测数、绝对 GLB 字节和图像指标。阈值是否靠近 `0.5` 只作分布健康诊断，不参与安全硬门。
-
-## 正式 80 epoch 长训与核心消融
-
-快速阶段冻结每个模块及其超参数后，执行 80 epoch、三个固定种子 `20260801/20260802/20260803` 的从头训练。论文主效应矩阵由一个强参考、完整模型和三个留一变体组成；另加入两个机制对照，固定为七个变体，共 `7 × 3 = 21` 个成员：
-
-| 正式变体 | 关系生存网络 | 视角查询 | 损失 | 回答的问题 |
-|---|---|---|---|---|
-| `historical_strong_reference` | 等容量自由生存场 | Fourier117 | `rvl_strong_v2` | 与当前最强机制组合对照，不是新模型 |
-| `full` | 分层真实关系生成 | 视点区域积分频谱 | 质量风险与资源排斥 RVL | 三个创新点联合效果 |
-| `without_hierarchical_relation` | 等容量自由生存场 | 同 full | 同 full | 分层遮挡关系生存网络的独立贡献 |
-| `without_integrated_spectral` | 同 full | Fourier117 | 同 full | 区域积分关系条件化频谱的独立贡献 |
-| `without_quality_resource_loss` | 同 full | 同 full | `rvl_strong_v2` | 新损失相对 RVL 主干的独立贡献 |
-| `shuffled_occlusion_source` | 来源 ID 置乱但边度数/方向/权重不变 | 同 full | 同 full | 真实“谁遮挡谁”是否比同分布图信号有效 |
-| `quality_risk_only` | 同 full | 同 full | RVL + 质量尾部风险，不含资源排斥 | 分离资源排斥对安全与字节的增量 |
-
-留一变体只能替换被移除模块，其余训练预算、初始化策略、数据、候选和头部容量保持一致。关系留一使用与 full 同为 `18,831 × 4 × 7` 的 FP16 生存系数表和相同在线查询/输出头；“等容量”指导出表维度、在线头参数量和浏览器算子完全一致，离线关系编码器参数不计入浏览器容量。频谱留一使用已有强 Fourier117，避免用弱 direct9 抬高新编码；损失留一完整保留 RVL，准确回答新增质量和资源项的作用。置乱来源和仅质量风险成员属于机制鉴别，不改变三项主创新的定义。
-
-三张 GPU 并行三个 seed，第四张 GPU 用于完成上一批 validation、Color-ID 图像评价和 CUDA 成本测量。每轮记录训练/校准指标，每 4 epoch 评价一次；保存 `best.pt`、`last.pt`、每 10 epoch 快照和 epoch 80 快照。`best.pt` 只允许由 calibration 安全门后的注册选择规则保存，不能退回 best F1 或不安全 checkpoint。训练器当前没有可靠 resume，正式成员必须从头完成；意外中断的目录标记失败，用新清晰后缀重跑，不覆盖 partial。
-
-### 正式评价与统计
-
-每个 checkpoint 只用自己的同一 calibration split 冻结阈值，要求 weighted recall `>0.99` 且单侧 95% 下界 `>0.99`。这里“自己的”表示每个 checkpoint 独立扫描和冻结阈值，不表示重新划分 calibration pose。validation 评价同时报告：
-
-- 画面安全：pose/aggregate recall、weighted recall、bad cull、Color-ID miss/wrong/extra pixel 和 p95；
-- 分类：pose/aggregate precision、F1、Jaccard、instance accuracy、balanced accuracy、specificity；
-- 效率：useful cull、平均预测/FP/FN/TN、预测/候选、预测/GT；
-- 资源：预测 GLB 数、绝对预测字节、无需求额外字节、字节削减、相同图像效用下的字节；
-- 成本：FP16 表大小、模型权重、输入字节、CUDA p50/p95、浏览器数值 parity；WebGPU 硬件门通过后再报告硬件延迟和内存。
-
-阈值使用仓库统一的固定 calibration 网格：`0`、`10^-8` 至 `10^-3` 的 17 个对数点、`0.001/0.002/0.005/0.01/0.02/0.03/0.05/0.075/0.1/0.15/0.2`，以及 `0.22` 至 `0.90` 的 35 个等距点。单侧 95% 下界按 calibration view-cell 为单位进行 10,000 次 percentile bootstrap；不按 candidate 重采样。每个 epoch 的 calibration 只产生候选 checkpoint 记录；`best.pt` 先过滤满足安全门的 epoch，再依次最大化 calibration useful cull、balanced accuracy、precision，并最小化平均预测数。validation 不参与 checkpoint 或阈值选择。反复观察多个 epoch 意味着该下界是工程安全筛选而非严格的同时覆盖保证，论文必须如实说明；最终 validation 差异另用 seed 聚类的 paired bootstrap。
-
-使用 10,000 次 paired bootstrap：先按 seed 聚类，再在每个 seed 内对相同 pose 重采样。至少比较 `full` 与三个留一变体、`full` 与历史强参考、`full` 与 `shuffled_occlusion_source`，以及 `full` 与 `quality_risk_only`；输出每项差值、95% 区间、是否跨零和方向。test 只在 validation 结论、最终 checkpoint、阈值和导出资产全部冻结后执行一次。
-
-### 论文贡献保留门
-
-一个模块只有同时满足下列机械判据，才保留为论文创新。所有差值均采用相同 seed、相同 view-cell 的 10,000 次 paired bootstrap，正差表示新方法数值更高：
-
-- 三个 seed 的 checkpoint 均有合格 calibration 安全工作点；validation weighted recall 的点估计不得低于 `0.99`，相对对应留一变体的差值 95% 置信区间下界不得低于 `-0.002`；
-- bad cull 差值的 95% 置信区间上界不得超过 `+0.002`；平均和 p95 miss-pixel rate 差值的置信区间上界均不得超过 `+0.001`；
-- precision、balanced accuracy 或 useful cull 至少一项差值的 95% 置信区间下界大于 `0`，或者绝对无需求额外 GLB 字节差值的置信区间上界小于 `0`；
-- 完整浏览器神经包目标不超过 `7 MiB`，该口径包括 FP16 实例表、AABB/实例到 GLB 映射、查询网络权重和模型元数据，不含主体 GLB；同时报告解码后的 GPU buffer 与峰值运行内存。CUDA p95 不高于 Fourier117 强参考约 `3.45 ms`；
-- 浏览器仍只做一次 view-cell 批量查询，不加载关系图、不展开 subpose、不运行在线邻居搜索；
-- PyTorch/导出/WebGPU 数值一致；桌面硬件 WebGPU 必须按 `AGENTS.md` 的 Vulkan adapter、Chrome 参数和 `nvidia-smi/pmon` 双证据链执行。真实移动设备可用后，在同一导出包、10k 候选、预热 20 次和正式 100 次查询下要求 p95 `<50 ms`，并记录浏览器版本、adapter、峰值内存与主线程时间；移动设备结果缺失时可以保留离线论文候选，但不能进入“移动端部署已验证”的默认发布结论。
-
-未通过的模块删除默认 runner 引用和后续待办，保留一份精简失败结论；不继续通过大量权重扫描延长路线。
-
-## 实现文件与验证清单
-
-计划实现时使用一个主模型和一个主 runner，不复制现有多个实验入口：
-
-- 数据：新增 observed-relation CSR、分层图映射和 view-cell 质量 sidecar 构建器；
-- 模型：新增分层关系生存编码器、积分频谱查询器和统一模型/导出器；
-- 损失：新增质量风险与资源排斥 RVL，复用已测试的 noisy-OR 和梯度投影原语；
-- 评价：扩展现有同 pose evaluator，增加稀有 subpose 质量、绝对/额外 GLB 字节和频谱稳定性；
-- 编排：新增唯一 matrix runner，支持 `smoke`、`pilot`、`confirm`、`formal80`、`evaluate`、`summarize`，每种模式使用独立目录且拒绝覆盖 partial；
-- 测试：关系 CSR provenance、来源置乱、图池化/反池化、逐实例恢复、生存单调性、积分频谱极限、质量尾部、GLB noisy-OR、资源门、梯度投影、FP16 导出和 WebGPU parity。
-
-进入 pilot 前必须运行新增单元测试、训练前资源校验、两 pose 前后向 smoke 和结果 schema self-test。进入 formal80 前必须冻结代码 commit、输入 SHA-256、候选 digest、变体清单、种子、epoch、选择规则和 GPU 分配，并把 dry-run 命令写入正式 manifest。
+阶段判定为：实现、单元测试、schema self-test、pilot 和 32 epoch 学习曲线均已完成。分层关系模型可以在完整 calibration 下通过 validation 安全门，但效率未稳定改善，32 epoch 晋级门失败；完整结果见[学习曲线评价](../evaluation/pvs_hierarchical_relation_survival_learning_curve_e32_2026-08-13.md)，后续只按[v2 唯一执行计划](pvs_full_innovation_hyperparameter_scan_longtrain_ablation_2026-08-13.md)先修复损失和评价契约，再扫描全组合。不得通过降低 weighted recall 要求、共享阈值、补入 GT 或直接启动长训来掩盖该问题。默认模型和前端资产继续保持不变。
 
 ## 可形成的论文贡献
 

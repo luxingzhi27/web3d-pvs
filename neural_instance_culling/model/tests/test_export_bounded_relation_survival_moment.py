@@ -1,0 +1,638 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+
+import numpy as np
+import torch
+
+MODEL_DIR = Path(__file__).resolve().parents[1]
+if str(MODEL_DIR) not in sys.path:
+    sys.path.insert(0, str(MODEL_DIR))
+
+from export_bounded_relation_survival_moment import (  # noqa: E402
+    BOUNDARY_SUMMARY_DIM,
+    CHECKPOINT_SCHEMA,
+    CHI_TABLE_SIZE,
+    EXPORT_SCHEMA,
+    GEO_DIM,
+    LOW_RANK_SUMMARY_DIM,
+    MAX_NEURAL_ASSET_BYTES,
+    MODEL_SCHEMA,
+    RELATION_CONDITION_DIM,
+    RUNTIME_FEATURE_DIM,
+    RUNTIME_HEAD_INPUT_DIM,
+    SPECTRAL_FREQUENCY_COUNT,
+    SURVIVAL_PARAMETER_DIM,
+    SURVIVAL_RANK,
+    _check_neural_asset_budget,
+    _runtime_weight_specs,
+    export,
+    parse_args,
+)
+
+
+class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
+    hidden_dim = 4
+    num_instances = 3
+    num_glbs = 2
+
+    def _checkpoint(self, root: Path) -> dict:
+        state = {
+            name: torch.full(shape, 0.01, dtype=torch.float32)
+            for name, shape in _runtime_weight_specs(self.hidden_dim)
+        }
+        state["moment_query.frequency_cycles"] = torch.zeros((SPECTRAL_FREQUENCY_COUNT, 9))
+        state["moment_query.frequency_cycles"][:, 0] = torch.linspace(0.05, 0.8, SPECTRAL_FREQUENCY_COUNT)
+        state["moment_query.chi_table"] = torch.ones(CHI_TABLE_SIZE, dtype=torch.float32)
+        state["instance_calibration_residual_raw"] = torch.zeros(
+            self.num_instances, SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM
+        )
+        # This represents real offline checkpoint content.  The exporter must
+        # not copy it or serialize the entire checkpoint into the bundle.
+        state["offline_survival_encoder.relation_csr_payload"] = torch.ones(2)
+
+        config = {
+            "runtimeSchema": MODEL_SCHEMA,
+            "numInstances": self.num_instances,
+            "numGlbs": self.num_glbs,
+            "relationSource": "bounded_hierarchical",
+            "spectralMode": "moment_envelope",
+            "geometryDim": GEO_DIM,
+            "survivalCoefficientShape": [SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM],
+            "runtimeFeatureDim": RUNTIME_FEATURE_DIM,
+            "runtimeHeadInputDim": RUNTIME_HEAD_INPUT_DIM,
+            "boundarySummaryDim": BOUNDARY_SUMMARY_DIM,
+            "lowRankSummaryDim": LOW_RANK_SUMMARY_DIM,
+            "hiddenDim": self.hidden_dim,
+            "instanceCalibration": {
+                "mode": "residual",
+                "shape": [SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM],
+                "initialization": "zero",
+                "maximumAbsoluteResidual": 4.0,
+                "sparseInstancePenalty": 3.0,
+                "fusion": "survival_prior + blend * bounded_instance_residual",
+                "runtimeExport": "fused coefficients only",
+            },
+            "depthNormalization": {
+                "definition": "clip((log1p(distance/(radius+epsilon))-q01)/(q99-q01),0,1)",
+                "q01": 0.11,
+                "q99": 1.91,
+                "epsilon": 1e-4,
+                "sourceSplit": "train",
+            },
+            "frequency": {
+                "count": SPECTRAL_FREQUENCY_COUNT,
+                "units": "cycles",
+                "maxNormCycles": 8.0,
+            },
+        }
+        geometry = np.arange(self.num_instances * GEO_DIM, dtype=np.float16).reshape(
+            self.num_instances, GEO_DIM
+        )
+        geometry_path = root / "instance_geo_features_fp16.bin"
+        geometry.tofile(geometry_path)
+        dataset_path = root / "dataset"
+        dataset_path.mkdir(exist_ok=True)
+        relation_path = root / "relation"
+        relation_path.mkdir(exist_ok=True)
+        (relation_path / "relation_csr_meta.json").write_text(
+            json.dumps(
+                {
+                    "schema": "pvs-viewcell-train-observed-relation-csr-v3",
+                    "numInstances": self.num_instances,
+                    "stats": {
+                        "edgeCount": 4,
+                        "rowCount": 5,
+                        "survivalObservationCount": 6,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        coefficients = torch.arange(
+            self.num_instances * SURVIVAL_RANK * SURVIVAL_PARAMETER_DIM,
+            dtype=torch.float32,
+        ).reshape(self.num_instances, SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM)
+        residual = torch.full_like(coefficients, 0.25)
+        prior = coefficients - residual
+        return {
+            "schema": CHECKPOINT_SCHEMA,
+            "runtimeSchema": MODEL_SCHEMA,
+            "modelSchema": MODEL_SCHEMA,
+            "model": state,
+            "config": config,
+            "geometry": {
+                "path": str(geometry_path),
+                "sha256": "legacy-geometry-fingerprint",
+                "shape": [self.num_instances, GEO_DIM],
+                "dtype": "float16",
+            },
+            "instanceSurvivalCoefficients": coefficients,
+            "instanceSurvivalPriorCoefficients": prior,
+            "instanceSurvivalCalibrationResidual": residual,
+            "instanceCalibration": {
+                "mode": "residual",
+                "blend": 1.0,
+                "fusion": "prior_plus_applied_residual",
+                "reliability": {"sourceSplit": "train"},
+                "runtimeExport": "fused_coefficients_only",
+            },
+            "viewcell": {"shape": "horizontal_disk", "radiusM": 2.0},
+            "datasetDigest": "1" * 64,
+            "candidateDigest": "2" * 64,
+            "candidateDigests": {
+                "train": "2" * 64,
+                "calibration": "3" * 64,
+                "validation": "4" * 64,
+            },
+            "relationArtifactDigest": "5" * 64,
+            "protocol": {
+                "schema": "pvs-bounded-relation-prior-instance-calibrated-moment-training-v4",
+                "variant": "full",
+                "lossVariant": "safety_reserve",
+                "testRead": False,
+                "candidateUnion": False,
+                "instanceCalibration": {"mode": "residual"},
+                "trainCandidateDigest": "2" * 64,
+                "calibrationCandidateDigest": "3" * 64,
+                "validationCandidateDigest": "4" * 64,
+                "splitPoseCounts": {"train": 2772, "calibration": 168, "validation": 213},
+                "dataset": {"path": str(dataset_path)},
+                "runtimeMeta": {"path": str(root / "runtimeVisibilityMeta.json")},
+            },
+            "relation": {
+                "schema": "pvs-viewcell-train-observed-relation-csr-v3",
+                "path": str(relation_path),
+                "edgeCount": 4,
+                "rowCount": 5,
+                "observationCount": 6,
+                "candidateDigest": "2" * 64,
+                "artifactDigest": "5" * 64,
+            },
+            "relationCsr": {"path": "/never/pack/relation.csr"},
+            "groupIds": {"path": "/never/pack/groups.bin"},
+            "observations": {"path": "/never/pack/observations.bin"},
+            "calibration": {
+                "schema": "pvs-bounded-relation-prior-instance-calibrated-calibration-v4",
+                "testRead": False,
+                "selected": {
+                    "threshold": 0.02,
+                    "aggregateWeightedRecall": 0.995,
+                    "aggregateWeightedRecallLowerConfidenceBound": 0.992,
+                    "poseMacroWeightedRecall": 0.991,
+                    "safe": True,
+                },
+                "selectedFromTest": False,
+                "testEvaluationCount": 0,
+            },
+            "testRead": False,
+        }
+
+    def _runtime_meta(self, root: Path) -> Path:
+        path = root / "runtimeVisibilityMeta.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 2,
+                    "sceneBounds": {"min": [-1, -2, -3], "max": [4, 5, 6]},
+                    "componentRecords": [
+                        {
+                            "componentGlobalId": 0,
+                            "globalGlbId": 0,
+                            "bounds": {"min": [0, 0, 0], "max": [1, 1, 1]},
+                        },
+                        {
+                            "componentGlobalId": 1,
+                            "globalGlbId": 1,
+                            "bounds": {"min": [1, 2, 3], "max": [2, 3, 4]},
+                        },
+                        {
+                            "componentGlobalId": 2,
+                            "globalGlbId": 0,
+                            "bounds": {"min": [-1, -1, -1], "max": [0, 0, 0]},
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def _export(self, root: Path, checkpoint: dict, name: str = "bundle") -> Path:
+        checkpoint_path = root / f"{name}.pt"
+        torch.save(checkpoint, checkpoint_path)
+        output_dir = root / f"{name}-out"
+        result = export(
+            parse_args(
+                [
+                    "--checkpoint",
+                    str(checkpoint_path),
+                    "--runtime-meta",
+                    str(self._runtime_meta(root)),
+                    "--output-dir",
+                    str(output_dir),
+                ]
+            )
+        )
+        self.assertEqual(result["status"], "exported")
+        self.assertEqual(result["schema"], EXPORT_SCHEMA)
+        return output_dir
+
+    def test_exports_124d_table_and_strict_runtime_meta(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = self._export(root, self._checkpoint(root))
+            table = np.fromfile(output / "instance_runtime_features_fp16.bin", dtype="<f2")
+            self.assertEqual(table.size, self.num_instances * RUNTIME_FEATURE_DIM)
+            self.assertEqual(table.reshape(self.num_instances, RUNTIME_FEATURE_DIM).shape, (3, 124))
+
+            meta = json.loads((output / "model_meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["schema"], EXPORT_SCHEMA)
+            self.assertIs(meta["testRead"], False)
+            self.assertEqual(meta["modelSchema"], MODEL_SCHEMA)
+            self.assertEqual(meta["fixedTable"]["shape"], [3, 124])
+            self.assertEqual(meta["fixedTable"]["dtype"], "float16")
+            self.assertEqual(
+                meta["runtimeFeatureSource"]["source"],
+                "checkpoint.geometryFeatures_plus_survivalCoefficients",
+            )
+            self.assertNotIn("sha256", meta["runtimeFeatureSource"]["geometry"])
+            self.assertNotIn("sha256", meta["fixedTable"])
+            self.assertEqual(
+                meta["candidateCameraSemantics"],
+                "66-degree back-camera candidate identity only",
+            )
+            self.assertEqual(
+                meta["queryCenterSemantics"],
+                "center of the same-direction view-cell visibility union",
+            )
+            self.assertEqual(meta["viewcell"]["shape"], "horizontal_disk")
+            self.assertEqual(meta["viewcell"]["radiusM"], 2.0)
+            ray_space = meta["query"]["raySpace"]
+            self.assertEqual(meta["raySpace"], ray_space)
+            self.assertEqual(meta["diskAxisBound"], ray_space["diskAxisBound"])
+            self.assertEqual(meta["featureDomain"], ray_space["featureDomain"])
+            self.assertEqual(meta["rangeGuarantee"], ray_space["rangeGuarantee"])
+            self.assertEqual(
+                ray_space["diskAxisBound"],
+                "per-feature row norm <= 1 - abs(center feature)",
+            )
+            self.assertEqual(ray_space["featureDomain"], [-1.0, 1.0])
+            self.assertEqual(
+                ray_space["rangeGuarantee"]["rowFormula"],
+                "||B[i,:]||_2 <= 1 - abs(centerFeature[i])",
+            )
+            self.assertAlmostEqual(
+                ray_space["rangeGuarantee"]["maxTwoS"],
+                4.0 * np.pi * np.sqrt(9.0) * 8.0,
+            )
+            self.assertLess(ray_space["rangeGuarantee"]["maxTwoS"], 320.0)
+            self.assertTrue(ray_space["rangeGuarantee"]["twoSStrictlyInsideChiRange"])
+            self.assertEqual(meta["frequency"]["units"], "cycles")
+            self.assertEqual(meta["frequency"]["phaseFactor"], "2*pi")
+            self.assertAlmostEqual(meta["frequency"]["twoPi"], 2.0 * np.pi)
+            self.assertEqual(meta["chiLookup"]["interpolation"], "piecewise_linear")
+            self.assertEqual(meta["chiLookup"]["range"], [0.0, 320.0])
+            self.assertEqual(meta["chiLookup"]["table"]["bytes"], CHI_TABLE_SIZE * 4)
+            self.assertEqual(meta["depth"]["q01"], 0.11)
+            self.assertEqual(meta["depth"]["q99"], 1.91)
+            self.assertEqual(meta["depth"]["epsilon"], 1e-4)
+            self.assertEqual(meta["provenance"]["dataset"]["splitPoseCounts"], {"train": 2772, "calibration": 168, "validation": 213})
+            self.assertEqual(meta["provenance"]["relation"]["edgeCount"], 4)
+            self.assertEqual(meta["provenance"]["relation"]["observationCount"], 6)
+            self.assertNotIn("datasetDigest", meta["provenance"])
+            self.assertNotIn("relationArtifactDigest", meta["provenance"])
+            self.assertTrue(meta["safety"]["safe"])
+            self.assertEqual(meta["threshold"], 0.02)
+            self.assertLessEqual(
+                meta["neuralAssetBudget"]["usedBytes"], MAX_NEURAL_ASSET_BYTES
+            )
+
+    def test_dry_run_performs_full_validation_without_creating_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkpoint_path = root / "dry-run.pt"
+            torch.save(self._checkpoint(root), checkpoint_path)
+            output = root / "dry-run-out"
+            result = export(
+                parse_args(
+                    [
+                        "--checkpoint",
+                        str(checkpoint_path),
+                        "--runtime-meta",
+                        str(self._runtime_meta(root)),
+                        "--output-dir",
+                        str(output),
+                        "--dry-run",
+                    ]
+                )
+            )
+
+            self.assertEqual(result["status"], "dry-run")
+            self.assertEqual(result["schema"], EXPORT_SCHEMA)
+            self.assertFalse(output.exists())
+            self.assertEqual(
+                result["files"]["instance_runtime_features_fp16.bin"],
+                self.num_instances * RUNTIME_FEATURE_DIM * 2,
+            )
+            self.assertEqual(result["meta"]["fixedTable"]["shape"], [3, 124])
+            self.assertEqual(result["meta"]["calibrationFrozenThreshold"], 0.02)
+            self.assertTrue(result["meta"]["safety"]["safe"])
+            self.assertTrue(result["meta"]["neuralAssetBudget"]["withinLimit"])
+
+    def test_point_query_ablation_uses_the_same_runtime_bundle_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkpoint = self._checkpoint(root)
+            checkpoint["config"]["spectralMode"] = "point"
+            checkpoint["protocol"]["variant"] = "without_viewcell_moment_envelope"
+            output = self._export(root, checkpoint, name="point-query")
+            meta = json.loads((output / "model_meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["modelConfig"]["spectralMode"], "point")
+            self.assertEqual(meta["fixedTable"]["shape"], [self.num_instances, RUNTIME_FEATURE_DIM])
+
+    def test_unbounded_frequency_contract_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkpoint = self._checkpoint(root)
+            checkpoint["config"]["frequency"]["maxNormCycles"] = 8.01
+            path = root / "unbounded-frequency.pt"
+            torch.save(checkpoint, path)
+            with self.assertRaisesRegex(ValueError, "range contract"):
+                export(
+                    parse_args(
+                        [
+                            "--checkpoint",
+                            str(path),
+                            "--runtime-meta",
+                            str(self._runtime_meta(root)),
+                            "--output-dir",
+                            str(root / "unbounded-frequency-out"),
+                        ]
+                    )
+                )
+
+    def test_missing_viewcell_radius_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkpoint = self._checkpoint(root)
+            checkpoint.pop("viewcell")
+            path = root / "missing-viewcell.pt"
+            torch.save(checkpoint, path)
+            with self.assertRaisesRegex(ValueError, "explicit checkpoint view-cell radius"):
+                export(
+                    parse_args(
+                        [
+                            "--checkpoint",
+                            str(path),
+                            "--runtime-meta",
+                            str(self._runtime_meta(root)),
+                            "--output-dir",
+                            str(root / "missing-viewcell-out"),
+                        ]
+                    )
+                )
+
+    def test_disabled_residual_checkpoint_must_be_exactly_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkpoint = self._checkpoint(root)
+            checkpoint["protocol"]["variant"] = "without_instance_calibration_residual"
+            checkpoint["protocol"]["instanceCalibration"]["mode"] = "disabled"
+            checkpoint["config"]["instanceCalibration"]["mode"] = "disabled"
+            checkpoint["instanceCalibration"]["mode"] = "disabled"
+            checkpoint["instanceCalibration"]["blend"] = 0.0
+            checkpoint["model"].pop("instance_calibration_residual_raw")
+            coefficients = checkpoint["instanceSurvivalCoefficients"]
+            checkpoint["instanceSurvivalCalibrationResidual"] = torch.full_like(
+                coefficients, 0.25
+            )
+            checkpoint["instanceSurvivalPriorCoefficients"] = coefficients - 0.25
+            path = root / "tampered-disabled.pt"
+            torch.save(checkpoint, path)
+            with self.assertRaisesRegex(ValueError, "non-zero residual"):
+                export(
+                    parse_args(
+                        [
+                            "--checkpoint",
+                            str(path),
+                            "--runtime-meta",
+                            str(self._runtime_meta(root)),
+                            "--output-dir",
+                            str(root / "tampered-disabled-out"),
+                        ]
+                    )
+                )
+
+    def test_offline_checkpoint_resources_are_not_in_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = self._export(root, self._checkpoint(root))
+            names = {path.name for path in output.iterdir()}
+            self.assertNotIn("relation.csr", names)
+            self.assertNotIn("groups.bin", names)
+            self.assertNotIn("observations.bin", names)
+            self.assertNotIn("offline_survival_encoder.pt", names)
+            self.assertEqual(
+                names,
+                {
+                    "instance_runtime_features_fp16.bin",
+                    "instance_aabb_fp32.bin",
+                    "instance_to_glb_uint32.bin",
+                    "query_weights_fp16.bin",
+                    "frequency_cycles_fp32.bin",
+                    "chi_table_fp32.bin",
+                    "model_meta.json",
+                },
+            )
+            text = (output / "model_meta.json").read_text(encoding="utf-8")
+            self.assertNotIn("/never/pack", text)
+
+    def test_accepts_the_training_entry_checkpoint_field_names(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkpoint = self._checkpoint(root)
+            geometry_path = root / "instance_geo_features_fp16.bin"
+            np.zeros((self.num_instances, GEO_DIM), dtype="<f2").tofile(geometry_path)
+            checkpoint["runtimeSchema"] = checkpoint.pop("modelSchema")
+            checkpoint["modelState"] = checkpoint.pop("model")
+            checkpoint["modelConfig"] = checkpoint.pop("config")
+            checkpoint["geometry"] = {
+                "path": str(geometry_path),
+                "sha256": "legacy-ignored",
+                "shape": [self.num_instances, GEO_DIM],
+                "dtype": "float16",
+            }
+            checkpoint["instanceSurvivalCoefficients"] = torch.zeros(
+                (self.num_instances, SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM), dtype=torch.float16
+            )
+            checkpoint["instanceSurvivalPriorCoefficients"] = torch.zeros(
+                (self.num_instances, SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM), dtype=torch.float16
+            )
+            checkpoint["instanceSurvivalCalibrationResidual"] = torch.zeros(
+                (self.num_instances, SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM), dtype=torch.float16
+            )
+            checkpoint["protocol"]["dataset"] = {"path": str(root / "dataset")}
+            checkpoint.pop("datasetDigest")
+            checkpoint.pop("candidateDigest")
+            checkpoint.pop("candidateDigests")
+            checkpoint["relation"] = {
+                "schema": "pvs-viewcell-train-observed-relation-csr-v3",
+                "path": str(root / "relation"),
+                "edgeCount": 4,
+                "rowCount": 5,
+                "observationCount": 6,
+                "candidateDigest": "2" * 64,
+                "artifactDigest": "5" * 64,
+            }
+            checkpoint.pop("relationArtifactDigest")
+            checkpoint["calibration"]["selectedSafe"] = checkpoint["calibration"].pop("selected")
+            output = self._export(root, checkpoint, name="training-entry")
+            meta = json.loads((output / "model_meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["provenance"]["dataset"]["path"], str((root / "dataset").resolve()))
+            self.assertEqual(meta["provenance"]["relation"]["edgeCount"], 4)
+            self.assertEqual(meta["calibration"]["source"], "checkpoint.calibration.selectedSafe")
+            self.assertEqual(
+                meta["runtimeFeatureSource"]["source"],
+                "checkpoint.geometryFeatures_plus_survivalCoefficients",
+            )
+            self.assertNotIn("sha256", meta["runtimeFeatureSource"]["geometry"])
+            self.assertNotIn("sha256", meta["fixedTable"])
+
+    def test_legacy_geometry_fingerprint_is_ignored_after_structural_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkpoint = self._checkpoint(root)
+            checkpoint["geometry"]["sha256"] = "0" * 64
+            output = self._export(root, checkpoint, name="geometry-mismatch")
+            meta = json.loads((output / "model_meta.json").read_text(encoding="utf-8"))
+            self.assertNotIn("sha256", json.dumps(meta))
+
+    def test_only_v4_schema_and_calibration_threshold_are_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wrong = self._checkpoint(root)
+            wrong["modelSchema"] = "pvs-hierarchical-relation-survival-integrated-v1"
+            checkpoint_path = root / "wrong.pt"
+            torch.save(wrong, checkpoint_path)
+            with self.assertRaisesRegex(ValueError, "modelSchema"):
+                export(
+                    parse_args(
+                        [
+                            "--checkpoint",
+                            str(checkpoint_path),
+                            "--runtime-meta",
+                            str(self._runtime_meta(root)),
+                            "--output-dir",
+                            str(root / "wrong-out"),
+                        ]
+                    )
+                )
+
+            wrong_top_schema = self._checkpoint(root)
+            wrong_top_schema["schema"] = MODEL_SCHEMA
+            wrong_top_path = root / "wrong-top-schema.pt"
+            torch.save(wrong_top_schema, wrong_top_path)
+            with self.assertRaisesRegex(ValueError, "checkpoint schema"):
+                export(
+                    parse_args(
+                        [
+                            "--checkpoint",
+                            str(wrong_top_path),
+                            "--runtime-meta",
+                            str(self._runtime_meta(root)),
+                            "--output-dir",
+                            str(root / "wrong-top-schema-out"),
+                        ]
+                    )
+                )
+
+            with self.assertRaisesRegex(ValueError, "must equal the checkpoint calibration"):
+                self._export_with_threshold(root, self._checkpoint(root), 0.5)
+
+            mismatched_relation = self._checkpoint(root)
+            mismatched_relation["relation"]["candidateDigest"] = "6" * 64
+            output = self._export(root, mismatched_relation, name="mismatched-relation")
+            meta = json.loads((output / "model_meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["provenance"]["relation"]["schema"], "pvs-viewcell-train-observed-relation-csr-v3")
+
+    def test_unsafe_calibration_requires_explicit_diagnostic_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkpoint = self._checkpoint(root)
+            checkpoint["calibration"]["selected"]["aggregateWeightedRecall"] = 0.98
+            checkpoint["calibration"]["selected"]["aggregateWeightedRecallLowerConfidenceBound"] = 0.97
+            checkpoint["calibration"]["selected"]["safe"] = False
+            path = root / "unsafe.pt"
+            torch.save(checkpoint, path)
+            runtime_meta = self._runtime_meta(root)
+            with self.assertRaisesRegex(ValueError, "unsafe"):
+                export(
+                    parse_args(
+                        [
+                            "--checkpoint",
+                            str(path),
+                            "--runtime-meta",
+                            str(runtime_meta),
+                            "--output-dir",
+                            str(root / "unsafe-out"),
+                        ]
+                    )
+                )
+            output = root / "unsafe-diagnostic-out"
+            result = export(
+                parse_args(
+                    [
+                        "--checkpoint",
+                        str(path),
+                        "--runtime-meta",
+                        str(runtime_meta),
+                        "--output-dir",
+                        str(output),
+                        "--allow-unsafe-threshold",
+                    ]
+                )
+            )
+            self.assertEqual(result["threshold"], 0.02)
+            meta = json.loads((output / "model_meta.json").read_text(encoding="utf-8"))
+            self.assertFalse(meta["safety"]["safe"])
+            self.assertEqual(meta["calibration"]["source"], "checkpoint.calibration.selected")
+
+    def test_neural_asset_budget_is_a_hard_gate(self) -> None:
+        with self.assertRaisesRegex(ValueError, "budget exceeded"):
+            _check_neural_asset_budget(
+                {
+                    "instance_runtime_features_fp16.bin": b"0",
+                    "query_weights_fp16.bin": b"0" * (MAX_NEURAL_ASSET_BYTES + 1),
+                    "frequency_cycles_fp32.bin": b"0",
+                    "chi_table_fp32.bin": b"0",
+                }
+            )
+
+    def _export_with_threshold(self, root: Path, checkpoint: dict, threshold: float) -> Path:
+        checkpoint_path = root / "threshold.pt"
+        torch.save(checkpoint, checkpoint_path)
+        output = root / "threshold-out"
+        export(
+            parse_args(
+                [
+                    "--checkpoint",
+                    str(checkpoint_path),
+                    "--runtime-meta",
+                    str(self._runtime_meta(root)),
+                    "--output-dir",
+                    str(output),
+                    "--threshold",
+                    str(threshold),
+                ]
+            )
+        )
+        return output
+
+
+if __name__ == "__main__":
+    unittest.main()

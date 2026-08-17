@@ -157,6 +157,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Require the complete hardware-GPU component-ID image protocol and emit a formal-ready result.",
     )
+    parser.add_argument(
+        "--require-hardware-gpu",
+        action="store_true",
+        help="Require the renderer to use a hardware GPU and capture host GPU evidence.",
+    )
     parser.add_argument("--threshold", type=float, default=None)
     parser.add_argument(
         "--threshold-policy",
@@ -690,6 +695,52 @@ def save_preview(path: Path, reference: np.ndarray, test: np.ndarray, diff: np.n
     Image.fromarray(strip, mode="RGB").save(path)
 
 
+def _capture_gpu_snapshot(output_dir: Path, phase: str) -> dict[str, Any]:
+    """Capture host-side GPU observations for one browser render window."""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    commands = {
+        "nvidiaSmi": (["nvidia-smi"], output_dir / f"nvidia_smi_{phase}.txt"),
+        "nvidiaSmiPmon": (
+            ["nvidia-smi", "pmon", "-c", "1", "-s", "um"],
+            output_dir / f"nvidia_smi_pmon_{phase}.txt",
+        ),
+    }
+    result: dict[str, Any] = {"phase": phase, "complete": True, "observations": {}}
+    for name, (command, path) in commands.items():
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=ROOT.parent,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            path.write_text(
+                (completed.stdout or "") + (completed.stderr or ""),
+                encoding="utf-8",
+            )
+            available = completed.returncode == 0 and path.stat().st_size > 0
+            result["observations"][name] = {
+                "command": command,
+                "path": str(path.resolve()),
+                "returnCode": int(completed.returncode),
+                "available": bool(available),
+            }
+            result["complete"] = bool(result["complete"] and available)
+        except OSError as exc:
+            path.write_text(str(exc), encoding="utf-8")
+            result["observations"][name] = {
+                "command": command,
+                "path": str(path.resolve()),
+                "returnCode": None,
+                "available": False,
+                "error": repr(exc),
+            }
+            result["complete"] = False
+    return result
+
+
 def reference_error_contributors(reference: np.ndarray, test: np.ndarray) -> dict[int, int]:
     """Count reference GLB pixels whose final test ID is missing or different."""
     mask = (reference != 0) & (test != reference)
@@ -1078,18 +1129,72 @@ def run_true_glb_renderer(
     if args.chrome_exe is not None:
         cmd.extend(["--chrome-exe", str(args.chrome_exe)])
     print(f"[viewcell-image-per] component render manifest: samples={len(manifest_samples)} glbs={len(selected_glbs)}", flush=True)
-    proc = subprocess.run(cmd, cwd=ROOT.parent, text=True, capture_output=True, timeout=max(30, int(args.render_timeout_sec)))
-    (output_dir / "true_glb_render_stdout.log").write_text(proc.stdout, encoding="utf-8")
-    (output_dir / "true_glb_render_stderr.log").write_text(proc.stderr, encoding="utf-8")
-    if proc.returncode != 0:
+    render_output_dir = output_dir / "true_glb_render"
+    gpu_evidence = {
+        "schema": "pvs-browser-hardware-gpu-evidence-v1",
+        "required": bool(args.require_hardware_gpu or formal),
+        "chromeCommand": [str(value) for value in cmd],
+        "phases": {},
+    }
+    gpu_evidence["phases"]["before"] = _capture_gpu_snapshot(render_output_dir, "before")
+    proc = subprocess.Popen(
+        cmd,
+        cwd=ROOT.parent,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    gpu_evidence["pid"] = int(proc.pid)
+    # Give Chrome a short window to create its GPU process before taking the
+    # in-flight observation. The browser itself remains the source of the
+    # WebGL vendor/renderer gate; host snapshots are supplementary evidence.
+    time.sleep(0.5)
+    gpu_evidence["phases"]["during"] = _capture_gpu_snapshot(render_output_dir, "during")
+    timed_out = False
+    try:
+        stdout, stderr = proc.communicate(timeout=max(30, int(args.render_timeout_sec)))
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        proc.kill()
+        stdout, stderr = proc.communicate()
+    finally:
+        gpu_evidence["phases"]["after"] = _capture_gpu_snapshot(render_output_dir, "after")
+    (output_dir / "true_glb_render_stdout.log").write_text(stdout or "", encoding="utf-8")
+    (output_dir / "true_glb_render_stderr.log").write_text(stderr or "", encoding="utf-8")
+    gpu_evidence["returnCode"] = int(proc.returncode) if proc.returncode is not None else None
+    gpu_evidence["timedOut"] = bool(timed_out)
+    phase_complete = {
+        phase: bool((details or {}).get("complete", False))
+        for phase, details in gpu_evidence["phases"].items()
+    }
+    gpu_evidence["phaseComplete"] = phase_complete
+    gpu_evidence["complete"] = bool(all(phase_complete.values()))
+    summary_path = output_dir / "true_glb_render" / "render_summary.json"
+    if not summary_path.exists():
+        raise FileNotFoundError(f"True GLB renderer did not write {summary_path}")
+    render_summary = read_json(summary_path)
+    if not isinstance(render_summary, dict):
+        raise ValueError(f"True GLB renderer summary is not an object: {summary_path}")
+    render_summary["hardwareEvidence"] = gpu_evidence
+    browser_gate = render_summary.get("gpuGate")
+    if isinstance(browser_gate, dict):
+        render_summary["gpuGate"] = {
+            **browser_gate,
+            "hostEvidenceRequired": bool(gpu_evidence["required"]),
+            "hostEvidenceComplete": bool(gpu_evidence["complete"]),
+        }
+    summary_path.write_text(json.dumps(render_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    if timed_out or proc.returncode != 0:
         raise RuntimeError(
             "True GLB renderer failed; see true_glb_render_stdout.log and true_glb_render_stderr.log. "
             f"Return code: {proc.returncode}"
         )
-    summary_path = output_dir / "true_glb_render" / "render_summary.json"
-    if not summary_path.exists():
-        raise FileNotFoundError(f"True GLB renderer did not write {summary_path}")
-    return read_json(summary_path)
+    if gpu_evidence["required"] and not gpu_evidence["complete"]:
+        raise RuntimeError(
+            "formal image evaluation requires complete before/during/after host GPU evidence; "
+            f"see {render_output_dir}"
+        )
+    return render_summary
 
 
 def main() -> None:
@@ -1221,7 +1326,16 @@ def main() -> None:
             camera_world = np.asarray(pose_dataset.poses["camera_world"][row], dtype=np.float32)
             camera_view = pose_dataset.camera_view(row)
             mvp = pose_dataset.mvp_slice(row) if pose_dataset.mvp is not None else None
-            pred_ids, pred_result = runner.predict_ids(camera_norm, camera_world, camera_view, candidate_ids, mvp=mvp, threshold=threshold)
+            pred_ids, pred_result = runner.predict_viewcell_ids(
+                camera_norm,
+                camera_world,
+                camera_view,
+                candidate_ids,
+                query_center_world=pose_dataset.query_center_world(row, required=True),
+                viewcell_radius_m=pose_dataset.viewcell_radius_m(row, required=True),
+                mvp=mvp,
+                threshold=threshold,
+            )
             pred_ids = np.asarray(pred_ids, dtype=np.uint32)
             prediction_ms.append(float(pred_result.total_ms))
 
@@ -1396,6 +1510,7 @@ def main() -> None:
             "description": "浏览器一次加载完整本地 GLB 清单，将 componentGlobalId 和逐实例可见性绑定到 InstancedMesh 的 ID shader，并在同一页面顺序处理所有样本。",
             "formalImageEvaluationReady": bool(render_summary.get("formalImageEvaluationReady", False)),
             "gpuGate": render_summary.get("gpuGate"),
+            "hardwareEvidence": render_summary.get("hardwareEvidence"),
             "renderSummary": str(output_dir / "true_glb_render" / "render_summary.json"),
             "limitations": [
                 "The browser path uses a per-instance visibility mask rather than matrix compaction; it preserves component semantics but still submits the complete loaded scene.",
@@ -1474,6 +1589,7 @@ def main() -> None:
         "rawSubposeGt": raw_summary,
         "localGlbCheck": local_glb_check,
         "renderer": renderer_meta,
+        "hardwareEvidence": renderer_meta.get("hardwareEvidence"),
         "formalImageEvaluationReady": bool(
             args.formal_image_evaluation and renderer_meta.get("formalImageEvaluationReady", False)
         ),

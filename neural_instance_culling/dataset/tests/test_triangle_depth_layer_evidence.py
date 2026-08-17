@@ -18,6 +18,7 @@ from build_triangle_depth_layer_evidence import (  # noqa: E402
     _adjacent_occlusion_pixel_counts,
     build_evidence,
     load_layer_cache,
+    metric_ray_depths_for_cache_row,
 )
 from pose_csr_dataset import DIRECTIONAL_POSE_DTYPE  # noqa: E402
 
@@ -71,7 +72,7 @@ class TriangleDepthEvidenceTest(unittest.TestCase):
             depths.tofile(cache_dir / "depth.bin")
             np.asarray([0], dtype="<u4").tofile(cache_dir / "poses.bin")
             (cache_dir / "layer_cache_meta.json").write_text(json.dumps({
-                "schema": "triangle-depth-layer-cache-v1", "poseCount": 1, "maxLayers": 2, "width": 2, "height": 2, "modelInputFovYDeg": 66,
+                "schema": "triangle-depth-layer-cache-v1", "poseCount": 1, "maxLayers": 2, "width": 2, "height": 2, "modelInputFovYDeg": 66, "cameraFarMeters": 10.0,
                 "files": {"poseIndices": "poses.bin", "instanceIds": "ids.bin", "linearDepth": "depth.bin"},
             }), encoding="utf-8")
             (cache_dir / "triangle_depth.gpu_evidence.json").write_text(json.dumps({
@@ -92,7 +93,8 @@ class TriangleDepthEvidenceTest(unittest.TestCase):
                 "splits": "train", "source_k": 2, "min_depth_gap": 0.01, "max_poses": 0, "allow_outside_candidate": False,
             })()
             meta = build_evidence(args)
-            self.assertEqual(meta["schema"], "triangle-depth-layer-evidence-v1")
+            self.assertEqual(meta["schema"], "triangle-depth-layer-evidence-v3")
+            self.assertTrue(meta["pixelWeightPolicy"].endswith("sum_to_one"))
             self.assertGreater(meta["stats"]["layerPairCount"], 0)
             self.assertGreater(meta["stats"]["survivalObservationCount"], 0)
             source_ids = np.fromfile(output_dir / "source_ids_uint32.bin", dtype="<u4")
@@ -149,6 +151,7 @@ class TriangleDepthEvidenceTest(unittest.TestCase):
             manifest = root / "manifest.json"
             manifest.write_text(json.dumps({
                 "schema": "triangle-depth-layer-render-manifest-v2",
+                "cameraFar": 10.0,
                 "poses": [
                     {"renderPoseId": 0, "sourcePoseIndex": 0, "cameraWorld": [0, 0, 0], "cameraForward": [0, 0, 1], "cameraView": [0, 0, 1, 1, 1]},
                     {"renderPoseId": 1, "sourcePoseIndex": 0, "cameraWorld": [0.5, 0, 0], "cameraForward": [0, 0, 1], "cameraView": [0, 0, 1, 1, 1]},
@@ -185,6 +188,19 @@ class TriangleDepthEvidenceTest(unittest.TestCase):
             self.assertEqual(meta["stats"]["renderPoseCount"], 2)
             self.assertEqual(meta["stats"]["sourcePoseCount"], 1)
             self.assertTrue(meta["stats"]["representativeSubposeCache"])
+
+    def test_normalized_axial_cache_decodes_to_metric_ray_range(self) -> None:
+        encoded = np.full((1, 1, 2), 0.5, dtype=np.float32)
+        decoded = metric_ray_depths_for_cache_row(
+            {
+                "linearDepthEncoding": "camera_forward_axial_depth_divided_by_camera_far",
+                "cameraFarMeters": 10.0,
+            },
+            encoded,
+            np.asarray([0.0, 0.0, 1.0, 1.0, 1.0], dtype=np.float32),
+        )
+        expected = 5.0 * np.sqrt(1.0 + 0.5**2)
+        self.assertTrue(np.allclose(decoded, expected, rtol=1e-6, atol=1e-6))
 
 
 if __name__ == "__main__":

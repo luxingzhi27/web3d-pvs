@@ -103,6 +103,10 @@ class EvaluationProtocolSemanticsTests(unittest.TestCase):
             ["formal|/tmp/model.pt|/tmp/features.bin|/tmp/calibration_ready_summary.json"]
         )
         self.assertEqual(specs["formal"]["kind"], "directional_occlusion_proxy_encoder")
+        v3 = utility_metrics.parse_learned_model_specs(
+            ["formal-v3|bounded_relation_survival_moment_v4|/tmp/model.pt|/tmp/features.bin|/tmp/calibration.json"]
+        )
+        self.assertEqual(v3["formal-v3"]["kind"], "bounded_relation_survival_moment_v4")
         with self.assertRaisesRegex(ValueError, "name\|checkpoint"):
             utility_metrics.parse_learned_model_specs(["formal|only-two-fields"])
 

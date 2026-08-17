@@ -15,6 +15,8 @@
 - 不允许把 `recall_high` 当作额外变体后缀来逃避主目标；每个正式 PVS 实验默认就必须按高召回目标训练和选 checkpoint。若一个模型需要降低召回才能得到好看的 F1，它不能作为合格主线版本。历史路径或旧 benchmark 中出现的 PointNet / Triplane / dynamic-pool 命名只作为已删除旧实验理解，不能作为当前默认路径。
 - 向用户解释模型、训练流程或前端推理时，必须优先使用可读的中文概念和数据流描述；内部类名、函数名、变量名只能作为定位参考放在括号中，不能用一串代码英文名代替解释。每个新名词都要说明“它输入什么、输出什么、为什么需要它”。
 - 发现当前安全口径、代码实现或文档结论错误时，必须直接修正主线并删除错误的旧代码、旧文档和旧结果；不得增加兼容开关、双重默认路径、别名脚本或“旧逻辑仍可用”的过渡层。只有明确标注且仍有复现实验价值的原始数据或模型权重可以保留。
+- 禁止 agent 为日常代码验证、临时 smoke、checkpoint、运行包或数据文件手工计算、对比和汇报哈希，也不得把哈希确认写成计划步骤、验收条件或结果结论。程序内部为防止数据、checkpoint 和运行资产误配而自动维护的一致性字段可以保留，但执行与汇报必须聚焦 schema、shape、split、候选/GT 语义、数值有限性、测试结果和实际指标。
+- 已登记的完整训练计划不能被 pilot、参数扫描或中间指标门控提前取消。快速扫描必须始终选出一个相对最优配置；即使没有配置达到论文安全标准，也必须按计划完成完整组合与核心消融长训，并把不合格结果如实标记。只有代码无法运行、数值非有限、CUDA OOM 或外部硬件故障可以暂时中断执行；修复后应从未完成成员继续，而不是缩减矩阵。
 
 ## 1.1 当前运行环境
 
@@ -79,7 +81,7 @@ node slm2viewer/scripts/benchmark_ray_context_survival_owrb_webgpu_parity.mjs \
 ### 当前优化阶段覆盖（2026-08-10）
 
 - 当前阶段以 `docs/current/optimization_restart_2026-08-10.md` 为后续实验入口。
-- 当前唯一模型优化计划是 `docs/experiments/pvs_hierarchical_occlusion_survival_viewcell_spectral_query_2026-08-13.md`，统一实验前缀为 `pvs_hierarchical_relation_survival_integrated_spectral_quality_rvl_v1`。后续不得重新启用已失败的关系残差、固定 `0.5` 锚点、选择性纠错或旧 boundary 路线。
+- 当前唯一模型优化计划是 `docs/experiments/pvs_bounded_relation_survival_moment_v4_run_and_ablation_2026-08-15.md`，统一实验前缀为 `pvs_bounded_relation_prior_instance_calibrated_moment_safety_reserve_v4`。执行链固定为八组单种子快速扫描、冻结相对最优配置、五变体三种子 80 epoch 长训及完整评价；后续不得重新启用已失败的关系残差、固定 `0.5` 锚点、选择性纠错或旧 boundary 路线。
 - 本阶段暂不把 `bad cull` 置信区间上界作为路线否决条件，但仍必须报告 `bad cull`、漏检数量和图像级漏检指标；不得用减少预测数量掩盖画面风险。
 - 画面安全主门仍是每个 checkpoint 在 calibration 上冻结的 `weighted recall > 0.99` 及其单侧 95% 置信下界大于 `0.99`。普通 pose recall 只作诊断。
 - 安全阈值的位置只作分布健康诊断，不作固定 `p=0.5` 硬门。必须同时记录安全阈值区间、阈值扰动稳定性、正样本加权 q01/q005、负样本 q99/q99.5、logit 间隔、Brier/ECE 和可靠性图；低阈值本身不能否决模型，因为 bias 或温度缩放可以移动概率阈值而不改变排序。不得用这种后处理伪装模型改进，主线资格仍由 calibration 的 weighted recall 安全门，以及同一安全门下的 precision、accuracy、balanced accuracy、specificity、useful cull、图像和资源指标共同决定。
@@ -269,7 +271,7 @@ node slm2viewer/scripts/benchmark_ray_context_survival_owrb_webgpu_parity.mjs \
 - 当前默认模型运行时读取离线固定实例特征表，不在前端运行 PointNet++、Graph U-Net、Triplane、dynamic-pool 或任何动态图传播。
 - 当前 HKUST 前端资产默认路径为 `slm2viewer/public/assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best`，冻结阈值约为 `0.02`，并同步保留 `slm2viewer/assets/` 与已构建部署目录中的同名资产。`pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_best` 只作为历史 benchmark，不是当前前端默认模型。
 - 必须保留 2026-08-11 修正正式矩阵、2026-08-12 Fourier 补充矩阵的 model/benchmark 输出，以及 `neural_instance_culling/benchmark/out/pvs_ray_context_survival_owrb_v1_subpose5_20260811_directchrome` 三角形深度层硬件缓存；后者是新分层关系网络构建 train-only 遮挡关系 CSR 的数据依赖。
-- 当前唯一待实施论文模型由三项候选创新组成：真实遮挡边驱动的分层关系网络直接生成生存场、视点区域积分的关系条件化频谱查询、视点区域质量风险与 GLB 资源排斥 RVL。唯一计划和实验前缀分别是 `docs/experiments/pvs_hierarchical_occlusion_survival_viewcell_spectral_query_2026-08-13.md` 与 `pvs_hierarchical_relation_survival_integrated_spectral_quality_rvl_v1`；快速验证和 80 epoch 三种子消融完成前不得改默认 checkpoint、阈值或前端资产。
+- 当前唯一待实施论文模型由三项候选创新组成：共享分层遮挡关系先验与逐实例校准生存场、视点区域矩包络频谱查询、安全裕度工作区效用损失。唯一计划和实验前缀分别是 `docs/experiments/pvs_bounded_relation_survival_moment_v4_run_and_ablation_2026-08-15.md` 与 `pvs_bounded_relation_prior_instance_calibrated_moment_safety_reserve_v4`；快速扫描和 80 epoch 三种子消融完成前不得改默认 checkpoint、阈值或前端资产。
 - 历史字段 `visible_pixels.bin` 当前按 `visible_weights` 处理，不能宣称是真实 pixel coverage。
 - 后退扩大视锥候选上的 no-hash 主线相机输入必须参考 `Neural Visibility of Point Sets` 的视角条件化方式：以“当前相机到实例中心的单位视线方向 / ray direction”及轻量 ray-space 标量查询固定实例特征，不能把 raw camera xyz 或 raw world-space delta xyz 直接作为 visibility MLP 的主要输入。camera hash 只能作为消融或辅助，不得替代这种 view-ray 查询叙事。
 

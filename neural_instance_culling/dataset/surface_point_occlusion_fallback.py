@@ -51,7 +51,6 @@ def project_surface_points(
     tan_y: float,
     width: int,
     height: int,
-    camera_far: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     points = np.asarray(points_world, dtype=np.float32).reshape(-1, 3)
     origin = np.asarray(camera_world, dtype=np.float32).reshape(3)
@@ -68,8 +67,8 @@ def project_surface_points(
     px = np.clip(px, 0, int(width) - 1)
     py = np.clip(py, 0, int(height) - 1)
     pixel = py * int(width) + px
-    normalized_depth = np.clip(depth / max(float(camera_far), 1e-6), 0.0, 1.0)
-    return pixel, normalized_depth.astype(np.float32), valid
+    metric_range = np.linalg.norm(delta, axis=1)
+    return pixel, metric_range.astype(np.float32), valid
 
 
 def select_fallback_targets(
@@ -84,7 +83,6 @@ def select_fallback_targets(
     tan_y: float,
     width: int,
     height: int,
-    camera_far: float,
     *,
     coarse_points: int = 16,
     max_targets: int = 256,
@@ -106,7 +104,7 @@ def select_fallback_targets(
         points_world = centers[:, None, :] + points * np.max(sizes, axis=1)[:, None, None]
         flat = points_world.reshape(-1, 3)
         _pixel, depth, valid = project_surface_points(
-            flat, camera_world, camera_forward, tan_x, tan_y, width, height, camera_far
+            flat, camera_world, camera_forward, tan_x, tan_y, width, height
         )
         valid = valid.reshape(ids.size, sample_count)
         depth = depth.reshape(ids.size, sample_count)
@@ -140,14 +138,13 @@ def collect_front_surface_relations(
     first_layer_depths: np.ndarray,
     width: int,
     height: int,
-    camera_far: float,
     *,
     min_depth_gap: float = 1e-4,
 ) -> list[tuple[int, int, float, float]]:
-    """Return (front, target, normalized-gap, sample-count) relations."""
+    """Return (front, target, metric-range-gap, sample-count) relations."""
     points = reconstruct_instance_points(normalized_points, instance_aabb)
     pixel, depth, valid = project_surface_points(
-        points, camera_world, camera_forward, tan_x, tan_y, width, height, camera_far
+        points, camera_world, camera_forward, tan_x, tan_y, width, height
     )
     if not bool(valid.any()):
         return []

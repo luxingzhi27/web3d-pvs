@@ -41,7 +41,7 @@ FN = G - P
 TN = C - (P ∪ G)
 ```
 
-必须验证 `G ⊆ C`。候选上限、候选哈希、相机 FOV 或 view-cell 语义改变后，结果不能与原协议混合。正式评测默认使用完整的 post-frustum 候选集合；为显存或速度使用上限时，必须作为独立消融报告。
+必须验证 `G ⊆ C`。候选上限、候选内容、相机 FOV 或 view-cell 语义改变后，结果不能与原协议混合。正式评测默认使用完整的 post-frustum 候选集合；为显存或速度使用上限时，必须作为独立消融报告。
 
 ## 指标定义
 
@@ -91,7 +91,7 @@ Precision 还受候选集合中的正样本比例影响。令正样本比例为 
 
 1. pose-level 和 aggregate 的 precision、recall、weighted recall、F1、Jaccard、accuracy、balanced accuracy、specificity；
 2. useful cull、bad cull、平均 TP/FP/FN/TN、平均预测数和资源削减；
-3. 阈值的 calibration 来源、候选哈希、pose 数量和 test 是否读取；
+3. 阈值的 calibration 来源、候选集合口径、pose 数量和 test 是否读取；
 4. 图像级和浏览器运行时指标，未实现的项目明确写为 `not_available`。
 
 推荐入口：

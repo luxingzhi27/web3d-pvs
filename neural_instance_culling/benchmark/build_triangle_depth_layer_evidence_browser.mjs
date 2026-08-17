@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Hardware-WebGL triangle depth peeling for the v1 directional experiment.
+ * Hardware-WebGL triangle depth peeling for the bounded-relation experiment.
  *
  * Input is an instance-ID render manifest with `poses`, `glbEntries`,
  * `instanceBindings`, `assetsDir` and a model-input FOV of 66 degrees.  The
@@ -18,7 +18,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const SLM2_ROOT = path.join(REPO_ROOT, 'slm2viewer');
-const CACHE_SCHEMA = 'triangle-depth-layer-cache-v2';
+const CACHE_SCHEMA = 'triangle-depth-layer-cache-v3';
+const LINEAR_DEPTH_ENCODING = 'camera_forward_axial_depth_divided_by_camera_far';
 const MANIFEST_SCHEMAS = new Set([
   'triangle-depth-layer-render-manifest-v1',
   'triangle-depth-layer-render-manifest-v2',
@@ -542,6 +543,7 @@ async function main() {
   if (!MANIFEST_SCHEMAS.has(manifest.schema)) throw new Error(`unsupported triangle manifest schema ${manifest.schema}`);
   if (Number(manifest.modelInputFovYDeg) !== MODEL_FOV) throw new Error('triangle cache must use model input FOV 66');
   if (!Array.isArray(manifest.poses) || !Array.isArray(manifest.glbEntries)) throw new Error('manifest poses/glbEntries are required');
+  if (!Number.isFinite(Number(manifest.cameraFar)) || Number(manifest.cameraFar) <= 0) throw new Error('manifest cameraFar must be finite and positive');
   manifest.width = args.width;
   manifest.height = args.height;
   manifest.maxLayers = args.maxLayers;
@@ -728,7 +730,7 @@ async function main() {
     const sourcePoseIndexFinal = args.output + '.source_pose_indices.bin';
     const renderPoseIdFinal = args.output + '.render_pose_ids.bin';
     fs.renameSync(poseIndexPath, poseIndexFinal); fs.renameSync(sourcePoseIndexPath, sourcePoseIndexFinal); fs.renameSync(renderPoseIdPath, renderPoseIdFinal); fs.renameSync(idsPath, idsFinal); fs.renameSync(depthPath, depthFinal);
-    const meta = { schema: CACHE_SCHEMA, modelInputFovYDeg: MODEL_FOV, width: args.width, height: args.height, maxLayers: args.maxLayers, poseCount: manifest.poses.length, resumedPrefixPoseCount: resumeStart, assetsDir: manifest.assetsDir, sourceManifest: args.manifest, candidateIdentity: manifest.candidateIdentity || null, poseIdSemantics: 'poseIndices stores renderPoseId; sourcePoseIndices stores canonical PoseCSR sourcePoseIndex; renderPoseIds repeats the explicit render IDs for audit', firstLayerReference: result.firstLayerReference || null, gpuBackend: result.gpuBackend, gpuGate, files: { poseIndices: path.basename(poseIndexFinal), renderPoseIds: path.basename(renderPoseIdFinal), sourcePoseIndices: path.basename(sourcePoseIndexFinal), instanceIds: path.basename(idsFinal), linearDepth: path.basename(depthFinal) } };
+    const meta = { schema: CACHE_SCHEMA, modelInputFovYDeg: MODEL_FOV, width: args.width, height: args.height, maxLayers: args.maxLayers, poseCount: manifest.poses.length, resumedPrefixPoseCount: resumeStart, assetsDir: manifest.assetsDir, sourceManifest: args.manifest, candidateIdentity: manifest.candidateIdentity || null, poseIdSemantics: 'poseIndices stores renderPoseId; sourcePoseIndices stores canonical PoseCSR sourcePoseIndex; renderPoseIds repeats the explicit render IDs for audit', linearDepthEncoding: LINEAR_DEPTH_ENCODING, cameraFarMeters: Number(manifest.cameraFar), decodedDepthContract: 'dataset builders reconstruct per-pixel camera-ray range in meters before relation or survival supervision', firstLayerReference: result.firstLayerReference || null, gpuBackend: result.gpuBackend, gpuGate, files: { poseIndices: path.basename(poseIndexFinal), renderPoseIds: path.basename(renderPoseIdFinal), sourcePoseIndices: path.basename(sourcePoseIndexFinal), instanceIds: path.basename(idsFinal), linearDepth: path.basename(depthFinal) } };
     fs.writeFileSync(path.join(outputDir, 'layer_cache_meta.json'), JSON.stringify(meta, null, 2));
     writeGpuEvidence(args.output, {
       schema: 'triangle-depth-layer-gpu-evidence-v1',

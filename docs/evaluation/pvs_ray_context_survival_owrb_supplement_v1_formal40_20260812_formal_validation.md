@@ -1,6 +1,6 @@
 # 视线关系场、生存场与 OWRB 补充矩阵评价
 
-本报告只汇总 calibration 冻结阈值后的 validation 结果。补充矩阵是独立的五变体机制对照，不生成核心 2×2×2 因子主效应；所有成员使用同一 pose 顺序、后退相机候选集合、实例 GT 和候选哈希。
+本报告只汇总 calibration 冻结阈值后的 validation 结果。补充矩阵是独立的五变体机制对照，不生成核心 2×2×2 因子主效应；所有成员使用同一 pose 顺序、后退相机候选集合和实例 GT。
 paired bootstrap 先按 seed 重采样，再在每个 seed 内按 pose 重采样。
 
 - 变体：5；seed：3；pose：213。

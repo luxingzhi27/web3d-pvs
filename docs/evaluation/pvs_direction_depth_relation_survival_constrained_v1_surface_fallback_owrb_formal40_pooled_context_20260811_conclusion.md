@@ -6,7 +6,7 @@
 
 - 完整三因素矩阵：8 个变体 × 3 个随机种子 × 40 epoch。
 - validation：213 个 pose；test：238 个 pose。
-- 所有成员使用相同的后退相机候选集合、实例 GT、pose 顺序和候选哈希。
+- 所有成员使用相同的后退相机候选集合、实例 GT 和 pose 顺序。
 - 阈值由每个 checkpoint 的 calibration split 独立冻结；test 只在 validation 选择完成后读取一次。
 - paired bootstrap：10,000 次，外层按 seed 聚类，内层在 seed 内按 pose 重采样。
 - Color-ID 图像评价：24 个成员均通过 NVIDIA Vulkan/ANGLE 硬件 WebGL 门。

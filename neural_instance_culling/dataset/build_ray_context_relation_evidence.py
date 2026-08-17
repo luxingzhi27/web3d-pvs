@@ -41,6 +41,7 @@ from build_triangle_depth_layer_evidence import (
     _camera_for_cache_row,
     load_layer_cache,
     load_surface_fallback_relations,
+    metric_ray_depths_for_cache_row,
     spherical_direction_anchors,
 )
 from common.candidate_identity import (  # noqa: E402
@@ -112,7 +113,6 @@ def _surface_fallback_pose_rows(
     centers: np.ndarray,
     camera_world: np.ndarray,
     min_depth_gap: float,
-    camera_far: float | None = None,
 ) -> tuple[np.ndarray, int]:
     """Convert actual surface fallback records into relation-table rows.
 
@@ -155,15 +155,9 @@ def _surface_fallback_pose_rows(
     target = target[valid]
     pixels = pixels[valid]
     gap = gap[valid]
-    # ``gapMean`` is already a difference in the normalized linear-depth
-    # buffer produced by the surface-point projection.  Convert the target
-    # center distance to the same normalized domain before forming the
-    # relative gap; dividing the normalized gap by meters would collapse
-    # nearly every fallback relation into the first shell.
+    # Surface fallback and triangle peeling both use metric camera-ray range.
     target_distance = np.linalg.norm(centers[target] - camera_world[None, :], axis=1)
-    far = max(float(camera_far) if camera_far is not None else 1.0, 1e-4)
-    target_depth = target_distance / far
-    relative_gap = gap / np.maximum(target_depth, 1e-4)
+    relative_gap = gap / np.maximum(target_distance, 1e-4)
     shell = _shell_id(relative_gap)
     rows = np.column_stack([
         target,
@@ -488,7 +482,6 @@ def build_evidence(args: argparse.Namespace) -> dict[str, Any]:
     num_instances = int(world_aabbs.shape[0])
     centers = ((world_aabbs[:, :3] + world_aabbs[:, 3:]) * 0.5).astype(np.float32, copy=False)
     _scene_min, _scene_max, scene_size = scene_min_max(_runtime_meta["sceneBounds"])
-    scene_diagonal = max(float(np.linalg.norm(scene_size) * 2.0), 1e-4)
     dataset = PoseCSRDataset(dataset_dir, num_instances=num_instances)
     cache_meta, cache_render_pose_ids, cache_source_pose_indices, cache_ids, cache_depths = load_layer_cache(cache_dir)
     if cache_meta.get("schema") not in (CACHE_SCHEMA, CACHE_SCHEMA_V2) or float(cache_meta.get("modelInputFovYDeg", 0)) != 66.0:
@@ -552,7 +545,7 @@ def build_evidence(args: argparse.Namespace) -> dict[str, Any]:
     progress_interval = max(1, min(500, len(selected_entries) // 20 or 1))
     for entry_index, (cache_row, render_pose_id, pose_index) in enumerate(selected_entries, start=1):
         ids = np.asarray(cache_ids[cache_row], dtype=np.uint32)
-        depths = np.asarray(cache_depths[cache_row], dtype=np.float32)
+        encoded_depths = np.asarray(cache_depths[cache_row], dtype=np.float32)
         candidate = np.asarray(dataset.frustum_slice(int(pose_index)), dtype=np.uint32)
         candidate_mask = np.zeros((num_instances,), dtype=bool)
         if candidate.size and int(candidate.max()) >= num_instances:
@@ -577,9 +570,10 @@ def build_evidence(args: argparse.Namespace) -> dict[str, Any]:
                 f"first depth layer contains {outside_first.size} IDs outside stored candidates at pose {pose_index}"
             )
 
-        camera_world, _camera_forward, _camera_view = _camera_for_cache_row(
+        camera_world, _camera_forward, camera_view = _camera_for_cache_row(
             cache_meta, render_pose_id, dataset, pose_index
         )
+        depths = metric_ray_depths_for_cache_row(cache_meta, encoded_depths, camera_view)
         pose_rows = _reduce_pose_events(ids, depths, candidate_mask, float(args.min_depth_gap))
         pose_fallback = fallback_by_render_pose.get(int(render_pose_id))
         if pose_fallback is not None and pose_fallback.size:
@@ -589,7 +583,6 @@ def build_evidence(args: argparse.Namespace) -> dict[str, Any]:
                 centers,
                 camera_world,
                 float(args.min_depth_gap),
-                scene_diagonal,
             )
             if pose_rows.size:
                 pose_rows = np.concatenate([pose_rows, fallback_pose_rows], axis=0)

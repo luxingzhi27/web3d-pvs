@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -161,8 +162,18 @@ def weighted_recall_lower_confidence_bound(
     gt = np.asarray(weighted_gt, dtype=np.float64).reshape(-1)
     if tp.size == 0 or tp.size != gt.size:
         return 0.0
+    # Empty-candidate poses have no visible weight and must not affect the
+    # aggregate bootstrap denominator.  Keeping them in the raw pose stream
+    # is useful for pose-count diagnostics, but resampling them as successful
+    # recall observations would make the lower bound depend on empty poses.
+    valid = np.isfinite(tp) & np.isfinite(gt) & (gt > 1e-12)
+    tp = tp[valid]
+    gt = gt[valid]
+    if tp.size == 0:
+        return 1.0
     if int(replicates) <= 0:
-        return float(tp.sum() / max(1e-12, gt.sum()))
+        denominator = float(gt.sum())
+        return 1.0 if denominator <= 1e-12 else float(tp.sum() / denominator)
     rng = np.random.default_rng(int(seed))
     # Keep memory bounded for larger calibration sets while retaining exactly
     # the requested number of bootstrap draws.
@@ -173,8 +184,40 @@ def weighted_recall_lower_confidence_bound(
         indices = rng.integers(0, tp.size, size=(end - start, tp.size), endpoint=False)
         numerator = tp[indices].sum(axis=1)
         denominator = gt[indices].sum(axis=1)
-        values[start:end] = numerator / np.maximum(1e-12, denominator)
+        values[start:end] = np.divide(
+            numerator,
+            denominator,
+            out=np.ones_like(numerator),
+            where=denominator > 1e-12,
+        )
     return float(np.quantile(values, 0.05))
+
+
+def pose_macro_weighted_recall_lower_confidence_bound(
+    pose_weighted_recall: np.ndarray,
+    replicates: int = 10000,
+    seed: int = 0,
+) -> float:
+    """Return the one-sided bootstrap bound for the pose-macro diagnostic.
+
+    This is intentionally separate from ``weighted_recall_lower_confidence_bound``:
+    the latter resamples weighted TP/GT sufficient statistics and therefore
+    estimates the aggregate safety quantity.  A macro bound resamples already
+    computed per-pose ratios and is diagnostic only.
+    """
+    values = np.asarray(pose_weighted_recall, dtype=np.float64).reshape(-1)
+    if values.size == 0 or not bool(np.isfinite(values).all()):
+        return 0.0
+    if int(replicates) <= 0:
+        return float(np.mean(values))
+    rng = np.random.default_rng(int(seed))
+    result = np.empty((int(replicates),), dtype=np.float64)
+    chunk = max(1, min(int(replicates), 1_000_000 // max(1, values.size)))
+    for start in range(0, int(replicates), chunk):
+        end = min(int(replicates), start + chunk)
+        indices = rng.integers(0, values.size, size=(end - start, values.size), endpoint=False)
+        result[start:end] = values[indices].mean(axis=1)
+    return float(np.quantile(result, 0.05))
 
 
 def _weighted_quantile(values: np.ndarray, weights: np.ndarray, quantile: float) -> float:
@@ -380,7 +423,7 @@ def evaluate_thresholds(
     world_aabbs: np.ndarray,
     device: torch.device,
     poses_per_batch: int,
-    max_steps: int,
+    max_steps: int | None,
     max_candidates_per_pose: int,
     seed: int,
     thresholds: np.ndarray,
@@ -388,6 +431,9 @@ def evaluate_thresholds(
     allow_candidate_visible_union: bool = False,
     bootstrap_replicates: int = 0,
     collect_score_stats: bool = False,
+    collect_per_pose: bool = False,
+    instance_to_glb: np.ndarray | None = None,
+    glb_bytes: np.ndarray | None = None,
 ) -> list[dict[str, Any]]:
     model.eval()
     rng = np.random.default_rng(seed)
@@ -404,18 +450,40 @@ def evaluate_thresholds(
     pose_useful_culls = np.zeros((n_th,), dtype=np.float64)
     pose_bad_culls = np.zeros((n_th,), dtype=np.float64)
     pred_counts = np.zeros((n_th,), dtype=np.float64)
+    predicted_glb_counts = np.zeros((n_th,), dtype=np.float64)
+    predicted_glb_bytes = np.zeros((n_th,), dtype=np.float64)
+    candidate_glb_count_sum = 0.0
+    candidate_glb_bytes_sum = 0.0
     gt_count_sum = 0.0
     candidate_count_sum = 0.0
     agg_tp = np.zeros((n_th,), dtype=np.float64)
     agg_fp = np.zeros((n_th,), dtype=np.float64)
     agg_fn = np.zeros((n_th,), dtype=np.float64)
     agg_tn = np.zeros((n_th,), dtype=np.float64)
+    agg_weighted_tp = np.zeros((n_th,), dtype=np.float64)
+    agg_weighted_gt = 0.0
     pose_weighted_recall_values: list[list[float]] = [[] for _ in range(n_th)]
     pose_weighted_tp_values: list[list[float]] = [[] for _ in range(n_th)]
     pose_weighted_gt_values: list[list[float]] = [[] for _ in range(n_th)]
     score_values: list[np.ndarray] = []
     score_targets: list[np.ndarray] = []
     score_weights: list[np.ndarray] = []
+    per_pose_values: list[list[dict[str, Any]]] = [[] for _ in range(n_th)]
+    if (instance_to_glb is None) != (glb_bytes is None):
+        raise ValueError("instance_to_glb and glb_bytes must be supplied together")
+    resource_mapping = None
+    resource_bytes = None
+    if instance_to_glb is not None and glb_bytes is not None:
+        resource_mapping = np.asarray(instance_to_glb, dtype=np.int64).reshape(-1)
+        resource_bytes = np.asarray(glb_bytes, dtype=np.float64).reshape(-1)
+        if resource_mapping.size != int(world_aabbs.shape[0]):
+            raise ValueError("instance_to_glb does not match the runtime instance count")
+        if resource_mapping.size and (
+            int(resource_mapping.min()) < 0 or int(resource_mapping.max()) >= resource_bytes.size
+        ):
+            raise ValueError("instance_to_glb contains an id outside glb_bytes")
+        if not bool(np.isfinite(resource_bytes).all()) or bool(np.any(resource_bytes < 0.0)):
+            raise ValueError("glb_bytes must contain finite non-negative costs")
     pose_count = 0
     for pose_indices in split.pose_set_batches(poses_per_batch, rng, max_steps, include_empty=True):
         batch = split.build_pose_set_batch(
@@ -449,6 +517,25 @@ def evaluate_thresholds(
                     pose_weighted_recall_values[threshold_index].append(1.0)
                     pose_weighted_tp_values[threshold_index].append(0.0)
                     pose_weighted_gt_values[threshold_index].append(0.0)
+            if collect_per_pose:
+                empty_metrics = {
+                    "precision": 1.0, "recall": 1.0, "weightedRecall": 1.0,
+                    "f1": 1.0, "jaccard": 1.0, "accuracy": 1.0,
+                    "balancedAccuracy": 1.0, "specificity": 1.0,
+                    "usefulCull": 1.0, "badCull": 0.0,
+                    "avgPredCount": 0.0, "avgCandidateCount": 0.0,
+                    "avgGtCount": 0.0, "predictedGlbCount": 0.0,
+                    "candidateGlbCount": 0.0, "candidateGlbBytes": 0.0,
+                    "predictedGlbBytes": 0.0, "glbByteReduction": 0.0,
+                    "missPixelRate": 0.0, "wrongIdPixelRate": 0.0,
+                    "extraPixelRate": 0.0,
+                }
+                for threshold_index in range(n_th):
+                    per_pose_values[threshold_index].append({
+                        "poseIndex": int(pose_indices[row_index]),
+                        "candidateIds": [], "predictedIds": [],
+                        "metrics": dict(empty_metrics),
+                    })
             pose_count += 1
         if batch["instance"].size == 0:
             continue
@@ -456,7 +543,17 @@ def evaluate_thresholds(
         camera_world = torch.from_numpy(batch["camera_world"]).to(device)
         view = torch.from_numpy(batch["camera_view"]).to(device)
         ids = torch.from_numpy(batch["instance"]).to(device)
-        logits = model.compute_visibility_logits(camera, view, camera_world, ids, runtime_features=runtime_features)
+        query_center_world = torch.from_numpy(batch["query_center_world"]).to(device)
+        viewcell_radius_m = torch.from_numpy(batch["viewcell_radius_m"]).to(device)
+        logits = model.compute_visibility_logits(
+            camera,
+            view,
+            camera_world,
+            ids,
+            runtime_features=runtime_features,
+            query_center_world=query_center_world,
+            viewcell_radius_m=viewcell_radius_m,
+        )
         scores = torch.sigmoid(logits).detach().cpu().numpy().reshape(-1)
         target = batch["target"].astype(bool, copy=False)
         weights = batch.get("visible_weights", np.zeros_like(batch["target"], dtype=np.float32)).astype(np.float64, copy=False)
@@ -519,16 +616,75 @@ def evaluate_thresholds(
                 where=weighted_gt > 0.0,
             )
             pose_weighted_recalls += weighted_recall
+            agg_weighted_tp += weighted_tp
+            agg_weighted_gt += weighted_gt_scalar
             pose_specificities += specificity
             pose_accuracies += accuracy
             pose_balanced_accuracies += 0.5 * (recall + specificity)
             pose_useful_culls += local_tn / max(1.0, float(end - start))
             pose_bad_culls += local_fn / max(1.0, float(end - start))
+            local_predicted_glb_counts = np.zeros((n_th,), dtype=np.float64)
+            local_predicted_glb_bytes = np.zeros((n_th,), dtype=np.float64)
+            local_candidate_glb_count = 0.0
+            local_candidate_glb_bytes = 0.0
+            candidate_ids = np.asarray(batch["instance"][start:end], dtype=np.uint32)
+            if resource_mapping is not None and resource_bytes is not None:
+                candidate_glbs = np.unique(resource_mapping[candidate_ids.astype(np.int64, copy=False)])
+                local_candidate_glb_count = float(candidate_glbs.size)
+                local_candidate_glb_bytes = (
+                    float(resource_bytes[candidate_glbs].sum()) if candidate_glbs.size else 0.0
+                )
+                candidate_glb_count_sum += local_candidate_glb_count
+                candidate_glb_bytes_sum += local_candidate_glb_bytes
+                instance_glbs = resource_mapping[candidate_ids.astype(np.int64, copy=False)]
+                for threshold_index in range(n_th):
+                    selected_glbs = np.unique(instance_glbs[pred[:, threshold_index]])
+                    local_predicted_glb_counts[threshold_index] = float(selected_glbs.size)
+                    local_predicted_glb_bytes[threshold_index] = (
+                        float(resource_bytes[selected_glbs].sum()) if selected_glbs.size else 0.0
+                    )
+                predicted_glb_counts += local_predicted_glb_counts
+                predicted_glb_bytes += local_predicted_glb_bytes
             if collect_pose_stats:
                 for threshold_index in range(n_th):
                     pose_weighted_recall_values[threshold_index].append(float(weighted_recall[threshold_index]))
                     pose_weighted_tp_values[threshold_index].append(float(weighted_tp[threshold_index]))
                     pose_weighted_gt_values[threshold_index].append(float(weighted_gt[threshold_index]))
+            if collect_per_pose:
+                for threshold_index in range(n_th):
+                    local_pred_ids = candidate_ids[pred[:, threshold_index]].astype(np.uint32, copy=False)
+                    per_pose_values[threshold_index].append({
+                        "poseIndex": int(pose_indices[i]),
+                        "candidateIds": candidate_ids.tolist(),
+                        "predictedIds": local_pred_ids.tolist(),
+                        "metrics": {
+                            "precision": float(precision[threshold_index]),
+                            "recall": float(recall[threshold_index]),
+                            "weightedRecall": float(weighted_recall[threshold_index]),
+                            "f1": float(f1[threshold_index]),
+                            "jaccard": float(local_tp[threshold_index] / max(1.0, local_tp[threshold_index] + local_fp[threshold_index] + local_fn[threshold_index])),
+                            "accuracy": float(accuracy[threshold_index]),
+                            "balancedAccuracy": float(0.5 * (recall[threshold_index] + specificity[threshold_index])),
+                            "specificity": float(specificity[threshold_index]),
+                            "usefulCull": float(local_tn[threshold_index] / max(1.0, end - start)),
+                            "badCull": float(local_fn[threshold_index] / max(1.0, end - start)),
+                            "avgPredCount": float(pred[:, threshold_index].sum()),
+                            "avgCandidateCount": float(end - start),
+                            "avgGtCount": float(yy.sum()),
+                            "candidateGlbCount": local_candidate_glb_count,
+                            "candidateGlbBytes": local_candidate_glb_bytes,
+                            "predictedGlbCount": float(local_predicted_glb_counts[threshold_index]),
+                            "predictedGlbBytes": float(local_predicted_glb_bytes[threshold_index]),
+                            "glbByteReduction": float(
+                                1.0 - local_predicted_glb_bytes[threshold_index] / local_candidate_glb_bytes
+                                if local_candidate_glb_bytes > 0.0
+                                else 0.0
+                            ),
+                            "missPixelRate": 0.0,
+                            "wrongIdPixelRate": 0.0,
+                            "extraPixelRate": 0.0,
+                        },
+                    })
             pred_counts += pred.sum(axis=0).astype(np.float64)
             gt_count_sum += float(yy.sum())
             candidate_count_sum += float(end - start)
@@ -565,6 +721,7 @@ def evaluate_thresholds(
             "pose_bad_cull": float(pose_bad_culls[i] / max(1, pose_count)),
             "agg_precision": float(agg_precision),
             "agg_recall": float(agg_recall),
+            "agg_weighted_recall": float(agg_weighted_tp[i] / max(1e-12, agg_weighted_gt)),
             "agg_specificity": float(agg_specificity),
             "agg_accuracy": float((agg_tp[i] + agg_tn[i]) / max(1.0, agg_tp[i] + agg_fp[i] + agg_fn[i] + agg_tn[i])),
             "agg_balanced_accuracy": float(0.5 * (agg_recall + agg_specificity)),
@@ -574,6 +731,10 @@ def evaluate_thresholds(
             "avg_pred_count": avg_pred,
             "avg_gt_count": float(gt_count_sum / max(1, pose_count)),
             "avg_candidate_count": avg_candidate,
+            "avg_pred_glb_count": float(predicted_glb_counts[i] / max(1, pose_count)),
+            "avg_pred_glb_bytes": float(predicted_glb_bytes[i] / max(1, pose_count)),
+            "avg_candidate_glb_count": float(candidate_glb_count_sum / max(1, pose_count)),
+            "avg_candidate_glb_bytes": float(candidate_glb_bytes_sum / max(1, pose_count)),
             "candidate_reduction_ratio": float(1.0 - avg_pred / max(1.0, avg_candidate)),
             "tp": int(agg_tp[i]),
             "fp": int(agg_fp[i]),
@@ -581,16 +742,48 @@ def evaluate_thresholds(
             "tn": int(agg_tn[i]),
             "eval_pose_count": int(pose_count),
         }
-        if collect_pose_stats:
-            row["_pose_weighted_recall_values"] = pose_weighted_recall_values[i]
-            row["weighted_recall_lower_confidence_bound"] = weighted_recall_lower_confidence_bound(
+        aggregate_weighted_recall = float(
+            agg_weighted_tp[i] / agg_weighted_gt if agg_weighted_gt > 1e-12 else 1.0
+        )
+        pose_macro_weighted_recall = float(pose_weighted_recalls[i] / max(1, pose_count))
+        aggregate_lcb = None
+        pose_macro_lcb = None
+        if collect_pose_stats and int(bootstrap_replicates) > 0:
+            aggregate_lcb = weighted_recall_lower_confidence_bound(
                 np.asarray(pose_weighted_tp_values[i]),
                 np.asarray(pose_weighted_gt_values[i]),
                 replicates=bootstrap_replicates,
                 seed=int(seed) + i,
             )
+            pose_macro_lcb = pose_macro_weighted_recall_lower_confidence_bound(
+                np.asarray(pose_weighted_recall_values[i]),
+                replicates=bootstrap_replicates,
+                seed=int(seed) + 100000 + i,
+            )
+        if collect_pose_stats:
+            row["_pose_weighted_recall_values"] = pose_weighted_recall_values[i]
+            # A zero-replicate evaluation has only a point estimate.  Do not
+            # serialize that estimate under a confidence-bound field.
+            row["weighted_recall_lower_confidence_bound"] = (
+                None
+                if int(bootstrap_replicates) <= 0
+                else weighted_recall_lower_confidence_bound(
+                    np.asarray(pose_weighted_tp_values[i]),
+                    np.asarray(pose_weighted_gt_values[i]),
+                    replicates=bootstrap_replicates,
+                    seed=int(seed) + i,
+                )
+            )
+        row["aggregateWeightedRecall"] = aggregate_weighted_recall
+        row["aggregate_weighted_recall"] = aggregate_weighted_recall
+        row["poseMacroWeightedRecall"] = pose_macro_weighted_recall
+        row["aggregateWeightedRecallLowerConfidenceBound"] = aggregate_lcb
+        row["poseMacroWeightedRecallLowerConfidenceBound"] = pose_macro_lcb
+        row["weightedRecallBootstrapReplicates"] = int(max(0, bootstrap_replicates))
         if distribution is not None:
             row["scoreDistribution"] = distribution
+        if collect_per_pose:
+            row["_per_pose"] = per_pose_values[i]
         rows.append(row)
     return rows
 

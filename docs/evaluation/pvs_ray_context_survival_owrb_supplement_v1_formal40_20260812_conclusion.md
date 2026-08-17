@@ -7,7 +7,7 @@
 本补充实验用于拆分当前轻量可见性模型中的四个实现因素：上下文表容量、相机查询编码、遮挡生存参数化和离线遮挡证据来源。它与核心 2×2×2 formal matrix 使用独立名称和独立输出目录，不能把补充对照解释为核心因子主效应。
 
 - 5 个预注册变体 × 3 个随机种子 × 40 epoch，共 15 个成员；
-- 213 个 validation pose；所有成员使用相同的后退相机候选集合、实例 GT、pose 顺序和候选哈希；
+- 213 个 validation pose；所有成员使用相同的后退相机候选集合、实例 GT 和 pose 顺序；
 - 每个 checkpoint 使用自己的 calibration split 冻结阈值，安全门为 weighted recall `>0.99` 及其单侧置信下界 `>0.99`；
 - validation 只比较冻结工作点，test split 未读取；
 - 使用 10,000 次按 seed 聚类、seed 内按 pose 重采样的 paired bootstrap；

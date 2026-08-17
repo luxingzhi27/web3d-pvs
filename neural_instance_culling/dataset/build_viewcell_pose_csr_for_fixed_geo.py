@@ -70,11 +70,6 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional spatial four-way manifest directory containing manifest.json and pose_split_ids.bin.",
     )
-    parser.add_argument(
-        "--allow-candidate-visible-union",
-        action="store_true",
-        help="Exploratory-only compatibility mode that adds missed visible IDs to the AABB candidate set.",
-    )
     return parser.parse_args()
 
 
@@ -185,6 +180,8 @@ def main() -> None:
     args = parse_args()
     input_dir = args.input_dir
     output_dir = args.output_dir
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError(f"refusing to overwrite non-empty PoseCSR output: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     input_meta = read_json(input_dir / "dataset_meta.json")
     runtime_meta = read_json(args.runtime_meta)
@@ -260,18 +257,10 @@ def main() -> None:
             v_start = int(visible_offsets[i])
             v_end = int(visible_offsets[i + 1])
             visible = np.asarray(visible_ids[v_start:v_end], dtype=np.uint32)
-            before = set(int(v) for v in raw_candidates.tolist())
             missing = np.setdiff1d(visible, raw_candidates, assume_unique=False)
             stats["rawCandidateMissVisible"] += int(missing.size)
-            if missing.size and not args.allow_candidate_visible_union:
-                stats["candidateMissVisible"] += int(missing.size)
-                candidates = raw_candidates
-            else:
-                for vid in visible.tolist():
-                    if int(vid) not in before:
-                        stats["candidateMissVisible"] += 1
-                        before.add(int(vid))
-                candidates = np.asarray(sorted(before), dtype=np.uint32)
+            stats["candidateMissVisible"] += int(missing.size)
+            candidates = raw_candidates
             if candidates.size == 0:
                 stats["emptyCandidate"] += 1
             if not np.all(np.isin(visible, candidates, assume_unique=False)):
@@ -283,6 +272,9 @@ def main() -> None:
 
     poses.tofile(output_dir / "poses.bin")
     mvps.tofile(output_dir / "mvp.bin")
+    np.asarray(centers, dtype="<f4").tofile(output_dir / "query_center_world.bin")
+    np.asarray(camera_world, dtype="<f4").tofile(output_dir / "candidate_camera_world.bin")
+    np.asarray(params[:, 0], dtype="<f4").tofile(output_dir / "viewcell_radius_m.bin")
     candidate_offsets.tofile(output_dir / "candidate_offsets.bin")
     raw_candidate_offsets.tofile(output_dir / "raw_candidate_offsets.bin")
     candidate_offsets.tofile(output_dir / "frustum_offsets.bin")
@@ -297,11 +289,10 @@ def main() -> None:
     shutil.copyfile(input_dir / "visible_ids.bin", output_dir / "visible_ids.bin")
     visible_weights.astype("<f4", copy=False).tofile(output_dir / "visible_weights.bin")
 
-    if stats["rawCandidateMissVisible"] and not args.allow_candidate_visible_union:
+    if stats["rawCandidateMissVisible"]:
         raise RuntimeError(
             "Raw AABB candidates miss visible instances; refusing to create a formal dataset. "
-            f"missed references={stats['rawCandidateMissVisible']}. "
-            "Use --allow-candidate-visible-union only for explicitly exploratory output."
+            f"missed references={stats['rawCandidateMissVisible']}."
         )
 
     source_sampler = str(input_meta.get("sourceSampler", "rvc"))
@@ -310,7 +301,7 @@ def main() -> None:
     else:
         schema = "pose-csr-viewcell-back-camera-pvs-fov66-v1"
     meta = {
-        "schema": schema,
+        "schema": f"{schema.rsplit('-v1', 1)[0]}-v2",
         "experiment": args.experiment,
         "sourceSampler": source_sampler,
         "sourceDataset": str(input_dir.as_posix()),
@@ -322,15 +313,18 @@ def main() -> None:
         "visibleCount": int(visible_ids.size),
         "candidateCount": int(candidate_offsets[-1]),
         "rawCandidateCount": int(raw_candidate_offsets[-1]),
-        "candidateSemantics": (
-            "back-camera expanded PVS frustum AABB candidates plus all dense-subpose visible positives"
-            if args.allow_candidate_visible_union
-            else "raw back-camera expanded PVS frustum AABB candidates; no GT positive union"
-        ),
+        "candidateSemantics": "raw back-camera expanded PVS frustum AABB candidates; no GT positive union",
         "rawCandidateSemantics": "AABB candidates computed before any visible-positive union",
         "rawCandidateFile": "raw_candidate_ids.bin",
         "rawCandidateOffsets": "raw_candidate_offsets.bin",
-        "cameraSemantics": "camera_world = viewcell_center - normalize(viewcell_forward) * pvs_back_offset; FOV uses pvs_fov_x/y",
+        "cameraSemantics": "poses.camera_world is candidate_camera_world = query_center_world - normalize(viewcell_forward) * pvs_back_offset",
+        "candidateCameraSemantics": "candidate identity only; 66 degree backed-up AABB frustum",
+        "queryCenterSemantics": "canonical center of the same-direction horizontal-disk view-cell visibility union",
+        "viewcellGeometry": {
+            "shape": "horizontal_disk",
+            "radiusRangeM": [float(np.min(params[:, 0])), float(np.max(params[:, 0]))],
+            "verticalDisplacementM": 0.0,
+        },
         "gtSemantics": "visible_ids are dense subpose visible-id unions per viewcell",
         "visibleWeightSemantics": input_meta.get("visibleWeightSemantics", "rvcServer component_weights, not pixel coverage"),
         "visibleWeightDtype": "float32",
@@ -356,6 +350,9 @@ def main() -> None:
         "files": {
             "poses": "poses.bin",
             "mvp": "mvp.bin",
+            "queryCenterWorld": "query_center_world.bin",
+            "candidateCameraWorld": "candidate_camera_world.bin",
+            "viewcellRadiusM": "viewcell_radius_m.bin",
             "visibleOffsets": "visible_offsets.bin",
             "visibleIds": "visible_ids.bin",
             "visibleWeights": "visible_weights.bin",

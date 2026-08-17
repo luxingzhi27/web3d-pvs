@@ -9,6 +9,92 @@ import numpy as np
 DEFAULT_TARGET_WEIGHTED_RECALL = 0.99
 
 
+def _aggregate_weighted_value(row: Mapping[str, Any], key: str, default: float = -1.0) -> float:
+    """Read a canonical aggregate field without falling back to macro metrics."""
+    value = row.get(key, default)
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return numeric if np.isfinite(numeric) else float(default)
+
+
+def aggregate_weighted_recall_safe_rows(
+    rows: list[dict[str, Any]],
+    target_weighted_recall: float = DEFAULT_TARGET_WEIGHTED_RECALL,
+    minimum_point_estimate: float | None = None,
+    minimum_lower_confidence_bound: float | None = None,
+    minimum_pose_recall: float | None = None,
+) -> list[dict[str, Any]]:
+    """Filter new-line rows using aggregate weighted TP/GT safety fields.
+
+    The function deliberately does not fall back to ``pose_weighted_recall``.
+    This prevents a macro-average row from silently becoming the formal safety
+    gate after a schema migration.
+    """
+    target = float(target_weighted_recall)
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        aggregate = _aggregate_weighted_value(row, "aggregateWeightedRecall")
+        lower = _aggregate_weighted_value(row, "aggregateWeightedRecallLowerConfidenceBound")
+        if aggregate <= target:
+            continue
+        if minimum_point_estimate is not None and aggregate < float(minimum_point_estimate):
+            continue
+        if minimum_lower_confidence_bound is not None and lower <= float(minimum_lower_confidence_bound):
+            continue
+        if minimum_pose_recall is not None and float(row.get("pose_recall", -1.0)) < float(minimum_pose_recall):
+            continue
+        result.append(row)
+    return result
+
+
+def select_aggregate_weighted_cull_workpoint(
+    rows: list[dict[str, Any]],
+    target_weighted_recall: float = DEFAULT_TARGET_WEIGHTED_RECALL,
+    minimum_lower_confidence_bound: float | None = None,
+    minimum_threshold: float | None = None,
+    maximum_threshold: float | None = None,
+) -> dict[str, Any] | None:
+    """Select the resource-efficient workpoint for the canonical new schema."""
+    safe = aggregate_weighted_recall_safe_rows(
+        rows,
+        target_weighted_recall=target_weighted_recall,
+        minimum_lower_confidence_bound=minimum_lower_confidence_bound,
+    )
+    if minimum_threshold is not None:
+        safe = [row for row in safe if float(row.get("threshold", -np.inf)) >= float(minimum_threshold)]
+    if maximum_threshold is not None:
+        safe = [row for row in safe if float(row.get("threshold", np.inf)) <= float(maximum_threshold)]
+    if not safe:
+        return None
+    return max(
+        safe,
+        key=lambda row: (
+            float(row.get("agg_useful_cull", 0.0)),
+            float(row.get("agg_balanced_accuracy", 0.0)),
+            float(row.get("agg_precision", 0.0)),
+            -float(row.get("avg_pred_count", 0.0)),
+            float(row.get("scoreDistribution", {}).get("positiveNegativeGapQ05Q95", -np.inf))
+            if isinstance(row.get("scoreDistribution"), Mapping) else -np.inf,
+        ),
+    )
+
+
+def aggregate_weighted_cull_selection_rule(
+    target_weighted_recall: float = DEFAULT_TARGET_WEIGHTED_RECALL,
+    minimum_lower_confidence_bound: float | None = None,
+) -> str:
+    rule = f"aggregateWeightedRecall > {float(target_weighted_recall):.3f}"
+    if minimum_lower_confidence_bound is not None:
+        rule += f" and aggregateWeightedRecallLowerConfidenceBound > {float(minimum_lower_confidence_bound):.3f}"
+    return (
+        rule
+        + "; among safe rows maximize agg_useful_cull, then agg_balanced_accuracy, "
+        "agg_precision, minimize avg_pred_count, and maximize score gap"
+    )
+
+
 def target_weighted_recall_from_payload(
     payload: Mapping[str, Any] | None,
     default: float = DEFAULT_TARGET_WEIGHTED_RECALL,

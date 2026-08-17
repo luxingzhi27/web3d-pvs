@@ -69,8 +69,8 @@ class RayContextRelationEvidenceTest(unittest.TestCase):
 
     def test_surface_fallback_rows_keep_only_candidate_relations_and_preserve_targets(self) -> None:
         rows = np.asarray([
-            (7, 1, 3, 8, 0.25, 0.0),
-            (7, 2, 3, 4, 0.10, 0.0),
+            (7, 1, 3, 8, 2.00, 0.0),
+            (7, 2, 3, 4, 0.60, 0.0),
         ], dtype=SURFACE_FALLBACK_RELATION_DTYPE)
         candidate_mask = np.asarray([False, True, True, True, False], dtype=bool)
         centers = np.asarray([
@@ -86,15 +86,13 @@ class RayContextRelationEvidenceTest(unittest.TestCase):
             centers,
             np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
             min_depth_gap=0.01,
-            camera_far=10.0,
         )
         self.assertEqual(converted.shape, (2, 6))
         self.assertEqual(target_count, 1)
         self.assertTrue(np.all(converted[:, 0] == 3.0))
         self.assertTrue(np.all(converted[:, 1] != converted[:, 0]))
-        # Fallback gaps are normalized depth-buffer differences.  With a
-        # target-center depth of 0.3, 0.25 belongs to the far shell and 0.10
-        # belongs to the middle shell; neither is divided by world meters.
+        # Fallback gaps and target-center depth are both metric.  Relative
+        # gaps 2/3 and 0.6/3 land in the far and middle shells.
         self.assertEqual(converted[0, 2], 2.0)
         self.assertEqual(converted[1, 2], 1.0)
 

@@ -28,7 +28,9 @@ from pose_csr_dataset import PoseCSRDataset  # noqa: E402
 
 CACHE_SCHEMA = "triangle-depth-layer-cache-v1"
 CACHE_SCHEMA_V2 = "triangle-depth-layer-cache-v2"
-SUPPORTED_CACHE_SCHEMAS = {CACHE_SCHEMA, CACHE_SCHEMA_V2}
+CACHE_SCHEMA_V3 = "triangle-depth-layer-cache-v3"
+LINEAR_DEPTH_ENCODING = "camera_forward_axial_depth_divided_by_camera_far"
+SUPPORTED_CACHE_SCHEMAS = {CACHE_SCHEMA, CACHE_SCHEMA_V2, CACHE_SCHEMA_V3}
 EVIDENCE_SCHEMA = "triangle-depth-layer-gpu-evidence-v1"
 
 
@@ -79,19 +81,19 @@ def load_completed_cache(path: Path) -> tuple[dict[str, Any], np.ndarray, np.nda
         raise ValueError(f"{path}: render pose count mismatch ({render_pose_ids.size} != {pose_count})")
     if np.unique(render_pose_ids).size != render_pose_ids.size:
         raise ValueError(f"{path}: duplicate render pose IDs")
-    if meta.get("schema") == CACHE_SCHEMA_V2:
+    if meta.get("schema") in (CACHE_SCHEMA_V2, CACHE_SCHEMA_V3):
         first_layer_reference = meta.get("firstLayerReference") or {}
         if (
             int(first_layer_reference.get("checks", 0)) != pose_count
             or int(first_layer_reference.get("mismatches", 0)) != 0
         ):
             raise ValueError(
-                f"{path}: v2 cache must prove one matching unpeeled Color-ID reference per pose"
+                f"{path}: representative-subpose cache must prove one matching unpeeled Color-ID reference per pose"
             )
         source_name = files.get("sourcePoseIndices")
         render_name = files.get("renderPoseIds")
         if not source_name or not render_name:
-            raise ValueError(f"{path}: v2 cache must declare sourcePoseIndices and renderPoseIds")
+            raise ValueError(f"{path}: representative-subpose cache must declare sourcePoseIndices and renderPoseIds")
         explicit_render_ids = np.fromfile(_resolve(path, render_name), dtype="<u4")
         if explicit_render_ids.size != pose_count or not np.array_equal(explicit_render_ids, render_pose_ids):
             raise ValueError(f"{path}: explicit renderPoseIds do not match poseIndices")
@@ -126,13 +128,24 @@ def merge_caches(
                 raise ValueError(f"{path}: {key} does not match the first shard")
     if any(item[1].get("schema") != reference.get("schema") for item in loaded):
         raise ValueError("merged shards use different cache schemas")
-    if reference.get("schema") == CACHE_SCHEMA_V2:
+    if reference.get("schema") in (CACHE_SCHEMA_V2, CACHE_SCHEMA_V3):
         if any(
             int(meta.get("firstLayerReference", {}).get("checks", 0)) != int(meta["poseCount"])
             or int(meta.get("firstLayerReference", {}).get("mismatches", 0)) != 0
             for _path, meta, _render_ids, _source_ids, _ids, _depths in loaded
         ):
-            raise ValueError("v2 merge requires a matching unpeeled Color-ID reference for every pose")
+            raise ValueError("representative-subpose merge requires a matching unpeeled Color-ID reference for every pose")
+    if reference.get("schema") == CACHE_SCHEMA_V3:
+        if reference.get("linearDepthEncoding") != LINEAR_DEPTH_ENCODING:
+            raise ValueError("v3 merge requires the registered normalized axial depth encoding")
+        reference_far = float(reference.get("cameraFarMeters", float("nan")))
+        if not np.isfinite(reference_far) or reference_far <= 0.0:
+            raise ValueError("v3 merge requires a finite positive cameraFarMeters")
+        for path, meta, *_rest in loaded[1:]:
+            if meta.get("linearDepthEncoding") != LINEAR_DEPTH_ENCODING or not np.isclose(
+                float(meta.get("cameraFarMeters", float("nan"))), reference_far, rtol=1e-6, atol=1e-6
+            ):
+                raise ValueError(f"{path}: v3 depth encoding or cameraFarMeters differs from the first shard")
     render_parts = [item[2] for item in loaded]
     source_parts = [item[3] for item in loaded]
     all_render_ids = np.concatenate(render_parts).astype(np.int64, copy=False)
@@ -159,7 +172,7 @@ def merge_caches(
     source_mem = None
     render_out = None
     render_mem = None
-    if reference.get("schema") == CACHE_SCHEMA_V2:
+    if reference.get("schema") in (CACHE_SCHEMA_V2, CACHE_SCHEMA_V3):
         source_out = output_dir / "triangle_depth.bin.source_pose_indices.bin"
         render_out = output_dir / "triangle_depth.bin.render_pose_ids.bin"
         source_mem = np.memmap(source_out, dtype="<u4", mode="w+", shape=(all_render_ids.size,))
@@ -184,7 +197,7 @@ def merge_caches(
         source_mem.flush(); render_mem.flush()
     schema = reference["schema"]
     files = {"poseIndices": poses_out.name, "instanceIds": ids_out.name, "linearDepth": depth_out.name}
-    if schema == CACHE_SCHEMA_V2:
+    if schema in (CACHE_SCHEMA_V2, CACHE_SCHEMA_V3):
         files.update({"sourcePoseIndices": source_out.name, "renderPoseIds": render_out.name})
     meta = {
         "schema": schema,
@@ -194,7 +207,7 @@ def merge_caches(
         "maxLayers": layers,
         "poseCount": int(all_render_ids.size),
         "sourceShards": [str(path.resolve()) for path in shard_dirs],
-        "poseIdSemantics": reference.get("poseIdSemantics", "poseIndices stores renderPoseId; sourcePoseIndices stores sourcePoseIndex") if schema == CACHE_SCHEMA_V2 else "poseIndices stores canonical PoseCSR poseIndex",
+        "poseIdSemantics": reference.get("poseIdSemantics", "poseIndices stores renderPoseId; sourcePoseIndices stores sourcePoseIndex") if schema in (CACHE_SCHEMA_V2, CACHE_SCHEMA_V3) else "poseIndices stores canonical PoseCSR poseIndex",
         "gpuEvidence": "all source shards passed triangle-depth-layer-gpu-evidence-v1 formalReady=true",
         "firstLayerReference": {
             "checks": int(sum(int(meta.get("firstLayerReference", {}).get("checks", 0)) for _path, meta, *_rest in loaded)),
@@ -203,6 +216,15 @@ def merge_caches(
         },
         "files": files,
     }
+    if schema == CACHE_SCHEMA_V3:
+        meta.update({
+            "linearDepthEncoding": LINEAR_DEPTH_ENCODING,
+            "cameraFarMeters": float(reference["cameraFarMeters"]),
+            "decodedDepthContract": reference.get(
+                "decodedDepthContract",
+                "dataset builders reconstruct per-pixel camera-ray range in meters before relation or survival supervision",
+            ),
+        })
     if candidate_identity is not None:
         meta["candidateIdentity"] = candidate_identity
     elif reference.get("candidateIdentity") is not None:

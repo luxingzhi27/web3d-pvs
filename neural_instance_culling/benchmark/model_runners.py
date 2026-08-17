@@ -20,6 +20,11 @@ from common.threshold_selection import (  # noqa: E402
     target_weighted_recall_from_payload,
 )
 from directional_occlusion_proxy_encoder_model import DirectionalOcclusionProxyEncoderPVSModel  # noqa: E402
+from bounded_relation_survival_moment_model import (  # noqa: E402
+    BoundedRelationSurvivalMomentModel,
+    MODEL_SCHEMA as BOUNDED_RELATION_SURVIVAL_MOMENT_SCHEMA,
+    RUNTIME_FEATURE_DIM as BOUNDED_RELATION_SURVIVAL_MOMENT_RUNTIME_DIM,
+)
 from pose_csr_dataset import PoseCSRDataset, _project_aabb_features_numpy  # noqa: E402
 from aabb_ray_feature_utils import FEATURE_DIM as AABB_RAY_FEATURE_DIM, build_aabb_ray_features  # noqa: E402
 from utility_ranker import FEATURE_DIM as UTILITY_RANKER_FEATURE_DIM, IndependentUtilityRankerMLP  # noqa: E402
@@ -168,6 +173,28 @@ class BaseModelRunner:
         result = self.score_arrays(camera, world, view, candidate_ids.astype(np.int64, copy=False), mvp_rows)
         pred = candidate_ids[result.scores >= float(self.threshold if threshold is None else threshold)]
         return pred.astype(np.uint32, copy=False), result
+
+    def predict_viewcell_ids(
+        self,
+        camera_norm: np.ndarray,
+        camera_world: np.ndarray,
+        camera_view: np.ndarray,
+        candidate_ids: np.ndarray,
+        *,
+        query_center_world: np.ndarray,
+        viewcell_radius_m: float,
+        mvp: np.ndarray | None = None,
+        threshold: float | None = None,
+    ) -> tuple[np.ndarray, PredictionResult]:
+        del query_center_world, viewcell_radius_m
+        return self.predict_ids(
+            camera_norm,
+            camera_world,
+            camera_view,
+            candidate_ids,
+            mvp=mvp,
+            threshold=threshold,
+        )
 
 
 class StaticRuleRunner(BaseModelRunner):
@@ -652,6 +679,108 @@ class DirectionalOcclusionProxyEncoderRunner(BaseModelRunner):
             utility_scores=utility_scores,
             download_scores=download_scores,
         )
+
+
+class BoundedRelationSurvivalMomentV3Runner(BaseModelRunner):
+    """Query one checkpoint-owned fixed table at a registered view-cell."""
+
+    def __init__(self, *args, runtime_features: torch.Tensor, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.runtime_features = runtime_features
+
+    @torch.no_grad()
+    def score_arrays(
+        self,
+        camera_norm: np.ndarray,
+        camera_world: np.ndarray,
+        camera_view: np.ndarray,
+        instance_ids: np.ndarray,
+        mvp: np.ndarray | None = None,
+    ) -> PredictionResult:
+        del camera_norm, camera_world, camera_view, instance_ids, mvp
+        raise RuntimeError(
+            "bounded relation-survival v4 requires query_center_world and viewcell_radius_m"
+        )
+
+    @torch.no_grad()
+    def score_batch(self, batch: dict[str, np.ndarray]) -> PredictionResult:
+        required = ("camera", "camera_world", "camera_view", "instance", "query_center_world", "viewcell_radius_m")
+        missing = [name for name in required if name not in batch]
+        if missing:
+            raise ValueError(f"v4 runner batch is missing view-cell fields: {missing}")
+        t0 = time.perf_counter()
+        ids = torch.from_numpy(np.asarray(batch["instance"], dtype=np.int64)).to(self.device)
+        camera = torch.from_numpy(np.asarray(batch["camera"], dtype=np.float32)).to(self.device)
+        candidate_camera = torch.from_numpy(
+            np.asarray(batch["camera_world"], dtype=np.float32)
+        ).to(self.device)
+        view = torch.from_numpy(np.asarray(batch["camera_view"], dtype=np.float32)).to(self.device)
+        query_center = torch.from_numpy(
+            np.asarray(batch["query_center_world"], dtype=np.float32)
+        ).to(self.device)
+        radius = torch.from_numpy(
+            np.asarray(batch["viewcell_radius_m"], dtype=np.float32)
+        ).to(self.device)
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        t1 = time.perf_counter()
+        logits, aux = self.model.compute_logits_with_aux(
+            camera,
+            view,
+            candidate_camera,
+            ids,
+            runtime_features=self.runtime_features,
+            query_center_world=query_center,
+            viewcell_radius_m=radius,
+        )
+        scores = torch.sigmoid(logits).detach().cpu().numpy().reshape(-1)
+        utility_scores = torch.sigmoid(aux["utility_logits"]).detach().cpu().numpy().reshape(-1)
+        download_scores = aux["download_logits"].detach().cpu().numpy().reshape(-1)
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        t2 = time.perf_counter()
+        return PredictionResult(
+            scores=scores,
+            forward_ms=(t2 - t1) * 1000.0,
+            total_ms=(t2 - t0) * 1000.0,
+            diagnostics={
+                "avgSurvivalOcclusionProbability": float(
+                    aux["survival_occlusion_probability"].detach().mean().cpu()
+                ) if ids.numel() else 0.0,
+            },
+            utility_scores=utility_scores,
+            download_scores=download_scores,
+        )
+
+    def predict_viewcell_ids(
+        self,
+        camera_norm: np.ndarray,
+        camera_world: np.ndarray,
+        camera_view: np.ndarray,
+        candidate_ids: np.ndarray,
+        *,
+        query_center_world: np.ndarray,
+        viewcell_radius_m: float,
+        mvp: np.ndarray | None = None,
+        threshold: float | None = None,
+    ) -> tuple[np.ndarray, PredictionResult]:
+        del mvp
+        ids = np.asarray(candidate_ids, dtype=np.uint32).reshape(-1)
+        count = int(ids.size)
+        batch = {
+            "camera": np.repeat(np.asarray(camera_norm, dtype=np.float32)[None, :], count, axis=0),
+            "camera_world": np.repeat(np.asarray(camera_world, dtype=np.float32)[None, :], count, axis=0),
+            "camera_view": np.repeat(np.asarray(camera_view, dtype=np.float32)[None, :], count, axis=0),
+            "instance": ids.astype(np.int64, copy=False),
+            "query_center_world": np.repeat(
+                np.asarray(query_center_world, dtype=np.float32)[None, :], count, axis=0
+            ),
+            "viewcell_radius_m": np.full((count,), float(viewcell_radius_m), dtype=np.float32),
+            "pose_offsets": np.asarray([0, count], dtype=np.int64),
+        }
+        result = self.score_batch(batch)
+        selected = ids[result.scores >= float(self.threshold if threshold is None else threshold)]
+        return selected.astype(np.uint32, copy=False), result
 
 
 class IndependentUtilityRankerRunner(BaseModelRunner):
@@ -1365,6 +1494,125 @@ def load_directional_occlusion_proxy_encoder_runner(
     return runner
 
 
+def _v4_frozen_threshold(checkpoint: dict, calibration_path: str | Path) -> float:
+    path = Path(calibration_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema") != "pvs-bounded-relation-prior-instance-calibrated-calibration-summary-v4":
+        raise ValueError(f"{path} is not a v4 calibration summary")
+    if payload.get("testRead") is not False:
+        raise ValueError(f"{path} is not test-free")
+    key = "bestSafe" if payload.get("status") == "safe" else "bestDiagnostic"
+    workpoint = payload.get(key)
+    if not isinstance(workpoint, dict):
+        raise ValueError(f"{path} has no frozen {key} workpoint")
+    selection = workpoint.get("selection", workpoint)
+    checkpoint_best = checkpoint.get("best")
+    checkpoint_selection = checkpoint_best.get("selection", checkpoint_best) if isinstance(checkpoint_best, dict) else None
+    if not isinstance(selection, dict) or not isinstance(checkpoint_selection, dict):
+        raise ValueError("v4 checkpoint or calibration has no frozen threshold")
+    threshold = float(selection.get("threshold", np.nan))
+    if not np.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise ValueError("v4 frozen threshold is invalid")
+    if not np.isclose(float(checkpoint_selection.get("threshold", np.nan)), threshold, rtol=0.0, atol=1e-7):
+        raise ValueError("v4 checkpoint and calibration thresholds disagree")
+    return threshold
+
+
+def load_bounded_relation_survival_moment_v4_runner(
+    name: str,
+    checkpoint_path: str | Path,
+    runtime_meta_path: str | Path,
+    runtime_features_path: str | Path,
+    calibration_summary: str | Path,
+    device: torch.device,
+) -> BoundedRelationSurvivalMomentV3Runner:
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+    if checkpoint.get("schema") != "pvs-bounded-relation-prior-instance-calibrated-moment-checkpoint-v4":
+        raise ValueError(f"{checkpoint_path} is not a bounded relation-survival v4 checkpoint")
+    config = checkpoint.get("modelConfig")
+    if not isinstance(config, dict) or config.get("runtimeSchema") != BOUNDED_RELATION_SURVIVAL_MOMENT_SCHEMA:
+        raise ValueError("v4 checkpoint modelConfig is missing or invalid")
+    world_aabbs, instance_to_glb, runtime = load_runtime_meta(
+        runtime_meta_path, int(config["numInstances"])
+    )
+    runtime_path = Path(runtime_features_path).resolve()
+    bundle_meta_path = runtime_path.parent / "model_meta.json"
+    if not bundle_meta_path.is_file():
+        raise FileNotFoundError("v4 runtime table must come from an exported bundle with model_meta.json")
+    bundle_meta = json.loads(bundle_meta_path.read_text(encoding="utf-8"))
+    if bundle_meta.get("schema") != "pvs-bounded-relation-prior-instance-calibrated-moment-runtime-v4":
+        raise ValueError("v4 runtime bundle schema is invalid")
+    fixed_table = bundle_meta.get("fixedTable") or {}
+    source = bundle_meta.get("runtimeFeatureSource") or {}
+    geometry_source = source.get("geometry") or {}
+    geometry_checkpoint = checkpoint.get("geometry") or {}
+    if fixed_table.get("file") != runtime_path.name:
+        raise ValueError("v4 runtime table file disagrees with its bundle metadata")
+    if fixed_table.get("dtype") != "float16":
+        raise ValueError("v4 runtime table dtype is invalid")
+    declared_shape = fixed_table.get("shape")
+    if not isinstance(declared_shape, list) or len(declared_shape) != 2 or int(declared_shape[1]) != BOUNDED_RELATION_SURVIVAL_MOMENT_RUNTIME_DIM:
+        raise ValueError("v4 runtime table shape is invalid")
+    if int(declared_shape[0]) != int(config["numInstances"]):
+        raise ValueError("v4 runtime table instance count disagrees with checkpoint")
+    if int(fixed_table.get("byteLength", -1)) != int(runtime_path.stat().st_size):
+        raise ValueError("v4 runtime table byte length disagrees with its file")
+    if source.get("source") != "checkpoint.geometryFeatures_plus_survivalCoefficients":
+        raise ValueError("v4 runtime bundle was not rebuilt from checkpoint-owned coefficients")
+    if geometry_source.get("shape") != geometry_checkpoint.get("shape") or geometry_source.get("dtype") != geometry_checkpoint.get("dtype"):
+        raise ValueError("v4 runtime bundle geometry schema disagrees with checkpoint provenance")
+    threshold = _v4_frozen_threshold(checkpoint, calibration_summary)
+    if not np.isclose(float(bundle_meta.get("threshold", np.nan)), threshold, rtol=0.0, atol=1e-7):
+        raise ValueError("v4 runtime bundle threshold disagrees with checkpoint calibration")
+    values = np.fromfile(runtime_path, dtype=np.float16)
+    expected = int(config["numInstances"]) * BOUNDED_RELATION_SURVIVAL_MOMENT_RUNTIME_DIM
+    if values.size != expected or not bool(np.isfinite(values).all()):
+        raise ValueError(f"{runtime_path} has {values.size} fp16 values, expected {expected}")
+    runtime_features = values.reshape(
+        int(config["numInstances"]), BOUNDED_RELATION_SURVIVAL_MOMENT_RUNTIME_DIM
+    ).astype(np.float32)
+    depth = config.get("depthNormalization") or {}
+    instance_calibration = config.get("instanceCalibration") or {}
+    model = BoundedRelationSurvivalMomentModel(
+        num_instances=int(config["numInstances"]),
+        num_glbs=int(config["numGlbs"]),
+        relation_hidden_dim=int(config["relationHiddenDim"]),
+        hidden_dim=int(config["hiddenDim"]),
+        relation_source=str(config["relationSource"]),
+        spectral_mode=str(config["spectralMode"]),
+        depth_q01=float(depth["q01"]),
+        depth_q99=float(depth["q99"]),
+        depth_epsilon=float(depth["epsilon"]),
+        max_frequency_norm_cycles=float((config.get("frequency") or {})["maxNormCycles"]),
+        instance_calibration_mode=str(instance_calibration["mode"]),
+        instance_calibration_max_abs=float(instance_calibration["maximumAbsoluteResidual"]),
+        sparse_instance_penalty=float(instance_calibration["sparseInstancePenalty"]),
+    ).to(device)
+    model.set_instance_world_aabbs(torch.from_numpy(world_aabbs).to(device))
+    model.set_instance_to_glb(torch.from_numpy(instance_to_glb).to(device))
+    model.load_state_dict(checkpoint["modelState"], strict=True)
+    model.eval()
+    runner = BoundedRelationSurvivalMomentV3Runner(
+        name=name,
+        kind="bounded_relation_survival_moment_v4",
+        model=model,
+        world_aabbs=world_aabbs,
+        instance_to_glb=instance_to_glb,
+        runtime_meta=runtime,
+        checkpoint=checkpoint,
+        threshold=threshold,
+        device=device,
+        runtime_features=torch.from_numpy(runtime_features).to(device),
+    )
+    runner.runtime_feature_file_bytes = int(runtime_path.stat().st_size)
+    runner.checkpoint_file_bytes = int(Path(checkpoint_path).stat().st_size)
+    runner.runtime_bundle_meta = bundle_meta
+    return runner
+
+
 def load_independent_utility_ranker_runner(
     name: str,
     checkpoint_path: str | Path,
@@ -1433,6 +1681,15 @@ def load_runner(
             spec["runtime_features"],
             spec.get("eval_summary"),
             fallback_threshold,
+            device,
+        )
+    if kind == "bounded_relation_survival_moment_v4":
+        return load_bounded_relation_survival_moment_v4_runner(
+            name,
+            spec["checkpoint"],
+            runtime_meta,
+            spec["runtime_features"],
+            spec["eval_summary"],
             device,
         )
     if kind == "independent_utility_ranker":

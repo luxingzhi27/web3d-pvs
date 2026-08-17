@@ -21,8 +21,8 @@
 
 候选集合始终来自数据集保存的后退相机候选 CSR。真实可见集合来自对应数据集 GT，禁止将 GT 可见实例补入候选集合，禁止使用前端白名单修复，禁止在评价时重新构造候选集合。每个正式成员必须保存并校验：
 
-- canonical PoseCSR 候选摘要及 SHA-256；
-- 重复 subpose 渲染顺序的候选摘要及 SHA-256；
+- canonical PoseCSR 候选数量、顺序和字段语义；
+- 重复 subpose 渲染顺序的候选数量、顺序和字段语义；
 - validation pose 顺序；
 - 实例 GT、可见权重和 `visible_ids ⊆ candidate_ids` 检查结果。
 
@@ -98,7 +98,7 @@ TN = C - (P ∪ G)
 
 每个工作点必须同时报告 pose-level 宏平均和全部 pose 合并的 aggregate 结果：recall、weighted recall、precision、F1、Jaccard、accuracy、balanced accuracy、specificity、useful cull、bad cull、平均预测数、FP/FN/TN、预测/候选、预测/GT、GLB 数量和字节削减、特征表大小及前向延迟。Color-ID 图像评价另外报告 miss-pixel、wrong-ID pixel、extra-pixel 和 p95 miss-pixel；尚未生成时明确标记为未实现。
 
-Validation 使用至少 10,000 次 paired bootstrap。每次重采样先按 seed 聚类，再在抽中的 seed 内对 pose 重采样；比较成员使用同一 pose、同一候选哈希和同一 GT。对每个指标输出差值、95% 置信区间、方向和是否跨零。test 不参与 bootstrap 的模型选择。
+Validation 使用至少 10,000 次 paired bootstrap。每次重采样先按 seed 聚类，再在抽中的 seed 内对 pose 重采样；比较成员使用同一 pose、同一候选集合和同一 GT。对每个指标输出差值、95% 置信区间、方向和是否跨零。test 不参与 bootstrap 的模型选择。
 
 核心 2×2×2 变体为：上下文关闭/开启、生存场关闭/开启、RVL/安全约束损失。补充对照包括 AABB 投影证据、三角形深度剥离证据、192 维旧代理、同容量无单调 28 维代理、32/64 维上下文以及 Fourier/九维 ray 输入。
 
@@ -150,7 +150,7 @@ conda run -n slm_pvs python \
 ## 10. 本次正式冻结记录
 
 - 正式输出目录：`neural_instance_culling/benchmark/out/pvs_direction_depth_relation_survival_constrained_v1_surface_fallback_owrb_formal40_pooled_context_20260811/`。该目录替代了上下文关闭误设为全零输入的旧 formal 输出；旧目录不再作为可复现实验结果保留。
-- 矩阵规模：8 个完整三因素变体、3 个 seed（`20260801/02/03`）、213 个 validation pose；所有成员的候选集合、实例 GT、pose 顺序和候选哈希一致。
+- 矩阵规模：8 个完整三因素变体、3 个 seed（`20260801/02/03`）、213 个 validation pose；所有成员的候选集合、实例 GT 和 pose 顺序一致。
 - 统计：按 seed 聚类、seed 内按 pose 重采样的 paired bootstrap，共 10,000 次；test split 未读取，阈值和 gamma 未由 test 选择。
 - 图像硬件证据：Color-ID 图像评价为正式 NVIDIA 硬件 WebGL 结果。
 - WebGPU parity：8 个 parity case 的软件数值校验通过，最大绝对误差 `3.814697265625e-06`，最大相对误差 `3.7417979910969734e-05`；capture 报告的适配器为 SwiftShader，故 `formalReady=false`，不能把该结果写成 NVIDIA WebGPU 硬件性能。
@@ -170,7 +170,7 @@ conda run -n slm_pvs python \
 | `triangle_context32_direct9_unconstrained28` | 仅取消 28 维生存参数的单调构造 | 单调约束对照 |
 | `aabb_context32_direct9_monotone` | 仅将关系证据替换为 AABB 投影关系 | 证据来源对照 |
 
-每个变体使用 `20260801/02/03` 三个 seed、40 epoch 和同一 213 个 validation pose。每个 checkpoint 从自己的 calibration split 冻结阈值；安全门仍只看 weighted recall 及其 calibration 单侧置信下界，pose recall 作为诊断。所有成员的 candidate digest、逐 pose candidate hash、GT 和 Color-ID 图像评价口径一致，test split 未读取。
+每个变体使用 `20260801/02/03` 三个 seed、40 epoch 和同一 213 个 validation pose。每个 checkpoint 从自己的 calibration split 冻结阈值；安全门仍只看 weighted recall 及其 calibration 单侧置信下界，pose recall 作为诊断。所有成员的候选集合、逐 pose 候选顺序、GT 和 Color-ID 图像评价口径一致，test split 未读取。
 
 正式结果文件：
 

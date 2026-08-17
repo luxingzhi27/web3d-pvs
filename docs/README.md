@@ -1,15 +1,20 @@
 # NeuralStreamWeb3D 文档索引
 
-更新时间：2026-08-13
+更新时间：2026-08-17
 
-这里的文档只服务于当前可运行版本、正式保留证据和正在执行的唯一模型优化计划。重复路线报告、被修正的旧汇总、失败 pilot 及其本地输出已经清理；当前前端资产、正式训练权重、正式 benchmark、采样数据和硬件证据保持不变。
+这里的文档只服务于当前可运行版本、正式保留证据和唯一的 v4 实验执行链。重复路线报告和被修正的旧汇总已经清理；当前前端资产、正式训练权重、正式 benchmark、采样数据和硬件证据保持不变。v2 `formal80` 及 v3 纠错设计只作为历史诊断依据，不再作为 runner 或训练入口。v4 已完成共享关系先验、逐实例校准残差、checkpoint 专属运行表、validation weighted recall 评价、图像指标回填协议和真实 CUDA smoke；执行链已收敛为八组快速扫描及五变体三种子长训，当前没有相关实验进程。本轮只登记后处理计划，不启动新任务。
 
 ## 先读这几份
 
 | 文档 | 内容 |
 |---|---|
-| [`current/optimization_restart_2026-08-10.md`](current/optimization_restart_2026-08-10.md) | 当前优化阶段、最新 validation 结果和后续实验规则 |
-| [`experiments/pvs_hierarchical_occlusion_survival_viewcell_spectral_query_2026-08-13.md`](experiments/pvs_hierarchical_occlusion_survival_viewcell_spectral_query_2026-08-13.md) | 当前唯一实施计划：分层关系生存网络、视点区域积分频谱、质量风险与资源排斥 RVL；先快速验证，再进行 80 epoch 三种子长训和留一消融 |
+| [`current/optimization_restart_2026-08-10.md`](current/optimization_restart_2026-08-10.md) | 当前优化阶段、最新正式证据、v4 当前入口和统一实验规则 |
+| [`current/pvs_bounded_relation_survival_moment_v4_implementation_2026-08-15.md`](current/pvs_bounded_relation_survival_moment_v4_implementation_2026-08-15.md) | v4 已完成实现：共享关系先验加逐实例校准残差、正式关系/置乱数据、真实 CUDA smoke、关系负边语义与 55.2 倍训练性能纠错、checkpoint 专属 124 维运行表、validation 安全门、图像回填协议和 4.53 MiB 导出预算 |
+| [`experiments/pvs_bounded_relation_survival_moment_v4_run_and_ablation_2026-08-15.md`](experiments/pvs_bounded_relation_survival_moment_v4_run_and_ablation_2026-08-15.md) | 唯一当前执行手册：先登记八组单种子快速扫描、无条件冻结配置、五变体三种子共 15 成员 formal80、配对统计、图像/资源与最终 WebGPU 评价；当前不启动新任务 |
+| [`experiments/pvs_bounded_relation_survival_moment_envelope_safety_reserve_plan_2026-08-14.md`](experiments/pvs_bounded_relation_survival_moment_envelope_safety_reserve_plan_2026-08-14.md) | v3 历史纠错设计依据；其共享生存生成器已由 v4 的逐实例校准残差修正，不再直接执行 |
+| [`experiments/pvs_full_innovation_hyperparameter_scan_longtrain_ablation_2026-08-13.md`](experiments/pvs_full_innovation_hyperparameter_scan_longtrain_ablation_2026-08-13.md) | 已完成的 v2 扫参、冻结配置和 15 成员 formal80 预登记；保留用于解释历史训练，不再作为后续代码改进入口 |
+| [`experiments/pvs_hierarchical_occlusion_survival_viewcell_spectral_query_2026-08-13.md`](experiments/pvs_hierarchical_occlusion_survival_viewcell_spectral_query_2026-08-13.md) | v1 分层关系生存网络、视点区域积分频谱和质量/资源 RVL 的架构、实现、pilot 与学习曲线历史记录 |
+| [`experiments/pvs_integrated_spectral_survival_field_diagnosis_2026-08-14.md`](experiments/pvs_integrated_spectral_survival_field_diagnosis_2026-08-14.md) | 对当前 validation 结果、积分公式/中心、退化关系层级、固定生存观察、事件语义、置乱对照和资源梯度的完整代码审计 |
 | [`current/current_instance_pvs_versions.md`](current/current_instance_pvs_versions.md) | 两个场景、默认模型、前端资产和保留边界 |
 | [`current/neuralstreamweb3d_architecture_technical.md`](current/neuralstreamweb3d_architecture_technical.md) | 离线编码、模型查询、实例渲染和 GLB 调度的系统架构 |
 | [`current/neuralstreamweb3d_model_pipeline.md`](current/neuralstreamweb3d_model_pipeline.md) | 模型输入、方向遮挡代理、RVL 损失、训练和导出 |
@@ -40,6 +45,8 @@
 | [`evaluation/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_conclusion.md`](evaluation/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_conclusion.md) | 补充矩阵的上下文容量、Fourier ray、单调参数化和 AABB 证据结论 |
 | [`evaluation/hkust_fov66_rvl_w042_full40_test_2026-07-31.md`](evaluation/hkust_fov66_rvl_w042_full40_test_2026-07-31.md) | HKUST 已部署模型的 FOV66 基线 test 结果 |
 | [`evaluation/ifc_metropolis_instanced_v2_test_eval_2026-07-15.md`](evaluation/ifc_metropolis_instanced_v2_test_eval_2026-07-15.md) | IFCBench Metropolis 场景基线 test 结果 |
+| [`evaluation/pvs_hierarchical_relation_survival_integrated_spectral_quality_rvl_v1_pilot.md`](evaluation/pvs_hierarchical_relation_survival_integrated_spectral_quality_rvl_v1_pilot.md) | 2026-08-13 新路线三个单 seed pilot 的完整 validation 诊断；calibration 仅 32 pose，weighted recall 安全门未通过，未读取 test |
+| [`evaluation/pvs_hierarchical_relation_survival_learning_curve_e32_2026-08-13.md`](evaluation/pvs_hierarchical_relation_survival_learning_curve_e32_2026-08-13.md) | R0/R2 双 seed、32 epoch 学习曲线；R2 达到 weighted recall 安全门但未通过效率晋级门，旧 Formal80 未启动 |
 
 ## 场景和入口
 

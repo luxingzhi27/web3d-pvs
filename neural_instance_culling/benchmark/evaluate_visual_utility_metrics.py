@@ -86,7 +86,8 @@ def parse_choice_list(value: str, allowed: Iterable[str], option_name: str) -> t
 def parse_learned_model_specs(values: Iterable[str]) -> dict[str, dict[str, str]]:
     """Parse explicit dynamic learned runners without changing global defaults.
 
-    Format: ``name|checkpoint|runtime_features|calibration_or_test_summary``.
+    Format: ``name|checkpoint|runtime_features|calibration_or_test_summary`` or
+    ``name|kind|checkpoint|runtime_features|calibration_or_test_summary``.
     The pipe delimiter keeps ordinary Linux paths readable and makes the
     checkpoint/feature/threshold provenance visible in the command line.
     """
@@ -94,15 +95,20 @@ def parse_learned_model_specs(values: Iterable[str]) -> dict[str, dict[str, str]
     specs: dict[str, dict[str, str]] = {}
     for raw in values:
         parts = str(raw).split("|")
-        if len(parts) != 4 or any(not part.strip() for part in parts):
+        if len(parts) not in (4, 5) or any(not part.strip() for part in parts):
             raise ValueError(
-                "--learned-model-spec must use name|checkpoint|runtime_features|summary"
+                "--learned-model-spec must use name|checkpoint|runtime_features|summary "
+                "or name|kind|checkpoint|runtime_features|summary"
             )
-        name, checkpoint, runtime_features, eval_summary = (part.strip() for part in parts)
+        if len(parts) == 4:
+            name, checkpoint, runtime_features, eval_summary = (part.strip() for part in parts)
+            kind = "directional_occlusion_proxy_encoder"
+        else:
+            name, kind, checkpoint, runtime_features, eval_summary = (part.strip() for part in parts)
         if name in specs:
             raise ValueError(f"Duplicate learned model spec: {name!r}")
         specs[name] = {
-            "kind": "directional_occlusion_proxy_encoder",
+            "kind": kind,
             "checkpoint": checkpoint,
             "runtime_features": runtime_features,
             "eval_summary": eval_summary,
@@ -1623,7 +1629,8 @@ def main() -> None:
     first = next(iter(specs.values()))
     if first.get("checkpoint"):
         checkpoint = torch.load(first["checkpoint"], map_location="cpu")
-        num_instances = int(checkpoint["config"]["numInstances"])
+        config = checkpoint.get("config", checkpoint.get("modelConfig", {}))
+        num_instances = int(config["numInstances"])
     else:
         world_aabbs, _instance_to_glb, _runtime = load_runtime_meta(args.runtime_meta)
         num_instances = int(world_aabbs.shape[0])
