@@ -99,3 +99,11 @@
 5. 更新正式评价报告和文档索引，并提交代码、测试、计划和可跟踪的小型汇总结果。
 
 在上述条件完成前，不修改默认模型、默认前端阈值或前端资产。
+
+## 执行结果
+
+截至 2026-08-19，本计划已经完整执行：三个随机种子均完成 80 epoch，每个种子均生成 train、calibration、validation capture，三个后验成员使用同 checkpoint 回放，validation 每种子 213 个 pose，并完成 10,000 次按 seed 聚类、seed 内同 pose 配对 bootstrap。所有输出均标记 `testRead=false`，候选集合和真实可见集合未改变。
+
+快速迭代选出的分段线性与小型多层感知机组合在三种子合并结果中优于固定线性双探针，但没有稳定优于无后验长训基础模型。非线性组合相对无后验的 aggregate precision、accuracy、balanced accuracy 和 useful cull 分别变化 `-0.714`、`-1.213`、`-0.517` 和 `-1.224` 个百分点，95% 置信区间均跨零。固定线性双探针相对无后验使 balanced accuracy 显著下降 `2.178` 个百分点，95% 置信区间为 `[-4.967, -0.505]` 个百分点。
+
+因此本轮路线决定为：不晋级线性或非线性尾部分离后验，当前相对最优成员为无后验长训基础模型；默认 checkpoint、阈值和前端资产保持不变。完整结果、逐种子差异、统计区间及未完成的图像/浏览器评价见 [`../evaluation/pvs_train_owned_nonlinear_tail_posterior_longtrain_v1_2026-08-19.md`](../evaluation/pvs_train_owned_nonlinear_tail_posterior_longtrain_v1_2026-08-19.md)。
