@@ -11,6 +11,7 @@ from neural_instance_culling.benchmark.run_pvs_pose_balanced_frontier_visibility
     _formal_specs,
     _rank,
     _round2_configs,
+    _seed_aggregate,
     build_train_command,
 )
 
@@ -62,6 +63,26 @@ class PoseBalancedFrontierRunnerTests(unittest.TestCase):
         self.assertGreater(
             _rank(row(safe=True, precision=0.2, weighted_lcb=0.991)),
             _rank(row(safe=False, precision=0.9, weighted_lcb=0.989)),
+        )
+
+    def test_formal_summary_aggregates_every_seed(self) -> None:
+        rows = []
+        for index, value in enumerate((0.2, 0.3, 0.4)):
+            rows.append(
+                {
+                    "eligibleSafe": index < 2,
+                    "threshold": value,
+                    "aggregate": {"precision": value, "balancedAccuracy": 0.8},
+                    "poseMacro": {"precision": value + 0.1},
+                }
+            )
+        summary = _seed_aggregate(rows)
+        self.assertEqual(summary["memberCount"], 3)
+        self.assertEqual(summary["safeMemberCount"], 2)
+        self.assertFalse(summary["allMembersSafe"])
+        self.assertAlmostEqual(summary["aggregate"]["precision"]["mean"], 0.3)
+        self.assertGreater(
+            summary["aggregate"]["precision"]["populationStd"], 0.0
         )
 
 

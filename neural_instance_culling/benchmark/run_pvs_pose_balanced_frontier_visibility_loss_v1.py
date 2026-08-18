@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 from queue import Empty, Queue
+import statistics
 import subprocess
 import sys
 import time
@@ -541,6 +542,38 @@ def _select(
     return payload
 
 
+def _seed_aggregate(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    if not rows:
+        raise ValueError("formal seed aggregation requires at least one row")
+
+    def summarize(values: Sequence[float]) -> dict[str, float]:
+        finite = [float(value) for value in values]
+        return {
+            "mean": float(statistics.fmean(finite)),
+            "populationStd": float(statistics.pstdev(finite)),
+            "minimum": float(min(finite)),
+            "maximum": float(max(finite)),
+        }
+
+    aggregate_keys = tuple(rows[0]["aggregate"].keys())
+    pose_keys = tuple(rows[0]["poseMacro"].keys())
+    return {
+        "memberCount": len(rows),
+        "safeMemberCount": sum(bool(row["eligibleSafe"]) for row in rows),
+        "allMembersSafe": all(bool(row["eligibleSafe"]) for row in rows),
+        "threshold": summarize([float(row["threshold"]) for row in rows]),
+        "aggregate": {
+            key: summarize([float(row["aggregate"][key]) for row in rows])
+            for key in aggregate_keys
+        },
+        "poseMacro": {
+            key: summarize([float(row["poseMacro"][key]) for row in rows])
+            for key in pose_keys
+        },
+        "testRead": False,
+    }
+
+
 def _round1_specs() -> list[tuple[str, Mapping[str, Any], int, int]]:
     return [("scan_round1", config, SCAN_SEED, SCAN_EPOCHS) for config in ROUND1_CONFIGS]
 
@@ -738,6 +771,7 @@ def main(argv: list[str] | None = None) -> None:
         summary["memberCount"] = len(formal_specs)
         summary["seeds"] = list(FORMAL_SEEDS)
         summary["epochs"] = FORMAL_EPOCHS
+        summary["seedAggregate"] = _seed_aggregate(summary["rows"])
         _write_json(args.benchmark_root / "formal40_summary.json", summary)
 
 
