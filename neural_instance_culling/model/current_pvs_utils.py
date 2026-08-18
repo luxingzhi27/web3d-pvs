@@ -138,9 +138,14 @@ def threshold_grid() -> np.ndarray:
     # Spatially held-out positives can occupy the low-score tail even when
     # calibration still has a safe workpoint.  The grid must cover that tail
     # without turning threshold selection into test-time tuning.
-    low = np.geomspace(1e-8, 1e-3, 17, dtype=np.float32)
+    # A coarse geometric grid can hide real improvements when the safe
+    # boundary lies around 1e-4--1e-3: adjacent values in the former grid were
+    # more than twofold apart.  Model scores are computed once, so a denser
+    # calibration-only grid adds negligible inference cost and avoids freezing
+    # an unnecessarily conservative threshold.
+    low = np.geomspace(1e-8, 1e-2, 97, dtype=np.float32)
     low = np.concatenate([np.asarray([0.0], dtype=np.float32), low])
-    mid = np.asarray([0.001, 0.002, 0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.2], dtype=np.float32)
+    mid = np.asarray([0.0125, 0.015, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.2], dtype=np.float32)
     high = np.linspace(0.22, 0.9, 35, dtype=np.float32)
     return np.unique(np.concatenate([low, mid, high]))
 
@@ -496,9 +501,12 @@ def evaluate_thresholds(
     bootstrap_replicates: int = 0,
     collect_score_stats: bool = False,
     collect_per_pose: bool = False,
+    collect_raw_scores: bool = False,
     instance_to_glb: np.ndarray | None = None,
     glb_bytes: np.ndarray | None = None,
 ) -> list[dict[str, Any]]:
+    if collect_raw_scores and not collect_per_pose:
+        raise ValueError("raw score capture requires per-pose collection")
     model.eval()
     rng = np.random.default_rng(seed)
     th = thresholds.astype(np.float32)
@@ -598,6 +606,9 @@ def evaluate_thresholds(
                     per_pose_values[threshold_index].append({
                         "poseIndex": int(pose_indices[row_index]),
                         "candidateIds": [], "predictedIds": [],
+                        "candidateScores": [] if collect_raw_scores else None,
+                        "targets": [] if collect_raw_scores else None,
+                        "visibleWeights": [] if collect_raw_scores else None,
                         "metrics": dict(empty_metrics),
                     })
             pose_count += 1
@@ -617,6 +628,7 @@ def evaluate_thresholds(
             runtime_features=runtime_features,
             query_center_world=query_center_world,
             viewcell_radius_m=viewcell_radius_m,
+            pose_offsets=batch["pose_offsets"],
         )
         scores = torch.sigmoid(logits).detach().cpu().numpy().reshape(-1)
         target = batch["target"].astype(bool, copy=False)
@@ -721,6 +733,21 @@ def evaluate_thresholds(
                         "poseIndex": int(pose_indices[i]),
                         "candidateIds": candidate_ids.tolist(),
                         "predictedIds": local_pred_ids.tolist(),
+                        "candidateScores": (
+                            scores[start:end].astype(float).tolist()
+                            if collect_raw_scores
+                            else None
+                        ),
+                        "targets": (
+                            target[start:end].astype(np.uint8).tolist()
+                            if collect_raw_scores
+                            else None
+                        ),
+                        "visibleWeights": (
+                            weights[start:end].astype(float).tolist()
+                            if collect_raw_scores
+                            else None
+                        ),
                         "metrics": {
                             "precision": float(precision[threshold_index]),
                             "recall": float(recall[threshold_index]),

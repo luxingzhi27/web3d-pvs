@@ -194,9 +194,117 @@ view-cell 的标签语义是保守并集：只要一个合法 subpose 能看到�
 3. 新增安全裕度效用项是唯一根因；正式关闭该项的模型均值更差。
 4. 简单提高尾部权重、提前启用、移入主目标或缩小排序 top-k 即可修复。
 
+## 2026-08-18 worktree 定向快速迭代
+
+本轮继续使用独立分支 `research/v4-loss-diagnosis`，固定 seed `20260801`、第 24 epoch 的 train-owned 快照、相同 train/calibration/validation 划分、相同候选与 GT。每个快速成员从同一快照训练 4 epoch、每 epoch 100 step；只有训练轮数诊断成员运行 8 epoch。阈值仍由成员自己的 calibration split 冻结，validation 只在该阈值回放，test 未读取。以下结果是单种子因果诊断，不替代正式三 seed 结论，也不修改默认模型和前端资产。
+
+### 区域修正分支的整体漂移
+
+区域条件分支原先可以把一个 pose 内全部候选的分数一起抬高或压低。新增的 `pose_mean` 约束先计算每个候选的原始修正，再减去该 pose 候选集合的修正均值。模型同时输出原始修正和实际应用修正，运行时只增加每 pose 一次标量均值归约，不增加逐实例资产。
+
+| 变体 | weighted recall | precision | accuracy | balanced accuracy | useful cull | bad cull | 平均预测数 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 区域分支未中心化 | 99.409% | 42.876% | 94.630% | 80.084% | 91.791% | 1.588% | 342.6 |
+| 区域分支按 pose 中心化 | 99.352% | 44.367% | 94.864% | 79.705% | 92.072% | 1.635% | 325.6 |
+| 中心化，学习率 `5e-4` | 99.355% | 46.375% | 95.147% | 79.130% | 92.422% | 1.702% | 304.0 |
+
+中心化消除了通过整体移动分数取巧的路径，precision 提高约 1.49 个百分点，平均预测减少约 17 个实例。把学习率从 `2.5e-4` 提高到 `5e-4` 后进一步改善，说明新分支此前确实存在优化不足。学习率 `1e-3` 虽把 ROC-AUC 提高到约 0.936，却压低了重要正例尾部；`2e-3` 发生明显崩溃，继续训练到 8 epoch 也增加了预测量。因此短训存在约 `5e-4` 的优化甜点，延长训练不是直接解法。
+
+### 与 weighted recall 对齐的尾部排序
+
+原 partial-AUC 使用 `log1p(visible_weight)` 作为正例 pair 权重，会压缩重要实例之间的视觉效用差异。新实现允许使用 `visible_weight^p`，并加入两层共享阈值约束：
+
+- 跨 pose 配对：把不同 pose 内已选择的低分正例与高分负例相互比较；
+- 批次全局配对：直接从整个多 pose 批次选择全局最低的重要正例和全局最高负例。
+
+两者都只改变训练损失，不改变模型结构、运行时输入或资产大小。最终较优配置为平方根视觉权重 `p=0.5`、跨 pose 权重 `0.4`、批次全局权重 `0.25`，使用原有 `0.5` 最大有界修正。
+
+| 同起点变体 | 阈值 | weighted recall | 普通 recall | precision | F1 | accuracy | balanced accuracy | useful cull | bad cull | 平均预测数 | GLB 字节削减 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 原有有界局部 partial-AUC | 0.001155 | 99.317% | 60.446% | 47.431% | 53.154% | 95.283% | 78.672% | 92.608% | 1.751% | 291.9 | 45.287% |
+| 平方根权重 + 跨 pose `0.55` | 0.001155 | 99.308% | 60.055% | 47.993% | 53.350% | 95.351% | 78.520% | 92.692% | 1.768% | 286.6 | 45.648% |
+| 平方根权重 + 跨 pose `0.4` + 全局 `0.25` | 0.001155 | 99.307% | 60.022% | 48.074% | 53.388% | 95.360% | 78.509% | 92.703% | 1.770% | 286.0 | 45.804% |
+
+最终快速成员相对同起点局部 partial-AUC：precision 提高 0.64 个百分点，F1 提高 0.23 个百分点，accuracy 提高 0.08 个百分点，平均预测减少 5.9 个实例，GLB 字节削减提高 0.52 个百分点。普通 recall 和 balanced accuracy 略降，bad cull 增加约 0.019 个百分点；因此它是安全约束内的小幅资源收益，不能描述为分类能力全面提升。该成员 calibration weighted-recall LCB 为 `0.990118`，安全余量很薄；validation weighted recall 点估计为 `0.993065`，正式 validation LCB 仍需独立回填。
+
+### 安全阈值台阶和容量反证
+
+当跨 pose 权重从 `0.55` 增加到 `0.60` 时，较高网格阈值 `0.001154782` 的 calibration weighted-recall LCB 跌破 `0.99`，冻结阈值只能退回 `0.001`。这会一次性增加约 27 个预测实例并降低 precision。阈值选择实现先严格过滤 weighted recall/LCB，再最大化 useful cull，审计未发现排名错误；该现象是安全门与离散阈值网格共同形成的真实台阶。
+
+将有界修正幅度从 `0.5` 提高到 `0.75--2.0` 后，ROC-AUC、AP 和极端分位间隔有所改善，但 calibration 为保持安全约束选择了更低阈值，最终 precision 降至约 `44.9%--46.8%`，平均预测增至约 `300--322`。这排除了“只因残差幅度不足”这一解释：更大的修正空间改善平均排序，却没有稳定抬高最重要的低分正例，仍不能解决共享安全阈值附近的尾部重叠。
+
+### 本轮阶段结论
+
+1. 按 pose 零均值是有效且低成本的结构约束，避免区域分支通过整体漂移获得虚假收益。
+2. 与视觉权重对齐、跨 pose 和批次全局极端配对均产生方向一致但幅度较小的收益，证明共享阈值需要全局尾部监督。
+3. 当前最佳单种子快速成员仍存在明显的正例 q0.5% 与负例 q99.5% 重叠，precision 约 48%，不能视为已经解决极端分离问题。
+4. 更高学习率、更长训练、更强跨 pose 权重和更大残差容量都出现安全阈值回退，说明下一步应提高低分重要正例的跨 split 稳定性，而不是继续增加修正幅度或无界调权重。
+5. 该轮保留为训练目标与优化诊断；正式三 seed 训练、paired bootstrap 和图像评价完成前，不修改默认 checkpoint、阈值或前端资产。
+
+### 困难视点采样的首轮反证与修正实验
+
+首轮 train-only 困难视点采样从完整模型的 `best_safe.pt` 继续更新整个运行时可见性网络，使用 `1e-5` 学习率、6 epoch、每 epoch 50 step。它与当前最佳 `global0p25` 的实验对象并不一致：后者从第 24 epoch 快照新增并只训练有界尾部残差头，使用 `5e-4` 学习率、4 epoch、每 epoch 100 step。因此首轮结果只能说明“对完整可见性网络继续做低学习率困难视点微调”无效，不能否定困难视点采样对当前尾部残差头的作用。
+
+| 成员 | validation weighted recall | precision | accuracy | balanced accuracy | useful cull | bad cull | 平均预测数 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 当前参考 `global0p25` | 99.307% | 48.074% | 95.360% | 78.509% | 92.703% | 1.770% | 286.0 |
+| 困难 pose 50%，不加额外尾部项 | 99.430% | 37.957% | 93.655% | 81.562% | 90.632% | 1.404% | 412.1 |
+| 困难 pose 50%，尾部项 `0.01` | 99.430% | 37.951% | 93.653% | 81.568% | 90.629% | 1.403% | 412.3 |
+| 困难 pose 75%，尾部项 `0.01` | 99.431% | 37.952% | 93.654% | 81.564% | 90.630% | 1.403% | 412.2 |
+
+困难视点采样提高了普通 recall 和 balanced accuracy，并降低 bad cull，但通过保留更多候选实现，precision、accuracy、useful cull 和下载量均变差。三个困难采样成员几乎重合，说明额外尾部项在这条完整网络微调路径中没有形成有效分离梯度。
+
+该困难视点续训没有作为后续主线继续扩展。原因是它主要改变样本出现频率，无法回答原 8 维区域摘要是否保留了区分困难正负尾部所需的信息。本轮后续改为先冻结基础模型，直接审计现有视点区域查询特征的可分性，再决定是否训练新的修正头。
+
+### Train-only 双探针尾部救援
+
+后续审计使用基础 checkpoint 的候选分数定义困难尾部，并只在 train split 拟合加权岭分类探针。探针输入是前端查询路径已经能够得到的 108 维区域表示：9 维中心视线查询、64 维 Fourier 均值与标准差、8 维旧边界摘要，以及 27 维区域上下界和跨度。它不读取 test，不改变候选或 GT，也不增加逐实例资产。
+
+困难尾部的 validation ROC-AUC 如下：
+
+| 特征 | 困难尾部 ROC-AUC |
+|---|---:|
+| 中心视线查询 | 85.8% |
+| Fourier 均值与标准差 | 86.0% |
+| 区域上下界与跨度 | 85.8% |
+| 108 维原始组合查询 | 87.8% |
+| 旧 8 维学习摘要 | 52.3% |
+
+旧摘要接近随机分类，说明此前区域关系分支效果不稳定的直接原因之一是压缩瓶颈，而不是原始区域查询完全没有信息。基于该证据构造两个互补探针：平方根视觉权重探针保护高视觉效用的低分正例，普通等权探针保护一般低分正例。两个 train-only 风险证书只决定哪些候选可获得非负 logit 救援，最终 residual 为两支救援门的逐候选最大值；它不能压低任何实例分数，也不扩大已登记的证书支持集合。
+
+固定双探针在完整 213-pose validation 上使用 10,000 次 bootstrap。阈值只由 calibration 冻结：
+
+| 方案 | 阈值 | weighted recall / LCB | precision | accuracy | balanced accuracy | F1 | useful cull | bad cull | 平均预测数 | GLB 字节削减 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 原 `global0p25` | 0.001000 | 99.382% / 99.143% | 45.436% | 95.018% | 79.462% | 52.582% | 92.256% | 1.665% | 314.6 | 43.148% |
+| 固定双探针救援 | 0.001155 | 99.361% / 99.129% | 46.305% | 95.132% | 79.579% | 53.203% | 92.364% | 1.659% | 309.2 | 44.355% |
+
+固定双探针在安全门内同时提高 precision、accuracy、balanced accuracy、F1 和 useful cull，平均预测减少 5.3 个实例，GLB 字节削减提高 1.21 个百分点；weighted recall 和 LCB 分别下降约 0.021 和 0.014 个百分点，但仍严格高于 0.99。该结果说明 108 维区域信息可以识别一部分基础模型漏掉的正例，并允许 calibration 使用略高阈值剔除更多负例。
+
+### 可训练衰减头反证
+
+为判断固定证书中是否仍包含可删除的误救援，本轮新增约 1,794 个共享参数的衰减头。两组探针、标准化参数、风险阈值和基础模型全部冻结；衰减头初始化为 1，只允许把既有救援缩小到 `[0,1]`，不能产生新的支持集合，也不能把 residual 放大。训练入口 smoke 发现并修复了双探针作用域被通用目标覆盖、旧分支日志变量未初始化的控制流错误。修复后仅衰减头可训练，2-step CUDA smoke 损失有限，观测实例覆盖率为 100%，峰值显存约 1.36 GiB。
+
+四张 GPU 并行完成四组 `4 epoch x 100 step` 单种子短训。全部成员在 calibration 和 validation 上通过 weighted-recall 安全门，下面报告冻结 calibration 阈值后的 validation 结果：
+
+| 衰减权重组 | weighted recall / LCB | precision | accuracy | balanced accuracy | F1 | useful cull | bad cull | 平均预测数 | 平均预测 GLB 字节 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 正负等权 | 99.338% / 99.114% | 47.755% | 95.319% | 78.968% | 53.582% | 92.618% | 1.725% | 292.7 | 76.45 MB |
+| 正例保守 | 99.342% / 99.119% | 47.636% | 95.304% | 79.056% | 53.584% | 92.594% | 1.716% | 294.4 | 76.93 MB |
+| 负例优先 | 99.333% / 99.107% | 47.871% | 95.334% | 78.887% | 53.584% | 92.640% | 1.733% | 291.1 | 75.66 MB |
+| 加权保守 | 99.332% / 99.105% | 47.871% | 95.334% | 78.877% | 53.574% | 92.641% | 1.734% | 291.0 | 75.62 MB |
+
+衰减头相对固定双探针继续提高 precision、accuracy、useful cull 并降低预测数量和下载字节，但 validation balanced accuracy 从 79.579% 降到最高 79.056%，普通正例覆盖和 bad cull 也变差。calibration balanced accuracy 同样从固定双探针的 69.853% 降到最高 68.288%，没有满足预先登记的晋级规则。因此不为衰减头追加 10,000 次正式比较，不接入 exporter 或前端；当前保留固定双探针 posterior 作为后续研究候选。
+
+训练日志还显示，四个 epoch 的主探针支持正例每步中位数均为 0，覆盖探针支持正例中位数为 1--4.5；均值主要由少数高覆盖 batch 拉高。现有日志没有记录唯一支持 pose 和实例覆盖，因而该反证严格限定为“普通随机 pose 采样下的当前衰减训练协议未晋级”，不能外推为任何定向采样下衰减机制都无效。若未来重新研究衰减，只允许先构建 train-only 支持 pose 池并记录非零支持 step、唯一 pose 和唯一实例覆盖，不再继续盲扫损失权重。
+
+独立 evaluator 已从 `best_safe.pt` 重建模型并 strict-load 全部权重，冻结阈值及 validation 指标与训练内汇总一致。当前图像评价仍未回填，不能据此宣称 miss-pixel 或真实画面质量已经改善。
+
 ## 后续修复方向
 
-下一版损失不应继续围绕固定低阈值的饱和 sigmoid 调权重。应先采用与分数尺度无关的可微尾部间隔，直接约束每个 pose 或多 pose 批次中的“重要正例低分尾部”高于“负例高分尾部”，并分别按正负类归一化。候选形式为正例加权 q0.5%/q1% 与负例 q99%/q99.5% 的平滑条件风险价值差；其目标与安全工作点的实际失败模式一致。
+下一阶段不再继续扫描衰减头权重。固定双探针已经证明原始区域查询含有旧 8 维摘要丢失的尾部信息，但它仍是基于冻结 checkpoint 的单种子 train-only 后验修正。后续应把这种信息保留机制收敛为可训练、低容量且受证书约束的区域关系表示，并验证三个随机种子，而不是继续扩大通用残差头。
+
+损失也不应继续围绕固定低阈值的饱和 sigmoid 调权重。应采用与分数尺度无关的可微尾部间隔，直接约束每个 pose 或多 pose 批次中的“重要正例低分尾部”高于“负例高分尾部”，并分别按正负类归一化。候选形式为正例加权 q0.5%/q1% 与负例 q99%/q99.5% 的平滑条件风险价值差；其目标与安全工作点的实际失败模式一致。
 
 原 RVL 的数量和 FP 项暂时保留为弱预算正则，并采用分阶段权重，避免初始化时主导全部梯度。待尾部间隔形成后，再启用非饱和的资源/工作区目标。工作阈值采样序列应与模型初始化 seed 解耦，使三 seed 只反映参数和批次随机性。训练日志必须继续记录普通 ROC-AUC、AP、正例 q0.5%/q1%、负例 q99%/q99.5%、尾部间隔、效率/安全梯度比及阈值扰动曲线。
 
@@ -208,7 +316,8 @@ view-cell 的标签语义是保守并集：只要一个合法 subpose 能看到�
 2. 模型的全局 ROC-AUC 为 0.931--0.953，说明整体表征并非完全失效；核心失败集中在安全工作点所依赖的极端正负尾部。
 3. 分层关系、逐实例生存残差、视点区域矩包络和新增安全裕度项在现有消融中均表现出相对作用，但共享的 RVL 核心及尾部作用路径限制了绝对效果。
 4. 损失函数是当前最有证据支持的主要瓶颈：早期概率预算项主导、固定低阈值 sigmoid 饱和、后期效率梯度过弱，以及平均排序项未对齐极端尾部共同造成低阈值和大量 FP。
-5. 三轮最小实验没有产生可晋级模型。默认 checkpoint、前端阈值和资产保持不变；后续应重构尺度无关的尾部间隔目标，再进行正式长训。
+5. 固定双探针是本轮第一个在 weighted-recall 安全门内同时改善主要分类、剔除和资源指标的候选机制；可训练衰减头以普通正例覆盖换取额外效率，未通过 balanced accuracy 晋级条件。
+6. 固定双探针尚未完成三种子训练和图像评价，不能替换默认模型。默认 checkpoint、前端阈值和资产保持不变。
 
 ## 本轮代码与复现入口
 
@@ -216,8 +325,12 @@ view-cell 的标签语义是保守并集：只要一个合法 subpose 能看到�
 
 - `neural_instance_culling/model/common/safety_constraint_utility_loss.py`
 - `neural_instance_culling/model/common/safety_reserve_operating_utility_loss.py`
+- `neural_instance_culling/model/common/dual_probe_rescue_loss.py`
 - `neural_instance_culling/model/train_bounded_relation_survival_moment_safety.py`
 - `neural_instance_culling/model/current_pvs_utils.py`
+- `neural_instance_culling/benchmark/analyze_pvs_difficult_tail_feature_separability.py`
+- `neural_instance_culling/benchmark/scan_pvs_train_owned_tail_residual.py`
+- `neural_instance_culling/benchmark/build_pvs_dual_probe_rescue_spec.py`
 - `neural_instance_culling/benchmark/evaluate_pvs_bounded_relation_survival_moment_v4.py`
 - 对应的 common、trainer 和 evaluator unittest
 
@@ -257,3 +370,7 @@ conda run -n slm_pvs python -m unittest \
 - 第一轮损失短训：`neural_instance_culling/model/out/pvs_v4_loss_miniscan_20260817/`
 - 第二轮尾部路径短训：`neural_instance_culling/model/out/pvs_v4_loss_tail_miniscan_20260817/`
 - 第三轮工作带形状短训：`neural_instance_culling/model/out/pvs_v4_loss_shape_miniscan_20260817/`
+- train-only 加权探针：`neural_instance_culling/benchmark/out/pvs_v4_train_owned_weighted_tail_probes_20260818/`
+- 固定双探针正式比较：`neural_instance_culling/benchmark/out/pvs_v4_train_owned_dual_rescue_formal_20260818/`
+- 衰减头四组短训：`neural_instance_culling/model/out/pvs_v4_dual_probe_attenuation_scan_20260818/`
+- 独立 evaluator 回放：`neural_instance_culling/benchmark/out/pvs_v4_dual_probe_attenuation_scan_balanced_validation_20260818.json`

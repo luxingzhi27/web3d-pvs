@@ -16,9 +16,11 @@
 | HKUST 前端默认运行 | `pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best` | 保留，不因优化实验自动替换 |
 | IFCBench Metropolis 前端运行 | `pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40_best` | 保留，不因优化实验自动替换 |
 | 正式机制参考 | 生存场 + Fourier117 + `rvl_strong_v2` | 只作新计划的控制组，不导入默认前端 |
-| 当前实验入口 | `pvs_bounded_relation_prior_instance_calibrated_moment_safety_reserve_v4` | 实现与 CUDA smoke 已通过，尚未形成效果结论 |
+| 当前实验入口 | `pvs_bounded_relation_prior_instance_calibrated_moment_safety_reserve_v4` | 正式长训已完成；当前集中诊断 weighted-recall 安全边界附近的极端正负尾部分离 |
 
 前端仍使用真实渲染垂直视场角 `60°`，采样、后退相机和模型查询使用 `66°`。浏览器只读取离线固定实例特征和轻量查询头，不运行点云编码、图传播、动态邻居查询或 HZB。
+
+2026-08-18 的独立 worktree 诊断确认，现有 108 维区域查询仍保留困难尾部信息，旧 8 维学习摘要会严重丢失该信息。train-only 固定双探针在单种子 validation 上通过 weighted recall 及其置信下界安全门，并同时小幅改善 precision、accuracy、balanced accuracy、useful cull 和 GLB 字节；后续可训练衰减头虽进一步减少预测量，却降低 balanced accuracy，未晋级。该结果只作为候选机制，不修改默认模型，完整记录见[可见性分数分离问题诊断](../evaluation/pvs_bounded_relation_survival_moment_v4_score_separation_diagnosis_2026-08-17.md)。
 
 ## 最新正式证据
 

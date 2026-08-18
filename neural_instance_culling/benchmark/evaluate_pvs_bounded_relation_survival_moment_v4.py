@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Replay one calibrated relation-prior checkpoint on calibration/validation.
+"""Replay one calibrated relation-prior checkpoint on train/calibration/validation.
 
 This entry point owns the v4 replay contract.  It reads the checkpoint's
 calibration-frozen threshold, queries the fixed geometry and survival table,
-and writes per-pose instance/resource metrics.  It never reads the test
-split and it does not import a legacy evaluator.
+and writes per-pose instance/resource metrics.  Train replay is diagnostic-only:
+it consumes the checkpoint-owned threshold and cannot replace it.  This entry
+point never reads the test split and does not import a legacy evaluator.
 """
 from __future__ import annotations
 
@@ -24,17 +25,28 @@ if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
 
 from common.runtime_meta import load_runtime_meta  # noqa: E402
+from common.threshold_selection import (  # noqa: E402
+    aggregate_weighted_cull_selection_rule,
+    select_aggregate_weighted_cull_workpoint,
+)
 from bounded_relation_survival_moment_model import (  # noqa: E402
     BoundedRelationSurvivalMomentModel,
     GEO_DIM,
     MODEL_SCHEMA,
     RUNTIME_FEATURE_DIM,
+    VIEWCELL_EXTREME_VISIBILITY_INPUT_DIM,
+    VIEWCELL_EXTREME_VISIBILITY_PROJECTION_DIM,
+    VIEWCELL_REGION_CONDITIONED_VISIBILITY_FUSION_DIM,
+    VIEWCELL_REGION_CONDITIONED_VISIBILITY_HEAD_DIM,
+    VIEWCELL_REGION_CONDITIONED_VISIBILITY_PROJECTION_DIM,
+    VIEWCELL_REGION_CONDITIONED_VISIBILITY_REGION_DIM,
 )
-from current_pvs_utils import evaluate_thresholds  # noqa: E402
+from current_pvs_utils import evaluate_thresholds, threshold_grid  # noqa: E402
 from pose_csr_dataset import PoseCSRDataset  # noqa: E402
 
 
 CHECKPOINT_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-checkpoint-v4"
+REPLAY_SPLITS = ("train", "calibration", "validation")
 TRAINING_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-training-v4"
 CALIBRATION_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-calibration-summary-v4"
 EVALUATION_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-v4-evaluation-v1"
@@ -45,6 +57,9 @@ V4_CHECKPOINT_SCHEMA = CHECKPOINT_SCHEMA
 V4_TRAINING_SCHEMA = TRAINING_SCHEMA
 V4_CALIBRATION_SCHEMA = CALIBRATION_SCHEMA
 V4_EVALUATION_SCHEMA = EVALUATION_SCHEMA
+DIAGNOSTIC_RECALIBRATION_SCHEMA = (
+    "pvs-bounded-relation-prior-instance-calibrated-moment-v4-diagnostic-recalibration-v1"
+)
 CORE_METRICS = (
     "precision",
     "recall",
@@ -85,6 +100,216 @@ def _max_frequency_norm_cycles_from_config(config: Mapping[str, Any]) -> float:
             f"and <= {REGISTERED_MAX_NORM_CYCLES:g}"
         )
     return value
+
+
+def _view_residual_constructor_values(
+    config: Mapping[str, Any],
+) -> tuple[float, int]:
+    residual = config.get("viewResidual")
+    if residual is None:
+        return 0.0, 16
+    if not isinstance(residual, Mapping):
+        raise ValueError("v4 checkpoint viewResidual config is invalid")
+    if not bool(residual.get("enabled", False)):
+        return 0.0, 16
+    try:
+        maximum = float(residual["maximumAbsoluteResidual"])
+        hidden_dim = int(residual["hiddenDim"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("enabled viewResidual config is incomplete") from exc
+    if (
+        not np.isfinite(maximum)
+        or maximum <= 0.0
+        or hidden_dim <= 0
+    ):
+        raise ValueError("enabled viewResidual config has invalid dimensions")
+    return maximum, hidden_dim
+
+
+def _boundary_opportunity_constructor_values(
+    config: Mapping[str, Any],
+) -> tuple[int, int, float, float]:
+    opportunity = config.get("boundaryOpportunity")
+    if opportunity is None:
+        return 0, 24, -6.0, 6.0
+    if not isinstance(opportunity, Mapping):
+        raise ValueError("v4 checkpoint boundaryOpportunity config is invalid")
+    if not bool(opportunity.get("enabled", False)):
+        return 0, 24, -6.0, 6.0
+    try:
+        hidden_dim = int(opportunity["hiddenDim"])
+        projection_dim = int(opportunity["projectionDim"])
+        initial_logit = float(opportunity["initialLogit"])
+        maximum_uplift = float(opportunity["maximumLogitUplift"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("enabled boundaryOpportunity config is incomplete") from exc
+    if (
+        hidden_dim <= 0
+        or projection_dim <= 0
+        or not np.isfinite(initial_logit)
+        or not np.isfinite(maximum_uplift)
+        or maximum_uplift <= 0.0
+    ):
+        raise ValueError("enabled boundaryOpportunity config has invalid values")
+    return hidden_dim, projection_dim, initial_logit, maximum_uplift
+
+
+def _boundary_tail_residual_constructor_values(
+    config: Mapping[str, Any],
+) -> tuple[int, int, float, str, str, str, float]:
+    residual = config.get("boundaryTailResidual")
+    if residual is None:
+        return 0, 24, 1.0, "pose_mean", "none", "product", 0.0
+    if not isinstance(residual, Mapping):
+        raise ValueError("v4 checkpoint boundaryTailResidual config is invalid")
+    if not bool(residual.get("enabled", False)):
+        return 0, 24, 1.0, "pose_mean", "none", "product", 0.0
+    try:
+        hidden_dim = int(residual["hiddenDim"])
+        projection_dim = int(residual["projectionDim"])
+        maximum_abs = float(residual["maximumAbsoluteResidual"])
+        centering = str(residual.get("centering", "pose_mean"))
+        shortcut = str(residual.get("shortcut", "none"))
+        fusion = str(residual.get("fusionMode", "product"))
+        output_init_std = float(residual.get("outputInitializationStd", 0.0))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "enabled boundaryTailResidual config is incomplete"
+        ) from exc
+    if (
+        hidden_dim <= 0
+        or projection_dim <= 0
+        or not np.isfinite(maximum_abs)
+        or maximum_abs <= 0.0
+        or centering not in {"pose_mean", "none"}
+        or shortcut not in {"none", "region_linear"}
+        or fusion not in {"product", "affine_region"}
+        or not np.isfinite(output_init_std)
+        or output_init_std < 0.0
+    ):
+        raise ValueError("enabled boundaryTailResidual config has invalid values")
+    return (
+        hidden_dim,
+        projection_dim,
+        maximum_abs,
+        centering,
+        shortcut,
+        fusion,
+        output_init_std,
+    )
+
+
+def _viewcell_extreme_visibility_constructor_value(
+    config: Mapping[str, Any],
+) -> bool:
+    visibility = config.get("viewcellExtremeVisibility")
+    if visibility is None:
+        return False
+    if not isinstance(visibility, Mapping):
+        raise ValueError(
+            "v4 checkpoint viewcellExtremeVisibility config is invalid"
+        )
+    if not bool(visibility.get("enabled", False)):
+        return False
+    try:
+        input_dim = int(visibility["inputDim"])
+        query_aux_key = str(visibility["queryAuxKey"])
+        query_aux_dim = int(visibility["queryAuxFeatureDim"])
+        projection_dim = int(visibility["projectionDim"])
+        activation = str(visibility["activation"])
+        pose_reduction = str(visibility["poseReduction"])
+        bounded_correction = visibility["boundedCorrection"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "enabled viewcellExtremeVisibility config is incomplete"
+        ) from exc
+    if (
+        input_dim != VIEWCELL_EXTREME_VISIBILITY_INPUT_DIM
+        or query_aux_key != "viewcell_extreme_features"
+        or query_aux_dim != input_dim - 10
+        or projection_dim != VIEWCELL_EXTREME_VISIBILITY_PROJECTION_DIM
+        or activation != "SiLU"
+        or pose_reduction != "none"
+        or bounded_correction is not False
+    ):
+        raise ValueError(
+            "enabled viewcellExtremeVisibility config has invalid schema"
+        )
+    return True
+
+
+def _viewcell_region_conditioned_visibility_constructor_value(
+    config: Mapping[str, Any],
+) -> tuple[bool, str]:
+    visibility = config.get("viewcellRegionConditionedVisibility")
+    if visibility is None:
+        return False, "none"
+    if not isinstance(visibility, Mapping):
+        raise ValueError(
+            "v4 checkpoint viewcellRegionConditionedVisibility config is invalid"
+        )
+    if not bool(visibility.get("enabled", False)):
+        return False, "none"
+    try:
+        region_input_dim = int(visibility["regionInputDim"])
+        query_aux_key = str(visibility["queryAuxKey"])
+        query_aux_dim = int(visibility["queryAuxFeatureDim"])
+        hidden_input_dim = int(visibility["hiddenInputDim"])
+        projection_dim = int(visibility["projectionDim"])
+        fusion_dim = int(visibility["fusionDim"])
+        head_hidden_dim = int(visibility["headHiddenDim"])
+        activation = str(visibility["activation"])
+        centering = str(visibility["centering"])
+        pose_reduction = str(visibility["poseReduction"])
+        runtime_reduction = str(visibility["runtimeReduction"])
+        bounded_correction = visibility["boundedCorrection"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "enabled viewcellRegionConditionedVisibility config is incomplete"
+        ) from exc
+    expected_hidden_dim = int(config.get("hiddenDim", 64))
+    fusion = visibility.get(
+        "fusion",
+        "concat(region_projection, hidden_projection, "
+        "region_projection * hidden_projection)",
+    )
+    output = visibility.get("output", "unbounded additive main visibility logit")
+    output_initialization = visibility.get(
+        "outputInitialization", "zero weight and bias"
+    )
+    if (
+        region_input_dim != VIEWCELL_REGION_CONDITIONED_VISIBILITY_REGION_DIM
+        or query_aux_key != "viewcell_extreme_features"
+        or query_aux_dim != 17
+        or hidden_input_dim != expected_hidden_dim
+        or projection_dim != VIEWCELL_REGION_CONDITIONED_VISIBILITY_PROJECTION_DIM
+        or fusion_dim != VIEWCELL_REGION_CONDITIONED_VISIBILITY_FUSION_DIM
+        or head_hidden_dim != VIEWCELL_REGION_CONDITIONED_VISIBILITY_HEAD_DIM
+        or activation != "SiLU"
+        or fusion
+        != "concat(region_projection, hidden_projection, "
+        "region_projection * hidden_projection)"
+        or output != "unbounded additive main visibility logit"
+        or output_initialization != "zero weight and bias"
+        or centering not in {"none", "pose_mean"}
+        or pose_reduction
+        != (
+            "candidate_mean_per_pose"
+            if centering == "pose_mean"
+            else "none"
+        )
+        or runtime_reduction
+        != (
+            "candidate_mean_per_pose"
+            if centering == "pose_mean"
+            else "none"
+        )
+        or bounded_correction is not False
+    ):
+        raise ValueError(
+            "enabled viewcellRegionConditionedVisibility config has invalid schema"
+        )
+    return True, centering
 
 
 def _load_checkpoint(path: Path) -> dict[str, Any]:
@@ -445,6 +670,108 @@ def _summarize_pose_rows(rows: list[dict[str, Any]], lcb_replicates: int = 0, se
     }
 
 
+def _diagnostic_workpoint(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    return max(
+        rows,
+        key=lambda row: (
+            float(row.get("aggregateWeightedRecallLowerConfidenceBound") or -1.0),
+            float(row.get("aggregateWeightedRecall") or -1.0),
+            float(row.get("agg_balanced_accuracy") or 0.0),
+            float(row.get("agg_useful_cull") or 0.0),
+            float(row.get("agg_precision") or 0.0),
+            -float(row.get("avg_pred_count") or 0.0),
+        ),
+    )
+
+
+def _diagnostic_recalibration(
+    args: argparse.Namespace,
+    checkpoint: Mapping[str, Any],
+    checkpoint_path: Path,
+    model: BoundedRelationSurvivalMomentModel,
+    dataset: PoseCSRDataset,
+    runtime_features: torch.Tensor,
+    world_aabbs: np.ndarray,
+    instance_to_glb: np.ndarray,
+    glb_bytes: np.ndarray,
+    device: torch.device,
+) -> dict[str, Any]:
+    """Rescan complete calibration without modifying checkpoint-owned assets."""
+    replicates = int(getattr(args, "recalibration_bootstrap_replicates", 2000))
+    if replicates <= 0:
+        raise ValueError("diagnostic recalibration bootstrap count must be positive")
+    calibration_split = dataset.split("calibration")
+    validation_split = dataset.split("validation")
+    calibration_rows = evaluate_thresholds(
+        model,
+        calibration_split,
+        runtime_features,
+        world_aabbs,
+        device,
+        poses_per_batch=max(1, int(args.poses_per_batch)),
+        max_steps=None,
+        max_candidates_per_pose=0,
+        seed=int(args.seed),
+        thresholds=threshold_grid(),
+        collect_pose_stats=True,
+        allow_candidate_visible_union=False,
+        bootstrap_replicates=replicates,
+        collect_score_stats=True,
+        collect_per_pose=False,
+        instance_to_glb=instance_to_glb,
+        glb_bytes=glb_bytes,
+    )
+    selected = select_aggregate_weighted_cull_workpoint(
+        calibration_rows,
+        target_weighted_recall=0.99,
+        minimum_lower_confidence_bound=0.99,
+    )
+    diagnostic = _diagnostic_workpoint(calibration_rows)
+    chosen = selected if selected is not None else diagnostic
+    validation = None
+    if chosen is not None:
+        validation_rows = evaluate_thresholds(
+            model,
+            validation_split,
+            runtime_features,
+            world_aabbs,
+            device,
+            poses_per_batch=max(1, int(args.poses_per_batch)),
+            max_steps=None,
+            max_candidates_per_pose=0,
+            seed=int(args.seed) + 1,
+            thresholds=np.asarray([float(chosen["threshold"])], dtype=np.float32),
+            collect_pose_stats=True,
+            allow_candidate_visible_union=False,
+            bootstrap_replicates=replicates,
+            collect_score_stats=True,
+            collect_per_pose=False,
+            instance_to_glb=instance_to_glb,
+            glb_bytes=glb_bytes,
+        )
+        validation = validation_rows[0] if validation_rows else None
+    protocol = checkpoint.get("protocol")
+    return {
+        "schema": DIAGNOSTIC_RECALIBRATION_SCHEMA,
+        "status": "safe" if selected is not None else "no_qualified_safety_workpoint",
+        "checkpoint": str(checkpoint_path),
+        "epoch": int(checkpoint.get("epoch", 0)),
+        "seed": int(protocol.get("seed", args.seed)) if isinstance(protocol, Mapping) else int(args.seed),
+        "selectionRule": aggregate_weighted_cull_selection_rule(0.99, 0.99),
+        "bootstrapReplicates": replicates,
+        "calibrationPoseCount": int(calibration_split.pose_indices.size),
+        "validationPoseCount": int(validation_split.pose_indices.size),
+        "selectedSafe": _json_safe_metadata(selected),
+        "diagnostic": _json_safe_metadata(diagnostic),
+        "validationAtSelectedThreshold": _json_safe_metadata(validation),
+        "calibrationThresholdRows": _json_safe_metadata(calibration_rows),
+        "thresholdSource": "complete-calibration-split-diagnostic-rescan",
+        "testRead": False,
+    }
+
+
 @torch.no_grad()
 def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any], checkpoint_path: Path) -> dict[str, Any]:
     if checkpoint.get("schema") != CHECKPOINT_SCHEMA:
@@ -469,10 +796,51 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
     instance_calibration = config.get("instanceCalibration")
     if not isinstance(instance_calibration, Mapping):
         raise ValueError("checkpoint instance calibration config is missing")
+    certificate = config.get("cullCertificate")
+    if certificate is not None and not isinstance(certificate, Mapping):
+        raise ValueError("checkpoint cull certificate config is invalid")
+    certificate_enabled = bool(
+        isinstance(certificate, Mapping) and certificate.get("enabled")
+    )
+    (
+        view_residual_max_abs,
+        view_residual_hidden_dim,
+    ) = (
+        _view_residual_constructor_values(config)
+    )
+    (
+        boundary_opportunity_hidden_dim,
+        boundary_opportunity_projection_dim,
+        boundary_opportunity_initial_logit,
+        boundary_opportunity_max_logit_uplift,
+    ) = _boundary_opportunity_constructor_values(config)
+    (
+        boundary_tail_residual_hidden_dim,
+        boundary_tail_residual_projection_dim,
+        boundary_tail_residual_max_abs,
+        boundary_tail_residual_centering,
+        boundary_tail_residual_shortcut,
+        boundary_tail_residual_fusion,
+        boundary_tail_residual_output_init_std,
+    ) = _boundary_tail_residual_constructor_values(config)
+    viewcell_extreme_visibility_enabled = (
+        _viewcell_extreme_visibility_constructor_value(config)
+    )
+    (
+        viewcell_region_conditioned_visibility_enabled,
+        viewcell_region_conditioned_visibility_centering,
+    ) = (
+        _viewcell_region_conditioned_visibility_constructor_value(config)
+    )
+    dual_probe_rescue = config.get("dualProbeRescue")
+    if dual_probe_rescue is not None and not isinstance(dual_probe_rescue, Mapping):
+        raise ValueError("checkpoint dual-probe-rescue config is invalid")
     device = torch.device("cuda" if args.device == "cuda" or (args.device == "auto" and torch.cuda.is_available()) else "cpu")
     model = BoundedRelationSurvivalMomentModel(
         num_instances=num_instances,
         num_glbs=int(config.get("numGlbs", int(instance_to_glb.max()) + 1 if instance_to_glb.size else 0)),
+        relation_hidden_dim=int(config.get("relationHiddenDim", 64)),
+        hidden_dim=int(config.get("hiddenDim", 64)),
         relation_source=str(config.get("relationSource")),
         spectral_mode=str(config.get("spectralMode")),
         depth_q01=float(depth["q01"]),
@@ -485,6 +853,58 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         ),
         sparse_instance_penalty=float(
             instance_calibration.get("sparseInstancePenalty")
+        ),
+        cull_certificate_max_suppression=(
+            float(certificate.get("maximumSuppressionLogit"))
+            if certificate_enabled
+            else 0.0
+        ),
+        cull_certificate_initial_suppression=(
+            float(certificate.get("initialSuppressionLogit"))
+            if certificate_enabled
+            else 0.05
+        ),
+        cull_certificate_hidden_dim=(
+            int(certificate.get("hiddenDim", 0))
+            if certificate_enabled
+            else 0
+        ),
+        cull_certificate_input_mode=(
+            str(certificate.get("inputMode", "hidden"))
+            if certificate_enabled
+            else "hidden"
+        ),
+        view_residual_max_abs=view_residual_max_abs,
+        view_residual_hidden_dim=view_residual_hidden_dim,
+        boundary_opportunity_hidden_dim=boundary_opportunity_hidden_dim,
+        boundary_opportunity_projection_dim=boundary_opportunity_projection_dim,
+        boundary_opportunity_initial_logit=boundary_opportunity_initial_logit,
+        boundary_opportunity_max_logit_uplift=(
+            boundary_opportunity_max_logit_uplift
+        ),
+        boundary_tail_residual_hidden_dim=boundary_tail_residual_hidden_dim,
+        boundary_tail_residual_projection_dim=(
+            boundary_tail_residual_projection_dim
+        ),
+        boundary_tail_residual_max_abs=boundary_tail_residual_max_abs,
+        boundary_tail_residual_centering=boundary_tail_residual_centering,
+        boundary_tail_residual_shortcut=boundary_tail_residual_shortcut,
+        boundary_tail_residual_fusion=boundary_tail_residual_fusion,
+        boundary_tail_residual_output_init_std=(
+            boundary_tail_residual_output_init_std
+        ),
+        viewcell_extreme_visibility_enabled=viewcell_extreme_visibility_enabled,
+        viewcell_region_conditioned_visibility_enabled=(
+            viewcell_region_conditioned_visibility_enabled
+        ),
+        viewcell_region_conditioned_visibility_centering=(
+            viewcell_region_conditioned_visibility_centering
+        ),
+        dual_probe_rescue=(
+            dict(dual_probe_rescue)
+            if isinstance(dual_probe_rescue, Mapping)
+            and bool(dual_probe_rescue.get("enabled", False))
+            else None
         ),
     ).to(device)
     model.set_instance_world_aabbs(torch.from_numpy(world_aabbs).to(device))
@@ -531,6 +951,23 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         raise ValueError("checkpoint fused coefficients disagree with prior plus residual")
     runtime_features = torch.cat([torch.from_numpy(geometry).to(device), coefficients.reshape(num_instances, -1)], dim=-1)
     dataset = PoseCSRDataset(Path(args.dataset_dir).resolve(), num_instances=num_instances)
+    num_glbs = int(instance_to_glb.max()) + 1 if instance_to_glb.size else 0
+    glb_bytes = _load_glb_bytes(
+        Path(args.glb_index).resolve(), Path(args.glb_root).resolve(), num_glbs
+    )
+    if bool(getattr(args, "diagnostic_recalibrate", False)):
+        return _diagnostic_recalibration(
+            args,
+            checkpoint,
+            checkpoint_path,
+            model,
+            dataset,
+            runtime_features,
+            world_aabbs,
+            instance_to_glb,
+            glb_bytes,
+            device,
+        )
     split_name = str(args.split)
     if split_name.lower() == "test":
         raise ValueError("test is not allowed in the v4 evaluator")
@@ -573,8 +1010,6 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         if int(relation_meta.get("numInstances", -1)) != num_instances:
             raise ValueError("v4 replay relation instance count disagrees with checkpoint")
 
-    num_glbs = int(instance_to_glb.max()) + 1 if instance_to_glb.size else 0
-    glb_bytes = _load_glb_bytes(Path(args.glb_index).resolve(), Path(args.glb_root).resolve(), num_glbs)
     started = time.perf_counter()
     rows = evaluate_thresholds(
         model,
@@ -592,6 +1027,7 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         bootstrap_replicates=0,
         collect_score_stats=True,
         collect_per_pose=True,
+        collect_raw_scores=bool(getattr(args, "persist_scores", False)),
     )
     if len(rows) != 1 or not isinstance(rows[0].get("_per_pose"), list):
         raise ValueError("v4 evaluator did not produce per-pose rows")
@@ -625,6 +1061,21 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
             "candidateCount": int(candidate_ids.size),
             "candidateIds": candidate_ids.astype(int).tolist() if args.persist_ids else None,
             "predictedIds": predicted_ids.astype(int).tolist() if args.persist_ids else None,
+            "candidateScores": (
+                raw.get("candidateScores")
+                if bool(getattr(args, "persist_scores", False))
+                else None
+            ),
+            "targets": (
+                raw.get("targets")
+                if bool(getattr(args, "persist_scores", False))
+                else None
+            ),
+            "visibleWeights": (
+                raw.get("visibleWeights")
+                if bool(getattr(args, "persist_scores", False))
+                else None
+            ),
             "metrics": metrics,
         })
     pose_array = np.asarray(split.pose_indices, dtype="<i8")
@@ -712,15 +1163,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--glb-index", type=Path, required=True)
     parser.add_argument("--glb-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--split", choices=("calibration", "validation"), default="validation")
+    parser.add_argument("--split", choices=REPLAY_SPLITS, default="validation")
     parser.add_argument("--poses-per-batch", type=int, default=2)
     parser.add_argument("--seed", type=int, default=20260801)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--allow-unsafe-diagnostic", action="store_true")
     parser.add_argument("--persist-ids", action="store_true")
+    parser.add_argument("--persist-scores", action="store_true")
     parser.add_argument("--relation-dir", type=Path, default=None)
     parser.add_argument("--model-meta", type=Path, default=None)
     parser.add_argument("--calibration", type=Path, default=None)
+    parser.add_argument("--diagnostic-recalibrate", action="store_true")
+    parser.add_argument("--recalibration-bootstrap-replicates", type=int, default=2000)
     return parser.parse_args(argv)
 
 
@@ -728,7 +1182,18 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     payload = evaluate_checkpoint(args)
     _write_json(args.output.resolve(), payload)
-    print(json.dumps({"output": str(args.output.resolve()), "poseCount": payload["poseCount"], "testRead": False}, ensure_ascii=False))
+    print(
+        json.dumps(
+            {
+                "output": str(args.output.resolve()),
+                "poseCount": payload.get("poseCount"),
+                "calibrationPoseCount": payload.get("calibrationPoseCount"),
+                "validationPoseCount": payload.get("validationPoseCount"),
+                "testRead": False,
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 if __name__ == "__main__":

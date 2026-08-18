@@ -168,6 +168,7 @@ def rvl_strong_v2_visibility_loss(
     fp_normalization: str = "positive",
     rank_weight: float = 0.45,
     rank_negative_top_k: int = 256,
+    budget_scale: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compact registered control matching the current rvl_strong_v2 intent."""
     if float(bce_positive_weight) <= 0.0 or float(tversky_fn_weight) <= 0.0:
@@ -176,6 +177,8 @@ def rvl_strong_v2_visibility_loss(
         raise ValueError("RVL count weight must be non-negative")
     if float(rank_weight) < 0.0 or int(rank_negative_top_k) <= 0:
         raise ValueError("RVL rank weight must be non-negative and top-k must be positive")
+    if not 0.0 <= float(budget_scale) <= 1.0:
+        raise ValueError("RVL budget scale must lie in [0, 1]")
     if str(fp_normalization) not in {"positive", "negative", "candidate"}:
         raise ValueError("RVL FP normalization must be positive, negative, or candidate")
     scores = torch.sigmoid(logits.float().view(-1))
@@ -241,10 +244,15 @@ def rvl_strong_v2_visibility_loss(
     loss = (
         0.28 * parts["lossBce"]
         + 1.35 * parts["lossTversky"]
-        + float(count_weight) * parts["lossCount"]
+        + float(budget_scale) * float(count_weight) * parts["lossCount"]
         + float(rank_weight) * parts["lossRank"]
-        + 0.12 * (0.25 * parts["lossRvlFn"] + parts["lossRvlFp"])
+        + 0.12
+        * (
+            0.25 * parts["lossRvlFn"]
+            + float(budget_scale) * parts["lossRvlFp"]
+        )
     )
+    parts["rvlBudgetScale"] = logits.new_tensor(float(budget_scale))
     parts["lossRvlStrongV2"] = loss
     return loss, parts
 

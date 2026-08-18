@@ -216,15 +216,73 @@ class PoseCSRSplit:
         rng: np.random.Generator,
         max_steps: int | None,
         include_empty: bool = False,
+        hard_pose_indices: np.ndarray | None = None,
+        hard_pose_fraction: float = 0.0,
     ):
         poses_per_batch = max(1, int(poses_per_batch))
         source_indices = self.pose_indices if include_empty else self.pose_indices_with_visible
         if source_indices.size == 0:
             return
+        if not 0.0 <= float(hard_pose_fraction) <= 1.0:
+            raise ValueError("hard pose fraction must lie in [0, 1]")
+        if float(hard_pose_fraction) > 0.0:
+            hard = np.unique(
+                np.asarray(hard_pose_indices, dtype=np.int64).reshape(-1)
+                if hard_pose_indices is not None
+                else np.zeros((0,), dtype=np.int64)
+            )
+            if hard.size == 0 or np.setdiff1d(hard, source_indices).size:
+                raise ValueError("hard poses must be a non-empty subset of the split")
+            step_limit = (
+                max(1, int(max_steps))
+                if max_steps is not None
+                else math.ceil(source_indices.size / poses_per_batch)
+            )
+            hard_count = min(
+                poses_per_batch,
+                max(1, int(round(float(hard_pose_fraction) * poses_per_batch))),
+            )
+            uniform_count = poses_per_batch - hard_count
+            for _step in range(step_limit):
+                chosen_hard = rng.choice(
+                    hard,
+                    size=hard_count,
+                    replace=hard.size < hard_count,
+                ).astype(np.int64, copy=False)
+                if uniform_count > 0:
+                    uniform_pool = np.setdiff1d(
+                        source_indices,
+                        hard,
+                        assume_unique=True,
+                    )
+                    if uniform_pool.size == 0:
+                        uniform_pool = np.setdiff1d(
+                            source_indices,
+                            np.unique(chosen_hard),
+                            assume_unique=True,
+                        )
+                    if uniform_pool.size == 0:
+                        uniform_pool = source_indices
+                    chosen_uniform = rng.choice(
+                        uniform_pool,
+                        size=uniform_count,
+                        replace=uniform_pool.size < uniform_count,
+                    ).astype(np.int64, copy=False)
+                    batch = np.concatenate([chosen_hard, chosen_uniform])
+                else:
+                    batch = chosen_hard
+                yield rng.permutation(batch)
+            return
         if max_steps is not None:
-            replace = source_indices.size < poses_per_batch
-            for _step in range(max(1, int(max_steps))):
-                yield rng.choice(source_indices, size=poses_per_batch, replace=replace)
+            step_limit = max(1, int(max_steps))
+            yielded = 0
+            while yielded < step_limit:
+                order = rng.permutation(source_indices)
+                for start in range(0, order.size, poses_per_batch):
+                    if yielded >= step_limit:
+                        break
+                    yield order[start:min(order.size, start + poses_per_batch)]
+                    yielded += 1
             return
         order = rng.permutation(source_indices)
         for start in range(0, order.size, poses_per_batch):

@@ -10,10 +10,104 @@ import numpy as np
 from neural_instance_culling.model.pose_csr_dataset import (
     DIRECTIONAL_POSE_DTYPE,
     PoseCSRDataset,
+    PoseCSRSplit,
 )
 
 
 class PoseCSRViewCellQueryContractTest(unittest.TestCase):
+    def test_capped_pose_set_batches_do_not_repeat_before_exhaustion(self) -> None:
+        class DatasetStub:
+            visible_counts = np.ones((20,), dtype=np.int64)
+            frustum_counts = np.ones((20,), dtype=np.int64)
+
+        split = PoseCSRSplit(
+            DatasetStub(),
+            "diagnostic",
+            pose_indices=np.arange(20, dtype=np.int64),
+        )
+        batches = list(
+            split.pose_set_batches(
+                4,
+                np.random.default_rng(20260817),
+                max_steps=3,
+                include_empty=False,
+            )
+        )
+        selected = np.concatenate(batches)
+        self.assertEqual(selected.size, 12)
+        self.assertEqual(np.unique(selected).size, 12)
+
+    def test_capped_pose_set_batches_repeat_only_after_a_full_cycle(self) -> None:
+        class DatasetStub:
+            visible_counts = np.ones((5,), dtype=np.int64)
+            frustum_counts = np.ones((5,), dtype=np.int64)
+
+        split = PoseCSRSplit(
+            DatasetStub(),
+            "diagnostic",
+            pose_indices=np.arange(5, dtype=np.int64),
+        )
+        selected = np.concatenate(
+            list(
+                split.pose_set_batches(
+                    2,
+                    np.random.default_rng(20260817),
+                    max_steps=4,
+                    include_empty=False,
+                )
+            )
+        )
+        self.assertEqual(selected.size, 7)
+        self.assertEqual(np.unique(selected[:5]).size, 5)
+
+    def test_capped_pose_set_batches_keep_a_short_last_batch(self) -> None:
+        class DatasetStub:
+            visible_counts = np.ones((5,), dtype=np.int64)
+            frustum_counts = np.ones((5,), dtype=np.int64)
+
+        split = PoseCSRSplit(
+            DatasetStub(),
+            "diagnostic",
+            pose_indices=np.arange(5, dtype=np.int64),
+        )
+        batches = list(
+            split.pose_set_batches(
+                2,
+                np.random.default_rng(20260817),
+                max_steps=3,
+                include_empty=False,
+            )
+        )
+        self.assertEqual([batch.size for batch in batches], [2, 2, 1])
+        self.assertEqual(np.unique(np.concatenate(batches)).size, 5)
+
+    def test_hard_pose_batches_mix_registered_tail_and_uniform_poses(self) -> None:
+        class DatasetStub:
+            visible_counts = np.ones((20,), dtype=np.int64)
+            frustum_counts = np.ones((20,), dtype=np.int64)
+
+        split = PoseCSRSplit(
+            DatasetStub(),
+            "diagnostic",
+            pose_indices=np.arange(20, dtype=np.int64),
+        )
+        hard = np.asarray([0, 1, 2, 3], dtype=np.int64)
+        batches = list(
+            split.pose_set_batches(
+                4,
+                np.random.default_rng(20260818),
+                max_steps=8,
+                hard_pose_indices=hard,
+                hard_pose_fraction=0.5,
+            )
+        )
+
+        self.assertEqual(len(batches), 8)
+        for batch in batches:
+            self.assertEqual(batch.size, 4)
+            self.assertEqual(np.unique(batch).size, 4)
+            self.assertEqual(np.isin(batch, hard).sum(), 2)
+
     def test_batch_keeps_candidate_camera_and_query_center_separate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
