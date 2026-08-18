@@ -23,7 +23,6 @@ from typing import Any, Mapping, Sequence
 ROOT = Path(__file__).resolve().parents[2]
 TRAIN = ROOT / "neural_instance_culling/model/train_bounded_relation_survival_moment_safety.py"
 EVALUATE = ROOT / "neural_instance_culling/benchmark/evaluate_pvs_bounded_relation_survival_moment_v4.py"
-FIT_LINEAR = ROOT / "neural_instance_culling/benchmark/analyze_pvs_difficult_tail_feature_separability.py"
 FIT_NONLINEAR = ROOT / "neural_instance_culling/benchmark/fit_pvs_train_owned_tail_nonlinear_probe.py"
 SCAN = ROOT / "neural_instance_culling/benchmark/scan_pvs_train_owned_tail_residual.py"
 SUMMARIZE = ROOT / "neural_instance_culling/benchmark/summarize_pvs_train_owned_tail_nonlinear_posterior_longtrain.py"
@@ -125,8 +124,7 @@ def preflight(shared_root: Path) -> dict[str, Any]:
     _required_dir(paths["glb_root"], "GLB asset root")
     _required_file(TRAIN, "training entry")
     _required_file(EVALUATE, "evaluation entry")
-    _required_file(FIT_LINEAR, "linear probe entry")
-    _required_file(FIT_NONLINEAR, "nonlinear probe entry")
+    _required_file(FIT_NONLINEAR, "linear/nonlinear probe entry")
     _required_file(SCAN, "posterior scan entry")
     _required_file(SUMMARIZE, "three-seed summary entry")
     sidecar = _required_dir(
@@ -531,16 +529,15 @@ def run_postprocess(
         }
         fit_jobs: list[tuple[str, list[str], Path]] = []
         for role, power in (("linear_primary", "0.5"), ("linear_coverage", "0.0")):
-            command = [sys.executable, str(FIT_LINEAR)] + _probe_common(
+            command = [sys.executable, str(FIT_NONLINEAR)] + _probe_common(
                 paths, captures, checkpoint, probes[role]
             )
             command.extend(
                 [
-                    "--probe-fit-split", "train",
-                    "--probe-fit-tail-source", "train",
+                    "--probe-type", "linear",
                     "--ridge", "0.001",
                     "--max-probe-samples", "-1",
-                    "--probe-sample-weight-power", power,
+                    "--sample-weight-power", power,
                 ]
             )
             fit_jobs.append((f"fit_{role}", command, probes[role]))

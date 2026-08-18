@@ -6,7 +6,10 @@ normalization, nonlinear basis, and finite-sample rescue certificate are fitted
 from train.  Calibration freezes only the diagnostic probe threshold; validation
 is replay-only and test is rejected by construction.
 
-Two exportable probe families are supported:
+Three exportable probe families are supported:
+
+``linear``
+    The fixed ridge-linear reference on standardized 108D features.
 
 ``hinge``
     A ridge-regularized additive piecewise-linear model.  It adds train-fixed
@@ -54,7 +57,7 @@ from neural_instance_culling.model.pose_csr_dataset import PoseCSRDataset
 
 
 SCHEMA = "pvs-difficult-tail-feature-separability-v1"
-PROBE_TYPES = ("hinge", "mlp")
+PROBE_TYPES = ("linear", "hinge", "mlp")
 PROBE_LABEL_SEMANTICS = "1=high_score_negative, 0=low_score_positive"
 
 
@@ -165,6 +168,44 @@ def _fit_hinge(
         "parameterCount": int(coefficients.size),
     }
     return record, predict
+
+
+def _fit_linear(
+    values: np.ndarray,
+    labels: np.ndarray,
+    sample_weights: np.ndarray,
+    *,
+    mean: np.ndarray,
+    scale: np.ndarray,
+    ridge: float,
+) -> tuple[dict[str, Any], Any]:
+    standardized = (values - mean[None, :]) / scale[None, :]
+    design = np.concatenate(
+        [np.ones((standardized.shape[0], 1), dtype=np.float64), standardized], axis=1
+    )
+    regularizer = np.eye(design.shape[1], dtype=np.float64) * float(ridge)
+    regularizer[0, 0] = 0.0
+    weighted_design = design * sample_weights[:, None]
+    normal = design.T @ weighted_design + regularizer
+    rhs = design.T @ (sample_weights * labels.astype(np.float64))
+    try:
+        coefficients = np.linalg.solve(normal, rhs)
+    except np.linalg.LinAlgError:
+        coefficients = np.linalg.lstsq(normal, rhs, rcond=None)[0]
+
+    def predict(raw: np.ndarray) -> np.ndarray:
+        standardized_raw = (raw - mean[None, :]) / scale[None, :]
+        return coefficients[0] + standardized_raw @ coefficients[1:]
+
+    return (
+        {
+            "probeType": "standardized_ridge_linear",
+            "ridge": float(ridge),
+            "coefficients": [float(value) for value in coefficients],
+            "parameterCount": int(coefficients.size),
+        },
+        predict,
+    )
 
 
 def _fit_mlp(
@@ -288,7 +329,16 @@ def fit_probe(
         sample_weight_power=float(sample_weight_power),
         seed=int(seed),
     )
-    if probe_type == "hinge":
+    if probe_type == "linear":
+        parameters, predict = _fit_linear(
+            values,
+            labels,
+            sample_weights,
+            mean=mean,
+            scale=scale,
+            ridge=float(ridge),
+        )
+    elif probe_type == "hinge":
         knots = np.unique(np.asarray(tuple(hinge_knots), dtype=np.float64))
         if knots.size == 0 or not bool(np.isfinite(knots).all()):
             raise ValueError("hinge knots must be finite and non-empty")

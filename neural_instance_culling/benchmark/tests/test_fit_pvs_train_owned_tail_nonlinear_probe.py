@@ -22,6 +22,26 @@ def _synthetic(seed: int, count: int) -> tuple[np.ndarray, np.ndarray, np.ndarra
 
 
 class TrainOwnedTailNonlinearProbeTest(unittest.TestCase):
+    def test_linear_fit_matches_runtime_probe_schema(self) -> None:
+        train = _synthetic(21, 240)
+        calibration = _synthetic(22, 100)
+        validation = _synthetic(23, 100)
+        record = fit_probe(
+            train[0], train[1], train[2],
+            calibration[0], calibration[1],
+            validation[0], validation[1],
+            probe_type="linear",
+            sample_weight_power=0.5,
+            max_samples=-1,
+            ridge=1e-3,
+            seed=29,
+            device="cpu",
+        )
+        self.assertEqual(record["probeType"], "standardized_ridge_linear")
+        self.assertEqual(record["parameterCount"], 5)
+        self.assertEqual(len(record["coefficients"]), 5)
+        self.assertEqual(record["riskCertificates"]["sourceSplit"], "train")
+
     def test_hinge_fit_is_train_owned_and_loader_compatible(self) -> None:
         train = _synthetic(1, 240)
         calibration = _synthetic(2, 100)
