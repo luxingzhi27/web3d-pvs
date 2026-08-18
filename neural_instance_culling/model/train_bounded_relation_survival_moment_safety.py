@@ -67,6 +67,9 @@ from common.viewcell_tail_boundary_deficit_loss import (  # noqa: E402
     viewcell_tail_boundary_deficit_loss,
 )
 from common.occlusion_edges import glb_priority_loss  # noqa: E402
+from common.pose_balanced_frontier_loss import (  # noqa: E402
+    pose_balanced_frontier_visibility_loss,
+)
 from common.provenance import relation_artifact_digest  # noqa: E402
 from common.runtime_meta import load_runtime_meta  # noqa: E402
 from common.safety_reserve_operating_utility_loss import (  # noqa: E402
@@ -2457,7 +2460,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--loss-variant",
-        choices=("safety_reserve", "normalized_rvl"),
+        choices=(
+            "safety_reserve",
+            "normalized_rvl",
+            "pose_balanced_frontier",
+        ),
         default="safety_reserve",
     )
     parser.add_argument("--train-split", default="auto")
@@ -2502,6 +2509,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--efficiency-primary-fraction", type=float, default=0.0)
     parser.add_argument("--rvl-rank-weight", type=float, default=0.45)
     parser.add_argument("--rvl-rank-negative-top-k", type=int, default=256)
+    parser.add_argument("--frontier-loss-weight", type=float, default=0.20)
+    parser.add_argument(
+        "--frontier-positive-mass-fraction", type=float, default=0.005
+    )
+    parser.add_argument("--frontier-positive-count-cap", type=int, default=64)
+    parser.add_argument("--frontier-negative-fraction", type=float, default=0.01)
+    parser.add_argument("--frontier-negative-count-cap", type=int, default=256)
+    parser.add_argument("--frontier-margin", type=float, default=0.50)
+    parser.add_argument("--frontier-temperature", type=float, default=0.25)
+    parser.add_argument(
+        "--frontier-positive-importance-floor", type=float, default=0.50
+    )
+    parser.add_argument(
+        "--frontier-positive-importance-power", type=float, default=0.50
+    )
     parser.add_argument("--instance-exposure-balance-weight", type=float, default=0.0)
     parser.add_argument("--instance-exposure-balance-power", type=float, default=0.5)
     parser.add_argument("--instance-exposure-balance-max-weight", type=float, default=8.0)
@@ -2964,6 +2986,35 @@ def main() -> None:
         or (args.operating_threshold_seed is not None and args.operating_threshold_seed < 0)
     ):
         raise ValueError("RVL diagnostic weights or efficiency warmup are invalid")
+    frontier_scalars = (
+        args.frontier_loss_weight,
+        args.frontier_positive_mass_fraction,
+        args.frontier_negative_fraction,
+        args.frontier_margin,
+        args.frontier_temperature,
+        args.frontier_positive_importance_floor,
+        args.frontier_positive_importance_power,
+    )
+    if not all(math.isfinite(float(value)) for value in frontier_scalars):
+        raise ValueError("pose-balanced frontier parameters must be finite")
+    if (
+        args.frontier_loss_weight < 0.0
+        or not 0.0 < args.frontier_positive_mass_fraction <= 1.0
+        or args.frontier_positive_count_cap <= 0
+        or not 0.0 < args.frontier_negative_fraction <= 1.0
+        or args.frontier_negative_count_cap <= 0
+        or args.frontier_margin < 0.0
+        or args.frontier_temperature <= 0.0
+        or not 0.0 <= args.frontier_positive_importance_floor <= 1.0
+        or not 0.0 < args.frontier_positive_importance_power <= 1.0
+    ):
+        raise ValueError("pose-balanced frontier parameters are invalid")
+    if args.loss_variant == "pose_balanced_frontier" and (
+        args.refinement_scope != "all" or query_tail_enabled
+    ):
+        raise ValueError(
+            "pose-balanced frontier training requires full-model scope and no query-tail head"
+        )
     if args.safety_boundary_ema_decay > 0.0 and (
         args.safety_boundary_scope != "batch"
         or args.safety_boundary_excess_weight <= 0.0
@@ -3484,6 +3535,7 @@ def main() -> None:
         "lossVariant": args.loss_variant,
         "initialization": initialization or {"mode": "from-scratch"},
         "rvlDiagnostics": {
+            "enabled": args.loss_variant != "pose_balanced_frontier",
             "bcePositiveWeight": float(args.rvl_bce_positive_weight),
             "tverskyFnWeight": float(args.rvl_tversky_fn_weight),
             "countWeight": float(args.rvl_count_weight),
@@ -3497,6 +3549,29 @@ def main() -> None:
             "budgetInitialScale": float(args.rvl_budget_initial_scale),
             "budgetStartFraction": float(args.rvl_budget_start_fraction),
             "budgetRampFraction": float(args.rvl_budget_ramp_fraction),
+        },
+        "poseBalancedFrontierLoss": {
+            "enabled": args.loss_variant == "pose_balanced_frontier",
+            "visibilityTerms": (
+                "pose-balanced BCE + dynamic weighted safety-frontier separation"
+            ),
+            "frontierWeight": float(args.frontier_loss_weight),
+            "positiveMassFraction": float(
+                args.frontier_positive_mass_fraction
+            ),
+            "positiveCountCap": int(args.frontier_positive_count_cap),
+            "negativeTopFraction": float(args.frontier_negative_fraction),
+            "negativeCountCap": int(args.frontier_negative_count_cap),
+            "margin": float(args.frontier_margin),
+            "temperature": float(args.frontier_temperature),
+            "positiveImportanceFloor": float(
+                args.frontier_positive_importance_floor
+            ),
+            "positiveImportancePower": float(
+                args.frontier_positive_importance_power
+            ),
+            "selectionSource": "current detached final visibility logits per train pose",
+            "testRead": False,
         },
         "refinementScope": refinement_scope_meta,
         "dualProbeRescue": dual_probe_rescue_meta,
@@ -4663,104 +4738,158 @@ def main() -> None:
                 if args.refinement_scope == "boundary_opportunity"
                 else logits
             )
-            _combined_visibility, visibility_parts = safety_reserve_operating_utility_loss(
-                visibility_training_logits,
-                target,
-                pose_offsets,
-                visible_weights,
-                visible_hit_rates,
-                instance_ids,
-                model.instance_to_glb,
-                glb_bytes,
-                train_seed=operating_threshold_seed,
-                global_step=global_step - 1,
-                total_optimizer_steps=total_steps,
-                split="train",
-                efficiency_logits=efficiency_logits,
-                boundary_tail_weight=args.boundary_tail_weight if use_safety_reserve else 0.0,
-                negative_band_weight=args.negative_band_weight if use_safety_reserve else 0.0,
-                threshold_temperature=args.negative_band_temperature,
-                negative_band_shape=args.negative_band_shape,
-                glb_resource_weight=args.glb_resource_weight if use_safety_reserve else 0.0,
-                warmup_fraction=args.efficiency_warmup_fraction,
-                rvl_bce_positive_weight=args.rvl_bce_positive_weight,
-                rvl_tversky_fn_weight=args.rvl_tversky_fn_weight,
-                rvl_count_weight=args.rvl_count_weight,
-                rvl_fp_normalization=args.rvl_fp_normalization,
-                rvl_rank_weight=args.rvl_rank_weight,
-                rvl_rank_negative_top_k=args.rvl_rank_negative_top_k,
-                positive_tail_compactness_weight=(
-                    args.positive_tail_compactness_weight
-                    if use_safety_reserve
-                    else 0.0
-                ),
-                positive_tail_mass_fraction=args.positive_tail_mass_fraction,
-                positive_tail_reference_quantile=(
-                    args.positive_tail_reference_quantile
-                ),
-                positive_tail_allowed_relative_gap=(
-                    args.positive_tail_allowed_relative_gap
-                ),
-                positive_tail_temperature=args.positive_tail_temperature,
-                positive_tail_ramp_fraction=args.positive_tail_ramp_fraction,
-                tail_separation_weight=(
-                    args.tail_separation_weight if use_safety_reserve else 0.0
-                ),
-                tail_selection_logits=_extreme_tail_selection_logits(
-                    args.tail_selection_source,
-                    visibility_training_logits,
-                    aux["query_features"],
-                    initial_visibility_weight,
-                    initial_visibility_bias,
-                ),
-                tail_positive_fraction=args.tail_positive_fraction,
-                tail_negative_fraction=args.tail_negative_fraction,
-                tail_margin=args.tail_margin,
-                tail_temperature=args.tail_temperature,
-                tail_pose_cvar_fraction=args.tail_pose_cvar_fraction,
-                tail_pose_cvar_weight=args.tail_pose_cvar_weight,
-                tail_positive_importance_mix=args.tail_positive_importance_mix,
-                tail_positive_gradient_scale=args.tail_positive_gradient_scale,
-                coverage_tail_separation_weight=(
-                    args.coverage_tail_separation_weight
-                    if use_safety_reserve
-                    else 0.0
-                ),
-                coverage_tail_positive_fraction=(
-                    args.coverage_tail_positive_fraction
-                ),
-                tail_objective_group=args.tail_objective_group,
-                tail_ramp_fraction=args.tail_ramp_fraction,
-                safety_boundary_excess_weight=(
-                    args.safety_boundary_excess_weight if use_safety_reserve else 0.0
-                ),
-                safety_boundary_scope=args.safety_boundary_scope,
-                safety_boundary_positive_mass_fraction=(
-                    args.safety_boundary_positive_mass_fraction
-                ),
-                safety_boundary_negative_tail_fraction=(
-                    args.safety_boundary_negative_tail_fraction
-                ),
-                safety_boundary_margin=args.safety_boundary_margin,
-                safety_boundary_temperature=args.safety_boundary_temperature,
-                safety_boundary_pose_cvar_fraction=(
-                    args.safety_boundary_pose_cvar_fraction
-                ),
-                safety_boundary_pose_cvar_weight=(
-                    args.safety_boundary_pose_cvar_weight
-                ),
-                safety_boundary_ramp_fraction=args.safety_boundary_ramp_fraction,
-                safety_boundary_reference_logit=safety_boundary_reference,
-                rvl_budget_initial_scale=(
-                    args.rvl_budget_initial_scale if use_safety_reserve else 1.0
-                ),
-                rvl_budget_start_fraction=(
-                    args.rvl_budget_start_fraction if use_safety_reserve else 0.0
-                ),
-                rvl_budget_ramp_fraction=(
-                    args.rvl_budget_ramp_fraction if use_safety_reserve else 0.0
-                ),
+            use_pose_balanced_frontier = (
+                args.loss_variant == "pose_balanced_frontier"
             )
+            if use_pose_balanced_frontier:
+                _combined_visibility, visibility_parts = (
+                    pose_balanced_frontier_visibility_loss(
+                        visibility_training_logits,
+                        target,
+                        pose_offsets,
+                        visible_weights,
+                        frontier_weight=args.frontier_loss_weight,
+                        positive_mass_fraction=(
+                            args.frontier_positive_mass_fraction
+                        ),
+                        positive_count_cap=args.frontier_positive_count_cap,
+                        negative_top_fraction=args.frontier_negative_fraction,
+                        negative_count_cap=args.frontier_negative_count_cap,
+                        margin=args.frontier_margin,
+                        temperature=args.frontier_temperature,
+                        positive_importance_floor=(
+                            args.frontier_positive_importance_floor
+                        ),
+                        positive_importance_power=(
+                            args.frontier_positive_importance_power
+                        ),
+                    )
+                )
+            else:
+                _combined_visibility, visibility_parts = (
+                    safety_reserve_operating_utility_loss(
+                        visibility_training_logits,
+                        target,
+                        pose_offsets,
+                        visible_weights,
+                        visible_hit_rates,
+                        instance_ids,
+                        model.instance_to_glb,
+                        glb_bytes,
+                        train_seed=operating_threshold_seed,
+                        global_step=global_step - 1,
+                        total_optimizer_steps=total_steps,
+                        split="train",
+                        efficiency_logits=efficiency_logits,
+                        boundary_tail_weight=(
+                            args.boundary_tail_weight if use_safety_reserve else 0.0
+                        ),
+                        negative_band_weight=(
+                            args.negative_band_weight if use_safety_reserve else 0.0
+                        ),
+                        threshold_temperature=args.negative_band_temperature,
+                        negative_band_shape=args.negative_band_shape,
+                        glb_resource_weight=(
+                            args.glb_resource_weight if use_safety_reserve else 0.0
+                        ),
+                        warmup_fraction=args.efficiency_warmup_fraction,
+                        rvl_bce_positive_weight=args.rvl_bce_positive_weight,
+                        rvl_tversky_fn_weight=args.rvl_tversky_fn_weight,
+                        rvl_count_weight=args.rvl_count_weight,
+                        rvl_fp_normalization=args.rvl_fp_normalization,
+                        rvl_rank_weight=args.rvl_rank_weight,
+                        rvl_rank_negative_top_k=args.rvl_rank_negative_top_k,
+                        positive_tail_compactness_weight=(
+                            args.positive_tail_compactness_weight
+                            if use_safety_reserve
+                            else 0.0
+                        ),
+                        positive_tail_mass_fraction=args.positive_tail_mass_fraction,
+                        positive_tail_reference_quantile=(
+                            args.positive_tail_reference_quantile
+                        ),
+                        positive_tail_allowed_relative_gap=(
+                            args.positive_tail_allowed_relative_gap
+                        ),
+                        positive_tail_temperature=args.positive_tail_temperature,
+                        positive_tail_ramp_fraction=args.positive_tail_ramp_fraction,
+                        tail_separation_weight=(
+                            args.tail_separation_weight if use_safety_reserve else 0.0
+                        ),
+                        tail_selection_logits=_extreme_tail_selection_logits(
+                            args.tail_selection_source,
+                            visibility_training_logits,
+                            aux["query_features"],
+                            initial_visibility_weight,
+                            initial_visibility_bias,
+                        ),
+                        tail_positive_fraction=args.tail_positive_fraction,
+                        tail_negative_fraction=args.tail_negative_fraction,
+                        tail_margin=args.tail_margin,
+                        tail_temperature=args.tail_temperature,
+                        tail_pose_cvar_fraction=args.tail_pose_cvar_fraction,
+                        tail_pose_cvar_weight=args.tail_pose_cvar_weight,
+                        tail_positive_importance_mix=(
+                            args.tail_positive_importance_mix
+                        ),
+                        tail_positive_gradient_scale=(
+                            args.tail_positive_gradient_scale
+                        ),
+                        coverage_tail_separation_weight=(
+                            args.coverage_tail_separation_weight
+                            if use_safety_reserve
+                            else 0.0
+                        ),
+                        coverage_tail_positive_fraction=(
+                            args.coverage_tail_positive_fraction
+                        ),
+                        tail_objective_group=args.tail_objective_group,
+                        tail_ramp_fraction=args.tail_ramp_fraction,
+                        safety_boundary_excess_weight=(
+                            args.safety_boundary_excess_weight
+                            if use_safety_reserve
+                            else 0.0
+                        ),
+                        safety_boundary_scope=args.safety_boundary_scope,
+                        safety_boundary_positive_mass_fraction=(
+                            args.safety_boundary_positive_mass_fraction
+                        ),
+                        safety_boundary_negative_tail_fraction=(
+                            args.safety_boundary_negative_tail_fraction
+                        ),
+                        safety_boundary_margin=args.safety_boundary_margin,
+                        safety_boundary_temperature=(
+                            args.safety_boundary_temperature
+                        ),
+                        safety_boundary_pose_cvar_fraction=(
+                            args.safety_boundary_pose_cvar_fraction
+                        ),
+                        safety_boundary_pose_cvar_weight=(
+                            args.safety_boundary_pose_cvar_weight
+                        ),
+                        safety_boundary_ramp_fraction=(
+                            args.safety_boundary_ramp_fraction
+                        ),
+                        safety_boundary_reference_logit=(
+                            safety_boundary_reference
+                        ),
+                        rvl_budget_initial_scale=(
+                            args.rvl_budget_initial_scale
+                            if use_safety_reserve
+                            else 1.0
+                        ),
+                        rvl_budget_start_fraction=(
+                            args.rvl_budget_start_fraction
+                            if use_safety_reserve
+                            else 0.0
+                        ),
+                        rvl_budget_ramp_fraction=(
+                            args.rvl_budget_ramp_fraction
+                            if use_safety_reserve
+                            else 0.0
+                        ),
+                    )
+                )
             efficiency_primary_fraction = float(args.efficiency_primary_fraction)
             if model.cull_certificate_head is not None:
                 (
@@ -4972,7 +5101,10 @@ def main() -> None:
             cross_view_half_weight = 0.5 * float(
                 args.same_instance_cross_view_rank_weight
             )
-            if args.refinement_scope == "view_residual":
+            if use_pose_balanced_frontier:
+                safety_objective = _combined_visibility
+                efficiency_objective = logits.sum() * 0.0
+            elif args.refinement_scope == "view_residual":
                 safety_objective = (
                     visibility_parts["lossExtremeTailSeparationScaled"]
                     + float(args.view_residual_positive_guard_weight)

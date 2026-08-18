@@ -106,6 +106,34 @@ def _dual_probe_init_spec() -> dict[str, object]:
 
 
 class BoundedRelationSurvivalMomentSafetyTrainingTest(unittest.TestCase):
+    def test_pose_balanced_frontier_cli_contract_is_explicit(self) -> None:
+        argv = [
+            "train",
+            "--dataset-dir", "dataset",
+            "--relation-dir", "relation",
+            "--runtime-meta", "runtime.json",
+            "--initial-geo-features", "geometry.bin",
+            "--glb-index", "glb-index.json",
+            "--glb-root", "glb-root",
+            "--output-dir", "output",
+            "--loss-variant", "pose_balanced_frontier",
+            "--frontier-loss-weight", "0.4",
+            "--frontier-positive-mass-fraction", "0.01",
+            "--frontier-negative-fraction", "0.02",
+            "--frontier-margin", "0.75",
+            "--frontier-temperature", "0.2",
+        ]
+        with mock.patch.object(sys, "argv", argv):
+            args = parse_args()
+        self.assertEqual(args.loss_variant, "pose_balanced_frontier")
+        self.assertEqual(args.frontier_loss_weight, 0.4)
+        self.assertEqual(args.frontier_positive_mass_fraction, 0.01)
+        self.assertEqual(args.frontier_negative_fraction, 0.02)
+        self.assertEqual(args.frontier_margin, 0.75)
+        self.assertEqual(args.frontier_temperature, 0.2)
+        self.assertEqual(args.refinement_scope, "all")
+        self.assertIsNone(args.initial_checkpoint)
+
     def test_query_tail_cli_defaults_to_joint_from_scratch_contract(self) -> None:
         argv = [
             "train",
