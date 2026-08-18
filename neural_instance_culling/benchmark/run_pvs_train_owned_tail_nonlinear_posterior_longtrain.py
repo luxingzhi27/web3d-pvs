@@ -529,6 +529,7 @@ def run_postprocess(
             "hinge_primary": seed_root / "probes/hinge_primary_p05.json",
             "mlp_coverage": seed_root / "probes/mlp8_coverage_p0.json",
         }
+        fit_jobs: list[tuple[str, list[str], Path]] = []
         for role, power in (("linear_primary", "0.5"), ("linear_coverage", "0.0")):
             command = [sys.executable, str(FIT_LINEAR)] + _probe_common(
                 paths, captures, checkpoint, probes[role]
@@ -542,7 +543,7 @@ def run_postprocess(
                     "--probe-sample-weight-power", power,
                 ]
             )
-            _run_stage_once(command, probes[role], logs, f"fit_{role}", gpu)
+            fit_jobs.append((f"fit_{role}", command, probes[role]))
 
         hinge_command = [sys.executable, str(FIT_NONLINEAR)] + _probe_common(
             paths, captures, checkpoint, probes["hinge_primary"]
@@ -556,9 +557,7 @@ def run_postprocess(
                 "--hinge-knots=-1,0,1",
             ]
         )
-        _run_stage_once(
-            hinge_command, probes["hinge_primary"], logs, "fit_hinge_primary", gpu
-        )
+        fit_jobs.append(("fit_hinge_primary", hinge_command, probes["hinge_primary"]))
 
         mlp_command = [sys.executable, str(FIT_NONLINEAR)] + _probe_common(
             paths, captures, checkpoint, probes["mlp_coverage"]
@@ -574,42 +573,52 @@ def run_postprocess(
                 "--learning-rate", "0.001",
             ]
         )
-        _run_stage_once(
-            mlp_command, probes["mlp_coverage"], logs, "fit_mlp_coverage", gpu
-        )
+        fit_jobs.append(("fit_mlp_coverage", mlp_command, probes["mlp_coverage"]))
+        with ThreadPoolExecutor(max_workers=len(fit_jobs)) as executor:
+            futures = {
+                executor.submit(_run_stage_once, command, output, logs, name, gpu): name
+                for name, command, output in fit_jobs
+            }
+            for future in as_completed(futures):
+                future.result()
 
         linear_scan = seed_root / "linear_dual_probe_formal.json"
         nonlinear_scan = seed_root / "nonlinear_dual_probe_formal.json"
-        _run_stage_once(
-            _scan_command(
-                paths,
-                captures,
-                checkpoint,
-                probes["linear_primary"],
-                probes["linear_coverage"],
+        scan_jobs = (
+            (
+                "scan_linear_dual_probe",
+                _scan_command(
+                    paths,
+                    captures,
+                    checkpoint,
+                    probes["linear_primary"],
+                    probes["linear_coverage"],
+                    linear_scan,
+                    include_zero=False,
+                ),
                 linear_scan,
-                include_zero=False,
             ),
-            linear_scan,
-            logs,
-            "scan_linear_dual_probe",
-            gpu,
-        )
-        _run_stage_once(
-            _scan_command(
-                paths,
-                captures,
-                checkpoint,
-                probes["hinge_primary"],
-                probes["mlp_coverage"],
+            (
+                "scan_nonlinear_dual_probe",
+                _scan_command(
+                    paths,
+                    captures,
+                    checkpoint,
+                    probes["hinge_primary"],
+                    probes["mlp_coverage"],
+                    nonlinear_scan,
+                    include_zero=True,
+                ),
                 nonlinear_scan,
-                include_zero=True,
             ),
-            nonlinear_scan,
-            logs,
-            "scan_nonlinear_dual_probe",
-            gpu,
         )
+        with ThreadPoolExecutor(max_workers=len(scan_jobs)) as executor:
+            futures = {
+                executor.submit(_run_stage_once, command, output, logs, name, gpu): name
+                for name, command, output in scan_jobs
+            }
+            for future in as_completed(futures):
+                future.result()
         results.append(
             {
                 "seed": seed,
