@@ -26,6 +26,7 @@ EVALUATE = ROOT / "neural_instance_culling/benchmark/evaluate_pvs_bounded_relati
 FIT_LINEAR = ROOT / "neural_instance_culling/benchmark/analyze_pvs_difficult_tail_feature_separability.py"
 FIT_NONLINEAR = ROOT / "neural_instance_culling/benchmark/fit_pvs_train_owned_tail_nonlinear_probe.py"
 SCAN = ROOT / "neural_instance_culling/benchmark/scan_pvs_train_owned_tail_residual.py"
+SUMMARIZE = ROOT / "neural_instance_culling/benchmark/summarize_pvs_train_owned_tail_nonlinear_posterior_longtrain.py"
 
 EXPERIMENT = "pvs_train_owned_nonlinear_tail_posterior_longtrain_v1"
 FORMAL_SEEDS = (20260801, 20260802, 20260803)
@@ -127,6 +128,7 @@ def preflight(shared_root: Path) -> dict[str, Any]:
     _required_file(FIT_LINEAR, "linear probe entry")
     _required_file(FIT_NONLINEAR, "nonlinear probe entry")
     _required_file(SCAN, "posterior scan entry")
+    _required_file(SUMMARIZE, "three-seed summary entry")
     sidecar = _required_dir(
         ROOT
         / "neural_instance_culling/dataset/out/pvs_v4_viewcell_extreme_support_scan_20260818/subpose_supervision_sidecar",
@@ -633,6 +635,25 @@ def run_postprocess(
     return results
 
 
+def run_summary(benchmark_output_root: Path, gpu: int) -> Path:
+    output = benchmark_output_root.resolve() / "formal_summary.json"
+    _run_stage_once(
+        [
+            sys.executable,
+            str(SUMMARIZE),
+            "--input-root", str(benchmark_output_root.resolve()),
+            "--output", str(output),
+            "--bootstrap-replicates", "10000",
+            "--seed", "20260819",
+        ],
+        output,
+        benchmark_output_root.resolve() / "logs",
+        "summarize_three_seed_formal",
+        gpu,
+    )
+    return output
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--phase", choices=("preflight", "train", "postprocess", "all"), default="all")
@@ -666,6 +687,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             args.benchmark_output_root,
             args.gpus[3],
         )
+        run_summary(args.benchmark_output_root, args.gpus[3])
     print(
         json.dumps(
             {

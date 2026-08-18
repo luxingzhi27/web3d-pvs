@@ -28,6 +28,7 @@ from neural_instance_culling.benchmark.scan_pvs_train_owned_tail_residual import
     residual_diagnostics,
     score_probe_families_from_aux,
     scan_members,
+    summarize_threshold,
 )
 import neural_instance_culling.benchmark.scan_pvs_train_owned_tail_residual as scan_module
 from neural_instance_culling.benchmark.analyze_pvs_difficult_tail_feature_separability import (
@@ -612,11 +613,26 @@ class TrainOwnedTailResidualTest(unittest.TestCase):
             self.assertIn("weightedRecallLowerConfidenceBound", member["validation"])
             self.assertNotIn("_weightedTpByPose", member["validation"])
             self.assertNotIn("_weightedGtByPose", member["validation"])
+            self.assertEqual(
+                [row["poseIndex"] for row in member["validation"]["perPose"]],
+                [2, 3],
+            )
         self.assertEqual(
             members[0]["calibration"]["selected"],
             members[1]["calibration"]["selected"],
             "alpha=0 policies must not depend on member order or residual sign",
         )
+
+    def test_threshold_summary_persists_candidate_aligned_pose_statistics(self) -> None:
+        rows = [
+            _row(11, [0.8, 0.2], [1, 0], [3.0, 0.0]),
+            _row(17, [0.4, 0.6], [1, 0], [2.0, 0.0]),
+        ]
+        summary = summarize_threshold(rows, [row.scores for row in rows], 0.5)
+        self.assertEqual([row["poseIndex"] for row in summary["perPose"]], [11, 17])
+        self.assertEqual(summary["perPose"][0]["tp"], 1)
+        self.assertEqual(summary["perPose"][1]["fp"], 1)
+        self.assertEqual(summary["aggregate"]["candidateCount"], 4)
 
     def test_direct_calibration_freeze_has_no_validation_argument(self) -> None:
         rows = [_row(0, [0.9, 0.1], [1, 0], [1.0, 0.0])]

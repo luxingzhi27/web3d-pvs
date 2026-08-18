@@ -125,6 +125,7 @@ __all__ = [
     "residual_diagnostics",
     "score_probe_families_from_aux",
     "scan_members",
+    "summarize_threshold",
 ]
 
 
@@ -1107,15 +1108,16 @@ def summarize_threshold(
 
     if len(rows) != len(corrected_scores) or not rows:
         raise ValueError("rows and corrected scores are not aligned or empty")
-    pose_rows = [
-        _pose_metrics(
+    pose_rows = []
+    for row, scores in zip(rows, corrected_scores, strict=True):
+        metrics = _pose_metrics(
             row,
             np.asarray(scores, dtype=np.float64) >= float(threshold),
             instance_to_glb,
             glb_bytes,
         )
-        for row, scores in zip(rows, corrected_scores, strict=True)
-    ]
+        metrics["poseIndex"] = int(row.pose_index)
+        pose_rows.append(metrics)
     metric_names = (
         "precision", "recall", "weightedRecall", "f1", "jaccard", "accuracy",
         "balancedAccuracy", "specificity", "usefulCull", "badCull", "predCount",
@@ -1178,6 +1180,7 @@ def summarize_threshold(
         "poseCount": len(pose_rows),
         "poseMacro": macro,
         "aggregate": aggregate,
+        "perPose": pose_rows,
         "_weightedTpByPose": np.asarray([row["weightedTp"] for row in pose_rows], dtype=np.float64),
         "_weightedGtByPose": np.asarray([row["weightedGt"] for row in pose_rows], dtype=np.float64),
     }
