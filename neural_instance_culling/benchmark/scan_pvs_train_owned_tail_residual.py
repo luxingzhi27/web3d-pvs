@@ -130,7 +130,7 @@ __all__ = [
 
 @dataclass(frozen=True)
 class ProbeSpec:
-    """Train-owned ridge probe parameters for one feature family."""
+    """Train-owned lightweight probe parameters for one feature family."""
 
     family: str
     feature_count: int
@@ -141,6 +141,13 @@ class ProbeSpec:
     ridge: float
     frontier_center_logit: float | None = None
     risk_certificates: Mapping[str, Any] | None = None
+    probe_type: str = "standardized_ridge_linear"
+    hinge_knots: np.ndarray | None = None
+    hidden_weight: np.ndarray | None = None
+    hidden_bias: np.ndarray | None = None
+    output_weight: np.ndarray | None = None
+    output_bias: float | None = None
+    activation: str | None = None
 
 
 @dataclass
@@ -309,15 +316,68 @@ def load_probe_spec(path: Path, family: str) -> tuple[ProbeSpec, dict[str, Any]]
         raise ValueError(f"probe family {family!r} is not a train-fitted usable probe")
     try:
         feature_count = int(record["featureCount"])
-        coefficients = _finite_vector(record["coefficients"], name=f"probe.{family}.coefficients")
         standardization = record["standardization"]
         mean = _finite_vector(standardization["mean"], name=f"probe.{family}.mean")
         scale = _finite_vector(standardization["scale"], name=f"probe.{family}.scale")
         ridge = float(record["ridge"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"probe family {family!r} has incomplete parameters") from exc
-    if feature_count <= 0 or coefficients.size != feature_count + 1:
-        raise ValueError(f"probe family {family!r} coefficient dimension is invalid")
+    probe_type = str(record.get("probeType", "standardized_ridge_linear"))
+    coefficients = np.zeros((0,), dtype=np.float64)
+    hinge_knots = None
+    hidden_weight = None
+    hidden_bias = None
+    output_weight = None
+    output_bias = None
+    activation = None
+    if probe_type == "standardized_ridge_linear":
+        coefficients = _finite_vector(
+            record.get("coefficients"), name=f"probe.{family}.coefficients"
+        )
+        if coefficients.size != feature_count + 1:
+            raise ValueError(f"probe family {family!r} coefficient dimension is invalid")
+    elif probe_type == "standardized_ridge_hinge":
+        coefficients = _finite_vector(
+            record.get("coefficients"), name=f"probe.{family}.coefficients"
+        )
+        hinge_knots = _finite_vector(
+            record.get("hingeKnots"), name=f"probe.{family}.hingeKnots"
+        )
+        if hinge_knots.size == 0 or np.unique(hinge_knots).size != hinge_knots.size:
+            raise ValueError(f"probe family {family!r} hinge knots must be unique")
+        expected = 1 + feature_count * (1 + int(hinge_knots.size))
+        if coefficients.size != expected:
+            raise ValueError(f"probe family {family!r} hinge coefficient dimension is invalid")
+    elif probe_type == "standardized_shallow_mlp":
+        parameters = record.get("parameters")
+        if not isinstance(parameters, Mapping):
+            raise ValueError(f"probe family {family!r} MLP parameters are missing")
+        hidden_weight = np.asarray(parameters.get("hiddenWeight"), dtype=np.float64)
+        hidden_bias = _finite_vector(
+            parameters.get("hiddenBias"), name=f"probe.{family}.hiddenBias"
+        )
+        output_weight = _finite_vector(
+            parameters.get("outputWeight"), name=f"probe.{family}.outputWeight"
+        )
+        try:
+            output_bias = float(parameters["outputBias"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"probe family {family!r} MLP output bias is invalid") from exc
+        activation = str(record.get("activation", "relu"))
+        if (
+            hidden_weight.ndim != 2
+            or hidden_weight.shape[1] != feature_count
+            or hidden_weight.shape[0] != hidden_bias.size
+            or output_weight.size != hidden_bias.size
+            or not bool(np.isfinite(hidden_weight).all())
+            or not np.isfinite(output_bias)
+            or activation not in {"relu", "tanh"}
+        ):
+            raise ValueError(f"probe family {family!r} MLP parameter dimensions are invalid")
+    else:
+        raise ValueError(f"probe family {family!r} has unsupported probeType={probe_type!r}")
+    if feature_count <= 0:
+        raise ValueError(f"probe family {family!r} feature dimension is invalid")
     if mean.size != feature_count or scale.size != feature_count:
         raise ValueError(f"probe family {family!r} standardization dimension is invalid")
     if bool(np.any(scale <= 0.0)) or not np.isfinite(ridge) or ridge <= 0.0:
@@ -373,6 +433,13 @@ def load_probe_spec(path: Path, family: str) -> tuple[ProbeSpec, dict[str, Any]]
             risk_certificates=(
                 dict(risk_certificates) if isinstance(risk_certificates, Mapping) else None
             ),
+            probe_type=probe_type,
+            hinge_knots=hinge_knots,
+            hidden_weight=hidden_weight,
+            hidden_bias=hidden_bias,
+            output_weight=output_weight,
+            output_bias=output_bias,
+            activation=activation,
         ),
         dict(payload),
     )
@@ -444,7 +511,13 @@ def load_score_rows(path: Path, split: str, dataset: Any) -> CandidateSplit:
 
 
 def probe_linear_scores(features: np.ndarray, probe: ProbeSpec) -> np.ndarray:
-    """Apply the train-owned standardized ridge coefficients without fitting."""
+    """Apply a train-owned lightweight probe without fitting.
+
+    The historical public name is retained because callers already import it,
+    but the function now dispatches over linear, additive hinge, and one-hidden-
+    layer probes.  All three consume the same fixed 108-dimensional runtime
+    query and add no per-instance asset.
+    """
 
     values = np.asarray(features, dtype=np.float64)
     if values.ndim != 2 or values.shape[1] != probe.feature_count:
@@ -454,7 +527,36 @@ def probe_linear_scores(features: np.ndarray, probe: ProbeSpec) -> np.ndarray:
     if not bool(np.isfinite(values).all()):
         raise ValueError("probe features contain non-finite values")
     standardized = (values - probe.mean[None, :]) / probe.scale[None, :]
-    result = probe.coefficients[0] + standardized @ probe.coefficients[1:]
+    if probe.probe_type == "standardized_ridge_linear":
+        result = probe.coefficients[0] + standardized @ probe.coefficients[1:]
+    elif probe.probe_type == "standardized_ridge_hinge":
+        if probe.hinge_knots is None:
+            raise ValueError("hinge probe has no knots")
+        pieces = [standardized]
+        pieces.extend(
+            np.maximum(standardized - float(knot), 0.0)
+            for knot in probe.hinge_knots.tolist()
+        )
+        design = np.concatenate(pieces, axis=1)
+        result = probe.coefficients[0] + design @ probe.coefficients[1:]
+    elif probe.probe_type == "standardized_shallow_mlp":
+        if (
+            probe.hidden_weight is None
+            or probe.hidden_bias is None
+            or probe.output_weight is None
+            or probe.output_bias is None
+        ):
+            raise ValueError("shallow MLP probe parameters are incomplete")
+        hidden = standardized @ probe.hidden_weight.T + probe.hidden_bias[None, :]
+        if probe.activation == "relu":
+            hidden = np.maximum(hidden, 0.0)
+        elif probe.activation == "tanh":
+            hidden = np.tanh(hidden)
+        else:
+            raise ValueError(f"unsupported shallow MLP activation {probe.activation!r}")
+        result = hidden @ probe.output_weight + float(probe.output_bias)
+    else:
+        raise ValueError(f"unsupported probe type {probe.probe_type!r}")
     if not bool(np.isfinite(result).all()):
         raise FloatingPointError("probe score is non-finite")
     return result
@@ -1917,11 +2019,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             "schema": PROBE_SCHEMA,
             "family": probe.family,
             "featureCount": probe.feature_count,
+            "probeType": probe.probe_type,
             "fitSplit": probe.fit_split,
             "ridge": probe.ridge,
             "labelSemantics": PROBE_LABEL_SEMANTICS,
             "standardizationSource": "probe.families[family].standardization from train",
-            "coefficientsSource": "probe.families[family].coefficients from train",
+            "parametersSource": "probe.families[family] train-owned parameters",
             "frontierCenterLogit": probe.frontier_center_logit,
             "frontierCenterSource": (
                 "tailDefinition.fitCutoffs from train"
@@ -1942,6 +2045,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "schema": PROBE_SCHEMA,
                 "family": coverage_probe.family,
                 "featureCount": coverage_probe.feature_count,
+                "probeType": coverage_probe.probe_type,
                 "fitSplit": coverage_probe.fit_split,
                 "ridge": coverage_probe.ridge,
                 "labelSemantics": PROBE_LABEL_SEMANTICS,
@@ -1950,7 +2054,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "threshold": coverage_rescue_threshold,
                 "thresholdSource": "coverage probe JSON train-only rescue certificate",
                 "standardizationSource": "coverage probe.families[family].standardization from train",
-                "coefficientsSource": "coverage probe.families[family].coefficients from train",
+                "parametersSource": "coverage probe.families[family] train-owned parameters",
                 "riskCertificatesSource": (
                     "coverage probe.families[family].riskCertificates; sourceSplit=train; fitRowsOnly=true"
                 ),

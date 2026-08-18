@@ -203,6 +203,45 @@ class TrainOwnedTailResidualTest(unittest.TestCase):
         features = np.ones((2, 27), dtype=np.float64)
         np.testing.assert_allclose(probe_linear_scores(features, probe), 0.25 + 2.7)
 
+    def test_hinge_probe_uses_train_fixed_piecewise_linear_basis(self) -> None:
+        probe = ProbeSpec(
+            family="region_extrema",
+            feature_count=2,
+            coefficients=np.asarray([0.5, 1.0, 2.0, 3.0, 4.0]),
+            mean=np.zeros(2),
+            scale=np.ones(2),
+            fit_split="train",
+            ridge=0.001,
+            probe_type="standardized_ridge_hinge",
+            hinge_knots=np.asarray([0.0]),
+        )
+        features = np.asarray([[-1.0, 2.0], [3.0, -2.0]], dtype=np.float64)
+        expected = np.asarray([
+            0.5 - 1.0 + 4.0 + 0.0 + 8.0,
+            0.5 + 3.0 - 4.0 + 9.0 + 0.0,
+        ])
+        np.testing.assert_allclose(probe_linear_scores(features, probe), expected)
+
+    def test_shallow_mlp_probe_uses_exported_relu_parameters(self) -> None:
+        probe = ProbeSpec(
+            family="region_extrema",
+            feature_count=2,
+            coefficients=np.zeros(0),
+            mean=np.zeros(2),
+            scale=np.ones(2),
+            fit_split="train",
+            ridge=0.001,
+            probe_type="standardized_shallow_mlp",
+            hidden_weight=np.asarray([[1.0, -1.0], [-1.0, 1.0]]),
+            hidden_bias=np.asarray([0.0, 0.5]),
+            output_weight=np.asarray([2.0, -1.0]),
+            output_bias=0.25,
+            activation="relu",
+        )
+        features = np.asarray([[2.0, 1.0], [0.0, 2.0]], dtype=np.float64)
+        expected = np.asarray([2.25, -2.25])
+        np.testing.assert_allclose(probe_linear_scores(features, probe), expected)
+
     def test_feature_families_have_expected_candidate_alignment(self) -> None:
         batch = 3
         aux = {
