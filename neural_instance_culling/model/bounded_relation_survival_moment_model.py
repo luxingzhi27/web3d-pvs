@@ -104,6 +104,9 @@ DUAL_PROBE_RAW_QUERY_DIM = (
 )
 DUAL_PROBE_COEFFICIENT_DIM = DUAL_PROBE_RAW_QUERY_DIM + 1
 DUAL_PROBE_ATTENUATION_HIDDEN_DIM = 16
+QUERY_TAIL_SEPARATOR_FAMILIES = ("disabled", "linear", "hinge", "mlp")
+QUERY_TAIL_SEPARATOR_CENTERING_MODES = ("none", "pose_mean")
+QUERY_TAIL_SEPARATOR_HINGE_KNOTS = (-1.0, 0.0, 1.0)
 
 
 def _float_tensor(value: Any, name: str, *, device: torch.device | None = None) -> torch.Tensor:
@@ -413,6 +416,10 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         viewcell_extreme_visibility_enabled: bool = False,
         viewcell_region_conditioned_visibility_enabled: bool = False,
         viewcell_region_conditioned_visibility_centering: str = "none",
+        query_tail_separator_family: str = "disabled",
+        query_tail_separator_hidden_dim: int = 8,
+        query_tail_separator_max_abs: float = 0.5,
+        query_tail_separator_centering: str = "pose_mean",
         dual_probe_rescue: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__()
@@ -468,6 +475,13 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             not in BOUNDARY_TAIL_RESIDUAL_FUSION_MODES
             or str(viewcell_region_conditioned_visibility_centering)
             not in VIEWCELL_REGION_CONDITIONED_VISIBILITY_CENTERING_MODES
+            or str(query_tail_separator_family)
+            not in QUERY_TAIL_SEPARATOR_FAMILIES
+            or int(query_tail_separator_hidden_dim) <= 0
+            or not math.isfinite(float(query_tail_separator_max_abs))
+            or float(query_tail_separator_max_abs) <= 0.0
+            or str(query_tail_separator_centering)
+            not in QUERY_TAIL_SEPARATOR_CENTERING_MODES
             or not math.isfinite(float(boundary_tail_residual_output_init_std))
             or float(boundary_tail_residual_output_init_std) < 0.0
         ):
@@ -577,6 +591,10 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         self.viewcell_region_conditioned_visibility_centering = str(
             viewcell_region_conditioned_visibility_centering
         )
+        self.query_tail_separator_family = str(query_tail_separator_family)
+        self.query_tail_separator_hidden_dim = int(query_tail_separator_hidden_dim)
+        self.query_tail_separator_max_abs = float(query_tail_separator_max_abs)
+        self.query_tail_separator_centering = str(query_tail_separator_centering)
         self.dual_probe_rescue_enabled = normalized_dual_probe_rescue is not None
         self._dual_probe_rescue_spec = normalized_dual_probe_rescue
         evidence_dim = 1 + SURVIVAL_SEMANTIC_DIM + 1
@@ -866,6 +884,42 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             self.viewcell_region_conditioned_visibility_region_projection = None
             self.viewcell_region_conditioned_visibility_hidden_projection = None
             self.viewcell_region_conditioned_visibility_head = None
+        # The ablated branch must not shift the random initialization of the
+        # shared utility/download heads or the later training RNG stream.
+        query_tail_rng_state = torch.random.get_rng_state()
+        try:
+            if self.query_tail_separator_family == "linear":
+                self.query_tail_separator: nn.Module | None = nn.Linear(
+                    DUAL_PROBE_RAW_QUERY_DIM, 1
+                )
+            elif self.query_tail_separator_family == "hinge":
+                self.query_tail_separator = nn.Linear(
+                    DUAL_PROBE_RAW_QUERY_DIM
+                    * (1 + len(QUERY_TAIL_SEPARATOR_HINGE_KNOTS)),
+                    1,
+                )
+            elif self.query_tail_separator_family == "mlp":
+                self.query_tail_separator = nn.Sequential(
+                    nn.Linear(
+                        DUAL_PROBE_RAW_QUERY_DIM,
+                        self.query_tail_separator_hidden_dim,
+                    ),
+                    nn.SiLU(),
+                    nn.Linear(self.query_tail_separator_hidden_dim, 1),
+                )
+            else:
+                self.query_tail_separator = None
+            if self.query_tail_separator is not None:
+                output = (
+                    self.query_tail_separator[-1]
+                    if isinstance(self.query_tail_separator, nn.Sequential)
+                    else self.query_tail_separator
+                )
+                assert isinstance(output, nn.Linear)
+                nn.init.zeros_(output.weight)
+                nn.init.zeros_(output.bias)
+        finally:
+            torch.random.set_rng_state(query_tail_rng_state)
         if self.dual_probe_rescue_enabled:
             assert normalized_dual_probe_rescue is not None
             primary = normalized_dual_probe_rescue["primary"]
@@ -975,6 +1029,23 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             "survivalCoefficientShape": [SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM],
             "runtimeFeatureDim": RUNTIME_FEATURE_DIM,
             "runtimeHeadInputDim": RUNTIME_HEAD_INPUT_DIM,
+            "queryTailSeparator": {
+                "enabled": self.query_tail_separator is not None,
+                "family": self.query_tail_separator_family,
+                "inputDim": DUAL_PROBE_RAW_QUERY_DIM,
+                "hiddenDim": (
+                    self.query_tail_separator_hidden_dim
+                    if self.query_tail_separator_family == "mlp"
+                    else 0
+                ),
+                "maximumAbsoluteResidual": self.query_tail_separator_max_abs,
+                "centering": self.query_tail_separator_centering,
+                "hingeKnots": list(QUERY_TAIL_SEPARATOR_HINGE_KNOTS),
+                "outputInitialization": "zero",
+                "training": "joint from-scratch visibility-tail separation",
+                "fusion": "visibility logit plus bounded signed residual before utility and download heads",
+                "runtimeAssets": "no additional per-instance asset",
+            },
             "boundarySummaryDim": BOUNDARY_SUMMARY_DIM,
             "lowRankSummaryDim": LOW_RANK_SUMMARY_DIM,
             "depthNormalization": {
@@ -1125,6 +1196,22 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
                     else "none"
                 ),
             }
+        if self.query_tail_separator is not None:
+            result["queryTailSeparator"]["architecture"] = (
+                [DUAL_PROBE_RAW_QUERY_DIM, 1]
+                if self.query_tail_separator_family == "linear"
+                else [
+                    DUAL_PROBE_RAW_QUERY_DIM
+                    * (1 + len(QUERY_TAIL_SEPARATOR_HINGE_KNOTS)),
+                    1,
+                ]
+                if self.query_tail_separator_family == "hinge"
+                else [
+                    DUAL_PROBE_RAW_QUERY_DIM,
+                    self.query_tail_separator_hidden_dim,
+                    1,
+                ]
+            )
         if self.viewcell_extreme_visibility_enabled:
             result["viewcellExtremeVisibility"] = {
                 "enabled": True,
@@ -1345,6 +1432,14 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             result["boundaryTailResidual"] = self.config["boundaryTailResidual"]
             result["outputs"]["boundaryTailResidualRaw"] = ["B", 1]
             result["outputs"]["boundaryTailResidualCentered"] = ["B", 1]
+        if self.query_tail_separator is not None:
+            result["queryTailSeparator"] = self.config["queryTailSeparator"]
+            result["outputs"]["queryTailSeparatorRawFeatures"] = [
+                "B",
+                DUAL_PROBE_RAW_QUERY_DIM,
+            ]
+            result["outputs"]["queryTailSeparatorResidualRaw"] = ["B", 1]
+            result["outputs"]["queryTailSeparatorResidual"] = ["B", 1]
         if self.viewcell_extreme_visibility_enabled:
             result["viewcellExtremeVisibility"] = self.config[
                 "viewcellExtremeVisibility"
@@ -1569,6 +1664,45 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         if not bool(torch.isfinite(result).all()):
             raise FloatingPointError("dual probe raw query is non-finite")
         return result
+
+    def _query_tail_separator_residual(
+        self,
+        raw_query: torch.Tensor,
+        pose_offsets: Any | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Map the shared 108D query to a bounded, optionally pose-centered residual."""
+        if self.query_tail_separator is None:
+            zero = raw_query.new_zeros((raw_query.shape[0], 1))
+            return zero, zero
+        if raw_query.ndim != 2 or raw_query.shape[1] != DUAL_PROBE_RAW_QUERY_DIM:
+            raise RuntimeError("query-tail separator input must follow the 108D layout")
+        if self.query_tail_separator_family == "hinge":
+            separator_input = torch.cat(
+                [raw_query]
+                + [
+                    F.relu(raw_query - float(knot))
+                    for knot in QUERY_TAIL_SEPARATOR_HINGE_KNOTS
+                ],
+                dim=-1,
+            )
+        else:
+            separator_input = raw_query
+        raw = self.query_tail_separator(separator_input)
+        if raw.shape != (raw_query.shape[0], 1):
+            raise RuntimeError("query-tail separator output must have shape [B, 1]")
+        if self.query_tail_separator_centering == "pose_mean":
+            precenter_bound = 0.5 * self.query_tail_separator_max_abs
+            bounded = precenter_bound * torch.tanh(raw / precenter_bound)
+            applied = _pose_centered_residual(bounded, pose_offsets)
+        else:
+            bound = self.query_tail_separator_max_abs
+            bounded = bound * torch.tanh(raw / bound)
+            applied = bounded
+        if not bool(torch.isfinite(raw).all() and torch.isfinite(applied).all()):
+            raise FloatingPointError("query-tail separator produced non-finite values")
+        if bool((applied.abs() > self.query_tail_separator_max_abs + 1e-6).any()):
+            raise FloatingPointError("query-tail separator exceeded its residual bound")
+        return raw, applied
 
     def _query_basis_and_semantic(
         self,
@@ -2235,6 +2369,30 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             depth,
             pre_opportunity_visibility_logits,
         )
+        pre_query_tail_separator_visibility_logits = visibility_logits
+        query_tail_separator_raw_features = visibility_logits.new_empty(
+            (visibility_logits.shape[0], 0)
+        )
+        query_tail_separator_residual_raw = torch.zeros_like(visibility_logits)
+        query_tail_separator_residual = torch.zeros_like(visibility_logits)
+        if self.query_tail_separator is not None:
+            query_tail_separator_raw_features = self._dual_probe_raw_query(
+                center,
+                query_aux["spectral_features"],
+                query_aux["boundary_spectral_summary"],
+                axes,
+            )
+            (
+                query_tail_separator_residual_raw,
+                query_tail_separator_residual,
+            ) = self._query_tail_separator_residual(
+                query_tail_separator_raw_features,
+                pose_offsets,
+            )
+            visibility_logits = (
+                pre_query_tail_separator_visibility_logits
+                + query_tail_separator_residual
+            )
         dual_probe_rescue_aux: dict[str, torch.Tensor] = {}
         if self.dual_probe_rescue_enabled:
             dual_probe_raw_features = self._dual_probe_raw_query(
@@ -2260,6 +2418,16 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             "boundary_opportunity_logits": boundary_opportunity_logits,
             "boundary_opportunity_raw_logit_uplift": boundary_opportunity_raw_logit_uplift,
             "boundary_opportunity_logit_uplift": boundary_opportunity_logit_uplift,
+            "pre_query_tail_separator_visibility_logits": (
+                pre_query_tail_separator_visibility_logits
+            ),
+            "query_tail_separator_raw_features": (
+                query_tail_separator_raw_features
+            ),
+            "query_tail_separator_residual_raw": (
+                query_tail_separator_residual_raw
+            ),
+            "query_tail_separator_residual": query_tail_separator_residual,
             "pre_tail_residual_visibility_logits": (
                 pre_tail_residual_visibility_logits
             ),

@@ -41,6 +41,8 @@ class BoundedRelationSurvivalMomentModelContractTest(unittest.TestCase):
         viewcell_extreme_visibility_enabled: bool = False,
         viewcell_region_conditioned_visibility_enabled: bool = False,
         viewcell_region_conditioned_visibility_centering: str = "none",
+        query_tail_separator_family: str = "disabled",
+        query_tail_separator_hidden_dim: int = 8,
     ) -> BoundedRelationSurvivalMomentModel:
         model = BoundedRelationSurvivalMomentModel(
             4,
@@ -67,6 +69,8 @@ class BoundedRelationSurvivalMomentModelContractTest(unittest.TestCase):
             viewcell_region_conditioned_visibility_centering=(
                 viewcell_region_conditioned_visibility_centering
             ),
+            query_tail_separator_family=query_tail_separator_family,
+            query_tail_separator_hidden_dim=query_tail_separator_hidden_dim,
         )
         model.set_instance_world_aabbs(
             torch.tensor(
@@ -116,6 +120,78 @@ class BoundedRelationSurvivalMomentModelContractTest(unittest.TestCase):
         self.assertEqual(config["relationHiddenDim"], 64)
         self.assertEqual(config["instanceCalibration"]["mode"], "residual")
         self.assertEqual(config["instanceCalibration"]["runtimeExport"], "fused coefficients only")
+        self.assertFalse(config["queryTailSeparator"]["enabled"])
+
+    def test_query_tail_separator_families_are_zero_initialized_and_share_108d_input(self) -> None:
+        inputs = self._inputs()
+        for family in ("linear", "hinge", "mlp"):
+            with self.subTest(family=family):
+                torch.manual_seed(20260819)
+                baseline = self._model()
+                torch.manual_seed(20260819)
+                separated = self._model(query_tail_separator_family=family)
+                baseline_state = baseline.state_dict()
+                for key, value in baseline_state.items():
+                    torch.testing.assert_close(
+                        separated.state_dict()[key], value, rtol=0.0, atol=0.0
+                    )
+                separated.load_state_dict(baseline_state, strict=False)
+                baseline_logits, _ = baseline.compute_logits_with_aux(
+                    inputs["camera"],
+                    inputs["camera_view"],
+                    inputs["candidate_camera"],
+                    inputs["instance_ids"],
+                    runtime_features=inputs["runtime"],
+                    query_center_world=inputs["query_center"],
+                    viewcell_radius_m=inputs["radius"],
+                    pose_offsets=torch.tensor([0, 2, 4]),
+                )
+                logits, aux = separated.compute_logits_with_aux(
+                    inputs["camera"],
+                    inputs["camera_view"],
+                    inputs["candidate_camera"],
+                    inputs["instance_ids"],
+                    runtime_features=inputs["runtime"],
+                    query_center_world=inputs["query_center"],
+                    viewcell_radius_m=inputs["radius"],
+                    pose_offsets=torch.tensor([0, 2, 4]),
+                )
+                torch.testing.assert_close(logits, baseline_logits, rtol=0.0, atol=0.0)
+                self.assertEqual(aux["query_tail_separator_raw_features"].shape, (4, 108))
+                self.assertTrue(
+                    torch.equal(
+                        aux["query_tail_separator_residual"],
+                        torch.zeros_like(aux["query_tail_separator_residual"]),
+                    )
+                )
+                self.assertEqual(
+                    separated.config["queryTailSeparator"]["family"], family
+                )
+                self.assertEqual(separated.config["runtimeFeatureDim"], 124)
+
+    def test_query_tail_separator_is_bounded_pose_centered_and_differentiable(self) -> None:
+        model = self._model(query_tail_separator_family="linear")
+        assert isinstance(model.query_tail_separator, torch.nn.Linear)
+        with torch.no_grad():
+            model.query_tail_separator.weight.fill_(0.2)
+            model.query_tail_separator.bias.fill_(0.1)
+        inputs = self._inputs()
+        logits, aux = model.compute_logits_with_aux(
+            inputs["camera"],
+            inputs["camera_view"],
+            inputs["candidate_camera"],
+            inputs["instance_ids"],
+            runtime_features=inputs["runtime"],
+            query_center_world=inputs["query_center"],
+            viewcell_radius_m=inputs["radius"],
+            pose_offsets=torch.tensor([0, 2, 4]),
+        )
+        residual = aux["query_tail_separator_residual"]
+        for start, end in ((0, 2), (2, 4)):
+            self.assertAlmostEqual(float(residual[start:end].mean()), 0.0, places=6)
+        self.assertLessEqual(float(residual.abs().max()), 0.5 + 1e-6)
+        logits.sum().backward()
+        self.assertIsNotNone(model.query_tail_separator.weight.grad)
 
     def test_moment_extrema_adds_analytic_query_without_runtime_assets(self) -> None:
         model = self._model(spectral_mode="moment_extrema")

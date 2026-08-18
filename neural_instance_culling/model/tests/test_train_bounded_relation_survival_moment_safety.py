@@ -106,6 +106,27 @@ def _dual_probe_init_spec() -> dict[str, object]:
 
 
 class BoundedRelationSurvivalMomentSafetyTrainingTest(unittest.TestCase):
+    def test_query_tail_cli_defaults_to_joint_from_scratch_contract(self) -> None:
+        argv = [
+            "train",
+            "--dataset-dir", "dataset",
+            "--relation-dir", "relation",
+            "--runtime-meta", "runtime.json",
+            "--initial-geo-features", "geometry.bin",
+            "--glb-index", "glb-index.json",
+            "--glb-root", "glb-root",
+            "--subpose-sidecar", "subpose",
+            "--output-dir", "output",
+            "--query-tail-separator-family", "mlp",
+            "--query-tail-separation-loss-weight", "0.3",
+        ]
+        with mock.patch.object(sys, "argv", argv):
+            args = parse_args()
+        self.assertEqual(args.query_tail_separator_family, "mlp")
+        self.assertEqual(args.query_tail_separation_loss_weight, 0.3)
+        self.assertEqual(args.refinement_scope, "all")
+        self.assertIsNone(args.initial_checkpoint)
+
     def test_dual_probe_init_protocol_rejects_test_or_validation_selected_specs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "init.json"

@@ -35,6 +35,7 @@ from bounded_relation_survival_moment_model import (  # noqa: E402
     DUAL_PROBE_RAW_QUERY_DIM,
     GEO_DIM,
     MODEL_SCHEMA,
+    QUERY_TAIL_SEPARATOR_FAMILIES,
     RUNTIME_FEATURE_DIM,
     VIEWCELL_REGION_CONDITIONED_VISIBILITY_FUSION_DIM,
     VIEWCELL_REGION_CONDITIONED_VISIBILITY_HEAD_DIM,
@@ -2316,6 +2317,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--boundary-tail-residual-classification-margin", type=float, default=0.20)
     parser.add_argument("--boundary-tail-residual-regularization-weight", type=float, default=0.02)
     parser.add_argument(
+        "--query-tail-separator-family",
+        choices=QUERY_TAIL_SEPARATOR_FAMILIES,
+        default="disabled",
+    )
+    parser.add_argument("--query-tail-separator-hidden-dim", type=int, default=8)
+    parser.add_argument("--query-tail-separator-max-abs", type=float, default=0.5)
+    parser.add_argument(
+        "--query-tail-separator-centering",
+        choices=("none", "pose_mean"),
+        default="pose_mean",
+    )
+    parser.add_argument("--query-tail-separation-loss-weight", type=float, default=0.0)
+    parser.add_argument("--query-tail-positive-mass-fraction", type=float, default=0.005)
+    parser.add_argument("--query-tail-positive-count-cap", type=int, default=64)
+    parser.add_argument("--query-tail-min-positives", type=int, default=2)
+    parser.add_argument("--query-tail-negative-fraction", type=float, default=0.04)
+    parser.add_argument("--query-tail-min-negatives", type=int, default=64)
+    parser.add_argument("--query-tail-max-negatives", type=int, default=256)
+    parser.add_argument("--query-tail-margin", type=float, default=0.0)
+    parser.add_argument("--query-tail-temperature", type=float, default=0.25)
+    parser.add_argument("--query-tail-pose-cvar-fraction", type=float, default=0.25)
+    parser.add_argument("--query-tail-pose-cvar-weight", type=float, default=0.50)
+    parser.add_argument("--query-tail-negative-positive-weight", type=float, default=0.25)
+    parser.add_argument("--query-tail-positive-negative-weight", type=float, default=0.25)
+    parser.add_argument("--query-tail-regularization-weight", type=float, default=0.02)
+    parser.add_argument("--query-tail-positive-importance-power", type=float, default=0.5)
+    parser.add_argument("--query-tail-cross-pose-pair-weight", type=float, default=0.40)
+    parser.add_argument("--query-tail-global-pair-weight", type=float, default=0.25)
+    parser.add_argument(
         "--boundary-tail-residual-positive-importance-transform",
         choices=("log1p", "power"),
         default="log1p",
@@ -2719,6 +2749,63 @@ def main() -> None:
             "subpose sidecar, analytic extrema, enabled head, positive loss weight, "
             "and at least two poses per batch"
         )
+    query_tail_enabled = args.query_tail_separator_family != "disabled"
+    query_tail_scalars = (
+        args.query_tail_separator_max_abs,
+        args.query_tail_separation_loss_weight,
+        args.query_tail_positive_mass_fraction,
+        args.query_tail_negative_fraction,
+        args.query_tail_margin,
+        args.query_tail_temperature,
+        args.query_tail_pose_cvar_fraction,
+        args.query_tail_pose_cvar_weight,
+        args.query_tail_negative_positive_weight,
+        args.query_tail_positive_negative_weight,
+        args.query_tail_regularization_weight,
+        args.query_tail_positive_importance_power,
+        args.query_tail_cross_pose_pair_weight,
+        args.query_tail_global_pair_weight,
+    )
+    if not all(math.isfinite(float(value)) for value in query_tail_scalars):
+        raise ValueError("query-tail separator arguments must be finite")
+    if (
+        args.query_tail_separator_hidden_dim <= 0
+        or args.query_tail_separator_max_abs <= 0.0
+        or not 0.0 < args.query_tail_positive_mass_fraction <= 1.0
+        or args.query_tail_positive_count_cap <= 0
+        or args.query_tail_min_positives < 0
+        or args.query_tail_min_positives > args.query_tail_positive_count_cap
+        or not 0.0 < args.query_tail_negative_fraction <= 1.0
+        or args.query_tail_min_negatives < 0
+        or args.query_tail_max_negatives <= 0
+        or args.query_tail_min_negatives > args.query_tail_max_negatives
+        or args.query_tail_margin < 0.0
+        or args.query_tail_temperature <= 0.0
+        or not 0.0 < args.query_tail_pose_cvar_fraction <= 1.0
+        or args.query_tail_pose_cvar_weight < 0.0
+        or args.query_tail_negative_positive_weight < 0.0
+        or args.query_tail_positive_negative_weight < 0.0
+        or args.query_tail_regularization_weight < 0.0
+        or args.query_tail_positive_importance_power <= 0.0
+        or args.query_tail_cross_pose_pair_weight < 0.0
+        or args.query_tail_global_pair_weight < 0.0
+    ):
+        raise ValueError("query-tail separator dimensions or loss arguments are invalid")
+    if query_tail_enabled and (
+        args.query_tail_separation_loss_weight <= 0.0
+        or args.refinement_scope != "all"
+        or args.initial_checkpoint is not None
+        or args.subpose_sidecar is None
+        or args.poses_per_batch < 2
+    ):
+        raise ValueError(
+            "query-tail separator requires from-scratch joint training, train-only "
+            "subpose supervision, a positive loss weight, and at least two poses per batch"
+        )
+    if not query_tail_enabled and args.query_tail_separation_loss_weight != 0.0:
+        raise ValueError(
+            "disabled query-tail separator requires zero separation loss weight"
+        )
     if args.boundary_tail_fixed_frontier_weight > 0.0 and (
         args.refinement_scope != "boundary_tail_residual"
         or args.initial_checkpoint is None
@@ -2966,7 +3053,7 @@ def main() -> None:
         "boundary_opportunity",
         "boundary_tail_residual",
         "viewcell_region_tail",
-    }:
+    } or query_tail_enabled:
         if not dataset.has_subpose_robust_labels or dataset.subpose_counts is None:
             raise ValueError(
                 "boundary-tail refinement requires valid train-only subpose hit-rate supervision"
@@ -3156,6 +3243,10 @@ def main() -> None:
         viewcell_region_conditioned_visibility_centering=(
             args.viewcell_region_conditioned_visibility_centering
         ),
+        query_tail_separator_family=args.query_tail_separator_family,
+        query_tail_separator_hidden_dim=args.query_tail_separator_hidden_dim,
+        query_tail_separator_max_abs=args.query_tail_separator_max_abs,
+        query_tail_separator_centering=args.query_tail_separator_centering,
         cull_certificate_max_suppression=args.cull_certificate_max_suppression,
         cull_certificate_initial_suppression=(
             args.cull_certificate_initial_suppression
@@ -3672,6 +3763,50 @@ def main() -> None:
                 if args.boundary_tail_residual_centering == "pose_mean"
                 else "none"
             ),
+            "testRead": False,
+        },
+        "queryTailSeparation": {
+            "enabled": query_tail_enabled,
+            "family": str(args.query_tail_separator_family),
+            "inputDim": int(DUAL_PROBE_RAW_QUERY_DIM),
+            "hiddenDim": int(args.query_tail_separator_hidden_dim),
+            "maximumAbsoluteResidual": float(
+                args.query_tail_separator_max_abs
+            ),
+            "centering": str(args.query_tail_separator_centering),
+            "lossWeight": float(args.query_tail_separation_loss_weight),
+            "positiveTailMassFraction": float(
+                args.query_tail_positive_mass_fraction
+            ),
+            "positiveTailCountCap": int(args.query_tail_positive_count_cap),
+            "minimumPositivesPerPose": int(args.query_tail_min_positives),
+            "negativeTailFraction": float(args.query_tail_negative_fraction),
+            "minimumNegativesPerPose": int(args.query_tail_min_negatives),
+            "maximumNegativesPerPose": int(args.query_tail_max_negatives),
+            "margin": float(args.query_tail_margin),
+            "temperature": float(args.query_tail_temperature),
+            "poseCvarFraction": float(args.query_tail_pose_cvar_fraction),
+            "poseCvarWeight": float(args.query_tail_pose_cvar_weight),
+            "negativePositiveResidualWeight": float(
+                args.query_tail_negative_positive_weight
+            ),
+            "selectedPositiveNegativeResidualWeight": float(
+                args.query_tail_positive_negative_weight
+            ),
+            "residualRegularizationWeight": float(
+                args.query_tail_regularization_weight
+            ),
+            "positiveImportanceTransform": "power",
+            "positiveImportancePower": float(
+                args.query_tail_positive_importance_power
+            ),
+            "crossPosePairWeight": float(args.query_tail_cross_pose_pair_weight),
+            "globalTailPairWeight": float(args.query_tail_global_pair_weight),
+            "selectionScore": "detached pre-separator current visibility logit",
+            "training": "joint from epoch one with the complete model",
+            "initialCheckpoint": None,
+            "refinementScope": str(args.refinement_scope),
+            "subposeSupervisionSourceSplit": "train",
             "testRead": False,
         },
         "instanceExposureBalance": {
@@ -4376,6 +4511,55 @@ def main() -> None:
                     "selectedPositiveCount": 0.0,
                     "selectedNegativeCount": 0.0,
                 }
+            if query_tail_enabled:
+                query_tail_loss, query_tail_parts = viewcell_tail_partial_auc_loss(
+                    aux["query_tail_separator_residual"],
+                    aux["pre_query_tail_separator_visibility_logits"],
+                    target,
+                    visible_hit_rates,
+                    visible_weights,
+                    pose_offsets,
+                    tail_selection_logits=(
+                        aux["pre_query_tail_separator_visibility_logits"]
+                    ),
+                    positive_tail_mass_fraction=(
+                        args.query_tail_positive_mass_fraction
+                    ),
+                    positive_tail_count_cap=args.query_tail_positive_count_cap,
+                    min_positive_count=args.query_tail_min_positives,
+                    negative_top_fraction=args.query_tail_negative_fraction,
+                    min_negative_count=args.query_tail_min_negatives,
+                    max_negative_count=args.query_tail_max_negatives,
+                    margin=args.query_tail_margin,
+                    temperature=args.query_tail_temperature,
+                    pose_cvar_fraction=args.query_tail_pose_cvar_fraction,
+                    pose_cvar_weight=args.query_tail_pose_cvar_weight,
+                    negative_positive_residual_weight=(
+                        args.query_tail_negative_positive_weight
+                    ),
+                    selected_positive_negative_residual_weight=(
+                        args.query_tail_positive_negative_weight
+                    ),
+                    all_positive_negative_residual_weight=0.0,
+                    tail_classification_weight=0.0,
+                    residual_l2_weight=args.query_tail_regularization_weight,
+                    positive_importance_transform="power",
+                    positive_importance_power=(
+                        args.query_tail_positive_importance_power
+                    ),
+                    cross_pose_pair_weight=(
+                        args.query_tail_cross_pose_pair_weight
+                    ),
+                    global_tail_pair_weight=args.query_tail_global_pair_weight,
+                )
+            else:
+                query_tail_loss = logits.sum() * 0.0
+                query_tail_parts = {
+                    "lossViewcellTailPartialAuc": query_tail_loss,
+                    "poseCount": 0.0,
+                    "selectedPositiveCount": 0.0,
+                    "selectedNegativeCount": 0.0,
+                }
             if (
                 args.refinement_scope == "boundary_tail_residual"
                 and args.boundary_tail_fixed_frontier_weight > 0.0
@@ -4923,6 +5107,9 @@ def main() -> None:
                     "total": tail_objective,
                 }
             else:
+                safety_objective = safety_objective + float(
+                    args.query_tail_separation_loss_weight
+                ) * query_tail_loss
                 objective_groups = _v4_objective_groups(
                     safety_objective,
                     survival_loss,
@@ -5089,6 +5276,10 @@ def main() -> None:
                         float(args.boundary_tail_residual_loss_weight)
                         * boundary_tail_loss
                     ),
+                    "lossQueryTailSeparationWeighted": (
+                        float(args.query_tail_separation_loss_weight)
+                        * query_tail_loss
+                    ),
                     "lossWeightedSafetyFrontierWeighted": (
                         float(args.boundary_tail_fixed_frontier_weight)
                         * fixed_frontier_loss
@@ -5121,6 +5312,15 @@ def main() -> None:
                     "boundaryTailResidualAppliedAbsMean": aux[
                         "boundary_tail_residual_centered"
                     ].abs().mean(),
+                    "queryTailSeparatorResidualMean": aux[
+                        "query_tail_separator_residual"
+                    ].mean(),
+                    "queryTailSeparatorResidualAbsMean": aux[
+                        "query_tail_separator_residual"
+                    ].abs().mean(),
+                    "queryTailSeparatorResidualMaxAbs": aux[
+                        "query_tail_separator_residual"
+                    ].abs().max(),
                     "lossSurvivalWeighted": float(args.survival_loss_weight) * survival_loss,
                     "lossRelationConsistencyWeighted": float(args.relation_consistency_weight) * relation_loss,
                     "lossUtilityWeighted": float(args.utility_loss_weight) * utility_loss,
@@ -5175,6 +5375,10 @@ def main() -> None:
                     **{
                         "tailObjective" + key[:1].upper() + key[1:]: value
                         for key, value in boundary_tail_parts.items()
+                    },
+                    **{
+                        "queryTail" + key[:1].upper() + key[1:]: value
+                        for key, value in query_tail_parts.items()
                     },
                     **{
                         "fixedFrontier" + key[:1].upper() + key[1:]: value

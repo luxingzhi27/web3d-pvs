@@ -81,7 +81,7 @@ node slm2viewer/scripts/benchmark_ray_context_survival_owrb_webgpu_parity.mjs \
 ### 当前优化阶段覆盖（2026-08-10）
 
 - 当前阶段以 `docs/current/optimization_restart_2026-08-10.md` 为后续实验入口。
-- 当前唯一模型优化计划是 `docs/experiments/pvs_bounded_relation_survival_moment_v4_run_and_ablation_2026-08-15.md`，统一实验前缀为 `pvs_bounded_relation_prior_instance_calibrated_moment_safety_reserve_v4`。执行链固定为八组单种子快速扫描、冻结相对最优配置、五变体三种子 80 epoch 长训及完整评价；后续不得重新启用已失败的关系残差、固定 `0.5` 锚点、选择性纠错或旧 boundary 路线。
+- 当前唯一进行中的模型优化计划是 `docs/experiments/pvs_joint_108d_query_tail_separator_from_scratch_v1_2026-08-19.md`，统一实验前缀为 `pvs_joint_108d_query_tail_separator_from_scratch_v1`。该实验必须从 epoch 1 联合训练完整模型，固定完成无分离器、线性、分段线性和小型 MLP 四变体、三种子、80 epoch 及完整评价；不得加载旧 checkpoint，不得把冻结主干 refinement 或训练后探针继续写成从头长训结果。
 - 本阶段暂不把 `bad cull` 置信区间上界作为路线否决条件，但仍必须报告 `bad cull`、漏检数量和图像级漏检指标；不得用减少预测数量掩盖画面风险。
 - 画面安全主门仍是每个 checkpoint 在 calibration 上冻结的 `weighted recall > 0.99` 及其单侧 95% 置信下界大于 `0.99`。普通 pose recall 只作诊断。
 - 安全阈值的位置只作分布健康诊断，不作固定 `p=0.5` 硬门。必须同时记录安全阈值区间、阈值扰动稳定性、正样本加权 q01/q005、负样本 q99/q99.5、logit 间隔、Brier/ECE 和可靠性图；低阈值本身不能否决模型，因为 bias 或温度缩放可以移动概率阈值而不改变排序。不得用这种后处理伪装模型改进，主线资格仍由 calibration 的 weighted recall 安全门，以及同一安全门下的 precision、accuracy、balanced accuracy、specificity、useful cull、图像和资源指标共同决定。
@@ -271,7 +271,7 @@ node slm2viewer/scripts/benchmark_ray_context_survival_owrb_webgpu_parity.mjs \
 - 当前默认模型运行时读取离线固定实例特征表，不在前端运行 PointNet++、Graph U-Net、Triplane、dynamic-pool 或任何动态图传播。
 - 当前 HKUST 前端资产默认路径为 `slm2viewer/public/assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best`，冻结阈值约为 `0.02`，并同步保留 `slm2viewer/assets/` 与已构建部署目录中的同名资产。`pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_best` 只作为历史 benchmark，不是当前前端默认模型。
 - 必须保留 2026-08-11 修正正式矩阵、2026-08-12 Fourier 补充矩阵的 model/benchmark 输出，以及 `neural_instance_culling/benchmark/out/pvs_ray_context_survival_owrb_v1_subpose5_20260811_directchrome` 三角形深度层硬件缓存；后者是新分层关系网络构建 train-only 遮挡关系 CSR 的数据依赖。
-- 当前唯一待实施论文模型由三项候选创新组成：共享分层遮挡关系先验与逐实例校准生存场、视点区域矩包络频谱查询、安全裕度工作区效用损失。唯一计划和实验前缀分别是 `docs/experiments/pvs_bounded_relation_survival_moment_v4_run_and_ablation_2026-08-15.md` 与 `pvs_bounded_relation_prior_instance_calibrated_moment_safety_reserve_v4`；快速扫描和 80 epoch 三种子消融完成前不得改默认 checkpoint、阈值或前端资产。
+- 当前论文模型基础仍由共享分层遮挡关系先验与逐实例校准生存场、视点区域矩包络频谱查询、安全裕度工作区效用损失组成；当前实验进一步验证联合训练的 108 维查询尾部分离器能否改善高 weighted recall 工作点下的正负分离。唯一进行中计划和前缀分别为 `docs/experiments/pvs_joint_108d_query_tail_separator_from_scratch_v1_2026-08-19.md` 与 `pvs_joint_108d_query_tail_separator_from_scratch_v1`；四变体三种子 80 epoch、validation 和配对统计完成前不得改默认 checkpoint、阈值或前端资产。
 - 历史字段 `visible_pixels.bin` 当前按 `visible_weights` 处理，不能宣称是真实 pixel coverage。
 - 后退扩大视锥候选上的 no-hash 主线相机输入必须参考 `Neural Visibility of Point Sets` 的视角条件化方式：以“当前相机到实例中心的单位视线方向 / ray direction”及轻量 ray-space 标量查询固定实例特征，不能把 raw camera xyz 或 raw world-space delta xyz 直接作为 visibility MLP 的主要输入。camera hash 只能作为消融或辅助，不得替代这种 view-ray 查询叙事。
 

@@ -17,6 +17,35 @@ import evaluate_pvs_bounded_relation_survival_moment_v4 as evaluator  # noqa: E4
 
 
 class BoundedRelationSurvivalMomentV3EvaluatorTests(unittest.TestCase):
+    def test_query_tail_separator_constructor_values_follow_checkpoint_schema(self) -> None:
+        self.assertEqual(
+            evaluator._query_tail_separator_constructor_values({}),
+            ("disabled", 8, 0.5, "pose_mean"),
+        )
+        self.assertEqual(
+            evaluator._query_tail_separator_constructor_values(
+                {
+                    "queryTailSeparator": {
+                        "enabled": True,
+                        "family": "mlp",
+                        "hiddenDim": 8,
+                        "maximumAbsoluteResidual": 0.5,
+                        "centering": "pose_mean",
+                    }
+                }
+            ),
+            ("mlp", 8, 0.5, "pose_mean"),
+        )
+        with self.assertRaisesRegex(ValueError, "queryTailSeparator"):
+            evaluator._query_tail_separator_constructor_values(
+                {
+                    "queryTailSeparator": {
+                        "enabled": False,
+                        "family": "linear",
+                    }
+                }
+            )
+
     def test_replay_splits_allow_train_diagnostics_but_never_test(self) -> None:
         self.assertEqual(
             evaluator.REPLAY_SPLITS,

@@ -199,6 +199,34 @@ def _boundary_tail_residual_constructor_values(
     )
 
 
+def _query_tail_separator_constructor_values(
+    config: Mapping[str, Any],
+) -> tuple[str, int, float, str]:
+    separator = config.get("queryTailSeparator")
+    if separator is None:
+        return "disabled", 8, 0.5, "pose_mean"
+    if not isinstance(separator, Mapping):
+        raise ValueError("v4 checkpoint queryTailSeparator config is invalid")
+    enabled = bool(separator.get("enabled", False))
+    family = str(separator.get("family", "disabled"))
+    try:
+        hidden_dim = int(separator.get("hiddenDim", 8) or 8)
+        maximum = float(separator.get("maximumAbsoluteResidual", 0.5))
+        centering = str(separator.get("centering", "pose_mean"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("v4 checkpoint queryTailSeparator config is incomplete") from exc
+    if (
+        family not in {"disabled", "linear", "hinge", "mlp"}
+        or enabled != (family != "disabled")
+        or hidden_dim <= 0
+        or not np.isfinite(maximum)
+        or maximum <= 0.0
+        or centering not in {"none", "pose_mean"}
+    ):
+        raise ValueError("v4 checkpoint queryTailSeparator values are invalid")
+    return family, hidden_dim, maximum, centering
+
+
 def _viewcell_extreme_visibility_constructor_value(
     config: Mapping[str, Any],
 ) -> bool:
@@ -835,6 +863,12 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
     dual_probe_rescue = config.get("dualProbeRescue")
     if dual_probe_rescue is not None and not isinstance(dual_probe_rescue, Mapping):
         raise ValueError("checkpoint dual-probe-rescue config is invalid")
+    (
+        query_tail_separator_family,
+        query_tail_separator_hidden_dim,
+        query_tail_separator_max_abs,
+        query_tail_separator_centering,
+    ) = _query_tail_separator_constructor_values(config)
     device = torch.device("cuda" if args.device == "cuda" or (args.device == "auto" and torch.cuda.is_available()) else "cpu")
     model = BoundedRelationSurvivalMomentModel(
         num_instances=num_instances,
@@ -900,6 +934,10 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         viewcell_region_conditioned_visibility_centering=(
             viewcell_region_conditioned_visibility_centering
         ),
+        query_tail_separator_family=query_tail_separator_family,
+        query_tail_separator_hidden_dim=query_tail_separator_hidden_dim,
+        query_tail_separator_max_abs=query_tail_separator_max_abs,
+        query_tail_separator_centering=query_tail_separator_centering,
         dual_probe_rescue=(
             dict(dual_probe_rescue)
             if isinstance(dual_probe_rescue, Mapping)
