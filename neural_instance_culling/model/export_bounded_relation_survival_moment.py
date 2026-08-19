@@ -75,12 +75,32 @@ MAX_NEURAL_ASSET_BYTES = 7 * 1024 * 1024
 # as FP16; validate their FP32 reconstruction with the registered bound.
 MAX_FP16_FUSION_ABS_ERROR = 0.02
 DEFAULT_VIEWCELL_SHAPE = "horizontal_disk"
-V4_VARIANT_CONTRACTS: dict[str, tuple[str, str]] = {
-    "full": ("safety_reserve", "residual"),
-    "without_bounded_relation": ("safety_reserve", "residual"),
-    "without_viewcell_moment_envelope": ("safety_reserve", "residual"),
-    "without_safety_reserve_utility": ("normalized_rvl", "residual"),
-    "without_instance_calibration_residual": ("safety_reserve", "disabled"),
+V4_VARIANT_CONTRACTS: dict[str, tuple[str, str, bool]] = {
+    "full": ("safety_reserve", "residual", False),
+    "without_bounded_relation": ("safety_reserve", "residual", False),
+    "without_viewcell_moment_envelope": ("safety_reserve", "residual", False),
+    "without_safety_reserve_utility": ("normalized_rvl", "residual", False),
+    "without_instance_calibration_residual": ("safety_reserve", "disabled", False),
+    "pose_balanced_frontier_without_exposure": (
+        "pose_balanced_frontier",
+        "residual",
+        False,
+    ),
+    "pose_balanced_frontier_with_exposure": (
+        "pose_balanced_frontier",
+        "residual",
+        True,
+    ),
+    "cross_pose_operating_without_exposure": (
+        "cross_pose_operating",
+        "residual",
+        False,
+    ),
+    "cross_pose_operating_with_exposure": (
+        "cross_pose_operating",
+        "residual",
+        True,
+    ),
 }
 
 def _as_mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -209,7 +229,11 @@ def _validate_checkpoint_schema(checkpoint: Mapping[str, Any]) -> None:
     variant = str(protocol.get("variant", ""))
     if variant not in V4_VARIANT_CONTRACTS:
         raise ValueError(f"checkpoint.protocol.variant is not registered: {variant!r}")
-    expected_loss, expected_calibration_mode = V4_VARIANT_CONTRACTS[variant]
+    (
+        expected_loss,
+        expected_calibration_mode,
+        expected_exposure_enabled,
+    ) = V4_VARIANT_CONTRACTS[variant]
     if protocol.get("lossVariant") != expected_loss:
         raise ValueError("checkpoint.protocol.lossVariant disagrees with the registered variant")
     protocol_calibration = _as_mapping(
@@ -218,6 +242,20 @@ def _validate_checkpoint_schema(checkpoint: Mapping[str, Any]) -> None:
     if protocol_calibration.get("mode") != expected_calibration_mode:
         raise ValueError(
             "checkpoint.protocol.instanceCalibration.mode disagrees with the registered variant"
+        )
+    protocol_exposure_value = protocol.get("viewcellExposureSupervision")
+    protocol_exposure = (
+        {}
+        if protocol_exposure_value is None
+        else _as_mapping(
+            protocol_exposure_value,
+            "checkpoint.protocol.viewcellExposureSupervision",
+        )
+    )
+    if bool(protocol_exposure.get("enabled", False)) != expected_exposure_enabled:
+        raise ValueError(
+            "checkpoint.protocol.viewcellExposureSupervision.enabled disagrees with "
+            "the registered variant"
         )
 
 
@@ -305,6 +343,37 @@ def _validate_model_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
             f"of {REGISTERED_MAX_NORM_CYCLES}"
         )
 
+    exposure = config.get("viewcellExposureSupervision")
+    exposure_enabled = False
+    exposure_hidden_dim = 0
+    if exposure is not None:
+        exposure = _as_mapping(
+            exposure, "config.viewcellExposureSupervision"
+        )
+        exposure_enabled = bool(exposure.get("enabled", False))
+        if exposure_enabled:
+            exposure_hidden_dim = _positive_int(
+                exposure.get("hiddenDim"),
+                "config.viewcellExposureSupervision.hiddenDim",
+            )
+            if (
+                _positive_int(
+                    exposure.get("inputDim"),
+                    "config.viewcellExposureSupervision.inputDim",
+                )
+                != hidden_dim
+                or exposure.get("trainingOnly") is not True
+                or exposure.get("runtimeExport") is not False
+            ):
+                raise ValueError(
+                    "view-cell exposure supervision must be train-only and excluded from runtime"
+                )
+    expected_exposure_enabled = V4_VARIANT_CONTRACTS[str(protocol["variant"])][2]
+    if exposure_enabled != expected_exposure_enabled:
+        raise ValueError(
+            "config.viewcellExposureSupervision.enabled disagrees with checkpoint variant"
+        )
+
     return {
         "runtimeSchema": MODEL_SCHEMA,
         "numInstances": num_instances,
@@ -342,6 +411,11 @@ def _validate_model_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
             "count": frequency_count,
             "units": "cycles",
             "maxNormCycles": max_frequency_norm,
+        },
+        "trainingOnlyExposureSupervision": {
+            "enabledInCheckpoint": exposure_enabled,
+            "hiddenDim": exposure_hidden_dim,
+            "runtimeExported": False,
         },
     }
 
@@ -810,12 +884,21 @@ def _resolve_threshold(
         )
     if calibration.get("testRead") is not False:
         raise ValueError("checkpoint.calibration must declare testRead=false")
+    best = checkpoint.get("best")
     selected = calibration.get("selected", calibration.get("selectedSafe"))
     source = (
         "checkpoint.calibration.selected"
         if calibration.get("selected") is not None
         else "checkpoint.calibration.selectedSafe"
     )
+    if (
+        allow_unsafe
+        and isinstance(best, Mapping)
+        and best.get("safe") is False
+        and isinstance(calibration.get("diagnostic"), Mapping)
+    ):
+        selected = calibration["diagnostic"]
+        source = "checkpoint.calibration.diagnostic"
     if not isinstance(selected, Mapping):
         if not allow_unsafe:
             raise ValueError("checkpoint.calibration.selected/selectedSafe is missing")
@@ -831,7 +914,12 @@ def _resolve_threshold(
     lower_bound = _threshold_value(
         selected, "aggregateWeightedRecallLowerConfidenceBound"
     )
-    safe = weighted_recall > TARGET_WEIGHTED_RECALL and lower_bound > MINIMUM_WEIGHTED_RECALL_LCB
+    calibration_safe = (
+        weighted_recall > TARGET_WEIGHTED_RECALL
+        and lower_bound > MINIMUM_WEIGHTED_RECALL_LCB
+    )
+    checkpoint_safe = not isinstance(best, Mapping) or best.get("safe") is not False
+    safe = calibration_safe and checkpoint_safe
     if not safe and not allow_unsafe:
         raise ValueError(
             "checkpoint calibration threshold is unsafe: "
@@ -851,7 +939,6 @@ def _resolve_threshold(
     declared_safe = selected.get("safe")
     if declared_safe is not None and bool(declared_safe) != safe:
         raise ValueError("calibration selected.safe disagrees with weighted-recall safety fields")
-    best = checkpoint.get("best")
     if isinstance(best, Mapping):
         if best.get("threshold") is not None:
             best_threshold = _finite_float(best["threshold"], "checkpoint.best.threshold")
@@ -867,6 +954,7 @@ def _resolve_threshold(
         "minimumWeightedRecallLowerConfidenceBound": MINIMUM_WEIGHTED_RECALL_LCB,
         "weightedRecallField": "aggregateWeightedRecall",
         "weightedRecallLowerConfidenceBoundField": "aggregateWeightedRecallLowerConfidenceBound",
+        "calibrationSafe": calibration_safe,
         "safe": safe,
         "status": "safe" if safe else "unsafe_diagnostic",
         "selected": _compact_workpoint(selected),

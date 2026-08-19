@@ -74,6 +74,7 @@ class BoundedRelationSurvivalMomentV3EvaluatorTests(unittest.TestCase):
 
             def load_state_dict(self, _state: object, strict: bool = True) -> None:
                 self.strict = strict
+                captured["strict"] = strict
                 raise StopAfterConstruction
 
         config = {
@@ -112,6 +113,14 @@ class BoundedRelationSurvivalMomentV3EvaluatorTests(unittest.TestCase):
                 "runtimeReduction": "candidate_mean_per_pose",
                 "boundedCorrection": False,
             },
+            "viewcellExposureSupervision": {
+                "enabled": True,
+                "inputDim": 13,
+                "hiddenDim": 7,
+                "target": "train-only successful-subpose visible hit rate",
+                "trainingOnly": True,
+                "runtimeExport": False,
+            },
         }
         checkpoint = {
             "schema": evaluator.CHECKPOINT_SCHEMA,
@@ -147,6 +156,8 @@ class BoundedRelationSurvivalMomentV3EvaluatorTests(unittest.TestCase):
             captured["viewcell_region_conditioned_visibility_centering"],
             "pose_mean",
         )
+        self.assertEqual(captured["exposure_supervision_hidden_dim"], 7)
+        self.assertIs(captured["strict"], True)
 
     def test_legacy_fingerprint_filter_preserves_shape_fields(self) -> None:
         value = evaluator._strip_fingerprint_fields(

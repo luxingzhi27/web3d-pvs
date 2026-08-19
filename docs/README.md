@@ -8,6 +8,8 @@
 
 | 文档 | 内容 |
 |---|---|
+| [`evaluation/pvs_cross_pose_operating_exposure_representation_v1_2026-08-19.md`](evaluation/pvs_cross_pose_operating_exposure_representation_v1_2026-08-19.md) | 跨视点工作边界与 view-cell 区域暴露监督的 8 epoch 扫描、单种子 16 epoch 2x2 快速评价、GLB 资源指标和不增长的前端运行契约 |
+| [`experiments/pvs_cross_pose_operating_exposure_representation_v1_2026-08-19.md`](experiments/pvs_cross_pose_operating_exposure_representation_v1_2026-08-19.md) | 当前训练期组合创新的输入、损失、暴露监督、快速矩阵、运行资产上限和执行状态 |
 | [`evaluation/pvs_pose_balanced_frontier_visibility_loss_v1_formal40_2026-08-19.md`](evaluation/pvs_pose_balanced_frontier_visibility_loss_v1_formal40_2026-08-19.md) | 逐 pose 平衡 BCE 加动态安全前沿损失的两轮扫描、三种子 40 epoch 正式结果及与旧 V4 的同口径比较；结果未晋级默认模型 |
 | [`experiments/pvs_pose_balanced_frontier_visibility_loss_v1_2026-08-19.md`](experiments/pvs_pose_balanced_frontier_visibility_loss_v1_2026-08-19.md) | 新损失的设计、输入输出、扫描配置、从头训练协议和保留规则 |
 | [`experiments/pvs_joint_108d_query_tail_separator_from_scratch_v1_2026-08-19.md`](experiments/pvs_joint_108d_query_tail_separator_from_scratch_v1_2026-08-19.md) | 已停止的 108 维联合分离器矩阵计划；只保留历史协议和已有产物，不再训练或续跑 |
@@ -41,6 +43,7 @@
 
 | 文档 | 内容 |
 |---|---|
+| [`evaluation/pvs_cross_pose_operating_exposure_representation_v1_2026-08-19.md`](evaluation/pvs_cross_pose_operating_exposure_representation_v1_2026-08-19.md) | 单种子快速结果：组合训练机制在 4.53 MiB 运行资产不变的前提下改善分类、有效剔除和 GLB 削减；等待三种子与图像/移动端评价 |
 | [`evaluation/pvs_pose_balanced_frontier_visibility_loss_v1_formal40_2026-08-19.md`](evaluation/pvs_pose_balanced_frontier_visibility_loss_v1_formal40_2026-08-19.md) | 新损失两轮参数扫描、三种子从头 40 epoch 结果、安全阈值、分类/剔除/资源指标和未晋级结论 |
 | [`evaluation/unified_pvs_metrics_evaluation.md`](evaluation/unified_pvs_metrics_evaluation.md) | pose/aggregate、weighted recall、accuracy、balanced accuracy、useful cull 和资源指标定义 |
 | [`evaluation/test_split_benchmark_protocol.md`](evaluation/test_split_benchmark_protocol.md) | calibration、validation、test 的冻结关系 |

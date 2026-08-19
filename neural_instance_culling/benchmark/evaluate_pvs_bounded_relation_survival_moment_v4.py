@@ -340,6 +340,33 @@ def _viewcell_region_conditioned_visibility_constructor_value(
     return True, centering
 
 
+def _exposure_supervision_constructor_value(config: Mapping[str, Any]) -> int:
+    exposure = config.get("viewcellExposureSupervision")
+    if exposure is None:
+        return 0
+    if not isinstance(exposure, Mapping):
+        raise ValueError("checkpoint viewcell exposure supervision config is invalid")
+    if not bool(exposure.get("enabled", False)):
+        return 0
+    try:
+        input_dim = int(exposure["inputDim"])
+        hidden_dim = int(exposure["hiddenDim"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "enabled viewcell exposure supervision config is incomplete"
+        ) from exc
+    if (
+        input_dim != int(config.get("hiddenDim", 64))
+        or hidden_dim <= 0
+        or exposure.get("trainingOnly") is not True
+        or exposure.get("runtimeExport") is not False
+    ):
+        raise ValueError(
+            "enabled viewcell exposure supervision must be train-only"
+        )
+    return hidden_dim
+
+
 def _load_checkpoint(path: Path) -> dict[str, Any]:
     try:
         value = torch.load(path, map_location="cpu", weights_only=False)
@@ -869,12 +896,16 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         query_tail_separator_max_abs,
         query_tail_separator_centering,
     ) = _query_tail_separator_constructor_values(config)
+    exposure_supervision_hidden_dim = _exposure_supervision_constructor_value(
+        config
+    )
     device = torch.device("cuda" if args.device == "cuda" or (args.device == "auto" and torch.cuda.is_available()) else "cpu")
     model = BoundedRelationSurvivalMomentModel(
         num_instances=num_instances,
         num_glbs=int(config.get("numGlbs", int(instance_to_glb.max()) + 1 if instance_to_glb.size else 0)),
         relation_hidden_dim=int(config.get("relationHiddenDim", 64)),
         hidden_dim=int(config.get("hiddenDim", 64)),
+        exposure_supervision_hidden_dim=exposure_supervision_hidden_dim,
         relation_source=str(config.get("relationSource")),
         spectral_mode=str(config.get("spectralMode")),
         depth_q01=float(depth["q01"]),
@@ -1048,6 +1079,9 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         if int(relation_meta.get("numInstances", -1)) != num_instances:
             raise ValueError("v4 replay relation instance count disagrees with checkpoint")
 
+    bootstrap_replicates = int(getattr(args, "bootstrap_replicates", 0))
+    if bootstrap_replicates < 0:
+        raise ValueError("bootstrap-replicates must be non-negative")
     started = time.perf_counter()
     rows = evaluate_thresholds(
         model,
@@ -1062,7 +1096,7 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         thresholds=np.asarray([threshold], dtype=np.float32),
         collect_pose_stats=True,
         allow_candidate_visible_union=False,
-        bootstrap_replicates=0,
+        bootstrap_replicates=bootstrap_replicates,
         collect_score_stats=True,
         collect_per_pose=True,
         collect_raw_scores=bool(getattr(args, "persist_scores", False)),
@@ -1117,7 +1151,11 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
             "metrics": metrics,
         })
     pose_array = np.asarray(split.pose_indices, dtype="<i8")
-    summary = _summarize_pose_rows(per_pose, lcb_replicates=10000 if split_name == "calibration" else 0, seed=int(args.seed))
+    summary = _summarize_pose_rows(
+        per_pose,
+        lcb_replicates=bootstrap_replicates,
+        seed=int(args.seed),
+    )
     return {
         "schema": EVALUATION_SCHEMA,
         "version": 1,
@@ -1213,6 +1251,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--calibration", type=Path, default=None)
     parser.add_argument("--diagnostic-recalibrate", action="store_true")
     parser.add_argument("--recalibration-bootstrap-replicates", type=int, default=2000)
+    parser.add_argument(
+        "--bootstrap-replicates",
+        type=int,
+        default=0,
+        help="Bootstrap replicates for the frozen-threshold split metrics.",
+    )
     return parser.parse_args(argv)
 
 

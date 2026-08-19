@@ -43,6 +43,7 @@ class BoundedRelationSurvivalMomentModelContractTest(unittest.TestCase):
         viewcell_region_conditioned_visibility_centering: str = "none",
         query_tail_separator_family: str = "disabled",
         query_tail_separator_hidden_dim: int = 8,
+        exposure_supervision_hidden_dim: int = 0,
     ) -> BoundedRelationSurvivalMomentModel:
         model = BoundedRelationSurvivalMomentModel(
             4,
@@ -71,6 +72,7 @@ class BoundedRelationSurvivalMomentModelContractTest(unittest.TestCase):
             ),
             query_tail_separator_family=query_tail_separator_family,
             query_tail_separator_hidden_dim=query_tail_separator_hidden_dim,
+            exposure_supervision_hidden_dim=exposure_supervision_hidden_dim,
         )
         model.set_instance_world_aabbs(
             torch.tensor(
@@ -121,6 +123,67 @@ class BoundedRelationSurvivalMomentModelContractTest(unittest.TestCase):
         self.assertEqual(config["instanceCalibration"]["mode"], "residual")
         self.assertEqual(config["instanceCalibration"]["runtimeExport"], "fused coefficients only")
         self.assertFalse(config["queryTailSeparator"]["enabled"])
+
+    def test_exposure_supervision_head_is_training_only_and_runtime_shape_is_unchanged(self) -> None:
+        torch.manual_seed(20260819)
+        baseline = self._model()
+        torch.manual_seed(20260819)
+        supervised = self._model(exposure_supervision_hidden_dim=16)
+        baseline_state = baseline.state_dict()
+        shared_state = {
+            key: value
+            for key, value in baseline_state.items()
+            if not key.startswith("exposure_supervision_head.")
+        }
+        supervised.load_state_dict(shared_state, strict=False)
+        inputs = self._inputs()
+        baseline.train()
+        supervised.train()
+        baseline_logits, _ = baseline.compute_logits_with_aux(
+            inputs["camera"],
+            inputs["camera_view"],
+            inputs["candidate_camera"],
+            inputs["instance_ids"],
+            runtime_features=inputs["runtime"],
+            query_center_world=inputs["query_center"],
+            viewcell_radius_m=inputs["radius"],
+            pose_offsets=torch.tensor([0, 2, 4]),
+        )
+        supervised_logits, supervised_aux = supervised.compute_logits_with_aux(
+            inputs["camera"],
+            inputs["camera_view"],
+            inputs["candidate_camera"],
+            inputs["instance_ids"],
+            runtime_features=inputs["runtime"],
+            query_center_world=inputs["query_center"],
+            viewcell_radius_m=inputs["radius"],
+            pose_offsets=torch.tensor([0, 2, 4]),
+        )
+        torch.testing.assert_close(supervised_logits, baseline_logits)
+        self.assertEqual(
+            tuple(supervised_aux["viewcell_exposure_supervision_logits"].shape),
+            (4, 1),
+        )
+        supervised.eval()
+        _, eval_aux = supervised.compute_logits_with_aux(
+            inputs["camera"],
+            inputs["camera_view"],
+            inputs["candidate_camera"],
+            inputs["instance_ids"],
+            runtime_features=inputs["runtime"],
+            query_center_world=inputs["query_center"],
+            viewcell_radius_m=inputs["radius"],
+            pose_offsets=torch.tensor([0, 2, 4]),
+        )
+        self.assertNotIn("viewcell_exposure_supervision_logits", eval_aux)
+        schema = supervised.export_schema()
+        self.assertEqual(schema["fixedTable"]["shape"], ["N", 124])
+        self.assertTrue(
+            schema["modelConfig"]["viewcellExposureSupervision"]["trainingOnly"]
+        )
+        self.assertFalse(
+            schema["modelConfig"]["viewcellExposureSupervision"]["runtimeExport"]
+        )
 
     def test_query_tail_separator_families_are_zero_initialized_and_share_108d_input(self) -> None:
         inputs = self._inputs()

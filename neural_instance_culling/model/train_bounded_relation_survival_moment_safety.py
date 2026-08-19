@@ -37,18 +37,26 @@ from bounded_relation_survival_moment_model import (  # noqa: E402
     MODEL_SCHEMA,
     QUERY_TAIL_SEPARATOR_FAMILIES,
     RUNTIME_FEATURE_DIM,
+    RUNTIME_HEAD_INPUT_DIM,
     VIEWCELL_REGION_CONDITIONED_VISIBILITY_FUSION_DIM,
     VIEWCELL_REGION_CONDITIONED_VISIBILITY_HEAD_DIM,
     VIEWCELL_REGION_CONDITIONED_VISIBILITY_PROJECTION_DIM,
     VIEWCELL_REGION_CONDITIONED_VISIBILITY_REGION_DIM,
 )
 from common.candidate_identity import candidate_digest_for_pose_sequence  # noqa: E402
+from common.cross_pose_operating_loss import (  # noqa: E402
+    CrossPoseOperatingDualState,
+    cross_pose_recall_constrained_operating_loss,
+)
 from common.dual_probe_rescue_loss import (  # noqa: E402
     dual_probe_rescue_attenuation_loss,
 )
 from common.viewcell_extreme_envelope import (  # noqa: E402
     VIEWCELL_EXTREME_ENVELOPE_DIM,
     VIEWCELL_SUPPORT_ENVELOPE_DIM,
+)
+from common.viewcell_exposure_supervision_loss import (  # noqa: E402
+    viewcell_exposure_supervision_loss,
 )
 from common.viewcell_boundary_opportunity_loss import (  # noqa: E402
     viewcell_boundary_opportunity_loss,
@@ -2045,6 +2053,8 @@ def _v4_objective_groups(
     download_weight: float,
     regularization_weight: float,
     instance_calibration_regularization_weight: float,
+    exposure_supervision: torch.Tensor | None = None,
+    exposure_supervision_weight: float = 0.0,
 ) -> dict[str, torch.Tensor]:
     """Build the four logged groups and the exact scalar optimized by the step."""
     relation = (
@@ -2054,6 +2064,8 @@ def _v4_objective_groups(
         + float(instance_calibration_regularization_weight)
         * instance_calibration_regularization
     )
+    if exposure_supervision is not None:
+        relation = relation + float(exposure_supervision_weight) * exposure_supervision
     schedule = float(utility_weight) * utility + float(download_weight) * download
     return {
         "safety": safety,
@@ -2464,6 +2476,7 @@ def parse_args() -> argparse.Namespace:
             "safety_reserve",
             "normalized_rvl",
             "pose_balanced_frontier",
+            "cross_pose_operating",
         ),
         default="safety_reserve",
     )
@@ -2523,6 +2536,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--frontier-positive-importance-power", type=float, default=0.50
+    )
+    parser.add_argument("--cross-pose-positive-class-fraction", type=float, default=0.25)
+    parser.add_argument("--cross-pose-operating-weight", type=float, default=1.0)
+    parser.add_argument("--cross-pose-weighted-recall-target", type=float, default=0.995)
+    parser.add_argument("--cross-pose-temperature", type=float, default=0.25)
+    parser.add_argument("--cross-pose-hard-negative-fraction", type=float, default=0.01)
+    parser.add_argument("--cross-pose-hard-negative-count-cap", type=int, default=512)
+    parser.add_argument("--cross-pose-hard-negative-mix", type=float, default=0.50)
+    parser.add_argument("--cross-pose-augmented-penalty", type=float, default=10.0)
+    parser.add_argument("--cross-pose-initial-boundary-logit", type=float, default=0.0)
+    parser.add_argument("--cross-pose-dual-initial", type=float, default=1.0)
+    parser.add_argument("--cross-pose-dual-learning-rate", type=float, default=0.05)
+    parser.add_argument("--cross-pose-dual-maximum", type=float, default=20.0)
+    parser.add_argument("--exposure-supervision-hidden-dim", type=int, default=0)
+    parser.add_argument("--exposure-supervision-loss-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--exposure-supervision-positive-class-fraction", type=float, default=0.25
     )
     parser.add_argument("--instance-exposure-balance-weight", type=float, default=0.0)
     parser.add_argument("--instance-exposure-balance-power", type=float, default=0.5)
@@ -3015,6 +3045,62 @@ def main() -> None:
         raise ValueError(
             "pose-balanced frontier training requires full-model scope and no query-tail head"
         )
+    cross_pose_scalars = (
+        args.cross_pose_positive_class_fraction,
+        args.cross_pose_operating_weight,
+        args.cross_pose_weighted_recall_target,
+        args.cross_pose_temperature,
+        args.cross_pose_hard_negative_fraction,
+        args.cross_pose_hard_negative_mix,
+        args.cross_pose_augmented_penalty,
+        args.cross_pose_initial_boundary_logit,
+        args.cross_pose_dual_initial,
+        args.cross_pose_dual_learning_rate,
+        args.cross_pose_dual_maximum,
+        args.exposure_supervision_loss_weight,
+        args.exposure_supervision_positive_class_fraction,
+    )
+    if not all(math.isfinite(float(value)) for value in cross_pose_scalars):
+        raise ValueError("cross-pose operating and exposure parameters must be finite")
+    if (
+        not 0.0 < args.cross_pose_positive_class_fraction < 1.0
+        or args.cross_pose_operating_weight < 0.0
+        or not 0.0 < args.cross_pose_weighted_recall_target < 1.0
+        or args.cross_pose_temperature <= 0.0
+        or not 0.0 < args.cross_pose_hard_negative_fraction <= 1.0
+        or args.cross_pose_hard_negative_count_cap <= 0
+        or not 0.0 <= args.cross_pose_hard_negative_mix <= 1.0
+        or args.cross_pose_augmented_penalty < 0.0
+        or args.cross_pose_dual_initial < 0.0
+        or args.cross_pose_dual_learning_rate < 0.0
+        or args.cross_pose_dual_maximum < args.cross_pose_dual_initial
+        or args.exposure_supervision_hidden_dim < 0
+        or args.exposure_supervision_loss_weight < 0.0
+        or not 0.0 < args.exposure_supervision_positive_class_fraction < 1.0
+    ):
+        raise ValueError("cross-pose operating or exposure parameters are invalid")
+    exposure_supervision_enabled = args.exposure_supervision_hidden_dim > 0
+    if exposure_supervision_enabled != (args.exposure_supervision_loss_weight > 0.0):
+        raise ValueError(
+            "exposure supervision hidden dimension and loss weight must be enabled together"
+        )
+    if exposure_supervision_enabled and (
+        args.refinement_scope != "all"
+        or args.loss_variant not in {"pose_balanced_frontier", "cross_pose_operating"}
+    ):
+        raise ValueError(
+            "exposure supervision is restricted to full-model frontier experiments"
+        )
+    if args.loss_variant == "cross_pose_operating" and (
+        args.refinement_scope != "all"
+        or query_tail_enabled
+        or args.initial_checkpoint is not None
+        or args.poses_per_batch < 2
+    ):
+        raise ValueError(
+            "cross-pose operating training must run from scratch on at least two poses "
+            "with full-model scope and no query-tail head"
+        )
     if args.safety_boundary_ema_decay > 0.0 and (
         args.safety_boundary_scope != "batch"
         or args.safety_boundary_excess_weight <= 0.0
@@ -3305,6 +3391,7 @@ def main() -> None:
         cull_certificate_hidden_dim=args.cull_certificate_hidden_dim,
         cull_certificate_input_mode=args.cull_certificate_input_mode,
         dual_probe_rescue=dual_probe_rescue_spec,
+        exposure_supervision_hidden_dim=args.exposure_supervision_hidden_dim,
     ).to(device)
     model.set_instance_world_aabbs(torch.from_numpy(world_aabbs).to(device))
     model.set_instance_to_glb(torch.from_numpy(instance_to_glb_np).to(device))
@@ -3474,6 +3561,21 @@ def main() -> None:
             learning_rate=args.boundary_tail_np_dual_learning_rate,
             maximum=args.boundary_tail_np_dual_maximum,
         )
+    cross_pose_boundary_logit: torch.nn.Parameter | None = None
+    cross_pose_dual_state: CrossPoseOperatingDualState | None = None
+    if args.loss_variant == "cross_pose_operating":
+        cross_pose_boundary_logit = torch.nn.Parameter(
+            torch.tensor(
+                float(args.cross_pose_initial_boundary_logit),
+                dtype=torch.float32,
+                device=device,
+            )
+        )
+        cross_pose_dual_state = CrossPoseOperatingDualState(
+            multiplier=args.cross_pose_dual_initial,
+            learning_rate=args.cross_pose_dual_learning_rate,
+            maximum=args.cross_pose_dual_maximum,
+        )
     if args.same_instance_cross_view_recurrence_selected_fraction > 0.0:
         assert initial_runtime_features is not None
         recurrence_priority_np, recurrence_priority_meta = (
@@ -3535,7 +3637,7 @@ def main() -> None:
         "lossVariant": args.loss_variant,
         "initialization": initialization or {"mode": "from-scratch"},
         "rvlDiagnostics": {
-            "enabled": args.loss_variant != "pose_balanced_frontier",
+            "enabled": args.loss_variant in {"safety_reserve", "normalized_rvl"},
             "bcePositiveWeight": float(args.rvl_bce_positive_weight),
             "tverskyFnWeight": float(args.rvl_tversky_fn_weight),
             "countWeight": float(args.rvl_count_weight),
@@ -3572,6 +3674,64 @@ def main() -> None:
             ),
             "selectionSource": "current detached final visibility logits per train pose",
             "testRead": False,
+        },
+        "crossPoseOperatingLoss": {
+            "enabled": args.loss_variant == "cross_pose_operating",
+            "sourceSplit": "train",
+            "positiveClassFraction": float(
+                args.cross_pose_positive_class_fraction
+            ),
+            "operatingWeight": float(args.cross_pose_operating_weight),
+            "weightedRecallTarget": float(
+                args.cross_pose_weighted_recall_target
+            ),
+            "temperature": float(args.cross_pose_temperature),
+            "hardNegativeFraction": float(
+                args.cross_pose_hard_negative_fraction
+            ),
+            "hardNegativeCountCap": int(
+                args.cross_pose_hard_negative_count_cap
+            ),
+            "hardNegativeMix": float(args.cross_pose_hard_negative_mix),
+            "augmentedPenalty": float(args.cross_pose_augmented_penalty),
+            "initialBoundaryLogit": float(
+                args.cross_pose_initial_boundary_logit
+            ),
+            "dualInitial": float(args.cross_pose_dual_initial),
+            "dualLearningRate": float(args.cross_pose_dual_learning_rate),
+            "dualMaximum": float(args.cross_pose_dual_maximum),
+            "boundaryMeaning": "train-only shared logit operating boundary",
+            "calibrationThresholdReplacement": False,
+            "runtimeExport": False,
+            "testRead": False,
+        },
+        "viewcellExposureSupervision": {
+            "enabled": model.exposure_supervision_head is not None,
+            "sourceSplit": "train",
+            "target": "visible subpose count / successful subpose count",
+            "hiddenDim": int(args.exposure_supervision_hidden_dim),
+            "lossWeight": float(args.exposure_supervision_loss_weight),
+            "positiveClassFraction": float(
+                args.exposure_supervision_positive_class_fraction
+            ),
+            "gradientGroup": "relation protected against safety conflicts",
+            "runtimeFeatureDimensionChanged": False,
+            "runtimeQueryDimensionChanged": False,
+            "runtimeExport": False,
+            "testRead": False,
+        },
+        "runtimeBudgetContract": {
+            "fixedInstanceFeatureDimension": int(RUNTIME_FEATURE_DIM),
+            "fixedInstanceFeatureDtype": "float16",
+            "fixedInstanceFeatureBytes": int(
+                num_instances * RUNTIME_FEATURE_DIM * np.dtype(np.float16).itemsize
+            ),
+            "queryHeadInputDimension": int(RUNTIME_HEAD_INPUT_DIM),
+            "neuralAssetUpperBoundBytes": int(7 * 1024 * 1024),
+            "onlineQueriesPerViewcell": 1,
+            "onlineNeighborQuery": False,
+            "onlineSubposeExpansion": False,
+            "trainingOnlyHeadsExported": False,
         },
         "refinementScope": refinement_scope_meta,
         "dualProbeRescue": dual_probe_rescue_meta,
@@ -4210,6 +4370,8 @@ def main() -> None:
     parameters = [value for value in model.parameters() if value.requires_grad]
     if weighted_np_boundary_logit is not None:
         parameters.append(weighted_np_boundary_logit)
+    if cross_pose_boundary_logit is not None:
+        parameters.append(cross_pose_boundary_logit)
     optimizer = torch.optim.AdamW(
         parameters,
         lr=args.learning_rate,
@@ -4710,6 +4872,7 @@ def main() -> None:
             )
 
             use_safety_reserve = args.loss_variant == "safety_reserve"
+            use_cross_pose_operating = args.loss_variant == "cross_pose_operating"
             safety_boundary_reference: torch.Tensor | None = None
             if (
                 use_safety_reserve
@@ -4741,7 +4904,42 @@ def main() -> None:
             use_pose_balanced_frontier = (
                 args.loss_variant == "pose_balanced_frontier"
             )
-            if use_pose_balanced_frontier:
+            if use_cross_pose_operating:
+                assert cross_pose_boundary_logit is not None
+                assert cross_pose_dual_state is not None
+                _combined_visibility, visibility_parts = (
+                    cross_pose_recall_constrained_operating_loss(
+                        visibility_training_logits,
+                        target,
+                        pose_offsets,
+                        visible_weights,
+                        cross_pose_boundary_logit,
+                        positive_class_fraction=(
+                            args.cross_pose_positive_class_fraction
+                        ),
+                        positive_importance_floor=(
+                            args.frontier_positive_importance_floor
+                        ),
+                        positive_importance_power=(
+                            args.frontier_positive_importance_power
+                        ),
+                        operating_weight=args.cross_pose_operating_weight,
+                        weighted_recall_target=(
+                            args.cross_pose_weighted_recall_target
+                        ),
+                        temperature=args.cross_pose_temperature,
+                        hard_negative_fraction=(
+                            args.cross_pose_hard_negative_fraction
+                        ),
+                        hard_negative_count_cap=(
+                            args.cross_pose_hard_negative_count_cap
+                        ),
+                        hard_negative_mix=args.cross_pose_hard_negative_mix,
+                        augmented_penalty=args.cross_pose_augmented_penalty,
+                        dual_multiplier=cross_pose_dual_state.multiplier,
+                    )
+                )
+            elif use_pose_balanced_frontier:
                 _combined_visibility, visibility_parts = (
                     pose_balanced_frontier_visibility_loss(
                         visibility_training_logits,
@@ -5000,6 +5198,36 @@ def main() -> None:
                     "instanceExposurePositiveCount": 0.0,
                     "instanceExposureNegativeCount": 0.0,
                 }
+            if model.exposure_supervision_head is not None:
+                exposure_logits = aux.get("viewcell_exposure_supervision_logits")
+                if exposure_logits is None:
+                    raise RuntimeError(
+                        "training-only exposure head did not produce supervision logits"
+                    )
+                (
+                    viewcell_exposure_loss,
+                    viewcell_exposure_parts,
+                ) = viewcell_exposure_supervision_loss(
+                    exposure_logits,
+                    target,
+                    visible_hit_rates,
+                    pose_offsets,
+                    positive_class_fraction=(
+                        args.exposure_supervision_positive_class_fraction
+                    ),
+                )
+            else:
+                viewcell_exposure_loss = logits.sum() * 0.0
+                viewcell_exposure_parts = {
+                    "lossViewcellExposureSupervision": viewcell_exposure_loss,
+                    "viewcellExposureMae": logits.new_zeros(()),
+                    "viewcellExposureBoundaryMae": logits.new_zeros(()),
+                    "viewcellExposureStableMae": logits.new_zeros(()),
+                    "viewcellExposureInvisibleMae": logits.new_zeros(()),
+                    "viewcellExposureBoundaryCount": 0.0,
+                    "viewcellExposureStableCount": 0.0,
+                    "viewcellExposureInvisibleCount": 0.0,
+                }
             if args.same_instance_cross_view_rank_weight > 0.0:
                 (
                     cross_view_positive_loss,
@@ -5101,7 +5329,7 @@ def main() -> None:
             cross_view_half_weight = 0.5 * float(
                 args.same_instance_cross_view_rank_weight
             )
-            if use_pose_balanced_frontier:
+            if use_pose_balanced_frontier or use_cross_pose_operating:
                 safety_objective = _combined_visibility
                 efficiency_objective = logits.sum() * 0.0
             elif args.refinement_scope == "view_residual":
@@ -5259,6 +5487,10 @@ def main() -> None:
                     instance_calibration_regularization_weight=(
                         args.instance_calibration_regularization_weight
                     ),
+                    exposure_supervision=viewcell_exposure_loss,
+                    exposure_supervision_weight=(
+                        args.exposure_supervision_loss_weight
+                    ),
                 )
             safety_objective = objective_groups["safety"]
             relation_objective = objective_groups["relation"]
@@ -5308,6 +5540,17 @@ def main() -> None:
                     weighted_np_boundary_logit.clamp_(-20.0, 20.0)
                 weighted_np_dual_state.update(
                     weighted_np_parts["weightedRecallViolation"]
+                )
+            if cross_pose_boundary_logit is not None:
+                assert cross_pose_dual_state is not None
+                if not bool(torch.isfinite(cross_pose_boundary_logit).all()):
+                    raise FloatingPointError(
+                        "cross-pose train boundary became non-finite"
+                    )
+                with torch.no_grad():
+                    cross_pose_boundary_logit.clamp_(-20.0, 20.0)
+                cross_pose_dual_state.update(
+                    visibility_parts["crossPoseWeightedRecallRawViolation"]
                 )
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
@@ -5462,6 +5705,10 @@ def main() -> None:
                         float(args.instance_calibration_regularization_weight)
                         * instance_calibration_regularization
                     ),
+                    "lossViewcellExposureSupervisionWeighted": (
+                        float(args.exposure_supervision_loss_weight)
+                        * viewcell_exposure_loss
+                    ),
                     "cullCertificateSuppressionMean": aux[
                         "cull_certificate_suppression"
                     ].mean(),
@@ -5499,6 +5746,7 @@ def main() -> None:
                     **certificate_parts,
                     **certificate_pair_parts,
                     **exposure_parts,
+                    **viewcell_exposure_parts,
                     **cross_view_parts,
                     **candidate_boundary_parts,
                     **view_residual_parts,
@@ -5621,6 +5869,29 @@ def main() -> None:
                 and weighted_np_dual_state is not None
                 else {"enabled": False, "sourceSplit": "train"}
             ),
+            "crossPoseOperating": (
+                {
+                    "enabled": True,
+                    "boundaryLogit": float(
+                        cross_pose_boundary_logit.detach().cpu()
+                    ),
+                    "boundaryProbability": float(
+                        torch.sigmoid(cross_pose_boundary_logit.detach()).cpu()
+                    ),
+                    "dual": cross_pose_dual_state.as_dict(),
+                    "sourceSplit": "train",
+                    "calibrationThresholdReplacement": False,
+                    "runtimeExport": False,
+                }
+                if cross_pose_boundary_logit is not None
+                and cross_pose_dual_state is not None
+                else {"enabled": False, "sourceSplit": "train"}
+            ),
+            "viewcellExposureSupervision": {
+                "enabled": model.exposure_supervision_head is not None,
+                "sourceSplit": "train",
+                "runtimeExport": False,
+            },
         }
 
         calibration_payload: dict[str, Any] | None = None
@@ -5660,6 +5931,28 @@ def main() -> None:
                     glb_bytes=glb_bytes_np,
                 )
                 validation_row = validation_rows[0] if validation_rows else None
+            if cross_pose_boundary_logit is not None and frozen is not None:
+                frozen_probability = min(
+                    1.0 - 1e-7,
+                    max(1e-7, float(frozen["threshold"])),
+                )
+                frozen_logit = math.log(
+                    frozen_probability / (1.0 - frozen_probability)
+                )
+                train_boundary_value = float(
+                    cross_pose_boundary_logit.detach().cpu()
+                )
+                row["crossPoseOperatingDiagnostics"] = {
+                    "trainBoundaryLogit": train_boundary_value,
+                    "trainBoundaryProbability": float(
+                        torch.sigmoid(cross_pose_boundary_logit.detach()).cpu()
+                    ),
+                    "calibrationThresholdLogit": frozen_logit,
+                    "trainMinusCalibrationLogit": (
+                        train_boundary_value - frozen_logit
+                    ),
+                    "calibrationThresholdReplacement": False,
+                }
             calibration_payload = {
                 "schema": "pvs-bounded-relation-prior-instance-calibrated-calibration-v4",
                 "thresholdSource": "this-checkpoint-calibration-only",

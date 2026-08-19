@@ -106,6 +106,34 @@ def _dual_probe_init_spec() -> dict[str, object]:
 
 
 class BoundedRelationSurvivalMomentSafetyTrainingTest(unittest.TestCase):
+    def test_cross_pose_operating_and_exposure_cli_contract_is_explicit(self) -> None:
+        argv = [
+            "train",
+            "--dataset-dir", "dataset",
+            "--relation-dir", "relation",
+            "--runtime-meta", "runtime.json",
+            "--initial-geo-features", "geometry.bin",
+            "--glb-index", "glb-index.json",
+            "--glb-root", "glb-root",
+            "--output-dir", "output",
+            "--loss-variant", "cross_pose_operating",
+            "--cross-pose-positive-class-fraction", "0.2",
+            "--cross-pose-weighted-recall-target", "0.993",
+            "--cross-pose-operating-weight", "0.75",
+            "--exposure-supervision-hidden-dim", "16",
+            "--exposure-supervision-loss-weight", "0.05",
+        ]
+        with mock.patch.object(sys, "argv", argv):
+            args = parse_args()
+        self.assertEqual(args.loss_variant, "cross_pose_operating")
+        self.assertEqual(args.cross_pose_positive_class_fraction, 0.2)
+        self.assertEqual(args.cross_pose_weighted_recall_target, 0.993)
+        self.assertEqual(args.cross_pose_operating_weight, 0.75)
+        self.assertEqual(args.exposure_supervision_hidden_dim, 16)
+        self.assertEqual(args.exposure_supervision_loss_weight, 0.05)
+        self.assertEqual(args.refinement_scope, "all")
+        self.assertIsNone(args.initial_checkpoint)
+
     def test_pose_balanced_frontier_cli_contract_is_explicit(self) -> None:
         argv = [
             "train",
@@ -1062,6 +1090,37 @@ class BoundedRelationSurvivalMomentSafetyTrainingTest(unittest.TestCase):
         self.assertTrue(torch.allclose(groups["total"], summed))
         groups["total"].backward()
         self.assertTrue(all(value.grad is not None for value in values))
+
+    def test_exposure_supervision_is_routed_through_protected_relation_group(self) -> None:
+        values = [
+            torch.tensor(value, requires_grad=True)
+            for value in (1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0)
+        ]
+        exposure = torch.tensor(9.0, requires_grad=True)
+        groups = _v4_objective_groups(
+            *values,
+            survival_weight=0.25,
+            relation_consistency_weight=0.10,
+            utility_weight=0.10,
+            download_weight=0.10,
+            regularization_weight=1e-5,
+            instance_calibration_regularization_weight=0.02,
+            exposure_supervision=exposure,
+            exposure_supervision_weight=0.05,
+        )
+        expected_without_exposure = (
+            0.25 * values[1]
+            + 0.10 * values[2]
+            + 1e-5 * values[5]
+            + 0.02 * values[6]
+        )
+        self.assertTrue(
+            torch.allclose(
+                groups["relation"], expected_without_exposure + 0.05 * exposure
+            )
+        )
+        groups["total"].backward()
+        self.assertIsNotNone(exposure.grad)
 
     def test_boundary_tail_refinement_keeps_negative_efficiency_gradient(self) -> None:
         safety_parameter = torch.tensor(2.0, requires_grad=True)

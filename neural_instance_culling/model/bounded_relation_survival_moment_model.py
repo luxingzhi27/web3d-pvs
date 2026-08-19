@@ -387,6 +387,7 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         *,
         relation_hidden_dim: int = 64,
         hidden_dim: int = 64,
+        exposure_supervision_hidden_dim: int = 0,
         relation_source: str = "bounded_hierarchical",
         spectral_mode: str = "moment_envelope",
         depth_q01: float = 0.0,
@@ -458,6 +459,7 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             or not math.isfinite(float(view_residual_max_abs))
             or float(view_residual_max_abs) < 0.0
             or int(view_residual_hidden_dim) < 0
+            or int(exposure_supervision_hidden_dim) < 0
             or int(boundary_opportunity_hidden_dim) < 0
             or int(boundary_opportunity_projection_dim) <= 0
             or not math.isfinite(float(boundary_opportunity_initial_logit))
@@ -531,6 +533,9 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         self.spectral_mode = str(spectral_mode)
         self.hidden_dim = int(hidden_dim)
         self.relation_hidden_dim = int(relation_hidden_dim)
+        self.exposure_supervision_hidden_dim = int(
+            exposure_supervision_hidden_dim
+        )
         self.depth_q01 = float(depth_q01)
         self.depth_q99 = float(depth_q99)
         self.depth_epsilon = float(depth_epsilon)
@@ -697,6 +702,14 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             nn.ReLU(inplace=True),
         )
         self.visibility_head = nn.Linear(self.hidden_dim, 1)
+        if self.exposure_supervision_hidden_dim > 0:
+            self.exposure_supervision_head: nn.Module | None = nn.Sequential(
+                nn.Linear(self.hidden_dim, self.exposure_supervision_hidden_dim),
+                nn.SiLU(),
+                nn.Linear(self.exposure_supervision_hidden_dim, 1),
+            )
+        else:
+            self.exposure_supervision_head = None
         if self.view_residual_max_abs > 0.0:
             self.view_residual_geometry_projection: nn.Module | None = nn.Linear(
                 GEO_DIM, self.view_residual_projection_dim
@@ -1029,6 +1042,14 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             "survivalCoefficientShape": [SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM],
             "runtimeFeatureDim": RUNTIME_FEATURE_DIM,
             "runtimeHeadInputDim": RUNTIME_HEAD_INPUT_DIM,
+            "viewcellExposureSupervision": {
+                "enabled": self.exposure_supervision_head is not None,
+                "inputDim": self.hidden_dim,
+                "hiddenDim": self.exposure_supervision_hidden_dim,
+                "target": "train-only successful-subpose visible hit rate",
+                "trainingOnly": True,
+                "runtimeExport": False,
+            },
             "queryTailSeparator": {
                 "enabled": self.query_tail_separator is not None,
                 "family": self.query_tail_separator_family,
@@ -1395,6 +1416,7 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
                 "relation consistency supervision",
                 "per-instance calibration residual parameters",
                 "per-instance calibration reliability",
+                "view-cell exposure supervision head",
             ],
         }
         if self.view_residual_head is not None:
@@ -2262,6 +2284,11 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             raise RuntimeError("v4 runtime input layout drifted from its schema")
         hidden = self.shared_trunk(trunk_input)
         base_visibility_logits = self.visibility_head(hidden)
+        exposure_supervision_logits = (
+            self.exposure_supervision_head(hidden)
+            if self.exposure_supervision_head is not None and self.training
+            else None
+        )
         viewcell_extreme_visibility_logit: torch.Tensor | None = None
         viewcell_extreme_visibility_input: torch.Tensor | None = None
         viewcell_region_conditioned_visibility_raw_logit: torch.Tensor | None = None
@@ -2448,6 +2475,10 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             **query_aux,
             **dual_probe_rescue_aux,
         }
+        if exposure_supervision_logits is not None:
+            auxiliary["viewcell_exposure_supervision_logits"] = (
+                exposure_supervision_logits
+            )
         if self.viewcell_extreme_visibility_enabled:
             assert viewcell_extreme_visibility_logit is not None
             assert viewcell_extreme_visibility_input is not None

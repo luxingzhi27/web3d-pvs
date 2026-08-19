@@ -29,9 +29,13 @@ from export_bounded_relation_survival_moment import (  # noqa: E402
     SURVIVAL_PARAMETER_DIM,
     SURVIVAL_RANK,
     _check_neural_asset_budget,
+    _resolve_threshold,
     _runtime_weight_specs,
     export,
     parse_args,
+)
+from bounded_relation_survival_moment_model import (  # noqa: E402
+    BoundedRelationSurvivalMomentModel,
 )
 
 
@@ -222,6 +226,96 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
         )
         return path
 
+    def _model_from_config(self, config: dict) -> BoundedRelationSurvivalMomentModel:
+        exposure = config["viewcellExposureSupervision"]
+        return BoundedRelationSurvivalMomentModel(
+            num_instances=int(config["numInstances"]),
+            num_glbs=int(config["numGlbs"]),
+            relation_hidden_dim=int(config["relationHiddenDim"]),
+            hidden_dim=int(config["hiddenDim"]),
+            exposure_supervision_hidden_dim=(
+                int(exposure["hiddenDim"]) if exposure["enabled"] else 0
+            ),
+            relation_source=str(config["relationSource"]),
+            spectral_mode=str(config["spectralMode"]),
+            depth_q01=float(config["depthNormalization"]["q01"]),
+            depth_q99=float(config["depthNormalization"]["q99"]),
+            depth_epsilon=float(config["depthNormalization"]["epsilon"]),
+            max_frequency_norm_cycles=float(config["frequency"]["maxNormCycles"]),
+            instance_calibration_mode=str(config["instanceCalibration"]["mode"]),
+            instance_calibration_max_abs=float(
+                config["instanceCalibration"]["maximumAbsoluteResidual"]
+            ),
+            sparse_instance_penalty=float(
+                config["instanceCalibration"]["sparseInstancePenalty"]
+            ),
+        )
+
+    def _checkpoint_from_model(self, root: Path, exposure_hidden_dim: int) -> dict:
+        checkpoint = self._checkpoint(root)
+        torch.manual_seed(20260819)
+        model = BoundedRelationSurvivalMomentModel(
+            num_instances=self.num_instances,
+            num_glbs=self.num_glbs,
+            relation_hidden_dim=64,
+            hidden_dim=self.hidden_dim,
+            exposure_supervision_hidden_dim=exposure_hidden_dim,
+            relation_source="bounded_hierarchical",
+            spectral_mode="moment_envelope",
+            depth_q01=0.11,
+            depth_q99=1.91,
+            depth_epsilon=1e-4,
+            max_frequency_norm_cycles=8.0,
+            instance_calibration_mode="residual",
+            instance_calibration_max_abs=4.0,
+            sparse_instance_penalty=3.0,
+        )
+        checkpoint["config"] = model.config
+        checkpoint["model"] = model.state_dict()
+        exposure_enabled = exposure_hidden_dim > 0
+        checkpoint["protocol"]["variant"] = (
+            "cross_pose_operating_with_exposure"
+            if exposure_enabled
+            else "cross_pose_operating_without_exposure"
+        )
+        checkpoint["protocol"]["lossVariant"] = "cross_pose_operating"
+        checkpoint["protocol"]["viewcellExposureSupervision"] = {
+            "enabled": exposure_enabled,
+            "runtimeExport": False,
+        }
+        return checkpoint
+
+    def _checkpoint_with_unexported_exposure_head(
+        self, root: Path, hidden_dim: int = 16
+    ) -> dict:
+        checkpoint = self._checkpoint_from_model(root, exposure_hidden_dim=0)
+        checkpoint["config"] = dict(checkpoint["config"])
+        checkpoint["config"]["viewcellExposureSupervision"] = {
+            "enabled": True,
+            "inputDim": self.hidden_dim,
+            "hiddenDim": hidden_dim,
+            "target": "train-only successful-subpose visible hit rate",
+            "trainingOnly": True,
+            "runtimeExport": False,
+        }
+        checkpoint["model"] = dict(checkpoint["model"])
+        checkpoint["model"].update(
+            {
+                "exposure_supervision_head.0.weight": torch.zeros(
+                    hidden_dim, self.hidden_dim
+                ),
+                "exposure_supervision_head.0.bias": torch.zeros(hidden_dim),
+                "exposure_supervision_head.2.weight": torch.zeros(1, hidden_dim),
+                "exposure_supervision_head.2.bias": torch.zeros(1),
+            }
+        )
+        checkpoint["protocol"]["variant"] = "cross_pose_operating_with_exposure"
+        checkpoint["protocol"]["viewcellExposureSupervision"] = {
+            "enabled": True,
+            "runtimeExport": False,
+        }
+        return checkpoint
+
     def _export(self, root: Path, checkpoint: dict, name: str = "bundle") -> Path:
         checkpoint_path = root / f"{name}.pt"
         torch.save(checkpoint, checkpoint_path)
@@ -310,6 +404,117 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
             self.assertEqual(meta["threshold"], 0.02)
             self.assertLessEqual(
                 meta["neuralAssetBudget"]["usedBytes"], MAX_NEURAL_ASSET_BYTES
+            )
+
+    def test_exposure_checkpoint_strict_loads_without_changing_runtime_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkpoint = self._checkpoint_from_model(root, exposure_hidden_dim=16)
+            config = checkpoint["config"]
+            restored = self._model_from_config(config)
+            incompatible = restored.load_state_dict(checkpoint["model"], strict=True)
+            self.assertEqual(incompatible.missing_keys, [])
+            self.assertEqual(incompatible.unexpected_keys, [])
+            self.assertTrue(config["viewcellExposureSupervision"]["enabled"])
+            self.assertEqual(
+                config["viewcellExposureSupervision"]["hiddenDim"], 16
+            )
+            self.assertTrue(config["viewcellExposureSupervision"]["trainingOnly"])
+            self.assertFalse(config["viewcellExposureSupervision"]["runtimeExport"])
+
+            output = self._export(root, checkpoint, name="with-exposure")
+            meta = json.loads((output / "model_meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["fixedTable"]["shape"], [self.num_instances, 124])
+            self.assertEqual(
+                meta["fixedTable"]["byteLength"], self.num_instances * 124 * 2
+            )
+            self.assertEqual(meta["modelConfig"]["runtimeFeatureDim"], 124)
+            self.assertEqual(meta["modelConfig"]["runtimeHeadInputDim"], 130)
+            training_only = meta["modelConfig"]["trainingOnlyExposureSupervision"]
+            self.assertTrue(training_only["enabledInCheckpoint"])
+            self.assertEqual(training_only["hiddenDim"], 16)
+            self.assertFalse(training_only["runtimeExported"])
+            layout = meta["networkWeights"]["layout"]
+            self.assertEqual(
+                next(
+                    row["shape"]
+                    for row in layout
+                    if row["name"] == "shared_trunk.0.weight"
+                ),
+                [self.hidden_dim, 130],
+            )
+            self.assertFalse(
+                any("exposure_supervision_head" in row["name"] for row in layout)
+            )
+            self.assertNotIn("exposure_supervision_head", meta["networkWeights"])
+
+    def test_unsafe_diagnostic_export_uses_the_checkpoint_matching_workpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            checkpoint = self._checkpoint(Path(temporary))
+            checkpoint["calibration"]["selectedSafe"] = checkpoint["calibration"].pop(
+                "selected"
+            )
+            checkpoint["calibration"]["diagnostic"] = {
+                "threshold": 0.0,
+                "aggregateWeightedRecall": 1.0,
+                "aggregateWeightedRecallLowerConfidenceBound": 1.0,
+            }
+            checkpoint["best"] = {"threshold": 0.0, "safe": False}
+            threshold, info = _resolve_threshold(
+                checkpoint, allow_unsafe=True
+            )
+            self.assertEqual(threshold, 0.0)
+            self.assertEqual(info["source"], "checkpoint.calibration.diagnostic")
+            self.assertTrue(info["calibrationSafe"])
+            self.assertFalse(info["safe"])
+
+    def test_training_only_head_does_not_change_exported_runtime_weight_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = self._checkpoint_from_model(root, exposure_hidden_dim=0)
+            with_exposure = self._checkpoint_with_unexported_exposure_head(root)
+            baseline_output = self._export(root, baseline, name="without-exposure")
+            exposure_output = self._export(root, with_exposure, name="with-exposure")
+
+            runtime_files = (
+                "instance_runtime_features_fp16.bin",
+                "frequency_cycles_fp32.bin",
+                "chi_table_fp32.bin",
+            )
+            for name in runtime_files:
+                self.assertEqual(
+                    (baseline_output / name).read_bytes(),
+                    (exposure_output / name).read_bytes(),
+                    name,
+                )
+            baseline_weights = (baseline_output / "query_weights_fp16.bin").read_bytes()
+            exposure_weights = (exposure_output / "query_weights_fp16.bin").read_bytes()
+            self.assertEqual(exposure_weights, baseline_weights)
+            self.assertEqual(len(exposure_weights), len(baseline_weights))
+
+            baseline_meta = json.loads(
+                (baseline_output / "model_meta.json").read_text(encoding="utf-8")
+            )
+            exposure_meta = json.loads(
+                (exposure_output / "model_meta.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(baseline_meta["fixedTable"]["shape"], [3, 124])
+            self.assertEqual(exposure_meta["fixedTable"]["shape"], [3, 124])
+            self.assertEqual(baseline_meta["query"]["raySpaceDim"], 9)
+            self.assertEqual(exposure_meta["query"]["raySpaceDim"], 9)
+            self.assertEqual(
+                baseline_meta["networkWeights"]["byteLength"],
+                exposure_meta["networkWeights"]["byteLength"],
+            )
+            self.assertEqual(
+                baseline_meta["networkWeights"]["layout"],
+                exposure_meta["networkWeights"]["layout"],
+            )
+            self.assertFalse(
+                any(
+                    "exposure_supervision_head" in row["name"]
+                    for row in exposure_meta["networkWeights"]["layout"]
+                )
             )
 
     def test_dry_run_performs_full_validation_without_creating_bundle(self) -> None:
