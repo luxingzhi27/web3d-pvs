@@ -85,6 +85,20 @@ class PoseBalancedFrontierRunnerTests(unittest.TestCase):
             summary["aggregate"]["precision"]["populationStd"], 0.0
         )
 
+    def test_formal_summary_preserves_missing_validation_lcb(self) -> None:
+        rows = [
+            {
+                "eligibleSafe": True,
+                "threshold": 0.2,
+                "aggregate": {"weightedRecallLowerConfidenceBound": None},
+                "poseMacro": {"precision": 0.3},
+            }
+        ]
+        summary = _seed_aggregate(rows)
+        lcb = summary["aggregate"]["weightedRecallLowerConfidenceBound"]
+        self.assertEqual(lcb["availableCount"], 0)
+        self.assertIsNone(lcb["mean"])
+
 
 if __name__ == "__main__":
     unittest.main()

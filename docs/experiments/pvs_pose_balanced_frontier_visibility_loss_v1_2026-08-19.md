@@ -59,7 +59,7 @@ L_{frontier}=\operatorname{mean}\operatorname{softplus}
 
 第二轮以第一轮相对最优非零权重为中心，四卡并行比较四组前沿形状：`(m,T)` 为 `(0.25,0.25)`、`(0.50,0.20)`、`(0.50,0.35)`、`(0.75,0.25)`。
 
-每个 checkpoint 只用 calibration split 冻结阈值，再在 validation 上评价。test 不参与扫描、阈值选择或排序。优先选择 calibration 与 validation weighted recall 均满足当前安全口径的配置；合格配置按 aggregate precision、balanced accuracy、instance accuracy、useful cull 和平均预测数量依次比较。如果没有配置达到安全门，仍按 weighted recall 及其置信下界、balanced accuracy、precision 的顺序选择相对最优配置，不取消后续长训。
+每个 checkpoint 只用 calibration split 冻结阈值，再在 validation 上评价。test 不参与扫描、阈值选择或排序。calibration 必须满足 weighted recall 及其单侧置信下界安全门，validation 必须在冻结阈值下满足 weighted recall 点估计要求；当前 validation evaluator 不生成置信下界，因此该字段必须明确记录为空，不能伪造或借用 calibration 的下界。合格配置按 aggregate precision、balanced accuracy、instance accuracy、useful cull 和平均预测数量依次比较。如果没有配置达到安全门，仍按可用的 weighted recall 安全证据、balanced accuracy、precision 的顺序选择相对最优配置，不取消后续长训。
 
 ## 40 epoch 正式训练
 
@@ -84,4 +84,3 @@ conda run -n slm_pvs python \
   neural_instance_culling/benchmark/run_pvs_pose_balanced_frontier_visibility_loss_v1.py \
   all --root /mnt/sda/rhyang/slm --gpu-ids 0 1 2 3
 ```
-

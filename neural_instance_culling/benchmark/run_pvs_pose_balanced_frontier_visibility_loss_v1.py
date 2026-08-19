@@ -438,11 +438,15 @@ def _row_for_spec(
         calibration.get("status") == "safe" and calibration.get("bestSafe") is not None
     )
     weighted_recall = float(aggregate["weightedRecall"])
-    weighted_lcb = float(aggregate["weightedRecallLowerConfidenceBound"])
-    validation_safe = (
-        weighted_recall > WEIGHTED_RECALL_FLOOR
-        and weighted_lcb > WEIGHTED_RECALL_FLOOR
+    weighted_lcb_raw = aggregate.get("weightedRecallLowerConfidenceBound")
+    weighted_lcb = (
+        None if weighted_lcb_raw is None else float(weighted_lcb_raw)
     )
+    # The checkpoint's calibration status already includes the registered
+    # one-sided LCB. The validation evaluator currently reports only the
+    # frozen-threshold point estimate, so a missing validation LCB is recorded
+    # rather than fabricated or treated as a numerical score.
+    validation_safe = weighted_recall > WEIGHTED_RECALL_FLOOR
     return {
         "member": member.name,
         "stage": stage,
@@ -452,9 +456,14 @@ def _row_for_spec(
         "checkpointSafeOnCalibration": bool(calibration_safe),
         "safeOnValidation": bool(validation_safe),
         "eligibleSafe": bool(calibration_safe and validation_safe),
+        "validationWeightedRecallLcbAvailable": weighted_lcb is not None,
         "threshold": float(evaluation["threshold"]),
         "aggregate": {
-            key: float(aggregate[key])
+            key: (
+                None
+                if aggregate[key] is None
+                else float(aggregate[key])
+            )
             for key in (
                 "precision",
                 "recall",
@@ -504,7 +513,11 @@ def _rank(row: Mapping[str, Any]) -> tuple[float, ...]:
         0.0,
         min(
             float(metrics["weightedRecall"]),
-            float(metrics["weightedRecallLowerConfidenceBound"]),
+            (
+                float(metrics["weightedRecallLowerConfidenceBound"])
+                if metrics["weightedRecallLowerConfidenceBound"] is not None
+                else float(metrics["weightedRecall"])
+            ),
         ),
         float(metrics["balancedAccuracy"]),
         float(metrics["precision"]),
@@ -546,9 +559,18 @@ def _seed_aggregate(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     if not rows:
         raise ValueError("formal seed aggregation requires at least one row")
 
-    def summarize(values: Sequence[float]) -> dict[str, float]:
-        finite = [float(value) for value in values]
+    def summarize(values: Sequence[Any]) -> dict[str, Any]:
+        finite = [float(value) for value in values if value is not None]
+        if not finite:
+            return {
+                "availableCount": 0,
+                "mean": None,
+                "populationStd": None,
+                "minimum": None,
+                "maximum": None,
+            }
         return {
+            "availableCount": len(finite),
             "mean": float(statistics.fmean(finite)),
             "populationStd": float(statistics.pstdev(finite)),
             "minimum": float(min(finite)),
@@ -563,11 +585,11 @@ def _seed_aggregate(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "allMembersSafe": all(bool(row["eligibleSafe"]) for row in rows),
         "threshold": summarize([float(row["threshold"]) for row in rows]),
         "aggregate": {
-            key: summarize([float(row["aggregate"][key]) for row in rows])
+            key: summarize([row["aggregate"][key] for row in rows])
             for key in aggregate_keys
         },
         "poseMacro": {
-            key: summarize([float(row["poseMacro"][key]) for row in rows])
+            key: summarize([row["poseMacro"][key] for row in rows])
             for key in pose_keys
         },
         "testRead": False,
