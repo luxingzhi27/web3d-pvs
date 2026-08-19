@@ -13,7 +13,10 @@ if str(MODEL) not in sys.path:
 
 from bounded_relation_survival_moment_model import (  # noqa: E402
     BoundedRelationSurvivalMomentModel,
+    EXPOSURE_SUPERVISION_SOURCES,
+    RELATION_CONTRAST_DIM,
     RUNTIME_FEATURE_DIM,
+    RUNTIME_RELATION_FEATURE_MODES,
     VIEWCELL_EXTREME_VISIBILITY_INPUT_DIM,
     VIEWCELL_EXTREME_VISIBILITY_PROJECTION_DIM,
     VIEWCELL_REGION_CONDITIONED_VISIBILITY_FUSION_DIM,
@@ -44,6 +47,8 @@ class BoundedRelationSurvivalMomentModelContractTest(unittest.TestCase):
         query_tail_separator_family: str = "disabled",
         query_tail_separator_hidden_dim: int = 8,
         exposure_supervision_hidden_dim: int = 0,
+        runtime_relation_feature_mode: str = "basis",
+        exposure_supervision_source: str = "hidden",
     ) -> BoundedRelationSurvivalMomentModel:
         model = BoundedRelationSurvivalMomentModel(
             4,
@@ -73,6 +78,8 @@ class BoundedRelationSurvivalMomentModelContractTest(unittest.TestCase):
             query_tail_separator_family=query_tail_separator_family,
             query_tail_separator_hidden_dim=query_tail_separator_hidden_dim,
             exposure_supervision_hidden_dim=exposure_supervision_hidden_dim,
+            runtime_relation_feature_mode=runtime_relation_feature_mode,
+            exposure_supervision_source=exposure_supervision_source,
         )
         model.set_instance_world_aabbs(
             torch.tensor(
@@ -120,9 +127,111 @@ class BoundedRelationSurvivalMomentModelContractTest(unittest.TestCase):
         config = self._model().config
         self.assertEqual(config["hiddenDim"], 64)
         self.assertEqual(config["relationHiddenDim"], 64)
+        self.assertEqual(config["runtimeRelationFeatureMode"], "basis")
+        self.assertEqual(config["exposureSupervisionSource"], "hidden")
+        relation_feature = config["runtimeRelationFeature"]
+        self.assertEqual(relation_feature["basisDim"], RELATION_CONTRAST_DIM)
+        self.assertEqual(relation_feature["contrastDim"], RELATION_CONTRAST_DIM)
+        self.assertEqual(relation_feature["relationConditionSlice"], [0, 4])
+        self.assertEqual(
+            relation_feature["formula"],
+            "relation_contrast = basis * (1 + tanh(relation_condition[:, :4]))",
+        )
+        self.assertEqual(relation_feature["mainTrunkInput"], "basis")
+        self.assertEqual(relation_feature["survivalSemanticInput"], "basis")
         self.assertEqual(config["instanceCalibration"]["mode"], "residual")
         self.assertEqual(config["instanceCalibration"]["runtimeExport"], "fused coefficients only")
+        exposure = config["viewcellExposureSupervision"]
+        self.assertEqual(exposure["source"], "hidden")
+        self.assertEqual(exposure["inputDim"], 64)
+        self.assertEqual(exposure["architecture"], None)
         self.assertFalse(config["queryTailSeparator"]["enabled"])
+
+    def test_relation_contrast_formula_is_query_conditioned_and_semantics_stay_on_basis(self) -> None:
+        inputs = self._inputs()
+        basis_model = self._model(runtime_relation_feature_mode="basis")
+        contrast_model = self._model(runtime_relation_feature_mode="gated_contrast")
+        contrast_model.load_state_dict(basis_model.state_dict(), strict=True)
+
+        _, basis_aux = basis_model.compute_logits_with_aux(
+            inputs["camera"],
+            inputs["camera_view"],
+            inputs["candidate_camera"],
+            inputs["instance_ids"],
+            runtime_features=inputs["runtime"],
+            query_center_world=inputs["query_center"],
+            viewcell_radius_m=inputs["radius"],
+        )
+        _, contrast_aux = contrast_model.compute_logits_with_aux(
+            inputs["camera"],
+            inputs["camera_view"],
+            inputs["candidate_camera"],
+            inputs["instance_ids"],
+            runtime_features=inputs["runtime"],
+            query_center_world=inputs["query_center"],
+            viewcell_radius_m=inputs["radius"],
+        )
+
+        expected_contrast = contrast_aux["survival_direction_basis"] * (
+            1.0 + torch.tanh(contrast_aux["relation_condition"][:, :4])
+        )
+        torch.testing.assert_close(
+            basis_aux["relation_contrast"], expected_contrast, rtol=0.0, atol=0.0
+        )
+        torch.testing.assert_close(
+            contrast_aux["relation_contrast"], expected_contrast, rtol=0.0, atol=0.0
+        )
+        torch.testing.assert_close(
+            basis_aux["survival_semantic"],
+            contrast_aux["survival_semantic"],
+            rtol=0.0,
+            atol=0.0,
+        )
+        torch.testing.assert_close(
+            basis_aux["runtime_relation_feature"],
+            basis_aux["survival_direction_basis"],
+            rtol=0.0,
+            atol=0.0,
+        )
+        torch.testing.assert_close(
+            contrast_aux["runtime_relation_feature"],
+            contrast_aux["relation_contrast"],
+            rtol=0.0,
+            atol=0.0,
+        )
+        self.assertEqual(contrast_aux["runtime_relation_feature"].shape, (4, 4))
+        self.assertFalse(
+            torch.equal(
+                basis_aux["runtime_relation_feature"],
+                contrast_aux["runtime_relation_feature"],
+            )
+        )
+        self.assertEqual(contrast_model.config["runtimeHeadInputDim"], 130)
+        self.assertEqual(contrast_model.export_schema()["fixedTable"]["shape"], ["N", 124])
+        self.assertEqual(
+            contrast_model.export_schema()["outputs"]["runtimeRelationFeature"],
+            ["B", RELATION_CONTRAST_DIM],
+        )
+
+    def test_relation_feature_and_exposure_mode_validation(self) -> None:
+        for mode in RUNTIME_RELATION_FEATURE_MODES:
+            self.assertEqual(
+                self._model(runtime_relation_feature_mode=mode).config[
+                    "runtimeRelationFeatureMode"
+                ],
+                mode,
+            )
+        for source in EXPOSURE_SUPERVISION_SOURCES:
+            self.assertEqual(
+                self._model(exposure_supervision_source=source).config[
+                    "exposureSupervisionSource"
+                ],
+                source,
+            )
+        with self.assertRaisesRegex(ValueError, "runtime_relation_feature_mode"):
+            self._model(runtime_relation_feature_mode="invalid")
+        with self.assertRaisesRegex(ValueError, "exposure_supervision_source"):
+            self._model(exposure_supervision_source="invalid")
 
     def test_exposure_supervision_head_is_training_only_and_runtime_shape_is_unchanged(self) -> None:
         torch.manual_seed(20260819)
@@ -136,6 +245,7 @@ class BoundedRelationSurvivalMomentModelContractTest(unittest.TestCase):
             if not key.startswith("exposure_supervision_head.")
         }
         supervised.load_state_dict(shared_state, strict=False)
+        self.assertEqual(supervised.exposure_supervision_head[0].in_features, 64)
         inputs = self._inputs()
         baseline.train()
         supervised.train()
@@ -184,6 +294,54 @@ class BoundedRelationSurvivalMomentModelContractTest(unittest.TestCase):
         self.assertFalse(
             schema["modelConfig"]["viewcellExposureSupervision"]["runtimeExport"]
         )
+
+    def test_relation_contrast_exposure_head_reads_4d_only_and_is_train_only(self) -> None:
+        model = self._model(
+            exposure_supervision_hidden_dim=16,
+            exposure_supervision_source="relation_contrast",
+        )
+        self.assertIsNotNone(model.exposure_supervision_head)
+        assert model.exposure_supervision_head is not None
+        self.assertEqual(model.exposure_supervision_head[0].in_features, 4)
+        self.assertEqual(
+            model.config["viewcellExposureSupervision"]["inputDim"],
+            RELATION_CONTRAST_DIM,
+        )
+        self.assertEqual(
+            model.config["viewcellExposureSupervision"]["architecture"],
+            [RELATION_CONTRAST_DIM, 16, 1],
+        )
+        self.assertEqual(
+            model.export_schema()["modelConfig"]["viewcellExposureSupervision"]["source"],
+            "relation_contrast",
+        )
+
+        inputs = self._inputs()
+        model.train()
+        _, train_aux = model.compute_logits_with_aux(
+            inputs["camera"],
+            inputs["camera_view"],
+            inputs["candidate_camera"],
+            inputs["instance_ids"],
+            runtime_features=inputs["runtime"],
+            query_center_world=inputs["query_center"],
+            viewcell_radius_m=inputs["radius"],
+        )
+        self.assertEqual(
+            train_aux["viewcell_exposure_supervision_logits"].shape,
+            (4, 1),
+        )
+        model.eval()
+        _, eval_aux = model.compute_logits_with_aux(
+            inputs["camera"],
+            inputs["camera_view"],
+            inputs["candidate_camera"],
+            inputs["instance_ids"],
+            runtime_features=inputs["runtime"],
+            query_center_world=inputs["query_center"],
+            viewcell_radius_m=inputs["radius"],
+        )
+        self.assertNotIn("viewcell_exposure_supervision_logits", eval_aux)
 
     def test_query_tail_separator_families_are_zero_initialized_and_share_108d_input(self) -> None:
         inputs = self._inputs()

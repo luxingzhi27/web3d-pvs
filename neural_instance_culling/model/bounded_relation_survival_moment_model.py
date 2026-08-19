@@ -54,7 +54,10 @@ BOUNDARY_SUMMARY_DIM = 8
 LOW_RANK_SUMMARY_DIM = 4
 SURVIVAL_SEMANTIC_DIM = 8
 RELATION_CONDITION_DIM = 8
+RELATION_CONTRAST_DIM = 4
 INSTANCE_CALIBRATION_MODES = ("residual", "disabled")
+RUNTIME_RELATION_FEATURE_MODES = ("basis", "gated_contrast")
+EXPOSURE_SUPERVISION_SOURCES = ("hidden", "relation_contrast")
 CULL_CERTIFICATE_INPUT_MODES = (
     "hidden",
     "evidence",
@@ -388,6 +391,8 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         relation_hidden_dim: int = 64,
         hidden_dim: int = 64,
         exposure_supervision_hidden_dim: int = 0,
+        runtime_relation_feature_mode: str = "basis",
+        exposure_supervision_source: str = "hidden",
         relation_source: str = "bounded_hierarchical",
         spectral_mode: str = "moment_envelope",
         depth_q01: float = 0.0,
@@ -445,6 +450,16 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         if instance_calibration_mode not in INSTANCE_CALIBRATION_MODES:
             raise ValueError(
                 f"instance_calibration_mode must be one of {INSTANCE_CALIBRATION_MODES}"
+            )
+        if runtime_relation_feature_mode not in RUNTIME_RELATION_FEATURE_MODES:
+            raise ValueError(
+                "runtime_relation_feature_mode must be one of "
+                f"{RUNTIME_RELATION_FEATURE_MODES}"
+            )
+        if exposure_supervision_source not in EXPOSURE_SUPERVISION_SOURCES:
+            raise ValueError(
+                "exposure_supervision_source must be one of "
+                f"{EXPOSURE_SUPERVISION_SOURCES}"
             )
         if not float(depth_q99) > float(depth_q01):
             raise ValueError("depth_q99 must be greater than depth_q01")
@@ -535,6 +550,13 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         self.relation_hidden_dim = int(relation_hidden_dim)
         self.exposure_supervision_hidden_dim = int(
             exposure_supervision_hidden_dim
+        )
+        self.runtime_relation_feature_mode = str(runtime_relation_feature_mode)
+        self.exposure_supervision_source = str(exposure_supervision_source)
+        self.exposure_supervision_input_dim = (
+            self.hidden_dim
+            if self.exposure_supervision_source == "hidden"
+            else RELATION_CONTRAST_DIM
         )
         self.depth_q01 = float(depth_q01)
         self.depth_q99 = float(depth_q99)
@@ -704,7 +726,10 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         self.visibility_head = nn.Linear(self.hidden_dim, 1)
         if self.exposure_supervision_hidden_dim > 0:
             self.exposure_supervision_head: nn.Module | None = nn.Sequential(
-                nn.Linear(self.hidden_dim, self.exposure_supervision_hidden_dim),
+                nn.Linear(
+                    self.exposure_supervision_input_dim,
+                    self.exposure_supervision_hidden_dim,
+                ),
                 nn.SiLU(),
                 nn.Linear(self.exposure_supervision_hidden_dim, 1),
             )
@@ -1029,6 +1054,24 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             "spectralMode": self.spectral_mode,
             "hiddenDim": self.hidden_dim,
             "relationHiddenDim": self.relation_hidden_dim,
+            "runtimeRelationFeatureMode": self.runtime_relation_feature_mode,
+            "exposureSupervisionSource": self.exposure_supervision_source,
+            "runtimeRelationFeature": {
+                "mode": self.runtime_relation_feature_mode,
+                "basisDim": SURVIVAL_RANK,
+                "contrastDim": RELATION_CONTRAST_DIM,
+                "relationConditionDim": RELATION_CONDITION_DIM,
+                "relationConditionSlice": [0, RELATION_CONTRAST_DIM],
+                "formula": (
+                    "relation_contrast = basis * "
+                    "(1 + tanh(relation_condition[:, :4]))"
+                ),
+                "mainTrunkInput": "relation_contrast"
+                if self.runtime_relation_feature_mode == "gated_contrast"
+                else "basis",
+                "survivalSemanticInput": "basis",
+                "fixedTableExport": "not stored; derived at query time",
+            },
             "instanceCalibration": {
                 "mode": self.instance_calibration_mode,
                 "shape": [SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM],
@@ -1044,8 +1087,19 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             "runtimeHeadInputDim": RUNTIME_HEAD_INPUT_DIM,
             "viewcellExposureSupervision": {
                 "enabled": self.exposure_supervision_head is not None,
-                "inputDim": self.hidden_dim,
+                "source": self.exposure_supervision_source,
+                "inputDim": self.exposure_supervision_input_dim,
                 "hiddenDim": self.exposure_supervision_hidden_dim,
+                "architecture": [
+                    self.exposure_supervision_input_dim,
+                    self.exposure_supervision_hidden_dim,
+                    1,
+                ] if self.exposure_supervision_head is not None else None,
+                "input": (
+                    "shared hidden feature"
+                    if self.exposure_supervision_source == "hidden"
+                    else "relation_contrast"
+                ),
                 "target": "train-only successful-subpose visible hit rate",
                 "trainingOnly": True,
                 "runtimeExport": False,
@@ -1403,11 +1457,14 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
                 "raySpace": export_ray_space_schema(),
                 "spectral": self.moment_query.export_schema(),
                 "spectralMode": self.spectral_mode,
+                "runtimeRelationFeature": self.config["runtimeRelationFeature"],
             },
             "outputs": {
                 "visibilityLogits": ["B", 1],
                 "utilityLogits": ["B", 1],
                 "downloadLogits": ["B", 1],
+                "relationContrast": ["B", RELATION_CONTRAST_DIM],
+                "runtimeRelationFeature": ["B", RELATION_CONTRAST_DIM],
             },
             "offlineOnly": [
                 "bounded relation CSR",
@@ -1773,6 +1830,14 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         basis = self.direction_basis_head(
             torch.cat([boundary, relation_condition, center_view[:, :3]], dim=-1)
         )
+        relation_contrast = basis * (
+            1.0 + torch.tanh(relation_condition[:, :RELATION_CONTRAST_DIM])
+        )
+        runtime_relation_feature = (
+            relation_contrast
+            if self.runtime_relation_feature_mode == "gated_contrast"
+            else basis
+        )
         semantic = _query_survival_semantic(basis, normalized_depth, coefficients)
         auxiliary = {
             "boundary_spectral_summary": boundary,
@@ -1780,6 +1845,8 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             "spectral_features": spectral.spectral_features,
             "spectral_radial_argument": spectral.s,
             "relation_condition": relation_condition,
+            "relation_contrast": relation_contrast,
+            "runtime_relation_feature": runtime_relation_feature,
             "effective_disk_axes": effective_axes,
         }
         if extreme is not None:
@@ -2271,7 +2338,7 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         trunk_input = torch.cat(
             [
                 geometry,
-                basis,
+                query_aux["runtime_relation_feature"],
                 semantic,
                 query_aux["boundary_spectral_summary"],
                 center,
@@ -2284,8 +2351,13 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             raise RuntimeError("v4 runtime input layout drifted from its schema")
         hidden = self.shared_trunk(trunk_input)
         base_visibility_logits = self.visibility_head(hidden)
+        exposure_supervision_input = (
+            hidden
+            if self.exposure_supervision_source == "hidden"
+            else query_aux["relation_contrast"]
+        )
         exposure_supervision_logits = (
-            self.exposure_supervision_head(hidden)
+            self.exposure_supervision_head(exposure_supervision_input)
             if self.exposure_supervision_head is not None and self.training
             else None
         )
@@ -2620,10 +2692,13 @@ __all__ = [
     "DUAL_PROBE_ATTENUATION_HIDDEN_DIM",
     "DUAL_PROBE_RAW_QUERY_DIM",
     "DUAL_PROBE_REGION_EXTREMA_DIM",
+    "EXPOSURE_SUPERVISION_SOURCES",
     "GEO_DIM",
     "LOW_RANK_SUMMARY_DIM",
     "MODEL_SCHEMA",
+    "RELATION_CONTRAST_DIM",
     "RUNTIME_FEATURE_DIM",
+    "RUNTIME_RELATION_FEATURE_MODES",
     "VIEWCELL_EXTREME_VISIBILITY_INPUT_DIM",
     "VIEWCELL_EXTREME_VISIBILITY_PROJECTION_DIM",
     "VIEWCELL_REGION_CONDITIONED_VISIBILITY_FUSION_DIM",

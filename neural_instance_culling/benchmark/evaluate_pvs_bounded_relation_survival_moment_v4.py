@@ -31,9 +31,12 @@ from common.threshold_selection import (  # noqa: E402
 )
 from bounded_relation_survival_moment_model import (  # noqa: E402
     BoundedRelationSurvivalMomentModel,
+    EXPOSURE_SUPERVISION_SOURCES,
     GEO_DIM,
     MODEL_SCHEMA,
+    RELATION_CONTRAST_DIM,
     RUNTIME_FEATURE_DIM,
+    RUNTIME_RELATION_FEATURE_MODES,
     VIEWCELL_EXTREME_VISIBILITY_INPUT_DIM,
     VIEWCELL_EXTREME_VISIBILITY_PROJECTION_DIM,
     VIEWCELL_REGION_CONDITIONED_VISIBILITY_FUSION_DIM,
@@ -340,14 +343,75 @@ def _viewcell_region_conditioned_visibility_constructor_value(
     return True, centering
 
 
-def _exposure_supervision_constructor_value(config: Mapping[str, Any]) -> int:
+def _runtime_relation_feature_mode_constructor_value(
+    config: Mapping[str, Any],
+) -> str:
+    """Read the runtime relation feature mode with an old-checkpoint default."""
+    nested = config.get("runtimeRelationFeature")
+    nested_mode: Any | None = None
+    if nested is not None:
+        if not isinstance(nested, Mapping):
+            raise ValueError("checkpoint runtime relation feature config is invalid")
+        nested_mode = nested.get("mode")
+    top_mode = config.get("runtimeRelationFeatureMode")
+    if top_mode is not None and nested_mode is not None and str(top_mode) != str(nested_mode):
+        raise ValueError(
+            "checkpoint runtime relation feature mode disagrees with its nested schema"
+        )
+    mode = str(
+        top_mode
+        if top_mode is not None
+        else nested_mode
+        if nested_mode is not None
+        else "basis"
+    )
+    if mode not in RUNTIME_RELATION_FEATURE_MODES:
+        raise ValueError(
+            "checkpoint runtime relation feature mode must be one of "
+            f"{RUNTIME_RELATION_FEATURE_MODES}"
+        )
+    return mode
+
+
+def _exposure_supervision_constructor_values(
+    config: Mapping[str, Any],
+) -> tuple[int, str]:
+    """Return the training-only head width and its input source.
+
+    The source is part of the checkpoint contract because the relation-contrast
+    branch has four inputs, while the hidden branch uses the shared trunk width.
+    """
     exposure = config.get("viewcellExposureSupervision")
-    if exposure is None:
-        return 0
-    if not isinstance(exposure, Mapping):
+    if exposure is not None and not isinstance(exposure, Mapping):
         raise ValueError("checkpoint viewcell exposure supervision config is invalid")
-    if not bool(exposure.get("enabled", False)):
-        return 0
+    nested_source = (
+        exposure.get("source")
+        if isinstance(exposure, Mapping) and "source" in exposure
+        else None
+    )
+    top_source = config.get("exposureSupervisionSource")
+    if (
+        top_source is not None
+        and nested_source is not None
+        and str(top_source) != str(nested_source)
+    ):
+        raise ValueError(
+            "checkpoint exposure supervision source disagrees with its nested schema"
+        )
+    source = str(
+        top_source
+        if top_source is not None
+        else nested_source
+        if nested_source is not None
+        else "hidden"
+    )
+    if source not in EXPOSURE_SUPERVISION_SOURCES:
+        raise ValueError(
+            "checkpoint exposure supervision source must be one of "
+            f"{EXPOSURE_SUPERVISION_SOURCES}"
+        )
+    if exposure is None or not bool(exposure.get("enabled", False)):
+        return 0, source
     try:
         input_dim = int(exposure["inputDim"])
         hidden_dim = int(exposure["hiddenDim"])
@@ -355,16 +419,28 @@ def _exposure_supervision_constructor_value(config: Mapping[str, Any]) -> int:
         raise ValueError(
             "enabled viewcell exposure supervision config is incomplete"
         ) from exc
+    try:
+        model_hidden_dim = int(config.get("hiddenDim", 64))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("checkpoint hiddenDim is invalid") from exc
+    expected_input_dim = (
+        model_hidden_dim if source == "hidden" else RELATION_CONTRAST_DIM
+    )
+    if input_dim != expected_input_dim:
+        raise ValueError(
+            "viewcell exposure supervision inputDim must be "
+            f"{expected_input_dim} for source {source}"
+        )
     if (
-        input_dim != int(config.get("hiddenDim", 64))
-        or hidden_dim <= 0
+        hidden_dim <= 0
+        or model_hidden_dim <= 0
         or exposure.get("trainingOnly") is not True
         or exposure.get("runtimeExport") is not False
     ):
         raise ValueError(
             "enabled viewcell exposure supervision must be train-only"
         )
-    return hidden_dim
+    return hidden_dim, source
 
 
 def _load_checkpoint(path: Path) -> dict[str, Any]:
@@ -896,9 +972,13 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         query_tail_separator_max_abs,
         query_tail_separator_centering,
     ) = _query_tail_separator_constructor_values(config)
-    exposure_supervision_hidden_dim = _exposure_supervision_constructor_value(
-        config
+    runtime_relation_feature_mode = (
+        _runtime_relation_feature_mode_constructor_value(config)
     )
+    (
+        exposure_supervision_hidden_dim,
+        exposure_supervision_source,
+    ) = _exposure_supervision_constructor_values(config)
     device = torch.device("cuda" if args.device == "cuda" or (args.device == "auto" and torch.cuda.is_available()) else "cpu")
     model = BoundedRelationSurvivalMomentModel(
         num_instances=num_instances,
@@ -906,6 +986,8 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         relation_hidden_dim=int(config.get("relationHiddenDim", 64)),
         hidden_dim=int(config.get("hiddenDim", 64)),
         exposure_supervision_hidden_dim=exposure_supervision_hidden_dim,
+        runtime_relation_feature_mode=runtime_relation_feature_mode,
+        exposure_supervision_source=exposure_supervision_source,
         relation_source=str(config.get("relationSource")),
         spectral_mode=str(config.get("spectralMode")),
         depth_q01=float(depth["q01"]),

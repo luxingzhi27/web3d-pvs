@@ -53,6 +53,117 @@ class BoundedRelationSurvivalMomentV3EvaluatorTests(unittest.TestCase):
         )
         self.assertNotIn("test", evaluator.REPLAY_SPLITS)
 
+    def test_old_checkpoint_defaults_for_runtime_relation_and_exposure_source(self) -> None:
+        self.assertEqual(
+            evaluator._runtime_relation_feature_mode_constructor_value({}),
+            "basis",
+        )
+        self.assertEqual(
+            evaluator._exposure_supervision_constructor_values({}),
+            (0, "hidden"),
+        )
+        self.assertEqual(
+            evaluator._exposure_supervision_constructor_values(
+                {"viewcellExposureSupervision": {"enabled": False}}
+            ),
+            (0, "hidden"),
+        )
+
+    def test_exposure_source_validates_hidden_and_relation_contrast_input_dims(self) -> None:
+        hidden_config = {
+            "hiddenDim": 13,
+            "viewcellExposureSupervision": {
+                "enabled": True,
+                "inputDim": 13,
+                "hiddenDim": 7,
+                "trainingOnly": True,
+                "runtimeExport": False,
+            },
+        }
+        self.assertEqual(
+            evaluator._exposure_supervision_constructor_values(hidden_config),
+            (7, "hidden"),
+        )
+
+        relation_config = {
+            "hiddenDim": 13,
+            "exposureSupervisionSource": "relation_contrast",
+            "viewcellExposureSupervision": {
+                "enabled": True,
+                "source": "relation_contrast",
+                "inputDim": 4,
+                "hiddenDim": 7,
+                "trainingOnly": True,
+                "runtimeExport": False,
+            },
+        }
+        self.assertEqual(
+            evaluator._exposure_supervision_constructor_values(relation_config),
+            (7, "relation_contrast"),
+        )
+
+    def test_runtime_relation_and_exposure_schema_errors_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "runtime relation feature mode"):
+            evaluator._runtime_relation_feature_mode_constructor_value(
+                {"runtimeRelationFeatureMode": "invalid"}
+            )
+        with self.assertRaisesRegex(ValueError, "runtime relation feature config"):
+            evaluator._runtime_relation_feature_mode_constructor_value(
+                {"runtimeRelationFeature": "invalid"}
+            )
+        with self.assertRaisesRegex(ValueError, "disagrees"):
+            evaluator._runtime_relation_feature_mode_constructor_value(
+                {
+                    "runtimeRelationFeatureMode": "basis",
+                    "runtimeRelationFeature": {"mode": "gated_contrast"},
+                }
+            )
+
+        for source, input_dim in (("hidden", 4), ("relation_contrast", 13)):
+            with self.subTest(source=source):
+                config = {
+                    "hiddenDim": 13,
+                    "exposureSupervisionSource": source,
+                    "viewcellExposureSupervision": {
+                        "enabled": True,
+                        "source": source,
+                        "inputDim": input_dim,
+                        "hiddenDim": 7,
+                        "trainingOnly": True,
+                        "runtimeExport": False,
+                    },
+                }
+                with self.assertRaisesRegex(ValueError, "inputDim"):
+                    evaluator._exposure_supervision_constructor_values(config)
+
+        with self.assertRaisesRegex(ValueError, "source must be one of"):
+            evaluator._exposure_supervision_constructor_values(
+                {
+                    "viewcellExposureSupervision": {
+                        "enabled": True,
+                        "source": "unknown",
+                        "inputDim": 64,
+                        "hiddenDim": 7,
+                        "trainingOnly": True,
+                        "runtimeExport": False,
+                    }
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "disagrees"):
+            evaluator._exposure_supervision_constructor_values(
+                {
+                    "exposureSupervisionSource": "hidden",
+                    "viewcellExposureSupervision": {
+                        "enabled": True,
+                        "source": "relation_contrast",
+                        "inputDim": 4,
+                        "hiddenDim": 7,
+                        "trainingOnly": True,
+                        "runtimeExport": False,
+                    },
+                }
+            )
+
     def test_checkpoint_reconstruction_passes_non_default_widths_and_region_head(self) -> None:
         captured: dict[str, object] = {}
 
@@ -85,6 +196,9 @@ class BoundedRelationSurvivalMomentV3EvaluatorTests(unittest.TestCase):
             "hiddenDim": 13,
             "relationSource": "bounded_hierarchical",
             "spectralMode": "moment_extrema",
+            "runtimeRelationFeatureMode": "gated_contrast",
+            "runtimeRelationFeature": {"mode": "gated_contrast"},
+            "exposureSupervisionSource": "relation_contrast",
             "depthNormalization": {"q01": 0.0, "q99": 1.0, "epsilon": 1e-6},
             "frequency": {"maxNormCycles": 8.0},
             "instanceCalibration": {
@@ -115,7 +229,8 @@ class BoundedRelationSurvivalMomentV3EvaluatorTests(unittest.TestCase):
             },
             "viewcellExposureSupervision": {
                 "enabled": True,
-                "inputDim": 13,
+                "source": "relation_contrast",
+                "inputDim": 4,
                 "hiddenDim": 7,
                 "target": "train-only successful-subpose visible hit rate",
                 "trainingOnly": True,
@@ -156,6 +271,8 @@ class BoundedRelationSurvivalMomentV3EvaluatorTests(unittest.TestCase):
             captured["viewcell_region_conditioned_visibility_centering"],
             "pose_mean",
         )
+        self.assertEqual(captured["runtime_relation_feature_mode"], "gated_contrast")
+        self.assertEqual(captured["exposure_supervision_source"], "relation_contrast")
         self.assertEqual(captured["exposure_supervision_hidden_dim"], 7)
         self.assertIs(captured["strict"], True)
 

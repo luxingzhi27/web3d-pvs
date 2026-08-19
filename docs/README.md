@@ -8,6 +8,8 @@
 
 | 文档 | 内容 |
 |---|---|
+| [`evaluation/pvs_direction_conditioned_counterfactual_occlusion_v1_quick8_2026-08-19.md`](evaluation/pvs_direction_conditioned_counterfactual_occlusion_v1_quick8_2026-08-19.md) | 4.53 MiB 神经资产、5.23 MiB 完整运行包下的方向门控关系与同实例反事实损失 2x2 快速评价；反事实损失有效，当前门控关系公式不保留 |
+| [`experiments/pvs_direction_conditioned_counterfactual_occlusion_v1_2026-08-19.md`](experiments/pvs_direction_conditioned_counterfactual_occlusion_v1_2026-08-19.md) | 方向条件化关系表征、视觉加权同实例反事实损失、四 GPU 快速矩阵和前端运行硬约束 |
 | [`evaluation/pvs_cross_pose_operating_exposure_representation_v1_2026-08-19.md`](evaluation/pvs_cross_pose_operating_exposure_representation_v1_2026-08-19.md) | 跨视点工作边界与 view-cell 区域暴露监督的 8 epoch 扫描、单种子 16 epoch 2x2 快速评价、GLB 资源指标和不增长的前端运行契约 |
 | [`experiments/pvs_cross_pose_operating_exposure_representation_v1_2026-08-19.md`](experiments/pvs_cross_pose_operating_exposure_representation_v1_2026-08-19.md) | 当前训练期组合创新的输入、损失、暴露监督、快速矩阵、运行资产上限和执行状态 |
 | [`evaluation/pvs_pose_balanced_frontier_visibility_loss_v1_formal40_2026-08-19.md`](evaluation/pvs_pose_balanced_frontier_visibility_loss_v1_formal40_2026-08-19.md) | 逐 pose 平衡 BCE 加动态安全前沿损失的两轮扫描、三种子 40 epoch 正式结果及与旧 V4 的同口径比较；结果未晋级默认模型 |
@@ -43,6 +45,7 @@
 
 | 文档 | 内容 |
 |---|---|
+| [`evaluation/pvs_direction_conditioned_counterfactual_occlusion_v1_quick8_2026-08-19.md`](evaluation/pvs_direction_conditioned_counterfactual_occlusion_v1_quick8_2026-08-19.md) | 单种子快速结果：同实例反事实损失改善安全工作点和跨视角分离，当前方向门控关系特征发生负交互，未修改默认模型 |
 | [`evaluation/pvs_cross_pose_operating_exposure_representation_v1_2026-08-19.md`](evaluation/pvs_cross_pose_operating_exposure_representation_v1_2026-08-19.md) | 单种子快速结果：组合训练机制在 4.53 MiB 运行资产不变的前提下改善分类、有效剔除和 GLB 削减；等待三种子与图像/移动端评价 |
 | [`evaluation/pvs_pose_balanced_frontier_visibility_loss_v1_formal40_2026-08-19.md`](evaluation/pvs_pose_balanced_frontier_visibility_loss_v1_formal40_2026-08-19.md) | 新损失两轮参数扫描、三种子从头 40 epoch 结果、安全阈值、分类/剔除/资源指标和未晋级结论 |
 | [`evaluation/unified_pvs_metrics_evaluation.md`](evaluation/unified_pvs_metrics_evaluation.md) | pose/aggregate、weighted recall、accuracy、balanced accuracy、useful cull 和资源指标定义 |

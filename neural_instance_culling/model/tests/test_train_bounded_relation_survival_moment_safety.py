@@ -14,6 +14,7 @@ import torch
 from neural_instance_culling.model.train_bounded_relation_survival_moment_safety import (
     CALIBRATION_FLOOR,
     _boundary_tail_refinement_objective_groups,
+    _counterfactual_rank_safety_objective,
     _calibration_workpoints,
     _candidate_frustum_boundary_proximity,
     _boundary_opportunity_scale,
@@ -121,7 +122,10 @@ class BoundedRelationSurvivalMomentSafetyTrainingTest(unittest.TestCase):
             "--cross-pose-weighted-recall-target", "0.993",
             "--cross-pose-operating-weight", "0.75",
             "--exposure-supervision-hidden-dim", "16",
+            "--exposure-supervision-source", "relation_contrast",
             "--exposure-supervision-loss-weight", "0.05",
+            "--runtime-relation-feature-mode", "gated_contrast",
+            "--counterfactual-view-rank-weight", "0.05",
         ]
         with mock.patch.object(sys, "argv", argv):
             args = parse_args()
@@ -130,7 +134,10 @@ class BoundedRelationSurvivalMomentSafetyTrainingTest(unittest.TestCase):
         self.assertEqual(args.cross_pose_weighted_recall_target, 0.993)
         self.assertEqual(args.cross_pose_operating_weight, 0.75)
         self.assertEqual(args.exposure_supervision_hidden_dim, 16)
+        self.assertEqual(args.exposure_supervision_source, "relation_contrast")
         self.assertEqual(args.exposure_supervision_loss_weight, 0.05)
+        self.assertEqual(args.runtime_relation_feature_mode, "gated_contrast")
+        self.assertEqual(args.counterfactual_view_rank_weight, 0.05)
         self.assertEqual(args.refinement_scope, "all")
         self.assertIsNone(args.initial_checkpoint)
 
@@ -161,6 +168,19 @@ class BoundedRelationSurvivalMomentSafetyTrainingTest(unittest.TestCase):
         self.assertEqual(args.frontier_temperature, 0.2)
         self.assertEqual(args.refinement_scope, "all")
         self.assertIsNone(args.initial_checkpoint)
+
+    def test_counterfactual_rank_both_sides_enter_protected_safety_group(self) -> None:
+        base = torch.tensor(2.0)
+        positive = torch.tensor(0.6)
+        negative = torch.tensor(0.4)
+        result = _counterfactual_rank_safety_objective(
+            base, positive, negative, weight=0.2
+        )
+        torch.testing.assert_close(result, torch.tensor(2.1))
+        disabled = _counterfactual_rank_safety_objective(
+            base, positive, negative, weight=0.0
+        )
+        torch.testing.assert_close(disabled, base)
 
     def test_query_tail_cli_defaults_to_joint_from_scratch_contract(self) -> None:
         argv = [

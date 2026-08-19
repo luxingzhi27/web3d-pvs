@@ -992,6 +992,18 @@ def _evaluation_row(job: Mapping[str, Any], member: Path, evaluation_path: Path)
             "crossPoseSoftWeightedRecall": training_mean(
                 "crossPoseSoftWeightedRecall"
             ),
+            "counterfactualViewGap": training_mean(
+                "counterfactualViewGap"
+            ),
+            "counterfactualViewWorstGap": training_mean(
+                "counterfactualViewWorstGap"
+            ),
+            "counterfactualViewViolationFraction": training_mean(
+                "counterfactualViewViolationFraction"
+            ),
+            "counterfactualViewPairCount": training_mean(
+                "counterfactualViewPairCount"
+            ),
             "cudaPeakMemoryAllocatedBytes": training_mean(
                 "cudaPeakMemoryAllocatedBytes"
             ),

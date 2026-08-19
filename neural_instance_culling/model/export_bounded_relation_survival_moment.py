@@ -47,6 +47,7 @@ BOUNDARY_SUMMARY_DIM = 8
 LOW_RANK_SUMMARY_DIM = 4
 SURVIVAL_SEMANTIC_DIM = 8
 RELATION_CONDITION_DIM = 8
+RELATION_CONTRAST_DIM = 4
 RUNTIME_HEAD_INPUT_DIM = (
     GEO_DIM
     + SURVIVAL_RANK
@@ -67,6 +68,8 @@ FEATURE_DOMAIN_ABS_MAX = 1.0
 DISK_AXIS_BOUND = "per-feature row norm <= 1 - abs(center feature)"
 REGISTERED_MAX_NORM_CYCLES = 8.0
 RELATION_SCHEMA_V3 = "pvs-viewcell-train-observed-relation-csr-v3"
+RUNTIME_RELATION_FEATURE_MODES = ("basis", "gated_contrast")
+EXPOSURE_SUPERVISION_SOURCES = ("hidden", "relation_contrast")
 
 TARGET_WEIGHTED_RECALL = 0.99
 MINIMUM_WEIGHTED_RECALL_LCB = 0.99
@@ -259,6 +262,151 @@ def _validate_checkpoint_schema(checkpoint: Mapping[str, Any]) -> None:
         )
 
 
+def _validate_runtime_relation_metadata(
+    config: Mapping[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    """Validate the fixed-width runtime relation feature contract."""
+    mode = config.get("runtimeRelationFeatureMode")
+    if mode not in RUNTIME_RELATION_FEATURE_MODES:
+        raise ValueError(
+            "config.runtimeRelationFeatureMode must be one of "
+            f"{RUNTIME_RELATION_FEATURE_MODES}, got {mode!r}"
+        )
+    feature = _as_mapping(
+        config.get("runtimeRelationFeature"),
+        "config.runtimeRelationFeature",
+    )
+    if feature.get("mode") != mode:
+        raise ValueError(
+            "config.runtimeRelationFeature.mode must match "
+            "config.runtimeRelationFeatureMode"
+        )
+    if _positive_int(feature.get("basisDim"), "config.runtimeRelationFeature.basisDim") != SURVIVAL_RANK:
+        raise ValueError("config.runtimeRelationFeature.basisDim must be 4")
+    if _positive_int(feature.get("contrastDim"), "config.runtimeRelationFeature.contrastDim") != RELATION_CONTRAST_DIM:
+        raise ValueError("config.runtimeRelationFeature.contrastDim must be 4")
+    if _positive_int(feature.get("relationConditionDim"), "config.runtimeRelationFeature.relationConditionDim") != RELATION_CONDITION_DIM:
+        raise ValueError("config.runtimeRelationFeature.relationConditionDim must be 8")
+    if list(feature.get("relationConditionSlice") or ()) != [0, RELATION_CONTRAST_DIM]:
+        raise ValueError(
+            "config.runtimeRelationFeature.relationConditionSlice must be [0, 4]"
+        )
+    formula = (
+        "relation_contrast = basis * "
+        "(1 + tanh(relation_condition[:, :4]))"
+    )
+    if feature.get("formula") != formula:
+        raise ValueError("config.runtimeRelationFeature.formula is not registered")
+    expected_main_input = (
+        "relation_contrast" if mode == "gated_contrast" else "basis"
+    )
+    if feature.get("mainTrunkInput") != expected_main_input:
+        raise ValueError(
+            "config.runtimeRelationFeature.mainTrunkInput disagrees with the mode"
+        )
+    if feature.get("survivalSemanticInput") != "basis":
+        raise ValueError(
+            "config.runtimeRelationFeature.survivalSemanticInput must be 'basis'"
+        )
+    if feature.get("fixedTableExport") != "not stored; derived at query time":
+        raise ValueError(
+            "config.runtimeRelationFeature.fixedTableExport must declare query-time derivation"
+        )
+    return str(mode), {
+        "mode": str(mode),
+        "basisDim": SURVIVAL_RANK,
+        "contrastDim": RELATION_CONTRAST_DIM,
+        "relationConditionDim": RELATION_CONDITION_DIM,
+        "relationConditionSlice": [0, RELATION_CONTRAST_DIM],
+        "formula": formula,
+        "mainTrunkInput": expected_main_input,
+        "survivalSemanticInput": "basis",
+        "fixedTableExport": "not stored; derived at query time",
+        "equivalent4DReplacement": True,
+    }
+
+
+def _validate_exposure_metadata(
+    config: Mapping[str, Any],
+    *,
+    hidden_dim: int,
+    expected_enabled: bool,
+) -> dict[str, Any]:
+    """Validate the training-only exposure head and its input source."""
+    exposure = _as_mapping(
+        config.get("viewcellExposureSupervision"),
+        "config.viewcellExposureSupervision",
+    )
+    enabled = bool(exposure.get("enabled", False))
+    if enabled != bool(expected_enabled):
+        raise ValueError(
+            "config.viewcellExposureSupervision.enabled disagrees with checkpoint variant"
+        )
+    source = exposure.get("source")
+    if source not in EXPOSURE_SUPERVISION_SOURCES:
+        raise ValueError(
+            "config.viewcellExposureSupervision.source must be one of "
+            f"{EXPOSURE_SUPERVISION_SOURCES}, got {source!r}"
+        )
+    input_dim = _positive_int(
+        exposure.get("inputDim"),
+        "config.viewcellExposureSupervision.inputDim",
+    )
+    expected_input_dim = hidden_dim if source == "hidden" else RELATION_CONTRAST_DIM
+    if input_dim != expected_input_dim:
+        raise ValueError(
+            "config.viewcellExposureSupervision.inputDim disagrees with its source"
+        )
+    head_hidden_dim = _positive_int(
+        exposure.get("hiddenDim"),
+        "config.viewcellExposureSupervision.hiddenDim",
+        allow_zero=True,
+    )
+    if enabled and head_hidden_dim <= 0:
+        raise ValueError(
+            "enabled view-cell exposure supervision requires a positive hiddenDim"
+        )
+    if not enabled and head_hidden_dim != 0:
+        raise ValueError(
+            "disabled view-cell exposure supervision must have hiddenDim=0"
+        )
+    expected_architecture = [input_dim, head_hidden_dim, 1] if enabled else None
+    if exposure.get("architecture") != expected_architecture:
+        raise ValueError(
+            "config.viewcellExposureSupervision.architecture disagrees with its source"
+        )
+    if exposure.get("trainingOnly") is not True:
+        raise ValueError(
+            "view-cell exposure supervision must declare trainingOnly=true"
+        )
+    if exposure.get("runtimeExport") is not False:
+        raise ValueError(
+            "view-cell exposure supervision must declare runtimeExport=false"
+        )
+    expected_input_description = (
+        "shared hidden feature" if source == "hidden" else "relation_contrast"
+    )
+    if exposure.get("input") != expected_input_description:
+        raise ValueError(
+            "config.viewcellExposureSupervision.input disagrees with its source"
+        )
+    return {
+        "enabled": enabled,
+        "source": str(source),
+        "inputDim": input_dim,
+        "hiddenDim": head_hidden_dim,
+        "architecture": expected_architecture,
+        "input": expected_input_description,
+        "target": str(
+            exposure.get(
+                "target", "train-only successful-subpose visible hit rate"
+            )
+        ),
+        "trainingOnly": True,
+        "runtimeExport": False,
+    }
+
+
 def _validate_model_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
     _validate_checkpoint_schema(checkpoint)
     config_value = checkpoint.get("config", checkpoint.get("modelConfig"))
@@ -284,6 +432,9 @@ def _validate_model_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
     if _positive_int(config.get("lowRankSummaryDim"), "config.lowRankSummaryDim") != LOW_RANK_SUMMARY_DIM:
         raise ValueError("config.lowRankSummaryDim must be 4")
     hidden_dim = _positive_int(config.get("hiddenDim"), "config.hiddenDim")
+    runtime_relation_mode, runtime_relation_feature = _validate_runtime_relation_metadata(
+        config
+    )
     instance_calibration = _as_mapping(
         config.get("instanceCalibration"), "config.instanceCalibration"
     )
@@ -343,36 +494,12 @@ def _validate_model_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
             f"of {REGISTERED_MAX_NORM_CYCLES}"
         )
 
-    exposure = config.get("viewcellExposureSupervision")
-    exposure_enabled = False
-    exposure_hidden_dim = 0
-    if exposure is not None:
-        exposure = _as_mapping(
-            exposure, "config.viewcellExposureSupervision"
-        )
-        exposure_enabled = bool(exposure.get("enabled", False))
-        if exposure_enabled:
-            exposure_hidden_dim = _positive_int(
-                exposure.get("hiddenDim"),
-                "config.viewcellExposureSupervision.hiddenDim",
-            )
-            if (
-                _positive_int(
-                    exposure.get("inputDim"),
-                    "config.viewcellExposureSupervision.inputDim",
-                )
-                != hidden_dim
-                or exposure.get("trainingOnly") is not True
-                or exposure.get("runtimeExport") is not False
-            ):
-                raise ValueError(
-                    "view-cell exposure supervision must be train-only and excluded from runtime"
-                )
     expected_exposure_enabled = V4_VARIANT_CONTRACTS[str(protocol["variant"])][2]
-    if exposure_enabled != expected_exposure_enabled:
-        raise ValueError(
-            "config.viewcellExposureSupervision.enabled disagrees with checkpoint variant"
-        )
+    exposure_meta = _validate_exposure_metadata(
+        config,
+        hidden_dim=hidden_dim,
+        expected_enabled=expected_exposure_enabled,
+    )
 
     return {
         "runtimeSchema": MODEL_SCHEMA,
@@ -387,6 +514,8 @@ def _validate_model_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
         "lowRankSummaryDim": LOW_RANK_SUMMARY_DIM,
         "hiddenDim": hidden_dim,
         "relationSource": str(config.get("relationSource", "bounded_hierarchical")),
+        "runtimeRelationFeatureMode": runtime_relation_mode,
+        "runtimeRelationFeature": runtime_relation_feature,
         "spectralMode": spectral_mode,
         "instanceCalibration": {
             "mode": calibration_mode,
@@ -413,8 +542,11 @@ def _validate_model_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
             "maxNormCycles": max_frequency_norm,
         },
         "trainingOnlyExposureSupervision": {
-            "enabledInCheckpoint": exposure_enabled,
-            "hiddenDim": exposure_hidden_dim,
+            "enabledInCheckpoint": bool(exposure_meta["enabled"]),
+            "source": str(exposure_meta["source"]),
+            "inputDim": int(exposure_meta["inputDim"]),
+            "hiddenDim": int(exposure_meta["hiddenDim"]),
+            "architecture": exposure_meta["architecture"],
             "runtimeExported": False,
         },
     }
@@ -1110,6 +1242,22 @@ def _build_model_meta(
         "numInstances": int(runtime_config["numInstances"]),
         "numGlbs": int(runtime_config["numGlbs"]),
         "modelConfig": dict(runtime_config),
+        "runtimeRelationFeatureMode": str(
+            runtime_config["runtimeRelationFeatureMode"]
+        ),
+        "runtimeRelationFeature": dict(runtime_config["runtimeRelationFeature"]),
+        "runtimeRelationContract": {
+            "mainTrunkInput": str(
+                runtime_config["runtimeRelationFeature"]["mainTrunkInput"]
+            ),
+            "basisDim": SURVIVAL_RANK,
+            "contrastDim": RELATION_CONTRAST_DIM,
+            "equivalent4DReplacement": True,
+            "runtimeFeatureDim": RUNTIME_FEATURE_DIM,
+            "runtimeHeadInputDim": RUNTIME_HEAD_INPUT_DIM,
+            "fixedTableUnchanged": True,
+            "queryInputUnchanged": True,
+        },
         "fixedTable": {
             "file": "instance_runtime_features_fp16.bin",
             "shape": [int(runtime_config["numInstances"]), RUNTIME_FEATURE_DIM],
@@ -1124,6 +1272,7 @@ def _build_model_meta(
                 },
             ],
             "byteLength": len(runtime_raw),
+            "bytesPerInstance": RUNTIME_FEATURE_DIM * 2,
         },
         "candidateCameraSemantics": viewcell["candidateCameraSemantics"],
         "queryCenterSemantics": viewcell["queryCenterSemantics"],
@@ -1137,6 +1286,8 @@ def _build_model_meta(
             "candidateCameraSemantics": viewcell["candidateCameraSemantics"],
             "queryCenterSemantics": viewcell["queryCenterSemantics"],
             "viewcellShape": DEFAULT_VIEWCELL_SHAPE,
+            "inputDim": RUNTIME_HEAD_INPUT_DIM,
+            "runtimeRelationFeatureDim": RELATION_CONTRAST_DIM,
             "viewcellRadiusM": float(viewcell["radiusM"]),
             "raySpaceDim": VIEW_DIM,
             "diskAxisShape": [VIEW_DIM, DISK_AXIS_DIM],
@@ -1254,6 +1405,13 @@ def _build_model_meta(
                 "frequency_cycles_fp32.bin",
                 "chi_table_fp32.bin",
             ],
+        },
+        "runtimeBudgetContract": {
+            "fixedTableDim": RUNTIME_FEATURE_DIM,
+            "queryInputDim": RUNTIME_HEAD_INPUT_DIM,
+            "neuralAssetBudgetBytes": MAX_NEURAL_ASSET_BYTES,
+            "neuralAssetBudgetMiB": 7,
+            "unchanged": True,
         },
         "runtimeSemantics": "fixed 124D offline table; one horizontal-disk view-cell query per candidate batch",
         "trainingCheckpointIncluded": False,

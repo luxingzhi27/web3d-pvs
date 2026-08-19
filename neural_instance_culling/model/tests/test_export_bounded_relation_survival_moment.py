@@ -23,6 +23,7 @@ from export_bounded_relation_survival_moment import (  # noqa: E402
     MAX_NEURAL_ASSET_BYTES,
     MODEL_SCHEMA,
     RELATION_CONDITION_DIM,
+    RELATION_CONTRAST_DIM,
     RUNTIME_FEATURE_DIM,
     RUNTIME_HEAD_INPUT_DIM,
     SPECTRAL_FREQUENCY_COUNT,
@@ -65,6 +66,30 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
             "numGlbs": self.num_glbs,
             "relationSource": "bounded_hierarchical",
             "spectralMode": "moment_envelope",
+            "runtimeRelationFeatureMode": "basis",
+            "runtimeRelationFeature": {
+                "mode": "basis",
+                "basisDim": SURVIVAL_RANK,
+                "contrastDim": RELATION_CONTRAST_DIM,
+                "relationConditionDim": RELATION_CONDITION_DIM,
+                "relationConditionSlice": [0, RELATION_CONTRAST_DIM],
+                "formula": "relation_contrast = basis * (1 + tanh(relation_condition[:, :4]))",
+                "mainTrunkInput": "basis",
+                "survivalSemanticInput": "basis",
+                "fixedTableExport": "not stored; derived at query time",
+            },
+            "exposureSupervisionSource": "hidden",
+            "viewcellExposureSupervision": {
+                "enabled": False,
+                "source": "hidden",
+                "inputDim": self.hidden_dim,
+                "hiddenDim": 0,
+                "architecture": None,
+                "input": "shared hidden feature",
+                "target": "train-only successful-subpose visible hit rate",
+                "trainingOnly": True,
+                "runtimeExport": False,
+            },
             "geometryDim": GEO_DIM,
             "survivalCoefficientShape": [SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM],
             "runtimeFeatureDim": RUNTIME_FEATURE_DIM,
@@ -251,7 +276,14 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
             ),
         )
 
-    def _checkpoint_from_model(self, root: Path, exposure_hidden_dim: int) -> dict:
+    def _checkpoint_from_model(
+        self,
+        root: Path,
+        exposure_hidden_dim: int,
+        *,
+        runtime_relation_feature_mode: str = "basis",
+        exposure_supervision_source: str = "hidden",
+    ) -> dict:
         checkpoint = self._checkpoint(root)
         torch.manual_seed(20260819)
         model = BoundedRelationSurvivalMomentModel(
@@ -260,6 +292,8 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
             relation_hidden_dim=64,
             hidden_dim=self.hidden_dim,
             exposure_supervision_hidden_dim=exposure_hidden_dim,
+            runtime_relation_feature_mode=runtime_relation_feature_mode,
+            exposure_supervision_source=exposure_supervision_source,
             relation_source="bounded_hierarchical",
             spectral_mode="moment_envelope",
             depth_q01=0.11,
@@ -292,12 +326,16 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
         checkpoint["config"] = dict(checkpoint["config"])
         checkpoint["config"]["viewcellExposureSupervision"] = {
             "enabled": True,
+            "source": "hidden",
             "inputDim": self.hidden_dim,
             "hiddenDim": hidden_dim,
+            "architecture": [self.hidden_dim, hidden_dim, 1],
+            "input": "shared hidden feature",
             "target": "train-only successful-subpose visible hit rate",
             "trainingOnly": True,
             "runtimeExport": False,
         }
+        checkpoint["config"]["exposureSupervisionSource"] = "hidden"
         checkpoint["model"] = dict(checkpoint["model"])
         checkpoint["model"].update(
             {
@@ -350,6 +388,20 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
             self.assertEqual(meta["modelSchema"], MODEL_SCHEMA)
             self.assertEqual(meta["fixedTable"]["shape"], [3, 124])
             self.assertEqual(meta["fixedTable"]["dtype"], "float16")
+            self.assertEqual(meta["runtimeRelationFeatureMode"], "basis")
+            self.assertEqual(
+                meta["runtimeRelationFeature"]["mainTrunkInput"], "basis"
+            )
+            self.assertTrue(
+                meta["runtimeRelationFeature"]["equivalent4DReplacement"]
+            )
+            self.assertEqual(meta["runtimeRelationContract"]["basisDim"], 4)
+            self.assertEqual(meta["runtimeRelationContract"]["contrastDim"], 4)
+            self.assertTrue(meta["runtimeRelationContract"]["fixedTableUnchanged"])
+            self.assertEqual(meta["query"]["inputDim"], 130)
+            self.assertEqual(meta["runtimeBudgetContract"]["fixedTableDim"], 124)
+            self.assertEqual(meta["runtimeBudgetContract"]["queryInputDim"], 130)
+            self.assertEqual(meta["runtimeBudgetContract"]["neuralAssetBudgetMiB"], 7)
             self.assertEqual(
                 meta["runtimeFeatureSource"]["source"],
                 "checkpoint.geometryFeatures_plus_survivalCoefficients",
@@ -432,6 +484,8 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
             self.assertEqual(meta["modelConfig"]["runtimeHeadInputDim"], 130)
             training_only = meta["modelConfig"]["trainingOnlyExposureSupervision"]
             self.assertTrue(training_only["enabledInCheckpoint"])
+            self.assertEqual(training_only["source"], "hidden")
+            self.assertEqual(training_only["inputDim"], self.hidden_dim)
             self.assertEqual(training_only["hiddenDim"], 16)
             self.assertFalse(training_only["runtimeExported"])
             layout = meta["networkWeights"]["layout"]
@@ -447,6 +501,61 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
                 any("exposure_supervision_head" in row["name"] for row in layout)
             )
             self.assertNotIn("exposure_supervision_head", meta["networkWeights"])
+
+    def test_gated_contrast_and_relation_contrast_exposure_keep_the_4d_runtime_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkpoint = self._checkpoint_from_model(
+                root,
+                exposure_hidden_dim=16,
+                runtime_relation_feature_mode="gated_contrast",
+                exposure_supervision_source="relation_contrast",
+            )
+            output = self._export(root, checkpoint, name="gated-contrast")
+            meta = json.loads((output / "model_meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["runtimeRelationFeatureMode"], "gated_contrast")
+            self.assertEqual(
+                meta["runtimeRelationFeature"]["mainTrunkInput"],
+                "relation_contrast",
+            )
+            self.assertEqual(
+                meta["modelConfig"]["runtimeRelationFeature"]["contrastDim"],
+                RELATION_CONTRAST_DIM,
+            )
+            training_only = meta["modelConfig"]["trainingOnlyExposureSupervision"]
+            self.assertEqual(training_only["source"], "relation_contrast")
+            self.assertEqual(training_only["inputDim"], RELATION_CONTRAST_DIM)
+            self.assertEqual(
+                training_only["architecture"], [RELATION_CONTRAST_DIM, 16, 1]
+            )
+            self.assertFalse(
+                any("exposure_supervision_head" in row["name"] for row in meta["networkWeights"]["layout"])
+            )
+            self.assertEqual(meta["fixedTable"]["shape"], [3, 124])
+            self.assertEqual(meta["query"]["inputDim"], 130)
+            self.assertEqual(meta["runtimeBudgetContract"]["neuralAssetBudgetMiB"], 7)
+
+    def test_runtime_relation_and_exposure_metadata_are_strictly_required(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            missing_mode = self._checkpoint_from_model(root, exposure_hidden_dim=0)
+            missing_mode["config"] = dict(missing_mode["config"])
+            missing_mode["config"].pop("runtimeRelationFeatureMode")
+            with self.assertRaisesRegex(ValueError, "runtimeRelationFeatureMode"):
+                self._export(root, missing_mode, name="missing-relation-mode")
+
+            bad_exposure = self._checkpoint_from_model(
+                root,
+                exposure_hidden_dim=16,
+                exposure_supervision_source="relation_contrast",
+            )
+            bad_exposure["config"] = dict(bad_exposure["config"])
+            bad_exposure["config"]["viewcellExposureSupervision"] = dict(
+                bad_exposure["config"]["viewcellExposureSupervision"]
+            )
+            bad_exposure["config"]["viewcellExposureSupervision"]["inputDim"] = 5
+            with self.assertRaisesRegex(ValueError, "inputDim"):
+                self._export(root, bad_exposure, name="bad-exposure-input")
 
     def test_unsafe_diagnostic_export_uses_the_checkpoint_matching_workpoint(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

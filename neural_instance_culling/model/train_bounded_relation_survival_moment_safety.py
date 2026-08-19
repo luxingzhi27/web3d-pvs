@@ -48,6 +48,9 @@ from common.cross_pose_operating_loss import (  # noqa: E402
     CrossPoseOperatingDualState,
     cross_pose_recall_constrained_operating_loss,
 )
+from common.counterfactual_view_rank_loss import (  # noqa: E402
+    counterfactual_view_rank_loss,
+)
 from common.dual_probe_rescue_loss import (  # noqa: E402
     dual_probe_rescue_attenuation_loss,
 )
@@ -2076,6 +2079,21 @@ def _v4_objective_groups(
     }
 
 
+def _counterfactual_rank_safety_objective(
+    base_safety: torch.Tensor,
+    positive_rank: torch.Tensor,
+    negative_rank: torch.Tensor,
+    *,
+    weight: float,
+) -> torch.Tensor:
+    """Keep both class sides of counterfactual ranking in the safety group."""
+    if not math.isfinite(float(weight)) or float(weight) < 0.0:
+        raise ValueError("counterfactual rank weight must be finite and non-negative")
+    return base_safety + 0.5 * float(weight) * (
+        positive_rank + negative_rank
+    )
+
+
 def _boundary_tail_refinement_objective_groups(
     tail_safety: torch.Tensor,
     paired_safety: torch.Tensor,
@@ -2550,6 +2568,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cross-pose-dual-learning-rate", type=float, default=0.05)
     parser.add_argument("--cross-pose-dual-maximum", type=float, default=20.0)
     parser.add_argument("--exposure-supervision-hidden-dim", type=int, default=0)
+    parser.add_argument(
+        "--exposure-supervision-source",
+        choices=("hidden", "relation_contrast"),
+        default="hidden",
+    )
     parser.add_argument("--exposure-supervision-loss-weight", type=float, default=0.0)
     parser.add_argument(
         "--exposure-supervision-positive-class-fraction", type=float, default=0.25
@@ -2585,6 +2608,22 @@ def parse_args() -> argparse.Namespace:
         "--same-instance-cross-view-recurrence-smoothing-strength",
         type=float,
         default=16.0,
+    )
+    parser.add_argument("--counterfactual-view-rank-weight", type=float, default=0.0)
+    parser.add_argument("--counterfactual-view-rank-margin", type=float, default=0.5)
+    parser.add_argument(
+        "--counterfactual-view-rank-temperature", type=float, default=0.25
+    )
+    parser.add_argument(
+        "--counterfactual-view-positive-weight-power", type=float, default=0.5
+    )
+    parser.add_argument(
+        "--counterfactual-view-positive-importance-mix", type=float, default=0.5
+    )
+    parser.add_argument(
+        "--runtime-relation-feature-mode",
+        choices=("basis", "gated_contrast"),
+        default="basis",
     )
     parser.add_argument("--candidate-boundary-hard-negative-weight", type=float, default=0.0)
     parser.add_argument("--candidate-boundary-threshold", type=float, default=0.05)
@@ -3059,6 +3098,11 @@ def main() -> None:
         args.cross_pose_dual_maximum,
         args.exposure_supervision_loss_weight,
         args.exposure_supervision_positive_class_fraction,
+        args.counterfactual_view_rank_weight,
+        args.counterfactual_view_rank_margin,
+        args.counterfactual_view_rank_temperature,
+        args.counterfactual_view_positive_weight_power,
+        args.counterfactual_view_positive_importance_mix,
     )
     if not all(math.isfinite(float(value)) for value in cross_pose_scalars):
         raise ValueError("cross-pose operating and exposure parameters must be finite")
@@ -3077,6 +3121,11 @@ def main() -> None:
         or args.exposure_supervision_hidden_dim < 0
         or args.exposure_supervision_loss_weight < 0.0
         or not 0.0 < args.exposure_supervision_positive_class_fraction < 1.0
+        or args.counterfactual_view_rank_weight < 0.0
+        or args.counterfactual_view_rank_margin < 0.0
+        or args.counterfactual_view_rank_temperature <= 0.0
+        or not 0.0 < args.counterfactual_view_positive_weight_power <= 1.0
+        or not 0.0 <= args.counterfactual_view_positive_importance_mix <= 1.0
     ):
         raise ValueError("cross-pose operating or exposure parameters are invalid")
     exposure_supervision_enabled = args.exposure_supervision_hidden_dim > 0
@@ -3090,6 +3139,14 @@ def main() -> None:
     ):
         raise ValueError(
             "exposure supervision is restricted to full-model frontier experiments"
+        )
+    if args.exposure_supervision_source == "relation_contrast" and not exposure_supervision_enabled:
+        raise ValueError(
+            "relation-contrast exposure supervision requires an enabled training head"
+        )
+    if args.counterfactual_view_rank_weight > 0.0 and args.poses_per_batch < 2:
+        raise ValueError(
+            "counterfactual view ranking requires at least two poses per batch"
         )
     if args.loss_variant == "cross_pose_operating" and (
         args.refinement_scope != "all"
@@ -3392,6 +3449,8 @@ def main() -> None:
         cull_certificate_input_mode=args.cull_certificate_input_mode,
         dual_probe_rescue=dual_probe_rescue_spec,
         exposure_supervision_hidden_dim=args.exposure_supervision_hidden_dim,
+        exposure_supervision_source=args.exposure_supervision_source,
+        runtime_relation_feature_mode=args.runtime_relation_feature_mode,
     ).to(device)
     model.set_instance_world_aabbs(torch.from_numpy(world_aabbs).to(device))
     model.set_instance_to_glb(torch.from_numpy(instance_to_glb_np).to(device))
@@ -3710,6 +3769,7 @@ def main() -> None:
             "sourceSplit": "train",
             "target": "visible subpose count / successful subpose count",
             "hiddenDim": int(args.exposure_supervision_hidden_dim),
+            "source": str(args.exposure_supervision_source),
             "lossWeight": float(args.exposure_supervision_loss_weight),
             "positiveClassFraction": float(
                 args.exposure_supervision_positive_class_fraction
@@ -3719,6 +3779,30 @@ def main() -> None:
             "runtimeQueryDimensionChanged": False,
             "runtimeExport": False,
             "testRead": False,
+        },
+        "counterfactualViewRankLoss": {
+            "enabled": args.counterfactual_view_rank_weight > 0.0,
+            "sourceSplit": "train",
+            "weight": float(args.counterfactual_view_rank_weight),
+            "marginLogit": float(args.counterfactual_view_rank_margin),
+            "temperatureLogit": float(args.counterfactual_view_rank_temperature),
+            "positiveWeightPower": float(
+                args.counterfactual_view_positive_weight_power
+            ),
+            "positiveImportanceMix": float(
+                args.counterfactual_view_positive_importance_mix
+            ),
+            "comparison": "same instance, opposite view-cell union labels",
+            "staticInstanceBiasCancels": True,
+            "runtimeExport": False,
+            "testRead": False,
+        },
+        "directionConditionedRelationFeature": {
+            "mode": str(args.runtime_relation_feature_mode),
+            "dimension": 4,
+            "fusion": "basis * (1 + tanh(relation_condition[:4]))",
+            "runtimeFeatureDimensionChanged": False,
+            "runtimeQueryDimensionChanged": False,
         },
         "runtimeBudgetContract": {
             "fixedInstanceFeatureDimension": int(RUNTIME_FEATURE_DIM),
@@ -5260,6 +5344,38 @@ def main() -> None:
                     "sameInstanceCrossViewViolationFraction": logits.new_zeros(()),
                     "sameInstanceCrossViewPairCount": 0.0,
                 }
+            if args.counterfactual_view_rank_weight > 0.0:
+                (
+                    counterfactual_positive_loss,
+                    counterfactual_negative_loss,
+                    counterfactual_parts,
+                ) = counterfactual_view_rank_loss(
+                    logits,
+                    target,
+                    instance_ids,
+                    visible_weights,
+                    margin=args.counterfactual_view_rank_margin,
+                    temperature=args.counterfactual_view_rank_temperature,
+                    positive_weight_power=(
+                        args.counterfactual_view_positive_weight_power
+                    ),
+                    positive_importance_mix=(
+                        args.counterfactual_view_positive_importance_mix
+                    ),
+                )
+            else:
+                counterfactual_positive_loss = logits.sum() * 0.0
+                counterfactual_negative_loss = logits.sum() * 0.0
+                counterfactual_parts = {
+                    "lossCounterfactualViewPositive": counterfactual_positive_loss,
+                    "lossCounterfactualViewNegative": counterfactual_negative_loss,
+                    "counterfactualViewGap": logits.new_zeros(()),
+                    "counterfactualViewWorstGap": logits.new_zeros(()),
+                    "counterfactualViewViolationFraction": logits.new_zeros(()),
+                    "counterfactualViewPairCount": 0.0,
+                    "counterfactualViewPositiveRows": 0.0,
+                    "counterfactualViewNegativeRows": 0.0,
+                }
             if args.candidate_boundary_hard_negative_weight > 0.0:
                 boundary_proximity = _candidate_frustum_boundary_proximity(
                     candidate_camera,
@@ -5329,6 +5445,9 @@ def main() -> None:
             cross_view_half_weight = 0.5 * float(
                 args.same_instance_cross_view_rank_weight
             )
+            counterfactual_half_weight = 0.5 * float(
+                args.counterfactual_view_rank_weight
+            )
             if use_pose_balanced_frontier or use_cross_pose_operating:
                 safety_objective = _combined_visibility
                 efficiency_objective = logits.sum() * 0.0
@@ -5369,6 +5488,16 @@ def main() -> None:
                     + float(args.candidate_boundary_hard_negative_weight)
                     * candidate_boundary_loss
                 )
+            # Counterfactual ranking is a classification objective on opposite
+            # labels of the same instance.  Both sides remain in the protected
+            # safety group; routing the negative side through the efficiency
+            # group would erase it when the efficiency gradient cap is zero.
+            safety_objective = _counterfactual_rank_safety_objective(
+                safety_objective,
+                counterfactual_positive_loss,
+                counterfactual_negative_loss,
+                weight=args.counterfactual_view_rank_weight,
+            )
             certificate_regularization = (
                 (
                     aux["cull_certificate_suppression"]
@@ -5627,6 +5756,12 @@ def main() -> None:
                     "lossSameInstanceCrossViewNegativeWeighted": (
                         cross_view_half_weight * cross_view_negative_loss
                     ),
+                    "lossCounterfactualViewPositiveWeighted": (
+                        counterfactual_half_weight * counterfactual_positive_loss
+                    ),
+                    "lossCounterfactualViewNegativeWeighted": (
+                        counterfactual_half_weight * counterfactual_negative_loss
+                    ),
                     "lossCandidateBoundaryHardNegativeWeighted": (
                         float(args.candidate_boundary_hard_negative_weight)
                         * candidate_boundary_loss
@@ -5748,6 +5883,7 @@ def main() -> None:
                     **exposure_parts,
                     **viewcell_exposure_parts,
                     **cross_view_parts,
+                    **counterfactual_parts,
                     **candidate_boundary_parts,
                     **view_residual_parts,
                     **dual_probe_rescue_parts,
