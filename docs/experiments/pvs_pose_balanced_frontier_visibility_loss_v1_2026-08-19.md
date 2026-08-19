@@ -2,6 +2,8 @@
 
 日期：2026-08-19
 
+> **执行状态**：两轮单种子参数扫描和冻结配置的三种子 40 epoch 从头训练均已完成。正式结果见[逐位姿平衡与安全前沿损失正式训练结果](../evaluation/pvs_pose_balanced_frontier_visibility_loss_v1_formal40_2026-08-19.md)。新损失改善了安全阈值尺度，但三种子平均 precision、accuracy、useful cull 和预测数量未超过旧 V4，因此不晋级默认模型；旧矩阵不再续跑。
+
 ## 目的
 
 当前完整模型后期会通过持续抬高正例分数、容忍大量假正例来降低漏检损失。其直接表现是校准阈值跌到极低区间，平均预测实例数从数百增长到数千，precision、accuracy、balanced accuracy 和 useful cull 同时退化。主要原因是可见性主损失中正例 BCE、Tversky 和 FN 项远强于 FP、数量及排序约束，优化目标与“在 weighted recall 安全前提下分开正负实例”不一致。

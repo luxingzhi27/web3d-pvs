@@ -2,14 +2,15 @@
 
 更新时间：2026-08-19
 
-这里的文档只服务于当前可运行版本、正式保留证据和 v4 实验执行链。重复路线报告和被修正的旧汇总已经清理；当前前端资产、正式训练权重、正式 benchmark、采样数据和硬件证据保持不变。v2 `formal80` 及 v3 纠错设计只作为历史诊断依据。108 维尾部分离矩阵继续按已登记协议运行；新的逐位姿平衡与安全前沿实验针对其暴露出的后期假正例膨胀问题，先扫参，再从 epoch 1 完成三种子 40 epoch 训练。正式结果产生前，默认 checkpoint、阈值和前端资产不变。
+这里的文档只服务于当前可运行版本、正式保留证据和 v4 实验链。重复路线报告和被修正的旧汇总已经清理；当前前端资产、正式训练权重、正式 benchmark、采样数据和硬件证据保持不变。v2 `formal80` 及 v3 纠错设计只作为历史诊断依据。108 维尾部分离旧矩阵已经停止，不再续跑；逐位姿平衡与安全前沿实验已完成两轮参数扫描和三种子 40 epoch 从头训练。该损失改善了阈值尺度但未提高总体分类和剔除效果，因此默认 checkpoint、阈值和前端资产保持不变。
 
 ## 先读这几份
 
 | 文档 | 内容 |
 |---|---|
-| [`experiments/pvs_pose_balanced_frontier_visibility_loss_v1_2026-08-19.md`](experiments/pvs_pose_balanced_frontier_visibility_loss_v1_2026-08-19.md) | 当前新损失实验：逐 pose 类别平衡 BCE 加动态加权安全前沿，执行两轮快速扫参，并强制完成相对最优配置的三种子 40 epoch 从头训练 |
-| [`experiments/pvs_joint_108d_query_tail_separator_from_scratch_v1_2026-08-19.md`](experiments/pvs_joint_108d_query_tail_separator_from_scratch_v1_2026-08-19.md) | 当前执行计划：108 维分离器作为完整模型分支，从 epoch 1 训练无分离器、线性、分段线性和 MLP 四变体，三种子 80 epoch，并执行 calibration/validation 与 10,000 次配对统计 |
+| [`evaluation/pvs_pose_balanced_frontier_visibility_loss_v1_formal40_2026-08-19.md`](evaluation/pvs_pose_balanced_frontier_visibility_loss_v1_formal40_2026-08-19.md) | 逐 pose 平衡 BCE 加动态安全前沿损失的两轮扫描、三种子 40 epoch 正式结果及与旧 V4 的同口径比较；结果未晋级默认模型 |
+| [`experiments/pvs_pose_balanced_frontier_visibility_loss_v1_2026-08-19.md`](experiments/pvs_pose_balanced_frontier_visibility_loss_v1_2026-08-19.md) | 新损失的设计、输入输出、扫描配置、从头训练协议和保留规则 |
+| [`experiments/pvs_joint_108d_query_tail_separator_from_scratch_v1_2026-08-19.md`](experiments/pvs_joint_108d_query_tail_separator_from_scratch_v1_2026-08-19.md) | 已停止的 108 维联合分离器矩阵计划；只保留历史协议和已有产物，不再训练或续跑 |
 | [`evaluation/pvs_train_owned_nonlinear_tail_posterior_longtrain_v1_2026-08-19.md`](evaluation/pvs_train_owned_nonlinear_tail_posterior_longtrain_v1_2026-08-19.md) | 历史诊断：冻结旧 v4 主干后训练尾部残差，并在结果上拟合探针；只能说明旧 checkpoint 的后验可修复性，不能视为从头联合训练 |
 | [`experiments/pvs_train_owned_nonlinear_tail_posterior_longtrain_ablation_2026-08-19.md`](experiments/pvs_train_owned_nonlinear_tail_posterior_longtrain_ablation_2026-08-19.md) | 历史 refinement 计划：记录固定旧 checkpoint 上的线性、分段线性和小型 MLP 探针比较 |
 | [`current/optimization_restart_2026-08-10.md`](current/optimization_restart_2026-08-10.md) | 当前优化阶段、最新正式证据、v4 当前入口和统一实验规则 |
@@ -40,6 +41,7 @@
 
 | 文档 | 内容 |
 |---|---|
+| [`evaluation/pvs_pose_balanced_frontier_visibility_loss_v1_formal40_2026-08-19.md`](evaluation/pvs_pose_balanced_frontier_visibility_loss_v1_formal40_2026-08-19.md) | 新损失两轮参数扫描、三种子从头 40 epoch 结果、安全阈值、分类/剔除/资源指标和未晋级结论 |
 | [`evaluation/unified_pvs_metrics_evaluation.md`](evaluation/unified_pvs_metrics_evaluation.md) | pose/aggregate、weighted recall、accuracy、balanced accuracy、useful cull 和资源指标定义 |
 | [`evaluation/test_split_benchmark_protocol.md`](evaluation/test_split_benchmark_protocol.md) | calibration、validation、test 的冻结关系 |
 | [`evaluation/viewcell_image_per_evaluation.md`](evaluation/viewcell_image_per_evaluation.md) | Color-ID 图像漏检、错误实例和额外实例指标 |
