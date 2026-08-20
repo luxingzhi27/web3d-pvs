@@ -2,8 +2,8 @@
 """Create a PoseCSR view with a new split manifest without duplicating data.
 
 All unchanged CSR files are hard-linked when the filesystem permits it.  Only
-``poses.bin`` and ``dataset_meta.json`` are newly written, so applying a
-directional split cannot silently regenerate or alter candidate/GT arrays.
+``poses.bin`` and ``dataset_meta.json`` are newly written, so applying a split
+cannot silently regenerate or alter candidate/GT arrays.
 """
 from __future__ import annotations
 
@@ -90,10 +90,11 @@ def apply_manifest(args: argparse.Namespace) -> dict[str, Any]:
         for name, split_id in SPLIT_IDS.items()
         if name in {"train", "validation", "calibration", "test", "guard"}
     }
+    manifest_schema = str(manifest.get("schema", "pose-split-manifest-v1"))
     output_meta = dict(input_meta)
     output_meta.update(
         {
-            "schema": "pose-csr-directional-yaw-holdout-v1",
+            "schema": "pose-csr-explicit-four-way-split-v1",
             "sourceDataset": str(input_dir),
             "splitManifest": str((manifest_dir / "manifest.json").as_posix()),
             "splitManifestSha256": sha256_file(manifest_dir / "manifest.json"),
@@ -101,9 +102,9 @@ def apply_manifest(args: argparse.Namespace) -> dict[str, Any]:
             "splitIds": manifest["splitIds"],
             "splitCounts": split_counts,
             "splitSemantics": manifest["semantics"],
-            "directionalSplit": manifest,
+            "splitProtocol": {"schema": manifest_schema, **manifest},
             "files": {**(input_meta.get("files") or {}), "poses": "poses.bin"},
-            "stats": {**(input_meta.get("stats") or {}), "directionalSplitPoseCounts": split_counts},
+            "stats": {**(input_meta.get("stats") or {}), "explicitSplitPoseCounts": split_counts},
         }
     )
     (output_dir / "dataset_meta.json").write_text(
