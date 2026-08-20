@@ -1,14 +1,16 @@
 # NeuralStreamWeb3D 文档索引
 
-更新时间：2026-08-17
+更新时间：2026-08-20
 
-这里的文档只服务于当前可运行版本、正式保留证据和唯一的 v4 实验执行链。重复路线报告和被修正的旧汇总已经清理；当前前端资产、正式训练权重、正式 benchmark、采样数据和硬件证据保持不变。v2 `formal80` 及 v3 纠错设计只作为历史诊断依据，不再作为 runner 或训练入口。v4 已完成共享关系先验、逐实例校准残差、checkpoint 专属运行表、validation weighted recall 评价、图像指标回填协议和真实 CUDA smoke；执行链已收敛为八组快速扫描及五变体三种子长训，当前没有相关实验进程。本轮只登记后处理计划，不启动新任务。
+这里的文档服务于当前可运行版本、正式保留证据和独立实验链。当前前端资产与默认 checkpoint 保持不变；HKUST 主评价已恢复固定 validation/test，并从历史 train 独立抽取 calibration。Pose 内困难负例对比学习只在独立 worktree 中完成单种子快速验证，尚未晋级默认模型。v2 `formal80` 及 v3 纠错设计只作为历史诊断依据，不再作为 runner 或训练入口。
 
 ## 先读这几份
 
 | 文档 | 内容 |
 |---|---|
 | [`current/optimization_restart_2026-08-10.md`](current/optimization_restart_2026-08-10.md) | 当前优化阶段、最新正式证据、v4 当前入口和统一实验规则 |
+| [`experiments/hkust_main_split_calibration_recovery_2026-08-20.md`](experiments/hkust_main_split_calibration_recovery_2026-08-20.md) | HKUST 主实验恢复固定 684 test、730 validation，并从历史 train 分层抽取 calibration 的协议与验证记录 |
+| [`experiments/pvs_pose_hard_negative_contrastive_scan_2026-08-20.md`](experiments/pvs_pose_hard_negative_contrastive_scan_2026-08-20.md) | 训练期 Pose 内困难负例对比学习实现、单种子 quick12 扫描和更保守 calibration 复评；不改变前端运行资产 |
 | [`current/pvs_bounded_relation_survival_moment_v4_implementation_2026-08-15.md`](current/pvs_bounded_relation_survival_moment_v4_implementation_2026-08-15.md) | v4 已完成实现：共享关系先验加逐实例校准残差、正式关系/置乱数据、真实 CUDA smoke、关系负边语义与 55.2 倍训练性能纠错、checkpoint 专属 124 维运行表、validation 安全门、图像回填协议和 4.53 MiB 导出预算 |
 | [`experiments/pvs_bounded_relation_survival_moment_v4_run_and_ablation_2026-08-15.md`](experiments/pvs_bounded_relation_survival_moment_v4_run_and_ablation_2026-08-15.md) | 唯一当前执行手册：先登记八组单种子快速扫描、无条件冻结配置、五变体三种子共 15 成员 formal80、配对统计、图像/资源与最终 WebGPU 评价；当前不启动新任务 |
 | [`experiments/pvs_bounded_relation_survival_moment_envelope_safety_reserve_plan_2026-08-14.md`](experiments/pvs_bounded_relation_survival_moment_envelope_safety_reserve_plan_2026-08-14.md) | v3 历史纠错设计依据；其共享生存生成器已由 v4 的逐实例校准残差修正，不再直接执行 |

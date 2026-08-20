@@ -12,6 +12,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from torch import nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
@@ -33,6 +34,125 @@ from common.threshold_selection import (
     weighted_precision_selection_key,
     weighted_precision_selection_rule,
 )
+
+
+class PoseContrastiveProjectionHead(nn.Module):
+    """Training-only projection head for pose-local contrastive supervision."""
+
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(int(input_dim), int(hidden_dim)),
+            nn.ReLU(inplace=True),
+            nn.Linear(int(hidden_dim), int(output_dim)),
+        )
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        return F.normalize(self.net(features.float()), dim=-1, eps=1e-6)
+
+
+def pose_hard_negative_contrastive_loss(
+    embeddings: torch.Tensor,
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    pose_offsets: torch.Tensor,
+    visible_weights: torch.Tensor,
+    *,
+    temperature: float,
+    positive_top_k: int,
+    negative_top_k: int,
+    importance_scale: float,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Separate important visible queries from hard invisible queries per pose.
+
+    Positives are not contrasted across unrelated poses. Within each pose, the
+    most important visible instances are supervised as one positive set while
+    the highest-scoring invisible instances form the denominator's hard
+    negatives. The projection head is discarded after training.
+    """
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
+    z = F.normalize(embeddings.float(), dim=-1, eps=1e-6)
+    scores = logits.float().view(-1)
+    y = target.float().view(-1)
+    raw_weights = torch.clamp(visible_weights.float().view(-1), min=0.0)
+    importance_denom = torch.log1p(
+        torch.tensor(1024.0, device=raw_weights.device, dtype=raw_weights.dtype)
+    )
+    importance = torch.clamp(
+        torch.log1p(raw_weights) / torch.clamp(importance_denom, min=1e-6),
+        0.0,
+        1.0,
+    )
+
+    pose_losses: list[torch.Tensor] = []
+    positive_similarities: list[torch.Tensor] = []
+    hard_negative_similarities: list[torch.Tensor] = []
+    anchor_count = 0
+    hard_negative_count = 0
+    max_pos = max(2, int(positive_top_k))
+    max_neg = max(1, int(negative_top_k))
+    for pose_id in range(max(0, pose_offsets.numel() - 1)):
+        start = int(pose_offsets[pose_id].item())
+        end = int(pose_offsets[pose_id + 1].item())
+        if end <= start:
+            continue
+        local_y = y[start:end]
+        pos_indices = torch.nonzero(local_y > 0.5, as_tuple=False).view(-1)
+        neg_indices = torch.nonzero(local_y <= 0.5, as_tuple=False).view(-1)
+        if pos_indices.numel() < 2 or neg_indices.numel() == 0:
+            continue
+        local_importance = importance[start:end]
+        if pos_indices.numel() > max_pos:
+            selected = torch.topk(local_importance[pos_indices], k=max_pos).indices
+            pos_indices = pos_indices[selected]
+        if neg_indices.numel() > max_neg:
+            selected = torch.topk(scores[start:end][neg_indices], k=max_neg).indices
+            neg_indices = neg_indices[selected]
+
+        pos_z = z[start:end][pos_indices]
+        neg_z = z[start:end][neg_indices]
+        candidates = torch.cat([pos_z, neg_z], dim=0)
+        similarities = pos_z @ candidates.transpose(0, 1)
+        scaled = similarities / float(temperature)
+        pos_count = int(pos_z.shape[0])
+        self_mask = torch.zeros_like(scaled, dtype=torch.bool)
+        self_mask[:, :pos_count] = torch.eye(pos_count, device=z.device, dtype=torch.bool)
+        denominator = torch.logsumexp(scaled.masked_fill(self_mask, float("-inf")), dim=1)
+        positive_logits = scaled[:, :pos_count].masked_fill(
+            torch.eye(pos_count, device=z.device, dtype=torch.bool),
+            float("-inf"),
+        )
+        numerator = torch.logsumexp(positive_logits, dim=1)
+        anchor_loss = denominator - numerator
+        anchor_weights = 1.0 + float(importance_scale) * local_importance[pos_indices]
+        pose_losses.append(
+            (anchor_loss * anchor_weights).sum() / torch.clamp(anchor_weights.sum(), min=1.0)
+        )
+
+        off_diagonal = ~torch.eye(pos_count, device=z.device, dtype=torch.bool)
+        positive_similarities.append(similarities[:, :pos_count][off_diagonal].mean())
+        hard_negative_similarities.append(similarities[:, pos_count:].mean())
+        anchor_count += pos_count
+        hard_negative_count += int(neg_z.shape[0])
+
+    if not pose_losses:
+        zero = embeddings.sum() * 0.0
+        return zero, {
+            "lossContrastive": 0.0,
+            "contrastiveAnchorCount": 0.0,
+            "contrastiveHardNegativeCount": 0.0,
+            "contrastivePositiveSimilarity": 0.0,
+            "contrastiveHardNegativeSimilarity": 0.0,
+        }
+    loss = torch.stack(pose_losses).mean()
+    return loss, {
+        "lossContrastive": float(loss.detach().cpu()),
+        "contrastiveAnchorCount": float(anchor_count),
+        "contrastiveHardNegativeCount": float(hard_negative_count),
+        "contrastivePositiveSimilarity": float(torch.stack(positive_similarities).mean().detach().cpu()),
+        "contrastiveHardNegativeSimilarity": float(torch.stack(hard_negative_similarities).mean().detach().cpu()),
+    }
 
 
 def select_target_recall_workpoints(rows: list[dict[str, Any]], target_recall: float, target_weighted_recall: float) -> dict[str, Any]:
@@ -1077,6 +1197,18 @@ def main() -> None:
     parser.add_argument("--rvl-fp-weight", type=float, default=1.0)
     parser.add_argument("--rvl-evidence-scale", type=float, default=1.0)
     parser.add_argument("--rvl-cost-scale", type=float, default=0.25)
+    parser.add_argument(
+        "--contrastive-loss-weight",
+        type=float,
+        default=0.0,
+        help="Weight of the training-only pose-local hard-negative contrastive objective.",
+    )
+    parser.add_argument("--contrastive-projection-dim", type=int, default=32)
+    parser.add_argument("--contrastive-hidden-dim", type=int, default=64)
+    parser.add_argument("--contrastive-temperature", type=float, default=0.10)
+    parser.add_argument("--contrastive-positive-top-k", type=int, default=64)
+    parser.add_argument("--contrastive-negative-top-k", type=int, default=256)
+    parser.add_argument("--contrastive-importance-scale", type=float, default=2.5)
     parser.add_argument("--reg-weight", type=float, default=1e-5)
     parser.add_argument("--feature-export-batch-size", type=int, default=512)
     parser.add_argument("--target-recall", type=float, default=0.95)
@@ -1151,6 +1283,12 @@ def main() -> None:
         parser.error("--train-pose-fraction must be in (0, 1]")
     if args.allow_scene_transfer and not args.init_checkpoint:
         parser.error("--allow-scene-transfer requires --init-checkpoint")
+    if args.contrastive_loss_weight < 0:
+        parser.error("--contrastive-loss-weight must be non-negative")
+    if args.contrastive_projection_dim <= 0 or args.contrastive_hidden_dim <= 0:
+        parser.error("contrastive projection dimensions must be positive")
+    if args.contrastive_temperature <= 0:
+        parser.error("--contrastive-temperature must be positive")
     loss_profile_overrides = resolve_loss_profile(args)
     runtime_ablation_loss_overrides = apply_runtime_feature_ablation_loss(args)
 
@@ -1230,6 +1368,13 @@ def main() -> None:
         torch.from_numpy(source_scores_np).to(device),
         torch.from_numpy(strength_np).to(device),
     )
+    contrastive_projector = None
+    if args.contrastive_loss_weight > 0:
+        contrastive_projector = PoseContrastiveProjectionHead(
+            input_dim=model.query_feature_dim + model.camera_feature_dim,
+            hidden_dim=args.contrastive_hidden_dim,
+            output_dim=args.contrastive_projection_dim,
+        ).to(device)
     init_checkpoint_meta: dict[str, Any] | None = None
     if args.init_checkpoint:
         init_checkpoint_path = Path(args.init_checkpoint)
@@ -1277,6 +1422,14 @@ def main() -> None:
         "initCheckpoint": init_checkpoint_meta,
         "freezeOfflineEncoder": freeze_report,
         "fixedRuntimeFeatures": fixed_runtime_meta,
+        "contrastiveTraining": {
+            "enabled": contrastive_projector is not None,
+            "runtimeExported": False,
+            "semantics": (
+                "training-only pose-local separation of important visible queries and hard invisible queries; "
+                "the projection head is omitted from runtime assets"
+            ),
+        },
         "datasetMeta": dataset.meta,
         "protocolSplit": protocol_split,
         "evidenceMeta": evidence_meta,
@@ -1470,6 +1623,8 @@ def main() -> None:
         return
 
     trainable_params = [param for param in model.parameters() if param.requires_grad]
+    if contrastive_projector is not None:
+        trainable_params.extend(contrastive_projector.parameters())
     if not trainable_params:
         raise RuntimeError("No trainable parameters remain after applying freeze options.")
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=1e-5)
@@ -1485,6 +1640,8 @@ def main() -> None:
 
     for epoch in range(args.epochs):
         model.train()
+        if contrastive_projector is not None:
+            contrastive_projector.train()
         losses = []
         loss_parts: dict[str, float] = {}
         skipped_nonfinite_loss = 0
@@ -1562,11 +1719,41 @@ def main() -> None:
                     glb_cost_norm,
                     offsets,
                 )
+                if contrastive_projector is not None:
+                    contrastive_input = torch.cat(
+                        [aux["query_features_for_ids"], aux["camera_features_for_ids"]],
+                        dim=-1,
+                    )
+                    contrastive_embeddings = contrastive_projector(contrastive_input)
+                    contrastive_loss, contrastive_parts = pose_hard_negative_contrastive_loss(
+                        contrastive_embeddings,
+                        logits,
+                        target,
+                        offsets,
+                        visible_weights,
+                        temperature=args.contrastive_temperature,
+                        positive_top_k=args.contrastive_positive_top_k,
+                        negative_top_k=args.contrastive_negative_top_k,
+                        importance_scale=args.contrastive_importance_scale,
+                    )
+                else:
+                    contrastive_loss = logits.sum() * 0.0
+                    contrastive_parts = {
+                        "lossContrastive": 0.0,
+                        "contrastiveAnchorCount": 0.0,
+                        "contrastiveHardNegativeCount": 0.0,
+                        "contrastivePositiveSimilarity": 0.0,
+                        "contrastiveHardNegativeSimilarity": 0.0,
+                    }
+                contrastive_parts["lossContrastiveScaled"] = float(
+                    (float(args.contrastive_loss_weight) * contrastive_loss).detach().cpu()
+                )
                 loss = (
                     visibility_loss
                     + proxy_loss
                     + float(args.utility_loss_weight) * utility_loss
                     + float(args.glb_priority_loss_weight) * glb_loss
+                    + float(args.contrastive_loss_weight) * contrastive_loss
                     + float(args.reg_weight) * model.regularization()
                 )
             if not torch.isfinite(loss):
@@ -1590,6 +1777,7 @@ def main() -> None:
                 **proxy_parts,
                 **utility_parts,
                 **glb_parts,
+                **contrastive_parts,
             }
 
         scheduler.step()
@@ -1649,6 +1837,9 @@ def main() -> None:
             torch.save(
                 {
                     "model": model.state_dict(),
+                    "contrastiveProjector": (
+                        contrastive_projector.state_dict() if contrastive_projector is not None else None
+                    ),
                     "config": model.config,
                     "sceneBounds": runtime_meta["sceneBounds"],
                     "cameraBounds": camera_bounds,
@@ -1685,6 +1876,9 @@ def main() -> None:
                 torch.save(
                     {
                         "model": model.state_dict(),
+                        "contrastiveProjector": (
+                            contrastive_projector.state_dict() if contrastive_projector is not None else None
+                        ),
                         "config": model.config,
                         "sceneBounds": runtime_meta["sceneBounds"],
                         "cameraBounds": camera_bounds,
@@ -1706,6 +1900,9 @@ def main() -> None:
         torch.save(
             {
                 "model": model.state_dict(),
+                "contrastiveProjector": (
+                    contrastive_projector.state_dict() if contrastive_projector is not None else None
+                ),
                 "config": model.config,
                 "sceneBounds": runtime_meta["sceneBounds"],
                 "cameraBounds": camera_bounds,

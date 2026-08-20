@@ -485,6 +485,7 @@ class DirectionalOcclusionProxyEncoderPVSModel(nn.Module):
             "inhibition": inhibition,
             "runtime_features_for_ids": runtime_for_ids,
             "query_features_for_ids": query,
+            "camera_features_for_ids": camera_feat,
             "selected_proxy": selected_proxy,
             "evidence_target": evidence_target,
             "utility_logits": utility_logits,
