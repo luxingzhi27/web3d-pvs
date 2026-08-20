@@ -9,6 +9,7 @@ MODEL_DIR = Path(__file__).resolve().parents[2] / "model"
 sys.path.insert(0, str(MODEL_DIR))
 
 from train_directional_occlusion_proxy_encoder import (  # noqa: E402
+    relative_checkpoint_selection_key,
     resolve_loss_profile,
     select_diagnostic_calibration_workpoint,
 )
@@ -41,6 +42,52 @@ class TrainingCalibrationControlTests(unittest.TestCase):
     def test_empty_calibration_rows_fail_loudly(self) -> None:
         with self.assertRaisesRegex(ValueError, "empty list"):
             select_diagnostic_calibration_workpoint([])
+
+    def test_safe_checkpoint_always_ranks_above_unsafe_checkpoint(self) -> None:
+        unsafe = relative_checkpoint_selection_key(
+            {
+                "pose_weighted_recall": 0.989,
+                "pose_balanced_accuracy": 0.99,
+                "pose_precision": 0.99,
+                "avg_pred_count": 10.0,
+            },
+            0.99,
+            calibration_safe=True,
+        )
+        safe = relative_checkpoint_selection_key(
+            {
+                "pose_weighted_recall": 0.991,
+                "pose_f1": 0.50,
+                "pose_precision": 0.40,
+                "avg_pred_count": 100.0,
+            },
+            0.99,
+            calibration_safe=True,
+        )
+        self.assertGreater(safe, unsafe)
+
+    def test_unsafe_pilot_still_has_a_relative_checkpoint_ranking(self) -> None:
+        lower_recall = relative_checkpoint_selection_key(
+            {
+                "pose_weighted_recall": 0.980,
+                "pose_balanced_accuracy": 0.90,
+                "pose_precision": 0.80,
+                "avg_pred_count": 100.0,
+            },
+            0.99,
+            calibration_safe=True,
+        )
+        higher_recall = relative_checkpoint_selection_key(
+            {
+                "pose_weighted_recall": 0.985,
+                "pose_balanced_accuracy": 0.70,
+                "pose_precision": 0.60,
+                "avg_pred_count": 200.0,
+            },
+            0.99,
+            calibration_safe=True,
+        )
+        self.assertGreater(higher_recall, lower_recall)
 
     def test_threshold_grid_covers_zero_and_low_score_tail(self) -> None:
         thresholds = threshold_grid()

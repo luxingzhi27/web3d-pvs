@@ -74,6 +74,33 @@ def target_recall_selection_score(row: dict[str, Any], target_recall: float, tar
     return precision + 1e-6 * f1 + 1e-9 * weighted + 1e-12 * neg_avg_pred
 
 
+def relative_checkpoint_selection_key(
+    row: dict[str, Any],
+    target_weighted_recall: float,
+    *,
+    calibration_safe: bool,
+) -> tuple[float, float, float, float, float]:
+    """Rank every completed checkpoint without weakening the safety label.
+
+    A checkpoint that is safe on both calibration and validation always ranks
+    above an unsafe checkpoint.  When a pilot has no safe member, retaining the
+    relatively best unsafe checkpoint preserves the completed trajectory for
+    the mandatory follow-up run instead of turning the safety gate into an
+    experiment-cancellation gate.
+    """
+    safe_key = weighted_precision_selection_key(row, target_weighted_recall)
+    if calibration_safe and safe_key is not None:
+        precision, f1, weighted, neg_avg_pred = safe_key
+        return (1.0, precision, f1, weighted, neg_avg_pred)
+    return (
+        0.0,
+        float(row.get("pose_weighted_recall", 0.0)),
+        float(row.get("pose_balanced_accuracy", 0.0)),
+        float(row.get("pose_precision", 0.0)),
+        -float(row.get("avg_pred_count", 0.0)),
+    )
+
+
 def select_diagnostic_calibration_workpoint(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Choose an unsafe monitoring row without treating it as a safe workpoint.
 
@@ -1449,7 +1476,7 @@ def main() -> None:
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, args.epochs))
     scaler = torch.amp.GradScaler("cuda", enabled=bool(args.amp and device.type == "cuda"))
     steps_per_epoch = int(args.steps_per_epoch or math.ceil(train_split.pose_indices_with_visible.size / max(1, args.pose_set_batch_size)))
-    best_selection_key: tuple[float, float, float, float] | None = None
+    best_selection_key: tuple[float, float, float, float, float] | None = None
     best_saved = False
     history: list[dict[str, Any]] = []
     metrics_log = output_dir / "train_metrics.jsonl"
@@ -1636,19 +1663,23 @@ def main() -> None:
                 },
                 output_dir / f"checkpoint_epoch_{epoch + 1:03d}.pt",
             )
-            # A diagnostic fallback keeps telemetry alive while optimization
-            # continues, but it is never allowed to select best.pt.  Only a
-            # calibration row satisfying the registered safety rule may
-            # participate in checkpoint selection.
-            selection_key = None
-            if calibration_summary["selectionStatus"] == "safe" and calibration_workpoint is not None:
-                selection_key = weighted_precision_selection_key(metrics, args.target_weighted_recall)
-            if selection_key is not None and (best_selection_key is None or selection_key > best_selection_key):
+            calibration_safe = (
+                calibration_summary["selectionStatus"] == "safe"
+                and calibration_workpoint is not None
+            )
+            selection_key = relative_checkpoint_selection_key(
+                metrics,
+                args.target_weighted_recall,
+                calibration_safe=calibration_safe,
+            )
+            if best_selection_key is None or selection_key > best_selection_key:
                 best_selection_key = selection_key
                 best_saved = True
+                checkpoint_safe = bool(selection_key[0] > 0.5)
                 best = {
                     "epoch": epoch + 1,
-                    "threshold": float(calibration_workpoint["threshold"]),
+                    "threshold": float(metrics["threshold"]),
+                    "selectionStatus": "safe" if checkpoint_safe else "unsafe_relative_best",
                     **metrics,
                 }
                 torch.save(
@@ -1690,9 +1721,7 @@ def main() -> None:
 
     if not best_saved:
         raise RuntimeError(
-            "No validation threshold satisfied the strict weighted-recall rule "
-            f"pose_weighted_recall > {float(args.target_weighted_recall):.3f}; "
-            "best.pt was not replaced."
+            "Training completed without an evaluable checkpoint; best.pt was not written."
         )
 
     checkpoint = torch.load(output_dir / "best.pt", map_location=device)
@@ -1717,12 +1746,55 @@ def main() -> None:
         calibration_bootstrap_replicates=args.calibration_bootstrap_replicates,
         calibration_bootstrap_confidence=args.calibration_bootstrap_confidence,
         allow_candidate_visible_union=args.allow_invalid_resource_semantics,
+        require_safe_workpoint=False,
     )
     if calibration_workpoint is None:
-        raise RuntimeError(
-            "Final calibration produced no safe weighted-recall workpoint; "
-            "refusing to export a calibration-ready checkpoint."
+        checkpoint_selection = dict(checkpoint.get("best") or {})
+        checkpoint["checkpointSelection"] = checkpoint_selection
+        checkpoint["workpoints"] = {
+            "calibration": calibration_summary,
+            "validationAtDiagnosticThreshold": validation_workpoint,
+            "frozenThreshold": None,
+            "selectionStatus": "no_safe_calibration_workpoint",
+            "selectionRule": weighted_precision_selection_rule(
+                args.target_weighted_recall,
+                minimum_point_estimate=args.calibration_point_floor,
+                minimum_lower_confidence_bound=args.calibration_lcb_floor,
+                minimum_pose_recall=args.calibration_pose_recall_floor,
+            ),
+        }
+        checkpoint["finalCalibration"] = calibration_summary
+        torch.save(checkpoint, output_dir / "best.pt")
+        unsafe_summary = {
+            "protocol": "training_complete_no_safe_calibration_workpoint",
+            "selectionStatus": "no_safe_calibration_workpoint",
+            "frozenThreshold": None,
+            "calibration": calibration_summary,
+            "validationAtDiagnosticThreshold": validation_workpoint,
+            "calibrationThresholdRows": calibration_rows,
+            "testEvaluationCount": 0,
+            "protocolSplit": protocol_split,
+            "args": vars(args),
+            "featureMeta": feature_meta,
+            "checkpointSelection": checkpoint_selection,
+            "testPolicy": "No test inference is allowed because calibration did not produce a safe frozen threshold.",
+        }
+        unsafe_path = output_dir / "training_complete_unsafe_summary.json"
+        unsafe_path.write_text(json.dumps(unsafe_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(
+            json.dumps(
+                {
+                    "outputDir": str(output_dir),
+                    "trainingCompleteUnsafeSummary": str(unsafe_path),
+                    "selectionStatus": "no_safe_calibration_workpoint",
+                    "testEvaluationCount": 0,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            flush=True,
         )
+        return
     if not isinstance(validation_workpoint, dict) or "threshold" not in validation_workpoint:
         raise RuntimeError(
             "Final calibration returned an invalid validation workpoint; "

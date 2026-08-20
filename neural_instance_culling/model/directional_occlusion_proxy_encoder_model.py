@@ -446,6 +446,7 @@ class DirectionalOcclusionProxyEncoderPVSModel(nn.Module):
         instance_ids: torch.Tensor,
         glb_points: torch.Tensor | None = None,
         runtime_features: torch.Tensor | None = None,
+        **_unused: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if runtime_features is None:
             if glb_points is None:
