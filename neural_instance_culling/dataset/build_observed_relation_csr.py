@@ -449,14 +449,8 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     if not selected:
         raise ValueError("depth cache has no train poses")
     render_poses = np.asarray([entry[2] for entry in selected], dtype="<i8")
-    registered_render_poses = np.asarray(
-        [entry[2] for entry in registered_selected], dtype="<i8"
-    )
     canonical_summary = _candidate_summary(dataset, canonical_poses, num_instances)
     render_summary = _candidate_summary(dataset, render_poses, num_instances)
-    registered_render_summary = _candidate_summary(
-        dataset, registered_render_poses, num_instances
-    )
     # The depth cache is a registered rendering artifact.  Its candidate
     # identity is part of the provenance contract, so recomputing a summary
     # is not enough: the builder must reject a cache whose render rows no
@@ -468,25 +462,38 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     expected_render_count = int(cache_identity.get("renderPoseCount", -1))
     if not expected_canonical_digest or not expected_render_digest:
         raise ValueError("depth cache is missing its canonical/render candidate identity")
-    if canonical_summary.digest != expected_canonical_digest:
+    # A split-only PoseCSR view may move poses between train, calibration, and
+    # validation without changing any candidate row.  Validate the immutable
+    # cache against the exact canonical/render pose coverage stored in that
+    # cache, then filter its rows by the current train labels above.  The new
+    # relation metadata still records the complete current train candidate
+    # identity through ``canonical_summary``.
+    cache_canonical_poses = np.unique(source_pose_indices.astype("<i8", copy=False))
+    cache_canonical_summary = _candidate_summary(
+        dataset, cache_canonical_poses, num_instances
+    )
+    cache_render_summary = _candidate_summary(
+        dataset, source_pose_indices.astype("<i8", copy=False), num_instances
+    )
+    if cache_canonical_summary.digest != expected_canonical_digest:
         raise ValueError(
             "depth cache canonical candidate digest does not match the registered dataset: "
-            f"{expected_canonical_digest!r} != {canonical_summary.digest!r}"
+            f"{expected_canonical_digest!r} != {cache_canonical_summary.digest!r}"
         )
-    if registered_render_summary.digest != expected_render_digest:
+    if cache_render_summary.digest != expected_render_digest:
         raise ValueError(
             "depth cache render candidate digest does not match the selected render pose order: "
-            f"{expected_render_digest!r} != {registered_render_summary.digest!r}"
+            f"{expected_render_digest!r} != {cache_render_summary.digest!r}"
         )
-    if expected_canonical_count != int(canonical_poses.size):
+    if expected_canonical_count != int(cache_canonical_poses.size):
         raise ValueError(
-            "depth cache canonical pose count does not match the registered train split: "
-            f"{expected_canonical_count} != {canonical_poses.size}"
+            "depth cache canonical pose count does not match its stored coverage: "
+            f"{expected_canonical_count} != {cache_canonical_poses.size}"
         )
-    if expected_render_count != int(registered_render_poses.size):
+    if expected_render_count != int(source_pose_indices.size):
         raise ValueError(
-            "depth cache render pose count does not match the selected cache rows: "
-            f"{expected_render_count} != {registered_render_poses.size}"
+            "depth cache render pose count does not match its stored rows: "
+            f"{expected_render_count} != {source_pose_indices.size}"
         )
     candidate_audit = audit_native_aabb_candidates(dataset, world_aabbs, canonical_poses)
 
@@ -748,6 +755,20 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         },
     )
     metadata["candidateAudit"] = candidate_audit
+    selected_unique_pose_count = int(np.unique(render_poses).size)
+    metadata["cacheCoverage"] = {
+        "cacheCanonicalPoseCount": int(cache_canonical_poses.size),
+        "currentTrainPoseCount": int(canonical_poses.size),
+        "selectedTrainRenderRowCount": int(render_poses.size),
+        "selectedTrainUniquePoseCount": selected_unique_pose_count,
+        "uncoveredCurrentTrainPoseCount": int(
+            canonical_poses.size - selected_unique_pose_count
+        ),
+        "policy": (
+            "filter the registered hardware depth cache to current train labels; "
+            "never synthesize relations for uncovered train poses"
+        ),
+    }
     metadata["scene"] = {
         "sceneMin": scene_min.astype(float).tolist(),
         "sceneSize": scene_size.astype(float).tolist(),

@@ -1117,7 +1117,13 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
             "metrics": metrics,
         })
     pose_array = np.asarray(split.pose_indices, dtype="<i8")
-    summary = _summarize_pose_rows(per_pose, lcb_replicates=10000 if split_name == "calibration" else 0, seed=int(args.seed))
+    summary = _summarize_pose_rows(
+        per_pose,
+        lcb_replicates=(
+            10000 if split_name in {"calibration", "validation"} else 0
+        ),
+        seed=int(args.seed),
+    )
     return {
         "schema": EVALUATION_SCHEMA,
         "version": 1,

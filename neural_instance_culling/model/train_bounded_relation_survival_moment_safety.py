@@ -70,6 +70,10 @@ from common.occlusion_edges import glb_priority_loss  # noqa: E402
 from common.pose_balanced_frontier_loss import (  # noqa: E402
     pose_balanced_frontier_visibility_loss,
 )
+from common.pose_balanced_rvl_contrastive_loss import (  # noqa: E402
+    TrainingOnlyContrastiveProjectionHead,
+    pose_balanced_rvl_contrastive_visibility_loss,
+)
 from common.provenance import relation_artifact_digest  # noqa: E402
 from common.runtime_meta import load_runtime_meta  # noqa: E402
 from common.safety_reserve_operating_utility_loss import (  # noqa: E402
@@ -2007,6 +2011,21 @@ def _weighted_recall_safety_gate(row: Mapping[str, Any] | None) -> bool:
     return float(recall) > CALIBRATION_FLOOR and float(lower) > CALIBRATION_FLOOR
 
 
+def _validation_safe_checkpoint_key(
+    validation: Mapping[str, Any],
+    calibration: Mapping[str, Any],
+) -> tuple[float, ...]:
+    """Rank safe epochs by validation classification quality, not calibration."""
+    return (
+        float(validation.get("agg_balanced_accuracy") or 0.0),
+        float(validation.get("agg_precision") or 0.0),
+        float(validation.get("agg_accuracy") or 0.0),
+        float(validation.get("agg_useful_cull") or 0.0),
+        -float(validation.get("avg_pred_count") or 0.0),
+        float(calibration.get("agg_useful_cull") or 0.0),
+    )
+
+
 def _update_safety_boundary_ema(
     current_boundary: torch.Tensor,
     previous_ema: torch.Tensor | None,
@@ -2464,6 +2483,7 @@ def parse_args() -> argparse.Namespace:
             "safety_reserve",
             "normalized_rvl",
             "pose_balanced_frontier",
+            "pose_balanced_rvl_contrastive",
         ),
         default="safety_reserve",
     )
@@ -2524,6 +2544,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--frontier-positive-importance-power", type=float, default=0.50
     )
+    parser.add_argument("--integrated-rvl-recall-guard-weight", type=float, default=0.30)
+    parser.add_argument("--integrated-rvl-recall-target", type=float, default=0.99)
+    parser.add_argument("--integrated-rvl-recall-temperature", type=float, default=0.05)
+    parser.add_argument("--integrated-rvl-pose-cvar-fraction", type=float, default=0.25)
+    parser.add_argument("--integrated-rvl-pose-cvar-weight", type=float, default=0.25)
+    parser.add_argument("--integrated-separation-weight", type=float, default=0.20)
+    parser.add_argument("--integrated-contrastive-mix", type=float, default=0.25)
+    parser.add_argument("--integrated-tail-ramp-fraction", type=float, default=0.15)
+    parser.add_argument("--integrated-contrastive-hidden-dim", type=int, default=64)
+    parser.add_argument("--integrated-contrastive-projection-dim", type=int, default=32)
+    parser.add_argument("--integrated-contrastive-temperature", type=float, default=0.10)
     parser.add_argument("--instance-exposure-balance-weight", type=float, default=0.0)
     parser.add_argument("--instance-exposure-balance-power", type=float, default=0.5)
     parser.add_argument("--instance-exposure-balance-max-weight", type=float, default=8.0)
@@ -3009,11 +3040,54 @@ def main() -> None:
         or not 0.0 < args.frontier_positive_importance_power <= 1.0
     ):
         raise ValueError("pose-balanced frontier parameters are invalid")
-    if args.loss_variant == "pose_balanced_frontier" and (
+    integrated_scalars = (
+        args.integrated_rvl_recall_guard_weight,
+        args.integrated_rvl_recall_target,
+        args.integrated_rvl_recall_temperature,
+        args.integrated_rvl_pose_cvar_fraction,
+        args.integrated_rvl_pose_cvar_weight,
+        args.integrated_separation_weight,
+        args.integrated_contrastive_mix,
+        args.integrated_tail_ramp_fraction,
+        args.integrated_contrastive_temperature,
+    )
+    if not all(math.isfinite(float(value)) for value in integrated_scalars):
+        raise ValueError("integrated visibility loss parameters must be finite")
+    if (
+        args.integrated_rvl_recall_guard_weight < 0.0
+        or not 0.0 < args.integrated_rvl_recall_target < 1.0
+        or args.integrated_rvl_recall_temperature <= 0.0
+        or not 0.0 < args.integrated_rvl_pose_cvar_fraction <= 1.0
+        or args.integrated_rvl_pose_cvar_weight < 0.0
+        or args.integrated_separation_weight < 0.0
+        or not 0.0 <= args.integrated_contrastive_mix <= 1.0
+        or not 0.0 <= args.integrated_tail_ramp_fraction <= 1.0
+        or args.integrated_contrastive_hidden_dim <= 0
+        or args.integrated_contrastive_projection_dim <= 0
+        or args.integrated_contrastive_temperature <= 0.0
+    ):
+        raise ValueError("integrated visibility loss parameters are invalid")
+    if args.loss_variant in {
+        "pose_balanced_frontier",
+        "pose_balanced_rvl_contrastive",
+    } and (
         args.refinement_scope != "all" or query_tail_enabled
     ):
         raise ValueError(
-            "pose-balanced frontier training requires full-model scope and no query-tail head"
+            "pose-balanced visibility training requires full-model scope and no query-tail head"
+        )
+    if args.loss_variant == "pose_balanced_rvl_contrastive" and (
+        args.utility_loss_weight != 0.0
+        or args.download_loss_weight != 0.0
+        or args.glb_resource_weight != 0.0
+        or args.boundary_tail_weight != 0.0
+        or args.negative_band_weight != 0.0
+        or args.rvl_count_weight != 0.0
+        or args.rvl_rank_weight != 0.0
+    ):
+        raise ValueError(
+            "integrated visibility training forbids utility, download, resource, "
+            "legacy RVL count/rank, and legacy boundary objectives"
         )
     if args.safety_boundary_ema_decay > 0.0 and (
         args.safety_boundary_scope != "batch"
@@ -3528,6 +3602,18 @@ def main() -> None:
         "testRead": False,
     }
 
+    contrastive_projector = (
+        TrainingOnlyContrastiveProjectionHead(
+            model.hidden_dim,
+            args.integrated_contrastive_hidden_dim,
+            args.integrated_contrastive_projection_dim,
+        ).to(device)
+        if args.loss_variant == "pose_balanced_rvl_contrastive"
+        and args.integrated_contrastive_mix > 0.0
+        and args.integrated_separation_weight > 0.0
+        else None
+    )
+
     protocol = {
         "schema": "pvs-bounded-relation-prior-instance-calibrated-moment-training-v4",
         "experiment": args.experiment_name,
@@ -3535,7 +3621,7 @@ def main() -> None:
         "lossVariant": args.loss_variant,
         "initialization": initialization or {"mode": "from-scratch"},
         "rvlDiagnostics": {
-            "enabled": args.loss_variant != "pose_balanced_frontier",
+            "enabled": args.loss_variant in {"safety_reserve", "normalized_rvl"},
             "bcePositiveWeight": float(args.rvl_bce_positive_weight),
             "tverskyFnWeight": float(args.rvl_tversky_fn_weight),
             "countWeight": float(args.rvl_count_weight),
@@ -3571,6 +3657,41 @@ def main() -> None:
                 args.frontier_positive_importance_power
             ),
             "selectionSource": "current detached final visibility logits per train pose",
+            "testRead": False,
+        },
+        "integratedVisibilityLoss": {
+            "enabled": args.loss_variant == "pose_balanced_rvl_contrastive",
+            "definition": (
+                "pose-balanced BCE + one-sided weighted-recall RVL guard + "
+                "one shared hard-tail logit/representation mixture"
+            ),
+            "fullHistoricalRvlAdded": False,
+            "recallGuardWeight": float(args.integrated_rvl_recall_guard_weight),
+            "recallTarget": float(args.integrated_rvl_recall_target),
+            "recallTemperature": float(args.integrated_rvl_recall_temperature),
+            "recallPoseCvarFraction": float(
+                args.integrated_rvl_pose_cvar_fraction
+            ),
+            "recallPoseCvarWeight": float(args.integrated_rvl_pose_cvar_weight),
+            "separationWeight": float(args.integrated_separation_weight),
+            "contrastiveMix": float(args.integrated_contrastive_mix),
+            "tailRampFraction": float(args.integrated_tail_ramp_fraction),
+            "projectionHead": {
+                "enabled": contrastive_projector is not None,
+                "inputDim": int(model.hidden_dim),
+                "hiddenDim": int(args.integrated_contrastive_hidden_dim),
+                "outputDim": int(args.integrated_contrastive_projection_dim),
+                "runtimeExport": False,
+            },
+            "legacyTermsDisabled": [
+                "high-positive-weight BCE",
+                "Tversky",
+                "count budget",
+                "duplicate RVL ranking",
+                "GLB resource",
+                "visual utility",
+                "download priority",
+            ],
             "testRead": False,
         },
         "refinementScope": refinement_scope_meta,
@@ -4208,6 +4329,8 @@ def main() -> None:
     _write_json(args.output_dir / "model_schema.json", model.export_schema())
 
     parameters = [value for value in model.parameters() if value.requires_grad]
+    if contrastive_projector is not None:
+        parameters.extend(contrastive_projector.parameters())
     if weighted_np_boundary_logit is not None:
         parameters.append(weighted_np_boundary_logit)
     optimizer = torch.optim.AdamW(
@@ -4233,6 +4356,8 @@ def main() -> None:
 
     for epoch in range(int(args.epochs)):
         model.train()
+        if contrastive_projector is not None:
+            contrastive_projector.train()
         sampler.start_epoch(epoch)
         rng = np.random.default_rng(int(args.seed) + epoch * 1009)
         epoch_metrics: dict[str, list[float]] = {}
@@ -4741,7 +4866,70 @@ def main() -> None:
             use_pose_balanced_frontier = (
                 args.loss_variant == "pose_balanced_frontier"
             )
-            if use_pose_balanced_frontier:
+            use_integrated_visibility = (
+                args.loss_variant == "pose_balanced_rvl_contrastive"
+            )
+            if use_integrated_visibility:
+                if args.integrated_tail_ramp_fraction <= 0.0:
+                    integrated_tail_scale = 1.0
+                else:
+                    integrated_tail_scale = min(
+                        1.0,
+                        float(global_step)
+                        / max(
+                            1.0,
+                            float(total_steps)
+                            * float(args.integrated_tail_ramp_fraction),
+                        ),
+                    )
+                contrastive_embeddings = (
+                    contrastive_projector(aux["query_features"])
+                    if contrastive_projector is not None
+                    else aux["query_features"]
+                )
+                _combined_visibility, visibility_parts = (
+                    pose_balanced_rvl_contrastive_visibility_loss(
+                        visibility_training_logits,
+                        contrastive_embeddings,
+                        target,
+                        pose_offsets,
+                        visible_weights,
+                        recall_guard_weight=(
+                            args.integrated_rvl_recall_guard_weight
+                        ),
+                        recall_target=args.integrated_rvl_recall_target,
+                        recall_temperature=(
+                            args.integrated_rvl_recall_temperature
+                        ),
+                        recall_pose_cvar_fraction=(
+                            args.integrated_rvl_pose_cvar_fraction
+                        ),
+                        recall_pose_cvar_weight=(
+                            args.integrated_rvl_pose_cvar_weight
+                        ),
+                        separation_weight=args.integrated_separation_weight,
+                        separation_scale=integrated_tail_scale,
+                        contrastive_mix=args.integrated_contrastive_mix,
+                        positive_mass_fraction=(
+                            args.frontier_positive_mass_fraction
+                        ),
+                        positive_count_cap=args.frontier_positive_count_cap,
+                        negative_top_fraction=args.frontier_negative_fraction,
+                        negative_count_cap=args.frontier_negative_count_cap,
+                        margin=args.frontier_margin,
+                        logit_temperature=args.frontier_temperature,
+                        contrastive_temperature=(
+                            args.integrated_contrastive_temperature
+                        ),
+                        positive_importance_floor=(
+                            args.frontier_positive_importance_floor
+                        ),
+                        positive_importance_power=(
+                            args.frontier_positive_importance_power
+                        ),
+                    )
+                )
+            elif use_pose_balanced_frontier:
                 _combined_visibility, visibility_parts = (
                     pose_balanced_frontier_visibility_loss(
                         visibility_training_logits,
@@ -5101,7 +5289,7 @@ def main() -> None:
             cross_view_half_weight = 0.5 * float(
                 args.same_instance_cross_view_rank_weight
             )
-            if use_pose_balanced_frontier:
+            if use_pose_balanced_frontier or use_integrated_visibility:
                 safety_objective = _combined_visibility
                 efficiency_objective = logits.sum() * 0.0
             elif args.refinement_scope == "view_residual":
@@ -5171,26 +5359,34 @@ def main() -> None:
                 seed=args.seed + global_step,
                 max_edges=args.observation_batch_size,
             )
-            utility_loss, utility_parts = visual_utility_loss(
-                aux,
-                target,
-                visible_weights,
-                pose_offsets,
-                invisible_weight=0.25,
-                rank_weight=0.30,
-                rank_margin=0.10,
-                rank_positive_top_k=32,
-                rank_negative_top_k=128,
-            )
-            download_loss, download_parts = glb_priority_loss(
-                aux["download_logits"],
-                instance_ids,
-                target,
-                visible_weights,
-                model.instance_to_glb,
-                glb_cost_norm,
-                pose_offsets,
-            )
+            if args.utility_loss_weight > 0.0:
+                utility_loss, utility_parts = visual_utility_loss(
+                    aux,
+                    target,
+                    visible_weights,
+                    pose_offsets,
+                    invisible_weight=0.25,
+                    rank_weight=0.30,
+                    rank_margin=0.10,
+                    rank_positive_top_k=32,
+                    rank_negative_top_k=128,
+                )
+            else:
+                utility_loss = logits.sum() * 0.0
+                utility_parts = {"lossVisualUtilityDisabled": utility_loss}
+            if args.download_loss_weight > 0.0:
+                download_loss, download_parts = glb_priority_loss(
+                    aux["download_logits"],
+                    instance_ids,
+                    target,
+                    visible_weights,
+                    model.instance_to_glb,
+                    glb_cost_norm,
+                    pose_offsets,
+                )
+            else:
+                download_loss = logits.sum() * 0.0
+                download_parts = {"lossDownloadPriorityDisabled": download_loss}
             regularization = model.regularization()
             instance_calibration_regularization = (
                 model.instance_calibration_regularization()
@@ -5294,6 +5490,13 @@ def main() -> None:
                 for name, parameter in model.named_parameters()
                 if parameter.grad is not None and not bool(torch.isfinite(parameter.grad).all())
             ]
+            if contrastive_projector is not None:
+                bad_gradients.extend(
+                    f"contrastive_projector.{name}"
+                    for name, parameter in contrastive_projector.named_parameters()
+                    if parameter.grad is not None
+                    and not bool(torch.isfinite(parameter.grad).all())
+                )
             if bad_gradients:
                 raise FloatingPointError(f"non-finite v4 gradients: {bad_gradients}")
             torch.nn.utils.clip_grad_norm_(parameters, max_norm=1.0)
@@ -5621,6 +5824,18 @@ def main() -> None:
                 and weighted_np_dual_state is not None
                 else {"enabled": False, "sourceSplit": "train"}
             ),
+            "contrastiveProjection": (
+                {
+                    "enabled": True,
+                    "state": {
+                        key: value.detach().cpu()
+                        for key, value in contrastive_projector.state_dict().items()
+                    },
+                    "runtimeExport": False,
+                }
+                if contrastive_projector is not None
+                else {"enabled": False, "runtimeExport": False}
+            ),
         }
 
         calibration_payload: dict[str, Any] | None = None
@@ -5737,11 +5952,10 @@ def main() -> None:
                     )
 
             if selected is not None and _weighted_recall_safety_gate(validation_row):
-                safe_key = (
-                    float(selected.get("agg_useful_cull") or 0.0),
-                    float(selected.get("agg_balanced_accuracy") or 0.0),
-                    float(selected.get("agg_precision") or 0.0),
-                    -float(selected.get("avg_pred_count") or 0.0),
+                assert validation_row is not None
+                safe_key = _validation_safe_checkpoint_key(
+                    validation_row,
+                    selected,
                 )
                 if best_safe_key is None or safe_key > best_safe_key:
                     best_safe_key = safe_key
@@ -5750,6 +5964,7 @@ def main() -> None:
                         "threshold": float(selected["threshold"]),
                         "safe": True,
                         "selection": selected,
+                        "validationSelection": validation_row,
                         "validationSafetyPassed": True,
                     }
                     best_safe_calibration = calibration_payload

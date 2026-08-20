@@ -1,13 +1,14 @@
 # NeuralStreamWeb3D 文档索引
 
-更新时间：2026-08-19
+更新时间：2026-08-21
 
-这里的文档只服务于当前可运行版本、正式保留证据和 v4 实验链。重复路线报告和被修正的旧汇总已经清理；当前前端资产、正式训练权重、正式 benchmark、采样数据和硬件证据保持不变。v2 `formal80` 及 v3 纠错设计只作为历史诊断依据。108 维尾部分离旧矩阵已经停止，不再续跑；逐位姿平衡与安全前沿实验已完成两轮参数扫描和三种子 40 epoch 从头训练。该损失改善了阈值尺度但未提高总体分类和剔除效果，因此默认 checkpoint、阈值和前端资产保持不变。
+这里的文档只服务于当前可运行版本、正式保留证据和 v4 实验链。当前唯一待执行优化入口是 V4 综合可见性主线：固定分层关系与逐实例校准生存场、视点区域矩包络频谱，并使用逐 pose 平衡分类、单侧 RVL 加权召回保护和共享困难边界对比的综合损失。旧 108 维尾部分离和逐位姿安全前沿结果只作为历史诊断，不再续跑。当前默认 checkpoint、阈值和前端资产保持不变。
 
 ## 先读这几份
 
 | 文档 | 内容 |
 |---|---|
+| [`experiments/pvs_v4_integrated_visibility_mainline_v1_2026-08-21.md`](experiments/pvs_v4_integrated_visibility_mainline_v1_2026-08-21.md) | 当前唯一执行协议：固定三项论文机制、恢复后的 5926/659/730/684 主 split、非重复综合损失、8 组快速扫描和五变体三种子 80 epoch 长训 |
 | [`evaluation/pvs_pose_balanced_frontier_visibility_loss_v1_formal40_2026-08-19.md`](evaluation/pvs_pose_balanced_frontier_visibility_loss_v1_formal40_2026-08-19.md) | 逐 pose 平衡 BCE 加动态安全前沿损失的两轮扫描、三种子 40 epoch 正式结果及与旧 V4 的同口径比较；结果未晋级默认模型 |
 | [`experiments/pvs_pose_balanced_frontier_visibility_loss_v1_2026-08-19.md`](experiments/pvs_pose_balanced_frontier_visibility_loss_v1_2026-08-19.md) | 新损失的设计、输入输出、扫描配置、从头训练协议和保留规则 |
 | [`experiments/pvs_joint_108d_query_tail_separator_from_scratch_v1_2026-08-19.md`](experiments/pvs_joint_108d_query_tail_separator_from_scratch_v1_2026-08-19.md) | 已停止的 108 维联合分离器矩阵计划；只保留历史协议和已有产物，不再训练或续跑 |

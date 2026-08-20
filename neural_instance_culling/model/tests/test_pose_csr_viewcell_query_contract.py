@@ -173,6 +173,51 @@ class PoseCSRViewCellQueryContractTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "query_center_world"):
                 dataset.query_center_world(0, required=True)
 
+    def test_subpose_sidecar_accepts_a_split_only_dataset_view(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "split_view"
+            sidecar = Path(directory) / "sidecar"
+            root.mkdir()
+            sidecar.mkdir()
+            (root / "dataset_meta.json").write_text(
+                json.dumps(
+                    {
+                        "poseCount": 1,
+                        "poseStrideBytes": int(DIRECTIONAL_POSE_DTYPE.itemsize),
+                        "splitIds": {"train": 0},
+                        "visibleWeightDtype": "float32",
+                        "sourceDataset": str(Path(directory) / "original_view"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            poses = np.zeros((1,), dtype=DIRECTIONAL_POSE_DTYPE)
+            poses["split"][0] = 0
+            poses.tofile(root / "poses.bin")
+            np.asarray([0, 1], dtype="<u8").tofile(root / "visible_offsets.bin")
+            np.asarray([0], dtype="<u4").tofile(root / "visible_ids.bin")
+            np.asarray([1.0], dtype="<f4").tofile(root / "visible_weights.bin")
+            np.asarray([0, 1], dtype="<u8").tofile(root / "frustum_offsets.bin")
+            np.asarray([0], dtype="<u4").tofile(root / "frustum_ids.bin")
+            (sidecar / "sidecar_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "pvs-viewcell-subpose-supervision-sidecar-v1",
+                        "poseCount": 1,
+                        "mainCsrDataset": str(Path(directory) / "original_view"),
+                        "splitLabelsMayDiffer": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            np.asarray([1], dtype="<u2").tofile(sidecar / "visible_hit_counts.bin")
+            np.asarray([0, 1], dtype="<u8").tofile(sidecar / "subpose_offsets.bin")
+
+            dataset = PoseCSRDataset(root, num_instances=1, subpose_sidecar=sidecar)
+
+            self.assertTrue(dataset.has_subpose_robust_labels)
+            self.assertTrue(dataset.subpose_sidecar_meta["splitLabelsMayDiffer"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -81,6 +81,26 @@ V4_VARIANT_CONTRACTS: dict[str, tuple[str, str]] = {
     "without_viewcell_moment_envelope": ("safety_reserve", "residual"),
     "without_safety_reserve_utility": ("normalized_rvl", "residual"),
     "without_instance_calibration_residual": ("safety_reserve", "disabled"),
+    "full_integrated_visibility_mainline": (
+        "pose_balanced_rvl_contrastive",
+        "residual",
+    ),
+    "integrated_without_bounded_relation": (
+        "pose_balanced_rvl_contrastive",
+        "residual",
+    ),
+    "integrated_without_viewcell_moment_envelope": (
+        "pose_balanced_rvl_contrastive",
+        "residual",
+    ),
+    "integrated_without_rvl_recall_guard": (
+        "pose_balanced_rvl_contrastive",
+        "residual",
+    ),
+    "integrated_without_contrastive_separation": (
+        "pose_balanced_rvl_contrastive",
+        "residual",
+    ),
 }
 
 def _as_mapping(value: Any, name: str) -> Mapping[str, Any]:

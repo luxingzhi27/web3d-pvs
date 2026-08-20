@@ -868,6 +868,31 @@ class SafetyReserveOperatingUtilityLossTest(unittest.TestCase):
         self.assertGreaterEqual(statistics["relationGradientDotAfterProjection"], 0.0)
         self.assertGreaterEqual(float(torch.dot(safety_value, projected["relation"][0])), -1e-4)
 
+    def test_projection_ignores_safety_only_projection_head_coordinates(self) -> None:
+        safety = [torch.tensor([1.0, 0.0]), torch.tensor([100.0])]
+        relation = [torch.tensor([-1.0, 1.0]), None]
+        zeros = [torch.zeros(2), None]
+
+        projected, statistics = project_operating_utility_gradient_groups(
+            safety,
+            relation,
+            zeros,
+            zeros,
+            relation_norm_cap=10.0,
+            schedule_norm_cap=10.0,
+            efficiency_norm_cap=10.0,
+        )
+
+        self.assertEqual(
+            statistics["relationGradientProjectionFallbackZeroed"], 0.0
+        )
+        self.assertEqual(statistics["relationGradientSharedSafetyNorm"], 1.0)
+        self.assertGreater(float(projected["relation"][0][1]), 0.0)
+        self.assertGreaterEqual(
+            float(torch.dot(safety[0], projected["relation"][0])),
+            -1e-7,
+        )
+
     def test_loss_is_finite_and_objective_parts_sum_exactly(self) -> None:
         inputs = self._inputs(requires_grad=True)
         total, parts = safety_reserve_operating_utility_loss(

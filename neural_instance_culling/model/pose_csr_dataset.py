@@ -671,7 +671,18 @@ class PoseCSRDataset:
             if int(sidecar_meta.get("poseCount", -1)) != int(self.poses.size):
                 raise ValueError("subpose sidecar pose count does not match the pose CSR")
             declared_csr = sidecar_meta.get("mainCsrDataset")
-            if declared_csr and Path(declared_csr).resolve() != self.dataset_dir.resolve():
+            split_only_view_allowed = sidecar_meta.get("splitLabelsMayDiffer") is True
+            split_view_source = self.meta.get("sourceDataset")
+            split_view_matches_declared = bool(
+                declared_csr
+                and split_view_source
+                and Path(split_view_source).resolve() == Path(declared_csr).resolve()
+            )
+            if (
+                declared_csr
+                and Path(declared_csr).resolve() != self.dataset_dir.resolve()
+                and not (split_only_view_allowed and split_view_matches_declared)
+            ):
                 raise ValueError("subpose sidecar was built for a different pose CSR dataset")
             self.subpose_sidecar_meta = sidecar_meta
         hit_counts_path = (sidecar_root / "visible_hit_counts.bin") if sidecar_root is not None else self.dataset_dir / "visible_hit_counts.bin"

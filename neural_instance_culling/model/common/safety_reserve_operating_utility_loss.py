@@ -2038,11 +2038,26 @@ def _project_one_gradient_group(
 ) -> tuple[list[torch.Tensor | None], dict[str, float]]:
     if float(norm_cap_ratio) < 0.0:
         raise ValueError("gradient norm cap ratios must be non-negative")
+    shared_safety_gradients = [
+        safety if auxiliary is not None else None
+        for safety, auxiliary in zip(
+            safety_gradients, auxiliary_gradients, strict=True
+        )
+    ]
     dot = _gradient_dot(safety_gradients, auxiliary_gradients, device)
     safety_norm_sq = _gradient_norm_sq(safety_gradients, device)
+    shared_safety_norm_sq = _gradient_norm_sq(
+        shared_safety_gradients, device
+    )
     auxiliary_norm_sq = _gradient_norm_sq(auxiliary_gradients, device)
-    apply_projection = bool(dot.detach() < 0.0 and safety_norm_sq.detach() > 0.0)
-    coefficient = dot / safety_norm_sq.clamp_min(1e-12) if apply_projection else dot.new_zeros(())
+    apply_projection = bool(
+        dot.detach() < 0.0 and shared_safety_norm_sq.detach() > 0.0
+    )
+    coefficient = (
+        dot / shared_safety_norm_sq.clamp_min(1e-12)
+        if apply_projection
+        else dot.new_zeros(())
+    )
     projected: list[torch.Tensor | None] = []
     for safety, auxiliary in zip(safety_gradients, auxiliary_gradients, strict=True):
         if auxiliary is None:
@@ -2053,18 +2068,24 @@ def _project_one_gradient_group(
             projected.append(auxiliary)
     for _attempt in range(3):
         dot_after_projection = _gradient_dot(safety_gradients, projected, device)
-        if bool(dot_after_projection.detach() >= 0.0 or safety_norm_sq.detach() <= 0.0):
+        if bool(
+            dot_after_projection.detach() >= 0.0
+            or shared_safety_norm_sq.detach() <= 0.0
+        ):
             break
         # FP32 gradient tensors can leave a negative residual after the
         # analytically exact projection.  Correct toward a small positive
         # relative margin, then verify the represented tensors again.
         projected_norm_sq_before_correction = _gradient_norm_sq(projected, device)
         margin = (
-            torch.sqrt(safety_norm_sq)
+            torch.sqrt(shared_safety_norm_sq)
             * torch.sqrt(projected_norm_sq_before_correction)
             * 1e-5
         )
-        correction = (dot_after_projection - margin) / safety_norm_sq.clamp_min(1e-24)
+        correction = (
+            (dot_after_projection - margin)
+            / shared_safety_norm_sq.clamp_min(1e-24)
+        )
         projected = [
             value
             if value is None or safety is None
@@ -2098,6 +2119,9 @@ def _project_one_gradient_group(
     return projected, {
         "dotBeforeProjection": float(dot.detach().cpu()),
         "dotAfterProjection": float(dot_after.detach().cpu()),
+        "sharedSafetyNorm": float(
+            torch.sqrt(shared_safety_norm_sq).detach().cpu()
+        ),
         "normBeforeProjection": float(torch.sqrt(auxiliary_norm_sq).detach().cpu()),
         "normAfterProjection": float(torch.sqrt(projected_norm_sq).detach().cpu()),
         "normAfterCap": float((projected_norm * scale).detach().cpu()),

@@ -38,6 +38,7 @@ from neural_instance_culling.model.train_bounded_relation_survival_moment_safety
     _set_refinement_scope,
     _update_safety_boundary_ema,
     _validate_extreme_tail_selection_contract,
+    _validation_safe_checkpoint_key,
     _v4_objective_groups,
     _weighted_recall_safety_gate,
     _weighted_quantile_numpy,
@@ -1045,6 +1046,30 @@ class BoundedRelationSurvivalMomentSafetyTrainingTest(unittest.TestCase):
             _weighted_recall_safety_gate(
                 {"aggregateWeightedRecall": 0.995}
             )
+        )
+
+    def test_safe_checkpoint_rank_uses_validation_before_calibration(self) -> None:
+        calibration = {"agg_useful_cull": 0.95}
+        weaker_validation = {
+            "agg_balanced_accuracy": 0.60,
+            "agg_precision": 0.30,
+            "agg_accuracy": 0.70,
+            "agg_useful_cull": 0.80,
+            "avg_pred_count": 100.0,
+        }
+        stronger_validation = {
+            **weaker_validation,
+            "agg_balanced_accuracy": 0.75,
+            "agg_precision": 0.45,
+        }
+
+        self.assertGreater(
+            _validation_safe_checkpoint_key(
+                stronger_validation, {"agg_useful_cull": 0.10}
+            ),
+            _validation_safe_checkpoint_key(
+                weaker_validation, calibration
+            ),
         )
 
     def test_four_objective_groups_sum_to_logged_total(self) -> None:
