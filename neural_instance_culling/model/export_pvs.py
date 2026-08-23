@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Export the calibrated relation-prior runtime bundle.
+"""Export the mainline runtime bundle and its compact occlusion controls.
 
 The checkpoint contains both offline training state and the small online query
 network.  This exporter has an explicit runtime allow-list.  The bundle gets a
-single ``[N, 124]`` FP16 table, scene lookup tables, the online dense weights,
+single FP16 instance table, scene lookup tables, the online dense weights,
 the learned frequency vectors, and the fixed FP32 disk-transfer table.  It
 never copies the checkpoint, relation CSR, hierarchy IDs, observations, or
 offline encoder state into the output directory.
@@ -56,6 +56,14 @@ RUNTIME_HEAD_INPUT_DIM = (
     + LOW_RANK_SUMMARY_DIM
     + 1
 )
+RUNTIME_HEAD_INPUT_DIM_WITHOUT_OCCLUSION = (
+    GEO_DIM
+    + BOUNDARY_SUMMARY_DIM
+    + VIEW_DIM
+    + LOW_RANK_SUMMARY_DIM
+    + 1
+)
+OCCLUSION_REPRESENTATION_MODES = ("survival", "generic28", "none")
 
 CHI_TABLE_SIZE = 8192
 CHI_TABLE_MAX_ARGUMENT = 320.0
@@ -101,6 +109,12 @@ V4_VARIANT_CONTRACTS: dict[str, tuple[str, str]] = {
         "pose_balanced_rvl_contrastive",
         "residual",
     ),
+    "core_no_relation": ("pose_balanced_rvl_contrastive", "residual"),
+    "core_no_survival": ("pose_balanced_rvl_contrastive", "disabled"),
+    "core_generic28": ("pose_balanced_rvl_contrastive", "disabled"),
+    "core_no_moment": ("pose_balanced_rvl_contrastive", "residual"),
+    "core_no_recall_guard": ("pose_balanced_rvl_contrastive", "residual"),
+    "core_no_tail_margin": ("pose_balanced_rvl_contrastive", "residual"),
 }
 
 def _as_mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -255,12 +269,35 @@ def _validate_model_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
     num_glbs = _positive_int(config.get("numGlbs"), "config.numGlbs", allow_zero=True)
     if _positive_int(config.get("geometryDim"), "config.geometryDim") != GEO_DIM:
         raise ValueError("config.geometryDim must be 96")
-    if list(config.get("survivalCoefficientShape") or ()) != [SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM]:
-        raise ValueError("config.survivalCoefficientShape must be [4, 7]")
-    if _positive_int(config.get("runtimeFeatureDim"), "config.runtimeFeatureDim") != RUNTIME_FEATURE_DIM:
-        raise ValueError("config.runtimeFeatureDim must be 124")
-    if _positive_int(config.get("runtimeHeadInputDim"), "config.runtimeHeadInputDim") != RUNTIME_HEAD_INPUT_DIM:
-        raise ValueError("config.runtimeHeadInputDim must be 130")
+    representation_config = config.get("occlusionRepresentation")
+    representation_mode = (
+        str(representation_config.get("mode"))
+        if isinstance(representation_config, Mapping)
+        else str(checkpoint.get("occlusionRepresentation", "survival"))
+    )
+    if representation_mode not in OCCLUSION_REPRESENTATION_MODES:
+        raise ValueError("config.occlusionRepresentation.mode is invalid")
+    expected_feature_dim = GEO_DIM + (
+        SURVIVAL_DIM if representation_mode != "none" else 0
+    )
+    expected_head_dim = (
+        RUNTIME_HEAD_INPUT_DIM
+        if representation_mode != "none"
+        else RUNTIME_HEAD_INPUT_DIM_WITHOUT_OCCLUSION
+    )
+    expected_survival_shape = (
+        [SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM]
+        if representation_mode == "survival"
+        else []
+    )
+    if list(config.get("survivalCoefficientShape") or ()) != expected_survival_shape:
+        raise ValueError(
+            "config.survivalCoefficientShape disagrees with the occlusion representation"
+        )
+    if _positive_int(config.get("runtimeFeatureDim"), "config.runtimeFeatureDim") != expected_feature_dim:
+        raise ValueError("config.runtimeFeatureDim disagrees with the occlusion representation")
+    if _positive_int(config.get("runtimeHeadInputDim"), "config.runtimeHeadInputDim") != expected_head_dim:
+        raise ValueError("config.runtimeHeadInputDim disagrees with the occlusion representation")
     if _positive_int(config.get("boundarySummaryDim"), "config.boundarySummaryDim") != BOUNDARY_SUMMARY_DIM:
         raise ValueError("config.boundarySummaryDim must be 8")
     if _positive_int(config.get("lowRankSummaryDim"), "config.lowRankSummaryDim") != LOW_RANK_SUMMARY_DIM:
@@ -272,11 +309,10 @@ def _validate_model_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
     calibration_mode = str(instance_calibration.get("mode", ""))
     if calibration_mode not in {"residual", "disabled"}:
         raise ValueError("config.instanceCalibration.mode must be residual or disabled")
-    if list(instance_calibration.get("shape") or ()) != [
-        SURVIVAL_RANK,
-        SURVIVAL_PARAMETER_DIM,
-    ]:
-        raise ValueError("config.instanceCalibration.shape must be [4, 7]")
+    if list(instance_calibration.get("shape") or ()) != expected_survival_shape:
+        raise ValueError(
+            "config.instanceCalibration.shape disagrees with the occlusion representation"
+        )
     calibration_max_abs = _finite_float(
         instance_calibration.get("maximumAbsoluteResidual"),
         "config.instanceCalibration.maximumAbsoluteResidual",
@@ -287,12 +323,25 @@ def _validate_model_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
     )
     if calibration_max_abs <= 0.0 or sparse_instance_penalty < 0.0:
         raise ValueError("config.instanceCalibration bounds are invalid")
-    if instance_calibration.get("runtimeExport") != "fused coefficients only":
-        raise ValueError("runtime must export only fused survival coefficients")
+    expected_calibration_export = (
+        "fused coefficients only"
+        if representation_mode == "survival"
+        else "not applicable"
+    )
+    if instance_calibration.get("runtimeExport") != expected_calibration_export:
+        raise ValueError("config.instanceCalibration.runtimeExport is invalid")
     protocol = _as_mapping(checkpoint.get("protocol"), "checkpoint.protocol")
     expected_calibration_mode = V4_VARIANT_CONTRACTS[str(protocol["variant"])][1]
     if calibration_mode != expected_calibration_mode:
         raise ValueError("config.instanceCalibration.mode disagrees with checkpoint variant")
+    relation_source = str(config.get("relationSource", ""))
+    if representation_mode == "survival":
+        if relation_source not in {"bounded_hierarchical", "geometry_only"}:
+            raise ValueError("survival representation requires a registered relation source")
+    elif relation_source != "none" or calibration_mode != "disabled":
+        raise ValueError(
+            "generic28 and none require relationSource=none and disabled calibration"
+        )
     spectral_mode = str(config.get("spectralMode", ""))
     if spectral_mode not in {"moment_envelope", "point"}:
         raise ValueError("config.spectralMode must be moment_envelope or point")
@@ -330,21 +379,27 @@ def _validate_model_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
         "numInstances": num_instances,
         "numGlbs": num_glbs,
         "geometryDim": GEO_DIM,
-        "survivalCoefficientShape": [SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM],
-        "survivalCoefficientDim": SURVIVAL_DIM,
-        "runtimeFeatureDim": RUNTIME_FEATURE_DIM,
-        "runtimeHeadInputDim": RUNTIME_HEAD_INPUT_DIM,
+        "occlusionRepresentation": {
+            "mode": representation_mode,
+            "featureDim": SURVIVAL_DIM if representation_mode != "none" else 0,
+        },
+        "survivalCoefficientShape": expected_survival_shape,
+        "survivalCoefficientDim": (
+            SURVIVAL_DIM if representation_mode == "survival" else 0
+        ),
+        "runtimeFeatureDim": expected_feature_dim,
+        "runtimeHeadInputDim": expected_head_dim,
         "boundarySummaryDim": BOUNDARY_SUMMARY_DIM,
         "lowRankSummaryDim": LOW_RANK_SUMMARY_DIM,
         "hiddenDim": hidden_dim,
-        "relationSource": str(config.get("relationSource", "bounded_hierarchical")),
+        "relationSource": relation_source,
         "spectralMode": spectral_mode,
         "instanceCalibration": {
             "mode": calibration_mode,
-            "shape": [SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM],
+            "shape": expected_survival_shape,
             "maximumAbsoluteResidual": calibration_max_abs,
             "sparseInstancePenalty": sparse_instance_penalty,
-            "runtimeExport": "fused coefficients only",
+            "runtimeExport": expected_calibration_export,
         },
         "depthNormalization": {
             "definition": str(
@@ -382,11 +437,12 @@ def _load_runtime_features(
     checkpoint: Mapping[str, Any],
     checkpoint_path: Path,
     num_instances: int,
+    representation_mode: str,
     instance_calibration_mode: str,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Rebuild the only valid runtime table from checkpoint-owned inputs.
 
-    The training directory also contains a last-epoch 124-value table.  It is
+    The training directory also contains a last-epoch runtime table.  It is
     intentionally ignored because the selected ``best.pt`` may come from an
     earlier epoch.  The checkpoint records the geometry table's source,
     shape, and dtype, while storing its own 28 survival coefficients.  These
@@ -412,6 +468,69 @@ def _load_runtime_features(
         (num_instances, GEO_DIM),
         "checkpoint geometry features",
     )
+
+    if representation_mode == "none":
+        raw_features = checkpoint.get("instanceOcclusionFeatures")
+        if raw_features is not None:
+            _to_fp16(
+                raw_features,
+                "checkpoint.instanceOcclusionFeatures",
+                (num_instances, 0),
+            )
+        return np.ascontiguousarray(geometry, dtype="<f2"), {
+            "source": "checkpoint.geometryFeatures_only",
+            "geometryDtype": "float16",
+            "occlusionRepresentation": "none",
+            "geometry": {
+                "source": "checkpoint.geometry.path",
+                "path": str(geometry_path),
+                "shape": [num_instances, GEO_DIM],
+                "dtype": "float16",
+            },
+        }
+
+    if representation_mode == "generic28":
+        features = _to_fp16(
+            checkpoint.get("instanceOcclusionFeatures"),
+            "checkpoint.instanceOcclusionFeatures",
+            (num_instances, SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM),
+        )
+        calibration = _as_mapping(
+            checkpoint.get("instanceCalibration"), "checkpoint.instanceCalibration"
+        )
+        if (
+            instance_calibration_mode != "disabled"
+            or calibration.get("mode") != "disabled"
+            or calibration.get("fusion") != "not_applicable"
+            or calibration.get("runtimeExport") != "not_applicable"
+        ):
+            raise ValueError("generic28 checkpoint must not carry survival calibration")
+        values = np.ascontiguousarray(
+            np.concatenate(
+                [geometry, features.reshape(num_instances, SURVIVAL_DIM)], axis=1
+            ),
+            dtype="<f2",
+        )
+        return values, {
+            "source": "checkpoint.geometryFeatures_plus_genericOcclusionFeatures",
+            "geometryDtype": "float16",
+            "occlusionFeatureDtype": "float16",
+            "occlusionRepresentation": "generic28",
+            "geometry": {
+                "source": "checkpoint.geometry.path",
+                "path": str(geometry_path),
+                "shape": [num_instances, GEO_DIM],
+                "dtype": "float16",
+            },
+            "occlusionFeatures": {
+                "source": "checkpoint.instanceOcclusionFeatures",
+                "shape": [num_instances, SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM],
+                "dtype": "float16",
+            },
+        }
+
+    if representation_mode != "survival":
+        raise ValueError(f"unsupported occlusion representation: {representation_mode}")
 
     coefficient_value = checkpoint.get("instanceSurvivalCoefficients")
     if coefficient_value is None:
@@ -477,6 +596,7 @@ def _load_runtime_features(
         "source": "checkpoint.geometryFeatures_plus_survivalCoefficients",
         "geometryDtype": "float16",
         "survivalCoefficientDtype": "float16",
+        "occlusionRepresentation": "survival",
         "geometry": {
             "source": "checkpoint.geometry.path",
             "path": str(geometry_path),
@@ -509,16 +629,42 @@ def _linear_specs(prefix: str, dimensions: tuple[int, ...]) -> list[tuple[str, t
     return specs
 
 
-def _runtime_weight_specs(hidden_dim: int) -> list[tuple[str, tuple[int, ...]]]:
-    spectral_fuse_dim = SPECTRAL_MOMENT_DIM + VIEW_DIM + LOW_RANK_SUMMARY_DIM + RELATION_CONDITION_DIM
-    return (
-        _linear_specs("relation_condition_head", (SURVIVAL_DIM, 16, RELATION_CONDITION_DIM))
-        + _linear_specs("boundary_summary_head", (spectral_fuse_dim, 48, BOUNDARY_SUMMARY_DIM))
+def _runtime_weight_specs(
+    hidden_dim: int, representation_mode: str = "survival"
+) -> list[tuple[str, tuple[int, ...]]]:
+    if representation_mode not in OCCLUSION_REPRESENTATION_MODES:
+        raise ValueError(f"unsupported occlusion representation: {representation_mode}")
+    has_occlusion = representation_mode != "none"
+    spectral_fuse_dim = (
+        SPECTRAL_MOMENT_DIM
+        + VIEW_DIM
+        + LOW_RANK_SUMMARY_DIM
+        + (RELATION_CONDITION_DIM if has_occlusion else 0)
+    )
+    representation_specs = (
+        _linear_specs(
+            "relation_condition_head",
+            (SURVIVAL_DIM, 16, RELATION_CONDITION_DIM),
+        )
         + _linear_specs(
             "direction_basis_head",
             (BOUNDARY_SUMMARY_DIM + RELATION_CONDITION_DIM + 3, 24, SURVIVAL_RANK),
         )
-        + _linear_specs("shared_trunk", (RUNTIME_HEAD_INPUT_DIM, hidden_dim, hidden_dim))
+        if has_occlusion
+        else []
+    )
+    runtime_head_dim = (
+        RUNTIME_HEAD_INPUT_DIM
+        if has_occlusion
+        else RUNTIME_HEAD_INPUT_DIM_WITHOUT_OCCLUSION
+    )
+    return (
+        representation_specs
+        + _linear_specs(
+            "boundary_summary_head",
+            (spectral_fuse_dim, 48, BOUNDARY_SUMMARY_DIM),
+        )
+        + _linear_specs("shared_trunk", (runtime_head_dim, hidden_dim, hidden_dim))
         + [
             ("visibility_head.weight", (1, hidden_dim)),
             ("visibility_head.bias", (1,)),
@@ -529,9 +675,9 @@ def _runtime_weight_specs(hidden_dim: int) -> list[tuple[str, tuple[int, ...]]]:
 
 
 def _pack_query_weights(
-    state: Mapping[str, Any], hidden_dim: int
+    state: Mapping[str, Any], hidden_dim: int, representation_mode: str = "survival"
 ) -> tuple[bytes, list[dict[str, Any]]]:
-    specs = _runtime_weight_specs(hidden_dim)
+    specs = _runtime_weight_specs(hidden_dim, representation_mode)
     chunks: list[bytes] = []
     layout: list[dict[str, Any]] = []
     offset_elements = 0
@@ -696,7 +842,9 @@ def _find_nested_value(containers: list[Mapping[str, Any]], keys: tuple[str, ...
     return None
 
 
-def _training_provenance(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
+def _training_provenance(
+    checkpoint: Mapping[str, Any], representation_mode: str
+) -> dict[str, Any]:
     """Validate checkpoint provenance with explainable structural fields only.
 
     Old checkpoints may still carry digest keys.  They are intentionally
@@ -705,57 +853,103 @@ def _training_provenance(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
     the exporter and evaluator.
     """
 
-    protocol = _as_mapping(checkpoint.get("protocol"), "checkpoint.protocol")
-    relation = _as_mapping(checkpoint.get("relation"), "checkpoint.relation")
-    if relation.get("schema") != RELATION_SCHEMA_V3:
-        raise ValueError(
-            "checkpoint relation provenance must use the corrected v3 relation schema"
-        )
-    relation_path_value = relation.get("path")
-    if not relation_path_value:
-        raise ValueError("checkpoint relation provenance must include relation.path")
-    relation_path = Path(str(relation_path_value)).expanduser().resolve()
-    if not relation_path.is_dir():
-        raise FileNotFoundError(f"missing checkpoint relation directory: {relation_path}")
-    relation_meta_path = relation_path / "relation_csr_meta.json"
-    if not relation_meta_path.is_file():
-        raise FileNotFoundError(f"missing checkpoint relation metadata: {relation_meta_path}")
-    try:
-        relation_meta = json.loads(relation_meta_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid relation metadata: {relation_meta_path}") from exc
-    relation_meta = _as_mapping(relation_meta, "relation metadata")
-    if relation_meta.get("schema") != RELATION_SCHEMA_V3:
-        raise ValueError("checkpoint relation metadata schema is not v3")
-
     def _declared_count(container: Mapping[str, Any], *names: str) -> int | None:
         for name in names:
             if container.get(name) is not None:
                 return _positive_int(container[name], f"relation.{name}", allow_zero=True)
         return None
 
-    relation_stats = relation_meta.get("stats")
-    if not isinstance(relation_stats, Mapping):
-        relation_stats = relation_meta
-    relation_counts = {
-        "edgeCount": _declared_count(relation, "edgeCount") or _declared_count(relation_stats, "edgeCount"),
-        "rowCount": _declared_count(relation, "rowCount") or _declared_count(relation_stats, "rowCount"),
-        "observationCount": _declared_count(relation, "observationCount") or _declared_count(relation_stats, "survivalObservationCount", "observationCount"),
-    }
-    for key, value in relation_counts.items():
-        if value is None or value <= 0:
-            raise ValueError(f"checkpoint relation provenance is missing positive {key}")
-    for key, value in relation_counts.items():
-        metadata_value = _declared_count(relation_stats, key, "survivalObservationCount" if key == "observationCount" else key)
-        if metadata_value is not None and metadata_value != value:
-            raise ValueError(f"checkpoint relation {key} disagrees with relation metadata")
+    protocol = _as_mapping(checkpoint.get("protocol"), "checkpoint.protocol")
+    relation = _as_mapping(checkpoint.get("relation"), "checkpoint.relation")
+    if representation_mode == "survival":
+        if relation.get("schema") != RELATION_SCHEMA_V3:
+            raise ValueError(
+                "checkpoint relation provenance must use the corrected v3 relation schema"
+            )
+        relation_path_value = relation.get("path")
+        if not relation_path_value:
+            raise ValueError("checkpoint relation provenance must include relation.path")
+        relation_path = Path(str(relation_path_value)).expanduser().resolve()
+        if not relation_path.is_dir():
+            raise FileNotFoundError(
+                f"missing checkpoint relation directory: {relation_path}"
+            )
+        relation_meta_path = relation_path / "relation_csr_meta.json"
+        if not relation_meta_path.is_file():
+            raise FileNotFoundError(
+                f"missing checkpoint relation metadata: {relation_meta_path}"
+            )
+        try:
+            relation_meta = json.loads(relation_meta_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid relation metadata: {relation_meta_path}") from exc
+        relation_meta = _as_mapping(relation_meta, "relation metadata")
+        if relation_meta.get("schema") != RELATION_SCHEMA_V3:
+            raise ValueError("checkpoint relation metadata schema is not v3")
+        relation_stats = relation_meta.get("stats")
+        if not isinstance(relation_stats, Mapping):
+            relation_stats = relation_meta
+        relation_counts = {
+            "edgeCount": _declared_count(relation, "edgeCount")
+            or _declared_count(relation_stats, "edgeCount"),
+            "rowCount": _declared_count(relation, "rowCount")
+            or _declared_count(relation_stats, "rowCount"),
+            "observationCount": _declared_count(relation, "observationCount")
+            or _declared_count(
+                relation_stats, "survivalObservationCount", "observationCount"
+            ),
+        }
+        for key, value in relation_counts.items():
+            if value is None or value <= 0:
+                raise ValueError(
+                    f"checkpoint relation provenance is missing positive {key}"
+                )
+            metadata_value = _declared_count(
+                relation_stats,
+                key,
+                "survivalObservationCount" if key == "observationCount" else key,
+            )
+            if metadata_value is not None and metadata_value != value:
+                raise ValueError(
+                    f"checkpoint relation {key} disagrees with relation metadata"
+                )
+        relation_provenance = {
+            "enabled": True,
+            "path": str(relation_path),
+            "schema": RELATION_SCHEMA_V3,
+            "edgeCount": int(relation_counts["edgeCount"]),
+            "rowCount": int(relation_counts["rowCount"]),
+            "observationCount": int(relation_counts["observationCount"]),
+            "testRead": False,
+        }
+    else:
+        if (
+            relation.get("enabled") is not False
+            or relation.get("relationGraphRead") is not False
+            or relation.get("survivalObservationsRead") is not False
+        ):
+            raise ValueError(
+                "non-survival checkpoint must declare that relation supervision was not read"
+            )
+        relation_provenance = {
+            "enabled": False,
+            "source": str(relation.get("source", "depth_normalization_metadata_only")),
+            "relationGraphRead": False,
+            "survivalObservationsRead": False,
+            "testRead": False,
+        }
 
     split_counts = protocol.get("splitPoseCounts")
     if not isinstance(split_counts, Mapping):
         raise ValueError("checkpoint protocol.splitPoseCounts is required")
-    expected_split_counts = {key: _positive_int(value, f"protocol.splitPoseCounts.{key}") for key, value in split_counts.items()}
-    if expected_split_counts.get("train") != 2772 or expected_split_counts.get("calibration") != 168 or expected_split_counts.get("validation") != 213:
-        raise ValueError("checkpoint protocol split pose counts do not match v4 contract")
+    expected_split_counts = {
+        key: _positive_int(value, f"protocol.splitPoseCounts.{key}")
+        for key, value in split_counts.items()
+    }
+    if set(expected_split_counts) != {"train", "calibration", "validation"}:
+        raise ValueError(
+            "checkpoint protocol must record train, calibration, and validation counts"
+        )
     dataset = protocol.get("dataset")
     if not isinstance(dataset, Mapping) or not dataset.get("path"):
         raise ValueError("checkpoint protocol.dataset.path is required")
@@ -774,14 +968,7 @@ def _training_provenance(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
             "splitPoseCounts": expected_split_counts,
             "testRead": False,
         },
-        "relation": {
-            "path": str(relation_path),
-            "schema": RELATION_SCHEMA_V3,
-            "edgeCount": int(relation_counts["edgeCount"]),
-            "rowCount": int(relation_counts["rowCount"]),
-            "observationCount": int(relation_counts["observationCount"]),
-            "testRead": False,
-        },
+        "relation": relation_provenance,
         "runtimeMeta": {
             "path": str(runtime_meta_path) if runtime_meta_path is not None else None,
             "testRead": False,
@@ -830,12 +1017,24 @@ def _resolve_threshold(
         )
     if calibration.get("testRead") is not False:
         raise ValueError("checkpoint.calibration must declare testRead=false")
-    selected = calibration.get("selected", calibration.get("selectedSafe"))
-    source = (
-        "checkpoint.calibration.selected"
-        if calibration.get("selected") is not None
-        else "checkpoint.calibration.selectedSafe"
+    best = checkpoint.get("best")
+    checkpoint_declares_unsafe = (
+        isinstance(best, Mapping) and best.get("safe") is False
     )
+    if checkpoint_declares_unsafe:
+        if not allow_unsafe:
+            raise ValueError(
+                "checkpoint failed its frozen-threshold validation safety gate"
+            )
+        selected = calibration.get("diagnostic")
+        source = "checkpoint.calibration.diagnostic"
+    else:
+        selected = calibration.get("selected", calibration.get("selectedSafe"))
+        source = (
+            "checkpoint.calibration.selected"
+            if calibration.get("selected") is not None
+            else "checkpoint.calibration.selectedSafe"
+        )
     if not isinstance(selected, Mapping):
         if not allow_unsafe:
             raise ValueError("checkpoint.calibration.selected/selectedSafe is missing")
@@ -851,7 +1050,11 @@ def _resolve_threshold(
     lower_bound = _threshold_value(
         selected, "aggregateWeightedRecallLowerConfidenceBound"
     )
-    safe = weighted_recall > TARGET_WEIGHTED_RECALL and lower_bound > MINIMUM_WEIGHTED_RECALL_LCB
+    safe = (
+        weighted_recall > TARGET_WEIGHTED_RECALL
+        and lower_bound > MINIMUM_WEIGHTED_RECALL_LCB
+        and not checkpoint_declares_unsafe
+    )
     if not safe and not allow_unsafe:
         raise ValueError(
             "checkpoint calibration threshold is unsafe: "
@@ -871,7 +1074,6 @@ def _resolve_threshold(
     declared_safe = selected.get("safe")
     if declared_safe is not None and bool(declared_safe) != safe:
         raise ValueError("calibration selected.safe disagrees with weighted-recall safety fields")
-    best = checkpoint.get("best")
     if isinstance(best, Mapping):
         if best.get("threshold") is not None:
             best_threshold = _finite_float(best["threshold"], "checkpoint.best.threshold")
@@ -1034,6 +1236,24 @@ def _build_model_meta(
     ray_space = _ray_space_contract(float(runtime_config["frequency"]["maxNormCycles"]))
     if not ray_space["rangeGuarantee"]["twoSStrictlyInsideChiRange"]:
         raise ValueError("v3 ray-space range guarantee does not fit the chi lookup range")
+    representation_mode = str(runtime_config["occlusionRepresentation"]["mode"])
+    runtime_feature_dim = int(runtime_config["runtimeFeatureDim"])
+    fixed_layout: list[dict[str, Any]] = [
+        {"name": "geometry", "offset": 0, "dim": GEO_DIM}
+    ]
+    if representation_mode != "none":
+        fixed_layout.append(
+            {
+                "name": (
+                    "survivalCoefficients"
+                    if representation_mode == "survival"
+                    else "genericOcclusionFeatures"
+                ),
+                "offset": GEO_DIM,
+                "dim": SURVIVAL_DIM,
+                "shape": ["N", SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM],
+            }
+        )
     return {
         "schema": EXPORT_SCHEMA,
         "testRead": False,
@@ -1044,17 +1264,9 @@ def _build_model_meta(
         "modelConfig": dict(runtime_config),
         "fixedTable": {
             "file": "instance_runtime_features_fp16.bin",
-            "shape": [int(runtime_config["numInstances"]), RUNTIME_FEATURE_DIM],
+            "shape": [int(runtime_config["numInstances"]), runtime_feature_dim],
             "dtype": "float16",
-            "layout": [
-                {"name": "geometry", "offset": 0, "dim": GEO_DIM},
-                {
-                    "name": "survivalCoefficients",
-                    "offset": GEO_DIM,
-                    "dim": SURVIVAL_DIM,
-                    "shape": ["N", SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM],
-                },
-            ],
+            "layout": fixed_layout,
             "byteLength": len(runtime_raw),
         },
         "candidateCameraSemantics": viewcell["candidateCameraSemantics"],
@@ -1134,7 +1346,7 @@ def _build_model_meta(
             "runtimeFeatures": _file_descriptor(
                 "instance_runtime_features_fp16.bin",
                 "float16",
-                ["N", RUNTIME_FEATURE_DIM],
+                ["N", runtime_feature_dim],
                 runtime_raw,
             ),
             "queryWeights": _file_descriptor(
@@ -1187,7 +1399,10 @@ def _build_model_meta(
                 "chi_table_fp32.bin",
             ],
         },
-        "runtimeSemantics": "fixed 124D offline table; one horizontal-disk view-cell query per candidate batch",
+        "runtimeSemantics": (
+            f"fixed {runtime_feature_dim}D offline table; one horizontal-disk "
+            "view-cell query per candidate batch"
+        ),
         "trainingCheckpointIncluded": False,
         "relationGraphDataIncluded": False,
         "offlineResourcesExcluded": [
@@ -1200,7 +1415,7 @@ def _build_model_meta(
             "per-instance calibration reliability",
         ],
         "onlineOperators": {
-            "featureLookup": "FP16 [N,124] storage-buffer lookup",
+            "featureLookup": f"FP16 [N,{runtime_feature_dim}] storage-buffer lookup",
             "frequencyQuery": "16 cycles frequencies with 2*pi phase and radial arguments",
             "chiLookup": "FP32 piecewise-linear table; no Bessel evaluation at runtime",
             "onlineRelationPropagation": False,
@@ -1223,10 +1438,11 @@ def _prepare_export(args: argparse.Namespace) -> tuple[Path, dict[str, bytes], d
 
     checkpoint = _load_checkpoint(checkpoint_path)
     runtime_config = _validate_model_config(checkpoint)
+    representation_mode = str(runtime_config["occlusionRepresentation"]["mode"])
     viewcell = _viewcell_contract(
         checkpoint, checkpoint.get("config", checkpoint.get("modelConfig", {}))
     )
-    provenance = _training_provenance(checkpoint)
+    provenance = _training_provenance(checkpoint, representation_mode)
     threshold, threshold_info = _resolve_threshold(
         checkpoint, args.threshold, bool(args.allow_unsafe_threshold)
     )
@@ -1236,6 +1452,7 @@ def _prepare_export(args: argparse.Namespace) -> tuple[Path, dict[str, bytes], d
         checkpoint,
         checkpoint_path,
         num_instances,
+        representation_mode,
         str(runtime_config["instanceCalibration"]["mode"]),
     )
     aabb, instance_to_glb, scene_bounds, runtime_meta_info = _load_runtime_tables(
@@ -1244,7 +1461,11 @@ def _prepare_export(args: argparse.Namespace) -> tuple[Path, dict[str, bytes], d
     state = _as_mapping(
         checkpoint.get("model", checkpoint.get("modelState")), "checkpoint.model/modelState"
     )
-    query_weights, query_layout = _pack_query_weights(state, int(runtime_config["hiddenDim"]))
+    query_weights, query_layout = _pack_query_weights(
+        state,
+        int(runtime_config["hiddenDim"]),
+        representation_mode,
+    )
     frequency, chi_table, frequency_info = _pack_frequency_and_chi(
         state, float(runtime_config["frequency"]["maxNormCycles"])
     )

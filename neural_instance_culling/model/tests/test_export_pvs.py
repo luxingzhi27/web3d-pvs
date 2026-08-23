@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 import sys
@@ -25,6 +26,7 @@ from export_pvs import (  # noqa: E402
     RELATION_CONDITION_DIM,
     RUNTIME_FEATURE_DIM,
     RUNTIME_HEAD_INPUT_DIM,
+    RUNTIME_HEAD_INPUT_DIM_WITHOUT_OCCLUSION,
     SPECTRAL_FREQUENCY_COUNT,
     SURVIVAL_PARAMETER_DIM,
     SURVIVAL_RANK,
@@ -222,6 +224,89 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
         )
         return path
 
+    def _control_checkpoint(self, root: Path, mode: str) -> dict:
+        checkpoint = copy.deepcopy(self._checkpoint(root))
+        if mode not in {"generic28", "none"}:
+            raise ValueError(mode)
+        runtime_dim = GEO_DIM + (28 if mode == "generic28" else 0)
+        head_dim = (
+            RUNTIME_HEAD_INPUT_DIM
+            if mode == "generic28"
+            else RUNTIME_HEAD_INPUT_DIM_WITHOUT_OCCLUSION
+        )
+        state = {
+            name: torch.full(shape, 0.01, dtype=torch.float32)
+            for name, shape in _runtime_weight_specs(self.hidden_dim, mode)
+        }
+        state["moment_query.frequency_cycles"] = torch.zeros(
+            (SPECTRAL_FREQUENCY_COUNT, 9)
+        )
+        state["moment_query.frequency_cycles"][:, 0] = torch.linspace(
+            0.05, 0.8, SPECTRAL_FREQUENCY_COUNT
+        )
+        state["moment_query.chi_table"] = torch.ones(
+            CHI_TABLE_SIZE, dtype=torch.float32
+        )
+        features = (
+            torch.arange(self.num_instances * 28, dtype=torch.float32).reshape(
+                self.num_instances, 4, 7
+            )
+            if mode == "generic28"
+            else torch.empty((self.num_instances, 0), dtype=torch.float32)
+        )
+        if mode == "generic28":
+            state["generic_occlusion_features"] = features.clone()
+        checkpoint["model"] = state
+        checkpoint["occlusionRepresentation"] = mode
+        checkpoint["instanceOcclusionFeatures"] = features
+        checkpoint["config"].update(
+            {
+                "relationSource": "none",
+                "occlusionRepresentation": {
+                    "mode": mode,
+                    "featureDim": 28 if mode == "generic28" else 0,
+                },
+                "survivalCoefficientShape": [],
+                "runtimeFeatureDim": runtime_dim,
+                "runtimeHeadInputDim": head_dim,
+                "instanceCalibration": {
+                    "mode": "disabled",
+                    "shape": [],
+                    "initialization": "zero",
+                    "maximumAbsoluteResidual": 4.0,
+                    "sparseInstancePenalty": 3.0,
+                    "fusion": "not applicable",
+                    "runtimeExport": "not applicable",
+                },
+            }
+        )
+        checkpoint["protocol"]["variant"] = (
+            "core_generic28" if mode == "generic28" else "core_no_survival"
+        )
+        checkpoint["protocol"]["lossVariant"] = "pose_balanced_rvl_contrastive"
+        checkpoint["protocol"]["instanceCalibration"] = {"mode": "disabled"}
+        checkpoint["relation"] = {
+            "enabled": False,
+            "source": "depth_normalization_metadata_only",
+            "relationGraphRead": False,
+            "survivalObservationsRead": False,
+            "testRead": False,
+        }
+        checkpoint["instanceCalibration"] = {
+            "mode": "disabled",
+            "blend": 0.0,
+            "fusion": "not_applicable",
+            "reliability": {"enabled": False, "sourceSplit": "train"},
+            "runtimeExport": "not_applicable",
+        }
+        for key in (
+            "instanceSurvivalCoefficients",
+            "instanceSurvivalPriorCoefficients",
+            "instanceSurvivalCalibrationResidual",
+        ):
+            checkpoint.pop(key, None)
+        return checkpoint
+
     def _export(self, root: Path, checkpoint: dict, name: str = "bundle") -> Path:
         checkpoint_path = root / f"{name}.pt"
         torch.save(checkpoint, checkpoint_path)
@@ -310,6 +395,59 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
             self.assertEqual(meta["threshold"], 0.02)
             self.assertLessEqual(
                 meta["neuralAssetBudget"]["usedBytes"], MAX_NEURAL_ASSET_BYTES
+            )
+
+    def test_generic28_exports_equal_capacity_unstructured_table(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = self._export(
+                root, self._control_checkpoint(root, "generic28"), "generic28"
+            )
+            meta = json.loads((output / "model_meta.json").read_text(encoding="utf-8"))
+            table = np.fromfile(
+                output / "instance_runtime_features_fp16.bin", dtype="<f2"
+            )
+            self.assertEqual(table.size, self.num_instances * 124)
+            self.assertEqual(meta["fixedTable"]["shape"], [self.num_instances, 124])
+            self.assertEqual(
+                meta["fixedTable"]["layout"][1]["name"],
+                "genericOcclusionFeatures",
+            )
+            self.assertEqual(
+                meta["runtimeFeatureSource"]["source"],
+                "checkpoint.geometryFeatures_plus_genericOcclusionFeatures",
+            )
+            self.assertFalse(meta["provenance"]["relation"]["enabled"])
+
+    def test_no_survival_exports_real_96d_table_and_118d_query(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = self._export(
+                root, self._control_checkpoint(root, "none"), "none"
+            )
+            meta = json.loads((output / "model_meta.json").read_text(encoding="utf-8"))
+            table = np.fromfile(
+                output / "instance_runtime_features_fp16.bin", dtype="<f2"
+            )
+            self.assertEqual(table.size, self.num_instances * 96)
+            self.assertEqual(meta["fixedTable"]["shape"], [self.num_instances, 96])
+            self.assertEqual(
+                meta["fixedTable"]["layout"],
+                [{"name": "geometry", "offset": 0, "dim": 96}],
+            )
+            self.assertEqual(meta["modelConfig"]["runtimeHeadInputDim"], 118)
+            self.assertEqual(
+                meta["runtimeFeatureSource"]["source"],
+                "checkpoint.geometryFeatures_only",
+            )
+            weight_names = {
+                row["name"] for row in meta["networkWeights"]["layout"]
+            }
+            self.assertFalse(
+                any(name.startswith("relation_condition_head") for name in weight_names)
+            )
+            self.assertFalse(
+                any(name.startswith("direction_basis_head") for name in weight_names)
             )
 
     def test_dry_run_performs_full_validation_without_creating_bundle(self) -> None:

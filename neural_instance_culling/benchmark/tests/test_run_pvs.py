@@ -6,6 +6,9 @@ import unittest
 from pathlib import Path
 
 from neural_instance_culling.benchmark.run_pvs import (
+    CORE_ABLATION_STAGE,
+    CORE_CONFIG,
+    CORE_VARIANTS,
     EVALUATION_SCHEMA,
     EXPECTED_SPLITS,
     FORMAL_ABLATIONS,
@@ -97,6 +100,82 @@ class IntegratedVisibilityMainlineRunnerTests(unittest.TestCase):
                 "without_contrastive_separation",
             },
         )
+
+    def test_core_ablation_matrix_is_exactly_six_variants_by_three_seeds(self) -> None:
+        specs = _specs(
+            CORE_ABLATION_STAGE,
+            tuple(CORE_VARIANTS),
+            (CORE_CONFIG,),
+            FORMAL_SEEDS,
+            FORMAL_EPOCHS,
+        )
+
+        self.assertEqual(len(specs), 18)
+        self.assertEqual(
+            set(CORE_VARIANTS),
+            {
+                "no_relation",
+                "no_survival",
+                "generic28",
+                "no_moment",
+                "no_recall_guard",
+                "no_tail_margin",
+            },
+        )
+        for spec in specs:
+            command = build_train_command(
+                DATA_ROOT,
+                Path("/tmp") / _member_for_spec(Path("/tmp"), spec).name,
+                spec[2],
+                spec[1],
+                seed=spec[3],
+                epochs=spec[4],
+                steps_per_epoch=FORMAL_STEPS_PER_EPOCH,
+            )
+            self.assertEqual(_argument(command, "--epochs"), "40")
+            self.assertEqual(_argument(command, "--steps-per-epoch"), "900")
+            self.assertEqual(_argument(command, "--poses-per-batch"), "4")
+            self.assertEqual(
+                _argument(command, "--calibration-bootstrap-replicates"), "10000"
+            )
+            self.assertEqual(_argument(command, "--integrated-contrastive-mix"), "0.0")
+
+    def test_non_survival_controls_disable_relation_supervision(self) -> None:
+        for variant, expected_mode, expected_runtime_dim in (
+            ("generic28", "generic28", 124),
+            ("no_survival", "none", 96),
+        ):
+            with self.subTest(variant=variant):
+                command = build_train_command(
+                    DATA_ROOT,
+                    Path("/tmp") / variant,
+                    CORE_CONFIG,
+                    variant,
+                    seed=FORMAL_SEEDS[0],
+                    epochs=FORMAL_EPOCHS,
+                    steps_per_epoch=FORMAL_STEPS_PER_EPOCH,
+                )
+                self.assertEqual(
+                    _argument(command, "--occlusion-representation"), expected_mode
+                )
+                self.assertEqual(_argument(command, "--relation-source"), "none")
+                self.assertEqual(
+                    _argument(command, "--instance-calibration-mode"), "disabled"
+                )
+                self.assertEqual(_argument(command, "--survival-loss-weight"), "0.0")
+                self.assertEqual(
+                    _argument(command, "--relation-consistency-weight"), "0.0"
+                )
+                self.assertEqual(
+                    _argument(
+                        command, "--instance-calibration-regularization-weight"
+                    ),
+                    "0.0",
+                )
+                self.assertEqual(
+                    96 + (28 if expected_mode == "generic28" else 0),
+                    expected_runtime_dim,
+                )
 
     def test_update_budget_check_retrains_s01_and_s02_for_twelve_by_three_hundred(self) -> None:
         self.assertEqual(

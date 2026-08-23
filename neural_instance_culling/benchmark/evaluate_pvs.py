@@ -826,7 +826,16 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
     runtime_meta_path = Path(args.runtime_meta).resolve()
     world_aabbs, instance_to_glb, _ = load_runtime_meta(runtime_meta_path)
     num_instances = int(world_aabbs.shape[0])
-    if int(config.get("numInstances", -1)) != num_instances or int(config.get("runtimeFeatureDim", -1)) != RUNTIME_FEATURE_DIM:
+    representation_config = config.get("occlusionRepresentation")
+    representation_mode = (
+        str(representation_config.get("mode"))
+        if isinstance(representation_config, Mapping)
+        else str(checkpoint.get("occlusionRepresentation", "survival"))
+    )
+    expected_runtime_dim = 96 if representation_mode == "none" else RUNTIME_FEATURE_DIM
+    if int(config.get("numInstances", -1)) != num_instances or int(
+        config.get("runtimeFeatureDim", -1)
+    ) != expected_runtime_dim:
         raise ValueError("v4 checkpoint modelConfig does not match runtime metadata")
     depth = config.get("depthNormalization")
     if not isinstance(depth, Mapping):
@@ -887,6 +896,7 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         relation_hidden_dim=int(config.get("relationHiddenDim", 64)),
         hidden_dim=int(config.get("hiddenDim", 64)),
         relation_source=str(config.get("relationSource")),
+        occlusion_representation=representation_mode,
         spectral_mode=str(config.get("spectralMode")),
         depth_q01=float(depth["q01"]),
         depth_q99=float(depth["q99"]),
@@ -972,33 +982,66 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         or geometry_meta.get("dtype") != "float16"
     ):
         raise ValueError("v4 geometry table shape or dtype disagrees with checkpoint provenance")
-    coefficients = torch.as_tensor(checkpoint.get("instanceSurvivalCoefficients"), dtype=torch.float32, device=device)
-    if tuple(coefficients.shape) != (num_instances, 4, 7) or not bool(torch.isfinite(coefficients).all()):
-        raise ValueError("v4 checkpoint instanceSurvivalCoefficients has an invalid shape")
-    prior_coefficients = torch.as_tensor(
-        checkpoint.get("instanceSurvivalPriorCoefficients"),
-        dtype=torch.float32,
-        device=device,
-    )
-    calibration_residual = torch.as_tensor(
-        checkpoint.get("instanceSurvivalCalibrationResidual"),
-        dtype=torch.float32,
-        device=device,
-    )
-    if (
-        prior_coefficients.shape != coefficients.shape
-        or calibration_residual.shape != coefficients.shape
-        or not bool(torch.isfinite(prior_coefficients).all())
-        or not bool(torch.isfinite(calibration_residual).all())
-        or not torch.allclose(
-            coefficients,
-            prior_coefficients + calibration_residual,
-            rtol=5e-3,
-            atol=1e-2,
+    geometry_tensor = torch.from_numpy(geometry).to(device)
+    if representation_mode == "survival":
+        features = torch.as_tensor(
+            checkpoint.get("instanceSurvivalCoefficients"),
+            dtype=torch.float32,
+            device=device,
         )
-    ):
-        raise ValueError("checkpoint fused coefficients disagree with prior plus residual")
-    runtime_features = torch.cat([torch.from_numpy(geometry).to(device), coefficients.reshape(num_instances, -1)], dim=-1)
+        if tuple(features.shape) != (num_instances, 4, 7) or not bool(
+            torch.isfinite(features).all()
+        ):
+            raise ValueError(
+                "v4 checkpoint instanceSurvivalCoefficients has an invalid shape"
+            )
+        prior_coefficients = torch.as_tensor(
+            checkpoint.get("instanceSurvivalPriorCoefficients"),
+            dtype=torch.float32,
+            device=device,
+        )
+        calibration_residual = torch.as_tensor(
+            checkpoint.get("instanceSurvivalCalibrationResidual"),
+            dtype=torch.float32,
+            device=device,
+        )
+        if (
+            prior_coefficients.shape != features.shape
+            or calibration_residual.shape != features.shape
+            or not bool(torch.isfinite(prior_coefficients).all())
+            or not bool(torch.isfinite(calibration_residual).all())
+            or not torch.allclose(
+                features,
+                prior_coefficients + calibration_residual,
+                rtol=5e-3,
+                atol=1e-2,
+            )
+        ):
+            raise ValueError(
+                "checkpoint fused coefficients disagree with prior plus residual"
+            )
+        runtime_features = torch.cat(
+            [geometry_tensor, features.reshape(num_instances, -1)], dim=-1
+        )
+    elif representation_mode == "generic28":
+        features = torch.as_tensor(
+            checkpoint.get("instanceOcclusionFeatures"),
+            dtype=torch.float32,
+            device=device,
+        )
+        if tuple(features.shape) != (num_instances, 4, 7) or not bool(
+            torch.isfinite(features).all()
+        ):
+            raise ValueError(
+                "generic28 checkpoint instanceOcclusionFeatures has an invalid shape"
+            )
+        runtime_features = torch.cat(
+            [geometry_tensor, features.reshape(num_instances, -1)], dim=-1
+        )
+    elif representation_mode == "none":
+        runtime_features = geometry_tensor
+    else:
+        raise ValueError(f"unsupported occlusion representation: {representation_mode}")
     dataset = PoseCSRDataset(Path(args.dataset_dir).resolve(), num_instances=num_instances)
     num_glbs = int(instance_to_glb.max()) + 1 if instance_to_glb.size else 0
     glb_bytes = _load_glb_bytes(
@@ -1048,7 +1091,7 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
     relation = checkpoint.get("relation")
     if not isinstance(relation, Mapping):
         raise ValueError("v4 checkpoint relation provenance is missing")
-    if args.relation_dir is not None:
+    if representation_mode == "survival" and args.relation_dir is not None:
         relation_dir = Path(args.relation_dir).resolve()
         relation_meta_path = relation_dir / "relation_csr_meta.json"
         if not relation_meta_path.is_file():

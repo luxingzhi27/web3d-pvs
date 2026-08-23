@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Train the relation-prior PVS model with per-instance calibration.
+"""Train the mainline PVS model and its compact occlusion controls.
 
 This entry reads train, calibration, and validation only.  The train-owned
 relation graph first generates a shared prior.  A zero-initialized train-only
 residual then calibrates each instance before both terms are fused into the
-fixed 124-value runtime table.  Calibration alone freezes each checkpoint's
+fixed runtime table.  Calibration alone freezes each checkpoint's
 threshold, while validation is replayed only at that frozen threshold.  Test
 is not a valid argument or fallback.
 """
@@ -35,6 +35,7 @@ from pvs_model import (  # noqa: E402
     DUAL_PROBE_RAW_QUERY_DIM,
     GEO_DIM,
     MODEL_SCHEMA,
+    OCCLUSION_REPRESENTATION_MODES,
     QUERY_TAIL_SEPARATOR_FAMILIES,
     RUNTIME_FEATURE_DIM,
     VIEWCELL_REGION_CONDITIONED_VISIBILITY_FUSION_DIM,
@@ -684,6 +685,64 @@ def _load_relation_bundle(
         observations,
         provenance,
     )
+
+
+def _load_depth_normalization_only(relation_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read only train-frozen depth metadata for non-survival controls."""
+    path = relation_dir / "relation_csr_meta.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"missing relation metadata: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    depth = payload.get("depthNormalization")
+    if not isinstance(depth, Mapping):
+        raise ValueError("relation metadata has no depthNormalization object")
+    q01 = float(depth.get("q01", float("nan")))
+    q99 = float(depth.get("q99", float("nan")))
+    epsilon = float(depth.get("epsilon", float("nan")))
+    if (
+        not math.isfinite(q01)
+        or not math.isfinite(q99)
+        or not math.isfinite(epsilon)
+        or q99 <= q01
+        or epsilon <= 0.0
+        or depth.get("sourceSplit") != "train"
+    ):
+        raise ValueError("depth normalization is not a valid train-frozen contract")
+    normalized = {
+        "q01": q01,
+        "q99": q99,
+        "epsilon": epsilon,
+        "sourceSplit": "train",
+        "definition": str(depth.get("definition", "")),
+    }
+    return normalized, {
+        "enabled": False,
+        "source": "depth_normalization_metadata_only",
+        "metadataPath": str(path.resolve()),
+        "relationGraphRead": False,
+        "survivalObservationsRead": False,
+        "testRead": False,
+    }
+
+
+class _DisabledSurvivalSampler:
+    epoch_instance_coverage = 0.0
+    epoch_observation_coverage = 0.0
+    epoch_unique_observation_count = 0
+    epoch_direction_coverage = 0.0
+    epoch_event_censor_coverage = 0.0
+
+    def start_epoch(self, _epoch: int) -> None:
+        return None
+
+    def manifest(self) -> dict[str, Any]:
+        return {
+            "enabled": False,
+            "reason": "occlusion representation has no survival supervision",
+            "relationGraphRead": False,
+            "survivalObservationsRead": False,
+            "testRead": False,
+        }
 
 
 def _load_glb_bytes(
@@ -1376,15 +1435,27 @@ def _runtime_features(
     )
     if not isinstance(diagnostics, Mapping):
         raise TypeError("offline encoder did not return calibration diagnostics")
-    coefficients = diagnostics.get("survival_coefficients")
-    if not isinstance(coefficients, torch.Tensor) or coefficients.shape != (
-        geometry.shape[0], *SURVIVAL_SHAPE
-    ):
-        raise ValueError("offline encoder did not produce [N, 4, 7]")
-    runtime = torch.cat([geometry, coefficients.reshape(geometry.shape[0], -1)], dim=-1)
-    if runtime.shape != (geometry.shape[0], RUNTIME_FEATURE_DIM) or not bool(torch.isfinite(runtime).all()):
+    features = diagnostics.get("occlusion_features")
+    if not isinstance(features, torch.Tensor):
+        raise ValueError("offline encoder did not produce occlusion features")
+    expected_feature_shape = (
+        (geometry.shape[0], 0)
+        if model.occlusion_representation == "none"
+        else (geometry.shape[0], *SURVIVAL_SHAPE)
+    )
+    if tuple(features.shape) != expected_feature_shape:
+        raise ValueError(
+            f"offline encoder produced {list(features.shape)}, expected {list(expected_feature_shape)}"
+        )
+    runtime = torch.cat(
+        [geometry, features.reshape(geometry.shape[0], -1)], dim=-1
+    )
+    if runtime.shape != (
+        geometry.shape[0],
+        model.runtime_feature_dim,
+    ) or not bool(torch.isfinite(runtime).all()):
         raise FloatingPointError("v4 fixed runtime table is invalid")
-    return runtime, coefficients, dict(diagnostics)
+    return runtime, features, dict(diagnostics)
 
 
 def _weighted_quantile_numpy(
@@ -2181,15 +2252,10 @@ def _checkpoint(
     best: Mapping[str, Any] | None = None,
     training_state: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    prior = coefficient_diagnostics.get("survival_prior_coefficients")
-    residual = coefficient_diagnostics.get("instance_calibration_applied_residual")
-    if not isinstance(prior, torch.Tensor) or not isinstance(residual, torch.Tensor):
-        raise ValueError("checkpoint requires prior and applied instance calibration tensors")
-    if prior.shape != coefficients.shape or residual.shape != coefficients.shape:
-        raise ValueError("checkpoint calibration tensors disagree with fused coefficients")
-    if not torch.allclose(coefficients, prior + residual, rtol=1e-5, atol=1e-6):
-        raise ValueError("checkpoint fused coefficients do not equal prior plus calibration residual")
-    return {
+    features = coefficient_diagnostics.get("occlusion_features")
+    if not isinstance(features, torch.Tensor) or features.shape != coefficients.shape:
+        raise ValueError("checkpoint occlusion features disagree with runtime features")
+    payload: dict[str, Any] = {
         "schema": "pvs-bounded-relation-prior-instance-calibrated-moment-checkpoint-v4",
         "runtimeSchema": MODEL_SCHEMA,
         "experimentName": args.experiment_name,
@@ -2197,15 +2263,22 @@ def _checkpoint(
         "globalStep": int(global_step),
         "modelConfig": model.config,
         "modelState": model.state_dict(),
-        "instanceSurvivalCoefficients": coefficients.detach().cpu().half(),
-        "instanceSurvivalPriorCoefficients": prior.detach().cpu().half(),
-        "instanceSurvivalCalibrationResidual": residual.detach().cpu().half(),
+        "occlusionRepresentation": model.occlusion_representation,
+        "instanceOcclusionFeatures": features.detach().cpu().half(),
         "instanceCalibration": {
             "mode": model.instance_calibration_mode,
             "blend": float(model.instance_calibration_blend.detach().cpu()),
-            "fusion": "prior_plus_applied_residual",
+            "fusion": (
+                "prior_plus_applied_residual"
+                if model.occlusion_representation == "survival"
+                else "not_applicable"
+            ),
             "reliability": dict(calibration_reliability_meta),
-            "runtimeExport": "fused_coefficients_only",
+            "runtimeExport": (
+                "fused_coefficients_only"
+                if model.occlusion_representation == "survival"
+                else "not_applicable"
+            ),
         },
         "protocol": dict(protocol),
         "relation": dict(relation_provenance),
@@ -2216,10 +2289,55 @@ def _checkpoint(
         "trainingState": dict(training_state or {}),
         "testRead": False,
     }
+    if model.occlusion_representation == "survival":
+        prior = coefficient_diagnostics.get("survival_prior_coefficients")
+        residual = coefficient_diagnostics.get(
+            "instance_calibration_applied_residual"
+        )
+        if not isinstance(prior, torch.Tensor) or not isinstance(
+            residual, torch.Tensor
+        ):
+            raise ValueError(
+                "survival checkpoint requires prior and applied calibration tensors"
+            )
+        if prior.shape != coefficients.shape or residual.shape != coefficients.shape:
+            raise ValueError(
+                "checkpoint calibration tensors disagree with fused coefficients"
+            )
+        if not torch.allclose(
+            coefficients, prior + residual, rtol=1e-5, atol=1e-6
+        ):
+            raise ValueError(
+                "checkpoint fused coefficients do not equal prior plus calibration residual"
+            )
+        payload.update(
+            {
+                "instanceSurvivalCoefficients": coefficients.detach().cpu().half(),
+                "instanceSurvivalPriorCoefficients": prior.detach().cpu().half(),
+                "instanceSurvivalCalibrationResidual": residual.detach().cpu().half(),
+            }
+        )
+    return payload
 
 
 def _save_fp16(path: Path, values: torch.Tensor) -> None:
     values.detach().cpu().numpy().astype("<f2").tofile(path)
+
+
+def _save_occlusion_fp16(
+    output_dir: Path,
+    prefix: str,
+    model: BoundedRelationSurvivalMomentModel,
+    values: torch.Tensor,
+) -> None:
+    if model.occlusion_representation == "none":
+        return
+    label = (
+        "instance_survival_coefficients"
+        if model.occlusion_representation == "survival"
+        else "instance_generic_occlusion_features"
+    )
+    _save_fp16(output_dir / f"{prefix}{label}_fp16.bin", values)
 
 
 def parse_args() -> argparse.Namespace:
@@ -2238,8 +2356,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--variant", default="full")
     parser.add_argument(
         "--relation-source",
-        choices=("bounded_hierarchical", "geometry_only"),
+        choices=("bounded_hierarchical", "geometry_only", "none"),
         default="bounded_hierarchical",
+    )
+    parser.add_argument(
+        "--occlusion-representation",
+        choices=OCCLUSION_REPRESENTATION_MODES,
+        default="survival",
     )
     parser.add_argument(
         "--spectral-mode",
@@ -3079,6 +3202,20 @@ def main() -> None:
             "integrated visibility training forbids utility, download, resource, "
             "legacy RVL count/rank, and legacy boundary objectives"
         )
+    if args.occlusion_representation == "survival":
+        if args.relation_source not in {"bounded_hierarchical", "geometry_only"}:
+            raise ValueError("survival representation requires a survival relation source")
+    elif (
+        args.relation_source != "none"
+        or args.instance_calibration_mode != "disabled"
+        or args.survival_loss_weight != 0.0
+        or args.relation_consistency_weight != 0.0
+        or args.instance_calibration_regularization_weight != 0.0
+    ):
+        raise ValueError(
+            "generic28 and none representations require relation_source=none, "
+            "disabled instance calibration, and zero survival auxiliary weights"
+        )
     if args.safety_boundary_ema_decay > 0.0 and (
         args.safety_boundary_scope != "batch"
         or args.safety_boundary_excess_weight <= 0.0
@@ -3234,42 +3371,65 @@ def main() -> None:
         raise ValueError("the registered v4 runtime requires one fixed view-cell radius")
 
     geometry_cpu, geometry_meta = _load_geometry(args.initial_geo_features, num_instances)
-    (
-        relation,
-        relation_cpu,
-        local_cpu,
-        structural_cpu,
-        observations_np,
-        relation_provenance,
-    ) = _load_relation_bundle(args.relation_dir, dataset, train_split, num_instances)
-    depth_meta = relation.metadata["depthNormalization"]
+    if args.occlusion_representation == "survival":
+        (
+            relation,
+            relation_cpu,
+            local_cpu,
+            structural_cpu,
+            observations_np,
+            relation_provenance,
+        ) = _load_relation_bundle(
+            args.relation_dir, dataset, train_split, num_instances
+        )
+        depth_meta = relation.metadata["depthNormalization"]
+        sampler: StratifiedSurvivalObservationSampler | _DisabledSurvivalSampler = (
+            StratifiedSurvivalObservationSampler(
+                observations_np,
+                seed=args.seed,
+                metadata={"trainOnly": True, "splitNames": ["train"]},
+            )
+        )
+        required_sampler_steps = math.ceil(
+            sampler.unique_instances.size / int(args.observation_batch_size)
+        )
+        if int(args.steps_per_epoch) < required_sampler_steps:
+            raise ValueError(
+                f"steps_per_epoch={args.steps_per_epoch} cannot cover all observed instances; "
+                f"need at least {required_sampler_steps}"
+            )
+        calibration_reliability_np, calibration_reliability_meta = (
+            _instance_calibration_reliability(
+                dataset,
+                train_split,
+                observations_np,
+                num_instances,
+            )
+        )
+        relation_metadata = relation.metadata
+    else:
+        depth_meta, relation_provenance = _load_depth_normalization_only(
+            args.relation_dir
+        )
+        relation_cpu = {}
+        local_cpu = torch.zeros((num_instances,), dtype=torch.long)
+        structural_cpu = torch.zeros((1,), dtype=torch.long)
+        observations_np = {}
+        sampler = _DisabledSurvivalSampler()
+        calibration_reliability_np = np.zeros((num_instances,), dtype=np.float32)
+        calibration_reliability_meta = {
+            "enabled": False,
+            "reason": "occlusion representation has no instance calibration",
+            "sourceSplit": "train",
+            "testRead": False,
+        }
+        relation_metadata = {"depthNormalization": depth_meta}
     depth_q01 = float(depth_meta["q01"])
     depth_q99 = float(depth_meta["q99"])
     depth_epsilon = float(depth_meta["epsilon"])
     if not depth_q99 > depth_q01 or depth_epsilon <= 0.0 or depth_meta.get("sourceSplit") != "train":
         raise ValueError("relation depth normalization is not a valid train-frozen contract")
 
-    sampler = StratifiedSurvivalObservationSampler(
-        observations_np,
-        seed=args.seed,
-        metadata={"trainOnly": True, "splitNames": ["train"]},
-    )
-    required_sampler_steps = math.ceil(
-        sampler.unique_instances.size / int(args.observation_batch_size)
-    )
-    if int(args.steps_per_epoch) < required_sampler_steps:
-        raise ValueError(
-            f"steps_per_epoch={args.steps_per_epoch} cannot cover all observed instances; "
-            f"need at least {required_sampler_steps}"
-        )
-    calibration_reliability_np, calibration_reliability_meta = (
-        _instance_calibration_reliability(
-            dataset,
-            train_split,
-            observations_np,
-            num_instances,
-        )
-    )
     if args.instance_exposure_balance_weight > 0.0:
         (
             exposure_positive_np,
@@ -3304,7 +3464,7 @@ def main() -> None:
     relation_tensors: dict[str, Any] = {
         key: value.to(device) for key, value in relation_cpu.items()
     }
-    relation_tensors["metadata"] = relation.metadata
+    relation_tensors["metadata"] = relation_metadata
     local_ids = local_cpu.to(device)
     structural_ids = structural_cpu.to(device)
     glb_bytes = torch.from_numpy(glb_bytes_np).to(device)
@@ -3315,6 +3475,7 @@ def main() -> None:
         num_instances,
         num_glbs,
         relation_source=args.relation_source,
+        occlusion_representation=args.occlusion_representation,
         spectral_mode=args.spectral_mode,
         depth_q01=depth_q01,
         depth_q99=depth_q99,
@@ -3683,7 +3844,7 @@ def main() -> None:
             ),
             "fusion": "unbounded additive main visibility logit",
             "poseReduction": "none",
-            "runtimeInstanceFeatureDim": 124,
+            "runtimeInstanceFeatureDim": int(model.runtime_feature_dim),
             "runtimeAssetShapeChanged": False,
             "onlineNeighborQuery": False,
             "onlineSubposeExpansion": False,
@@ -3732,7 +3893,7 @@ def main() -> None:
                 else "none"
             ),
             "boundedCorrection": False,
-            "runtimeInstanceFeatureDim": int(RUNTIME_FEATURE_DIM),
+            "runtimeInstanceFeatureDim": int(model.runtime_feature_dim),
             "runtimeAssets": "no additional per-instance asset",
             "runtimeAssetShapeChanged": False,
             "onlineNeighborQuery": False,
@@ -4201,6 +4362,12 @@ def main() -> None:
         },
         "relation": relation_provenance,
         "sampler": sampler.manifest(),
+        "occlusionRepresentation": {
+            "mode": args.occlusion_representation,
+            "runtimeFeatureDim": model.runtime_feature_dim,
+            "relationGraphRead": args.occlusion_representation == "survival",
+            "survivalObservationsRead": args.occlusion_representation == "survival",
+        },
         "instanceCalibration": {
             "mode": args.instance_calibration_mode,
             "maximumAbsoluteResidual": float(args.instance_calibration_max_abs),
@@ -4211,7 +4378,11 @@ def main() -> None:
             "warmupFraction": float(args.instance_calibration_warmup_fraction),
             "rampFraction": float(args.instance_calibration_ramp_fraction),
             "reliability": calibration_reliability_meta,
-            "runtimeExport": "fused_coefficients_only",
+            "runtimeExport": (
+                "fused_coefficients_only"
+                if args.occlusion_representation == "survival"
+                else "not_applicable"
+            ),
         },
         "cullCertificate": {
             "enabled": model.cull_certificate_head is not None,
@@ -4270,7 +4441,11 @@ def main() -> None:
             "sharedHiddenDetached": model.cull_certificate_head is not None,
         },
     }
-    if protocol["candidateDigests"]["train"] != relation_provenance["candidateDigest"]:
+    if (
+        args.occlusion_representation == "survival"
+        and protocol["candidateDigests"]["train"]
+        != relation_provenance["candidateDigest"]
+    ):
         raise ValueError("relation and PoseCSR train candidate hashes differ")
 
     _prepare_output(args.output_dir)
@@ -4300,8 +4475,19 @@ def main() -> None:
         parameters.extend(contrastive_projector.parameters())
     if weighted_np_boundary_logit is not None:
         parameters.append(weighted_np_boundary_logit)
+    if model.generic_occlusion_features is not None:
+        generic_parameter = model.generic_occlusion_features
+        shared_parameters = [
+            value for value in parameters if value is not generic_parameter
+        ]
+        optimizer_parameters: Any = [
+            {"params": shared_parameters, "weight_decay": args.weight_decay},
+            {"params": [generic_parameter], "weight_decay": 0.0},
+        ]
+    else:
+        optimizer_parameters = parameters
     optimizer = torch.optim.AdamW(
-        parameters,
+        optimizer_parameters,
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
     )
@@ -5285,20 +5471,33 @@ def main() -> None:
             assert isinstance(safety_objective, torch.Tensor)
             assert isinstance(efficiency_objective, torch.Tensor)
 
-            sample = sampler.sample_batch(args.observation_batch_size, step=step)
-            sampled_observations = sampler.gather(sample, device=device)
-            sampled_observations["normalized_depth"] = sampled_observations["depth"]
-            survival_loss, survival_parts = stratified_survival_censoring_loss(
-                model,
-                coefficients,
-                sampled_observations,
-            )
-            relation_loss, relation_parts = model.relation_consistency_loss(
-                geometry,
-                relation_tensors,
-                seed=args.seed + global_step,
-                max_edges=args.observation_batch_size,
-            )
+            if args.occlusion_representation == "survival":
+                assert isinstance(sampler, StratifiedSurvivalObservationSampler)
+                sample = sampler.sample_batch(args.observation_batch_size, step=step)
+                sampled_observations = sampler.gather(sample, device=device)
+                sampled_observations["normalized_depth"] = sampled_observations["depth"]
+                survival_loss, survival_parts = stratified_survival_censoring_loss(
+                    model,
+                    coefficients,
+                    sampled_observations,
+                )
+                relation_loss, relation_parts = model.relation_consistency_loss(
+                    geometry,
+                    relation_tensors,
+                    seed=args.seed + global_step,
+                    max_edges=args.observation_batch_size,
+                )
+            else:
+                survival_loss = logits.sum() * 0.0
+                relation_loss = logits.sum() * 0.0
+                survival_parts = {
+                    "lossSurvivalCensoring": survival_loss,
+                    "survivalSupervisionEnabled": 0.0,
+                }
+                relation_parts = {
+                    "lossRelationConsistency": relation_loss,
+                    "relationPositiveCount": 0.0,
+                }
             if args.utility_loss_weight > 0.0:
                 utility_loss, utility_parts = visual_utility_loss(
                     aux,
@@ -5710,7 +5909,10 @@ def main() -> None:
             raise RuntimeError(
                 f"processed {processed_steps} non-empty training steps, expected {args.steps_per_epoch}"
             )
-        if sampler.epoch_instance_coverage < 1.0:
+        if (
+            args.occlusion_representation == "survival"
+            and sampler.epoch_instance_coverage < 1.0
+        ):
             raise RuntimeError("stratified observation sampler did not cover every observed instance")
         scheduler.step()
         train_summary = {
@@ -5729,6 +5931,7 @@ def main() -> None:
             "lr": float(scheduler.get_last_lr()[0]),
             "trainMetricSummary": train_summary,
             "samplerCoverage": {
+                "enabled": args.occlusion_representation == "survival",
                 "instances": sampler.epoch_instance_coverage,
                 "observations": sampler.epoch_observation_coverage,
                 "uniqueObservations": sampler.epoch_unique_observation_count,
@@ -5886,8 +6089,10 @@ def main() -> None:
                         ),
                         args.output_dir / "best_diagnostic.pt",
                     )
-                    _save_fp16(
-                        args.output_dir / "best_diagnostic_instance_survival_coefficients_fp16.bin",
+                    _save_occlusion_fp16(
+                        args.output_dir,
+                        "best_diagnostic_",
+                        model,
                         coefficient_snapshot,
                     )
 
@@ -5926,8 +6131,10 @@ def main() -> None:
                         training_state=checkpoint_training_state,
                     )
                     _save_safe_checkpoint_alias(payload, args.output_dir)
-                    _save_fp16(
-                        args.output_dir / "best_safe_instance_survival_coefficients_fp16.bin",
+                    _save_occlusion_fp16(
+                        args.output_dir,
+                        "best_safe_",
+                        model,
                         coefficient_snapshot,
                     )
 
@@ -5969,7 +6176,9 @@ def main() -> None:
             ),
             args.output_dir / "last.pt",
         )
-        _save_fp16(args.output_dir / "instance_survival_coefficients_fp16.bin", coefficient_snapshot)
+        _save_occlusion_fp16(
+            args.output_dir, "", model, coefficient_snapshot
+        )
         history.append(row)
         _append_jsonl(metrics_path, row)
         _write_json(args.output_dir / "train_history.json", history)
@@ -5994,15 +6203,16 @@ def main() -> None:
         )
     _save_fp16(args.output_dir / "instance_runtime_features_fp16.bin", final_runtime)
     _save_fp16(args.output_dir / "instance_geo_features_fp16.bin", geometry)
-    _save_fp16(args.output_dir / "instance_survival_coefficients_fp16.bin", final_coefficients)
-    _save_fp16(
-        args.output_dir / "instance_survival_prior_coefficients_fp16.bin",
-        final_coefficient_diagnostics["survival_prior_coefficients"],
-    )
-    _save_fp16(
-        args.output_dir / "instance_survival_calibration_residual_fp16.bin",
-        final_coefficient_diagnostics["instance_calibration_applied_residual"],
-    )
+    _save_occlusion_fp16(args.output_dir, "", model, final_coefficients)
+    if model.occlusion_representation == "survival":
+        _save_fp16(
+            args.output_dir / "instance_survival_prior_coefficients_fp16.bin",
+            final_coefficient_diagnostics["survival_prior_coefficients"],
+        )
+        _save_fp16(
+            args.output_dir / "instance_survival_calibration_residual_fp16.bin",
+            final_coefficient_diagnostics["instance_calibration_applied_residual"],
+        )
     calibration_summary = {
         "schema": "pvs-bounded-relation-prior-instance-calibrated-calibration-summary-v4",
         "status": "safe" if best_safe is not None else "no_qualified_safety_workpoint",
@@ -6027,14 +6237,19 @@ def main() -> None:
             "modelConfig": model.config,
             "protocol": protocol,
             "runtimeFeature": {
-                "shape": [num_instances, RUNTIME_FEATURE_DIM],
+                "shape": [num_instances, model.runtime_feature_dim],
                 "dtype": "float16",
                 "file": "instance_runtime_features_fp16.bin",
-                "bytes": int(num_instances * RUNTIME_FEATURE_DIM * 2),
+                "bytes": int(num_instances * model.runtime_feature_dim * 2),
             },
             "relationRuntimeExported": False,
             "instanceCalibrationRuntimeExportedSeparately": False,
-            "survivalCoefficientFusion": "shared_relation_prior_plus_applied_instance_residual",
+            "occlusionRepresentation": args.occlusion_representation,
+            "survivalCoefficientFusion": (
+                "shared_relation_prior_plus_applied_instance_residual"
+                if args.occlusion_representation == "survival"
+                else "not_applicable"
+            ),
             "instanceCalibrationReliability": calibration_reliability_meta,
             "defaultFrontendModified": False,
             "testRead": False,

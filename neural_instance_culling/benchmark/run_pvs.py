@@ -41,6 +41,7 @@ UPDATE_BUDGET_CHECK_STEPS_PER_EPOCH = 300
 UPDATE_BUDGET_CHECK_STAGE = "update_budget_check12x300"
 FORMAL_FULL_STAGE = "formal40_s02_full"
 FORMAL_ABLATION_STAGE = "formal40_s02_ablation"
+CORE_ABLATION_STAGE = "core_ablation"
 EXPECTED_SPLITS = {
     "train": 5926,
     "calibration": 659,
@@ -100,6 +101,67 @@ FORMAL_VARIANTS: dict[str, dict[str, Any]] = {
     },
 }
 FORMAL_ABLATIONS = tuple(name for name in FORMAL_VARIANTS if name != "full")
+
+CORE_CONFIG: dict[str, Any] = {
+    "name": "final",
+    "lr": 2e-4,
+    "guard": 0.30,
+    "separation": 0.20,
+    "mix": 0.0,
+    "margin": 0.50,
+}
+CORE_VARIANTS: dict[str, dict[str, Any]] = {
+    "no_relation": {
+        "variant": "core_no_relation",
+        "representation": "survival",
+        "relation": "geometry_only",
+        "calibration": "residual",
+        "spectral": "moment_envelope",
+    },
+    "no_survival": {
+        "variant": "core_no_survival",
+        "representation": "none",
+        "relation": "none",
+        "calibration": "disabled",
+        "spectral": "moment_envelope",
+    },
+    "generic28": {
+        "variant": "core_generic28",
+        "representation": "generic28",
+        "relation": "none",
+        "calibration": "disabled",
+        "spectral": "moment_envelope",
+    },
+    "no_moment": {
+        "variant": "core_no_moment",
+        "representation": "survival",
+        "relation": "bounded_hierarchical",
+        "calibration": "residual",
+        "spectral": "point",
+    },
+    "no_recall_guard": {
+        "variant": "core_no_recall_guard",
+        "representation": "survival",
+        "relation": "bounded_hierarchical",
+        "calibration": "residual",
+        "spectral": "moment_envelope",
+        "guard": 0.0,
+    },
+    "no_tail_margin": {
+        "variant": "core_no_tail_margin",
+        "representation": "survival",
+        "relation": "bounded_hierarchical",
+        "calibration": "residual",
+        "spectral": "moment_envelope",
+        "separation": 0.0,
+    },
+}
+
+
+def _variant_spec(name: str) -> Mapping[str, Any]:
+    if name in CORE_VARIANTS:
+        return CORE_VARIANTS[name]
+    return FORMAL_VARIANTS[name]
 
 
 def _paths(data_root: Path) -> dict[str, Path]:
@@ -174,6 +236,8 @@ def preflight(data_root: Path) -> dict[str, Any]:
         ],
         "scanConfigCount": len(SCAN_CONFIGS),
         "formalVariants": list(FORMAL_VARIANTS),
+        "coreAblationVariants": list(CORE_VARIANTS),
+        "coreAblationNewMemberCount": len(CORE_VARIANTS) * len(FORMAL_SEEDS),
         "formalSeeds": list(FORMAL_SEEDS),
         "formalEpochs": FORMAL_EPOCHS,
         "formalStepsPerEpoch": FORMAL_STEPS_PER_EPOCH,
@@ -211,7 +275,7 @@ def build_train_command(
     eval_every: int = 4,
 ) -> list[str]:
     paths = _paths(data_root)
-    spec = FORMAL_VARIANTS[variant_name]
+    spec = _variant_spec(variant_name)
     hp = _effective_config(config, spec)
     command = [
         sys.executable,
@@ -226,9 +290,10 @@ def build_train_command(
         "--output-dir", str(member.resolve()),
         "--experiment-name", f"{EXPERIMENT}_{member.name}",
         "--variant", str(spec["variant"]),
+        "--occlusion-representation", str(spec.get("representation", "survival")),
         "--relation-source", str(spec["relation"]),
         "--spectral-mode", str(spec["spectral"]),
-        "--instance-calibration-mode", "residual",
+        "--instance-calibration-mode", str(spec.get("calibration", "residual")),
         "--loss-variant", "pose_balanced_rvl_contrastive",
         "--refinement-scope", "all",
         "--epochs", "1" if smoke else str(int(epochs)),
@@ -243,9 +308,15 @@ def build_train_command(
         "--device", "cuda",
         "--learning-rate", str(float(hp["lr"])),
         "--weight-decay", "0.00001",
-        "--survival-loss-weight", "0.25",
-        "--relation-consistency-weight", "0.10",
-        "--instance-calibration-regularization-weight", "0.02",
+        "--survival-loss-weight", (
+            "0.25" if spec.get("representation", "survival") == "survival" else "0.0"
+        ),
+        "--relation-consistency-weight", (
+            "0.10" if spec.get("representation", "survival") == "survival" else "0.0"
+        ),
+        "--instance-calibration-regularization-weight", (
+            "0.02" if spec.get("representation", "survival") == "survival" else "0.0"
+        ),
         "--instance-calibration-max-abs", "4.0",
         "--sparse-instance-penalty", "3.0",
         "--instance-calibration-warmup-fraction", "0.10",
@@ -281,14 +352,19 @@ def _member_contract(
     spec: tuple[str, str, Mapping[str, Any], int, int],
 ) -> dict[str, Any]:
     _stage, variant, config, seed, epochs = spec
-    variant_spec = FORMAL_VARIANTS[variant]
+    variant_spec = _variant_spec(variant)
     hp = _effective_config(config, variant_spec)
     return {
         "experiment_name": f"{EXPERIMENT}_{member.name}",
         "variant": str(variant_spec["variant"]),
+        "occlusion_representation": str(
+            variant_spec.get("representation", "survival")
+        ),
         "relation_source": str(variant_spec["relation"]),
         "spectral_mode": str(variant_spec["spectral"]),
-        "instance_calibration_mode": "residual",
+        "instance_calibration_mode": str(
+            variant_spec.get("calibration", "residual")
+        ),
         "loss_variant": "pose_balanced_rvl_contrastive",
         "epochs": int(epochs),
         "steps_per_epoch": _steps_per_epoch(_stage),
@@ -308,6 +384,8 @@ def _steps_per_epoch(stage: str) -> int:
     if stage == UPDATE_BUDGET_CHECK_STAGE:
         return UPDATE_BUDGET_CHECK_STEPS_PER_EPOCH
     if stage in {FORMAL_FULL_STAGE, FORMAL_ABLATION_STAGE}:
+        return FORMAL_STEPS_PER_EPOCH
+    if stage == CORE_ABLATION_STAGE:
         return FORMAL_STEPS_PER_EPOCH
     return STEPS_PER_EPOCH
 
@@ -369,7 +447,11 @@ def _require_formal_bootstrap_protocol(
     spec: tuple[str, str, Mapping[str, Any], int, int],
 ) -> None:
     stage = str(spec[0])
-    if stage not in {FORMAL_FULL_STAGE, FORMAL_ABLATION_STAGE}:
+    if stage not in {
+        FORMAL_FULL_STAGE,
+        FORMAL_ABLATION_STAGE,
+        CORE_ABLATION_STAGE,
+    }:
         return
     replicates = _calibration_bootstrap_replicates(member)
     if replicates < FORMAL_BOOTSTRAP_REPLICATES:
@@ -696,6 +778,8 @@ def main(argv: list[str] | None = None) -> None:
         choices=(
             "preflight",
             "smoke",
+            "core-smoke",
+            "core-ablation",
             "update-budget-check12x300",
             "formal40-s02-full",
             "formal40-s02-ablation",
@@ -703,17 +787,106 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     parser.add_argument("--data-root", type=Path, default=Path("/mnt/sda/rhyang/slm"))
-    parser.add_argument("--model-root", type=Path, default=ROOT / "neural_instance_culling/model/out" / OUTPUT_TAG)
-    parser.add_argument("--benchmark-root", type=Path, default=ROOT / "neural_instance_culling/benchmark/out" / OUTPUT_TAG)
+    parser.add_argument("--model-root", type=Path, default=None)
+    parser.add_argument("--benchmark-root", type=Path, default=None)
     parser.add_argument("--gpu-ids", type=int, nargs="+", default=[0, 1, 2, 3])
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+
+    core_mode = args.mode in {"core-smoke", "core-ablation"}
+    if args.model_root is None:
+        args.model_root = ROOT / "neural_instance_culling/model/out" / (
+            "pvs_mainline_core_ablation" if core_mode else OUTPUT_TAG
+        )
+    if args.benchmark_root is None:
+        args.benchmark_root = ROOT / "neural_instance_culling/benchmark/out" / (
+            "pvs_mainline_core_ablation" if core_mode else OUTPUT_TAG
+        )
 
     contract = preflight(args.data_root)
     args.benchmark_root.mkdir(parents=True, exist_ok=True)
     _write_json(args.benchmark_root / "preflight.json", contract)
     if args.mode == "preflight":
         print(json.dumps(contract, ensure_ascii=False, indent=2))
+        return
+    if args.mode == "core-smoke":
+        smoke_specs = _specs(
+            "core_smoke",
+            ("full", "generic28", "no_survival"),
+            (CORE_CONFIG,),
+            (SCAN_SEED,),
+            1,
+        )
+        commands = [
+            build_train_command(
+                args.data_root,
+                _member_for_spec(args.model_root, spec),
+                spec[2],
+                spec[1],
+                seed=spec[3],
+                epochs=1,
+                smoke=True,
+            )
+            for spec in smoke_specs
+        ]
+        if args.dry_run:
+            print(json.dumps({"commands": commands, "testRead": False}, indent=2))
+            return
+        for spec in smoke_specs:
+            member = _member_for_spec(args.model_root, spec)
+            if member.exists():
+                shutil.rmtree(member)
+        _run_queue(
+            [
+                (_member_for_spec(args.model_root, spec).name, command)
+                for spec, command in zip(smoke_specs, commands)
+            ],
+            args.gpu_ids[: min(3, len(args.gpu_ids))],
+            args.benchmark_root / "logs/core_smoke",
+        )
+        return
+
+    if args.mode == "core-ablation":
+        specs = _specs(
+            CORE_ABLATION_STAGE,
+            tuple(CORE_VARIANTS),
+            (CORE_CONFIG,),
+            FORMAL_SEEDS,
+            FORMAL_EPOCHS,
+        )
+        if args.dry_run:
+            commands = [
+                build_train_command(
+                    args.data_root,
+                    _member_for_spec(args.model_root, spec),
+                    spec[2],
+                    spec[1],
+                    seed=spec[3],
+                    epochs=spec[4],
+                    steps_per_epoch=FORMAL_STEPS_PER_EPOCH,
+                    eval_every=4,
+                )
+                for spec in specs
+            ]
+            print(json.dumps({"commands": commands, "testRead": False}, indent=2))
+            return
+        _run_specs(
+            args.data_root,
+            args.model_root,
+            args.benchmark_root,
+            specs,
+            args.gpu_ids,
+        )
+        summary = _summarize(
+            args.model_root,
+            args.benchmark_root,
+            specs,
+            args.benchmark_root / "core_ablation_summary.json",
+        )
+        summary["fullReference"] = "existing three-seed no-contrastive formal members"
+        summary["epochs"] = FORMAL_EPOCHS
+        summary["seeds"] = list(FORMAL_SEEDS)
+        _write_json(args.benchmark_root / "core_ablation_summary.json", summary)
         return
     if args.mode == "smoke":
         config = SCAN_CONFIGS[2]

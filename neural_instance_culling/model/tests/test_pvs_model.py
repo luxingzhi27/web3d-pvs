@@ -28,6 +28,7 @@ class BoundedRelationSurvivalMomentModelContractTest(unittest.TestCase):
     def _model(
         self,
         *,
+        occlusion_representation: str = "survival",
         spectral_mode: str = "moment_envelope",
         instance_calibration_mode: str = "residual",
         view_residual_max_abs: float = 0.0,
@@ -47,9 +48,18 @@ class BoundedRelationSurvivalMomentModelContractTest(unittest.TestCase):
         model = BoundedRelationSurvivalMomentModel(
             4,
             2,
-            relation_source="geometry_only",
+            relation_source=(
+                "geometry_only"
+                if occlusion_representation == "survival"
+                else "none"
+            ),
+            occlusion_representation=occlusion_representation,
             spectral_mode=spectral_mode,
-            instance_calibration_mode=instance_calibration_mode,
+            instance_calibration_mode=(
+                instance_calibration_mode
+                if occlusion_representation == "survival"
+                else "disabled"
+            ),
             depth_q01=0.0,
             depth_q99=4.0,
             view_residual_max_abs=view_residual_max_abs,
@@ -121,6 +131,65 @@ class BoundedRelationSurvivalMomentModelContractTest(unittest.TestCase):
         self.assertEqual(config["instanceCalibration"]["mode"], "residual")
         self.assertEqual(config["instanceCalibration"]["runtimeExport"], "fused coefficients only")
         self.assertFalse(config["queryTailSeparator"]["enabled"])
+
+    def test_occlusion_controls_have_exact_runtime_dimensions(self) -> None:
+        generic = self._model(occlusion_representation="generic28")
+        no_survival = self._model(occlusion_representation="none")
+
+        self.assertEqual(generic.runtime_feature_dim, 124)
+        self.assertEqual(generic.runtime_head_input_dim, 130)
+        self.assertEqual(generic.export_schema()["fixedTable"]["shape"], ["N", 124])
+        self.assertEqual(no_survival.runtime_feature_dim, 96)
+        self.assertEqual(no_survival.runtime_head_input_dim, 118)
+        self.assertEqual(
+            no_survival.export_schema()["fixedTable"]["shape"], ["N", 96]
+        )
+        self.assertEqual(
+            no_survival.export_schema()["fixedTable"]["layout"],
+            [{"name": "geometry", "offset": 0, "dim": 96}],
+        )
+
+    def test_generic28_receives_visibility_gradients_without_survival_encoder(self) -> None:
+        model = self._model(occlusion_representation="generic28")
+        geometry = torch.randn((4, 96), dtype=torch.float32)
+        diagnostics = model.offline_encode_survival(
+            geometry,
+            {},
+            torch.zeros(4, dtype=torch.long),
+            torch.zeros(4, dtype=torch.long),
+            return_diagnostics=True,
+        )
+        runtime = torch.cat(
+            [geometry, diagnostics["occlusion_features"].reshape(4, 28)], dim=-1
+        )
+        inputs = self._inputs()
+        logits, _ = model.compute_logits_with_aux(
+            inputs["camera"],
+            inputs["camera_view"],
+            inputs["candidate_camera"],
+            inputs["instance_ids"],
+            runtime_features=runtime,
+            query_center_world=inputs["query_center"],
+            viewcell_radius_m=inputs["radius"],
+        )
+        logits.square().mean().backward()
+
+        self.assertIsNone(model.offline_survival_encoder)
+        self.assertIsNone(model.geometry_only_survival_encoder)
+        self.assertIsNotNone(model.generic_occlusion_features.grad)
+        self.assertGreater(
+            float(model.generic_occlusion_features.grad.abs().sum()), 0.0
+        )
+
+    def test_all_occlusion_modes_strictly_reload_their_own_checkpoint_state(self) -> None:
+        for mode in ("survival", "generic28", "none"):
+            with self.subTest(mode=mode):
+                source = self._model(occlusion_representation=mode)
+                target = self._model(occlusion_representation=mode)
+                target.load_state_dict(source.state_dict(), strict=True)
+                self.assertEqual(
+                    set(source.state_dict()), set(target.state_dict())
+                )
 
     def test_query_tail_separator_families_are_zero_initialized_and_share_108d_input(self) -> None:
         inputs = self._inputs()

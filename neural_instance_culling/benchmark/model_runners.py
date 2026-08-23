@@ -24,7 +24,7 @@ from directional_occlusion_proxy_encoder_model import DirectionalOcclusionProxyE
 from pvs_model import (  # noqa: E402
     BoundedRelationSurvivalMomentModel,
     MODEL_SCHEMA as BOUNDED_RELATION_SURVIVAL_MOMENT_SCHEMA,
-    RUNTIME_FEATURE_DIM as BOUNDED_RELATION_SURVIVAL_MOMENT_RUNTIME_DIM,
+    OCCLUSION_REPRESENTATION_MODES,
     VIEWCELL_EXTREME_VISIBILITY_INPUT_DIM,
     VIEWCELL_EXTREME_VISIBILITY_PROJECTION_DIM,
     VIEWCELL_REGION_CONDITIONED_VISIBILITY_FUSION_DIM,
@@ -1859,7 +1859,16 @@ def load_bounded_relation_survival_moment_v4_runner(
     num_glbs = int(config["numGlbs"])
     if num_instances <= 0 or num_glbs <= 0:
         raise ValueError("v4 checkpoint instance or GLB count is invalid")
-    if int(config.get("runtimeFeatureDim", -1)) != BOUNDED_RELATION_SURVIVAL_MOMENT_RUNTIME_DIM:
+    representation_config = config.get("occlusionRepresentation")
+    representation_mode = (
+        str(representation_config.get("mode"))
+        if isinstance(representation_config, Mapping)
+        else str(checkpoint.get("occlusionRepresentation", "survival"))
+    )
+    if representation_mode not in OCCLUSION_REPRESENTATION_MODES:
+        raise ValueError("v4 checkpoint occlusion representation is invalid")
+    runtime_feature_dim = 96 if representation_mode == "none" else 124
+    if int(config.get("runtimeFeatureDim", -1)) != runtime_feature_dim:
         raise ValueError("v4 checkpoint runtime feature dimension is invalid")
     world_aabbs, instance_to_glb, runtime = load_runtime_meta(
         runtime_meta_path, num_instances
@@ -1915,6 +1924,14 @@ def load_bounded_relation_survival_moment_v4_runner(
     ):
         if bundle_config.get(key) != config.get(key):
             raise ValueError(f"v4 runtime bundle modelConfig field disagrees: {key}")
+    bundle_representation = bundle_config.get("occlusionRepresentation")
+    bundle_representation_mode = (
+        str(bundle_representation.get("mode"))
+        if isinstance(bundle_representation, Mapping)
+        else "survival"
+    )
+    if bundle_representation_mode != representation_mode:
+        raise ValueError("v4 runtime bundle occlusion representation disagrees")
     for section, fields in (
         (
             "depthNormalization",
@@ -1946,12 +1963,17 @@ def load_bounded_relation_survival_moment_v4_runner(
     if fixed_table.get("dtype") != "float16":
         raise ValueError("v4 runtime table dtype is invalid")
     declared_shape = fixed_table.get("shape")
-    if declared_shape != [num_instances, BOUNDED_RELATION_SURVIVAL_MOMENT_RUNTIME_DIM]:
+    if declared_shape != [num_instances, runtime_feature_dim]:
         raise ValueError("v4 runtime table shape is invalid")
     if int(fixed_table.get("byteLength", -1)) != int(runtime_path.stat().st_size):
         raise ValueError("v4 runtime table byte length disagrees with its file")
-    if source.get("source") != "checkpoint.geometryFeatures_plus_survivalCoefficients":
-        raise ValueError("v4 runtime bundle was not rebuilt from checkpoint-owned coefficients")
+    expected_feature_source = {
+        "survival": "checkpoint.geometryFeatures_plus_survivalCoefficients",
+        "generic28": "checkpoint.geometryFeatures_plus_genericOcclusionFeatures",
+        "none": "checkpoint.geometryFeatures_only",
+    }[representation_mode]
+    if source.get("source") != expected_feature_source:
+        raise ValueError("v4 runtime bundle feature source is invalid")
     if not isinstance(geometry_source, Mapping):
         raise ValueError("v4 runtime bundle geometry source is missing")
     if not isinstance(geometry_checkpoint, Mapping):
@@ -1964,11 +1986,11 @@ def load_bounded_relation_survival_moment_v4_runner(
     if not np.isclose(float(bundle_meta.get("threshold", np.nan)), threshold, rtol=0.0, atol=1e-7):
         raise ValueError("v4 runtime bundle threshold disagrees with checkpoint calibration")
     values = np.fromfile(runtime_path, dtype=np.float16)
-    expected = int(config["numInstances"]) * BOUNDED_RELATION_SURVIVAL_MOMENT_RUNTIME_DIM
+    expected = int(config["numInstances"]) * runtime_feature_dim
     if values.size != expected or not bool(np.isfinite(values).all()):
         raise ValueError(f"{runtime_path} has {values.size} fp16 values, expected {expected}")
     runtime_features = values.reshape(
-        int(config["numInstances"]), BOUNDED_RELATION_SURVIVAL_MOMENT_RUNTIME_DIM
+        int(config["numInstances"]), runtime_feature_dim
     ).astype(np.float32)
     depth = config.get("depthNormalization") or {}
     instance_calibration = config.get("instanceCalibration") or {}
@@ -1979,6 +2001,7 @@ def load_bounded_relation_survival_moment_v4_runner(
         relation_hidden_dim=int(config["relationHiddenDim"]),
         hidden_dim=int(config["hiddenDim"]),
         relation_source=str(config["relationSource"]),
+        occlusion_representation=representation_mode,
         spectral_mode=str(config["spectralMode"]),
         depth_q01=float(depth["q01"]),
         depth_q99=float(depth["q99"]),
