@@ -24,18 +24,30 @@ POSE_COUNT = 730
 BOOTSTRAP_REPLICATES = 10_000
 BOOTSTRAP_SEED = 20260823
 
+SET_METRICS = (
+    "Precision",
+    "Recall",
+    "WeightedRecall",
+    "Accuracy",
+    "BalancedAccuracy",
+    "Specificity",
+    "F1",
+    "Jaccard",
+    "UsefulCull",
+    "BadCull",
+)
 METRICS = (
-    "precision",
-    "recall",
-    "weightedRecall",
-    "accuracy",
-    "balancedAccuracy",
-    "specificity",
-    "f1",
-    "jaccard",
-    "usefulCull",
-    "badCull",
+    *(f"pose{name}" for name in SET_METRICS),
+    *(f"aggregate{name}" for name in SET_METRICS),
+    "avgCandidateCount",
+    "avgGtCount",
     "avgPredCount",
+    "avgTp",
+    "avgFp",
+    "avgFn",
+    "avgTn",
+    "predOverCandidate",
+    "predOverGt",
     "predictedGlbCount",
     "predictedGlbBytes",
     "glbCountReduction",
@@ -136,41 +148,75 @@ def _row_arrays(rows: list[dict[str, Any]]) -> dict[str, np.ndarray]:
     }
 
 
-def _metrics_from_sums(
-    sums: Mapping[str, np.ndarray], pose_count: int
+def _set_metrics(
+    values: Mapping[str, np.ndarray], *, prefix: str
 ) -> dict[str, np.ndarray]:
-    tp, fp, fn, tn = (sums[field] for field in ("tp", "fp", "fn", "tn"))
+    tp, fp, fn, tn = (values[field] for field in ("tp", "fp", "fn", "tn"))
     candidate = np.maximum(1.0, tp + fp + fn + tn)
     precision = tp / np.maximum(1.0, tp + fp)
     recall = tp / np.maximum(1.0, tp + fn)
     specificity = tn / np.maximum(1.0, tn + fp)
     return {
-        "precision": precision,
-        "recall": recall,
-        "weightedRecall": sums["weightedTp"] / np.maximum(1e-12, sums["weightedGt"]),
-        "accuracy": (tp + tn) / candidate,
-        "balancedAccuracy": 0.5 * (recall + specificity),
-        "specificity": specificity,
-        "f1": 2.0 * tp / np.maximum(1.0, 2.0 * tp + fp + fn),
-        "jaccard": tp / np.maximum(1.0, tp + fp + fn),
-        "usefulCull": tn / candidate,
-        "badCull": fn / candidate,
-        "avgPredCount": sums["predCount"] / max(1, pose_count),
-        "predictedGlbCount": sums["predictedGlbCount"] / max(1, pose_count),
-        "predictedGlbBytes": sums["predictedGlbBytes"] / max(1, pose_count),
-        "glbCountReduction": sums["glbCountReduction"] / max(1, pose_count),
-        "glbByteReduction": sums["glbByteReduction"] / max(1, pose_count),
-        "glbBytesAtAchievedVisualUtility": (
-            sums["glbBytesAtAchievedVisualUtility"] / max(1, pose_count)
-        ),
+        f"{prefix}Precision": precision,
+        f"{prefix}Recall": recall,
+        f"{prefix}WeightedRecall": values["weightedTp"]
+        / np.maximum(1e-12, values["weightedGt"]),
+        f"{prefix}Accuracy": (tp + tn) / candidate,
+        f"{prefix}BalancedAccuracy": 0.5 * (recall + specificity),
+        f"{prefix}Specificity": specificity,
+        f"{prefix}F1": 2.0 * tp / np.maximum(1.0, 2.0 * tp + fp + fn),
+        f"{prefix}Jaccard": tp / np.maximum(1.0, tp + fp + fn),
+        f"{prefix}UsefulCull": tn / candidate,
+        f"{prefix}BadCull": fn / candidate,
     }
 
 
+def _metrics_from_values(
+    values: Mapping[str, np.ndarray], pose_count: int
+) -> dict[str, np.ndarray]:
+    aggregate_values = {
+        field: value.sum(axis=-1) for field, value in values.items()
+    }
+    aggregate = _set_metrics(aggregate_values, prefix="aggregate")
+    pose = {
+        metric: value.mean(axis=-1)
+        for metric, value in _set_metrics(values, prefix="pose").items()
+    }
+    tp, fp, fn, tn = (
+        aggregate_values[field] for field in ("tp", "fp", "fn", "tn")
+    )
+    candidate = np.maximum(1.0, tp + fp + fn + tn)
+    gt = np.maximum(1.0, tp + fn)
+    efficiency = {
+        "avgCandidateCount": candidate / max(1, pose_count),
+        "avgGtCount": (tp + fn) / max(1, pose_count),
+        "avgPredCount": aggregate_values["predCount"] / max(1, pose_count),
+        "avgTp": tp / max(1, pose_count),
+        "avgFp": fp / max(1, pose_count),
+        "avgFn": fn / max(1, pose_count),
+        "avgTn": tn / max(1, pose_count),
+        "predOverCandidate": aggregate_values["predCount"] / candidate,
+        "predOverGt": aggregate_values["predCount"] / gt,
+        "predictedGlbCount": aggregate_values["predictedGlbCount"]
+        / max(1, pose_count),
+        "predictedGlbBytes": aggregate_values["predictedGlbBytes"]
+        / max(1, pose_count),
+        "glbCountReduction": aggregate_values["glbCountReduction"]
+        / max(1, pose_count),
+        "glbByteReduction": aggregate_values["glbByteReduction"]
+        / max(1, pose_count),
+        "glbBytesAtAchievedVisualUtility": aggregate_values[
+            "glbBytesAtAchievedVisualUtility"
+        ]
+        / max(1, pose_count),
+    }
+    return {**pose, **aggregate, **efficiency}
+
+
 def _seed_metrics(arrays: Mapping[str, np.ndarray]) -> dict[str, float]:
-    sums = {field: values.sum(keepdims=True) for field, values in arrays.items()}
     return {
-        metric: float(value[0])
-        for metric, value in _metrics_from_sums(sums, POSE_COUNT).items()
+        metric: float(value)
+        for metric, value in _metrics_from_values(arrays, POSE_COUNT).items()
     }
 
 
@@ -236,11 +282,11 @@ def paired_hierarchical_bootstrap(
             selected = np.take_along_axis(
                 selected_seeds, pose_indices[None, ...], axis=3
             )
-            sums = {
-                field: selected[index].sum(axis=2)
+            values = {
+                field: selected[index]
                 for index, field in enumerate(COUNT_FIELDS)
             }
-            return _metrics_from_sums(sums, POSE_COUNT)
+            return _metrics_from_values(values, POSE_COUNT)
 
         reference_metrics = sample_metrics(reference_stack)
         variant_metrics = sample_metrics(variant_stack)
@@ -271,6 +317,10 @@ def _aggregate_row(payload: Mapping[str, Any], source: Path) -> dict[str, Any]:
     runtime = payload.get("runtime")
     if not isinstance(aggregate, Mapping) or not isinstance(runtime, Mapping):
         raise ValueError(f"evaluation summary is incomplete: {source}")
+    per_pose = payload.get("perPose")
+    if not isinstance(per_pose, list):
+        raise ValueError(f"evaluation has no per-pose rows: {source}")
+    member_metrics = _seed_metrics(_row_arrays(per_pose))
     return {
         "source": str(source),
         "threshold": float(payload["threshold"]),
@@ -280,7 +330,7 @@ def _aggregate_row(payload: Mapping[str, Any], source: Path) -> dict[str, Any]:
         ),
         "runtimeFeatureBytes": int(runtime["runtimeFeatureBytes"]),
         "runtimeFeatureDim": int(runtime["runtimeFeatureDim"]),
-        "metrics": {metric: float(aggregate[metric]) for metric in METRICS},
+        "metrics": member_metrics,
         "testRead": False,
     }
 
@@ -321,7 +371,7 @@ def summarize(
         for index, variant in enumerate(VARIANTS)
     }
     payload = {
-        "schema": "pvs-mainline-core-ablation-summary-v1",
+        "schema": "pvs-mainline-core-ablation-summary-v2",
         "split": "validation",
         "testRead": False,
         "reference": "existing three-seed full model with contrastive representation loss disabled",
@@ -339,7 +389,7 @@ def summarize(
         "contrastDirection": (
             "full minus ablation; positive favors full for accuracy/recall/precision/"
             "useful-cull/reduction metrics, while negative favors full for bad-cull, "
-            "prediction count, and byte-cost metrics"
+            "prediction count, false-positive/false-negative count, and byte-cost metrics"
         ),
         "metrics": list(METRICS),
         "rows": rows,

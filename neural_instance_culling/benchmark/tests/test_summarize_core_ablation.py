@@ -48,11 +48,13 @@ class CoreAblationSummaryTest(unittest.TestCase):
             full, ablation, replicates=100, seed=20260823
         )
 
-        self.assertGreater(result["precision"]["ci95"][0], 0.0)
-        self.assertGreater(result["balancedAccuracy"]["ci95"][0], 0.0)
-        self.assertGreater(result["usefulCull"]["ci95"][0], 0.0)
+        self.assertGreater(result["posePrecision"]["ci95"][0], 0.0)
+        self.assertGreater(result["aggregatePrecision"]["ci95"][0], 0.0)
+        self.assertGreater(result["poseBalancedAccuracy"]["ci95"][0], 0.0)
+        self.assertGreater(result["aggregateUsefulCull"]["ci95"][0], 0.0)
         self.assertLess(result["avgPredCount"]["ci95"][1], 0.0)
-        self.assertEqual(result["weightedRecall"]["ci95"], [0.0, 0.0])
+        self.assertEqual(result["poseWeightedRecall"]["ci95"], [0.0, 0.0])
+        self.assertEqual(result["aggregateWeightedRecall"]["ci95"], [0.0, 0.0])
 
     def test_pair_validation_rejects_candidate_identity_drift(self) -> None:
         reference = [
