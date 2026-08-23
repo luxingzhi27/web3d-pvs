@@ -8,17 +8,27 @@ from pathlib import Path
 from neural_instance_culling.benchmark.run_pvs_v4_integrated_visibility_mainline_v1 import (
     EVALUATION_SCHEMA,
     EXPECTED_SPLITS,
+    FORMAL_ABLATIONS,
+    FORMAL_ABLATION_STAGE,
+    FORMAL_BOOTSTRAP_REPLICATES,
     FORMAL_EPOCHS,
+    FORMAL_FULL_STAGE,
     FORMAL_SEEDS,
+    FORMAL_STEPS_PER_EPOCH,
     FORMAL_VARIANTS,
     SCAN_CONFIGS,
     SCAN_EPOCHS,
     SCAN_SEED,
+    UPDATE_BUDGET_CHECK_CONFIGS,
+    UPDATE_BUDGET_CHECK_EPOCHS,
+    UPDATE_BUDGET_CHECK_STAGE,
+    UPDATE_BUDGET_CHECK_STEPS_PER_EPOCH,
     _evaluation_matches_member,
     _evaluation_path,
     _member_complete,
     _member_contract,
     _member_for_spec,
+    _require_formal_bootstrap_protocol,
     _specs,
     _validate_scan_summary,
     build_train_command,
@@ -68,9 +78,10 @@ class IntegratedVisibilityMainlineRunnerTests(unittest.TestCase):
         self.assertEqual(_argument(command, "--rvl-count-weight"), "0.0")
         self.assertEqual(_argument(command, "--rvl-rank-weight"), "0.0")
 
-    def test_formal_matrix_is_three_seed_eighty_epoch_and_has_core_ablations(self) -> None:
+    def test_formal_matrix_is_three_seed_forty_epoch_and_has_core_ablations(self) -> None:
         self.assertEqual(FORMAL_SEEDS, (20260801, 20260802, 20260803))
-        self.assertEqual(FORMAL_EPOCHS, 80)
+        self.assertEqual(FORMAL_EPOCHS, 40)
+        self.assertEqual(FORMAL_STEPS_PER_EPOCH, 900)
         self.assertEqual(
             set(FORMAL_VARIANTS),
             {
@@ -81,6 +92,114 @@ class IntegratedVisibilityMainlineRunnerTests(unittest.TestCase):
                 "without_contrastive_separation",
             },
         )
+
+    def test_update_budget_check_retrains_s01_and_s02_for_twelve_by_three_hundred(self) -> None:
+        self.assertEqual(
+            [config["name"] for config in UPDATE_BUDGET_CHECK_CONFIGS],
+            [SCAN_CONFIGS[1]["name"], SCAN_CONFIGS[2]["name"]],
+        )
+        self.assertEqual(UPDATE_BUDGET_CHECK_EPOCHS, 12)
+        self.assertEqual(UPDATE_BUDGET_CHECK_STEPS_PER_EPOCH, 300)
+        spec = (
+            UPDATE_BUDGET_CHECK_STAGE,
+            "full",
+            UPDATE_BUDGET_CHECK_CONFIGS[0],
+            SCAN_SEED,
+            UPDATE_BUDGET_CHECK_EPOCHS,
+        )
+        contract = _member_contract(Path("/tmp/member"), spec)
+        command = build_train_command(
+            DATA_ROOT,
+            Path("/tmp/member"),
+            spec[2],
+            spec[1],
+            seed=spec[3],
+            epochs=spec[4],
+            steps_per_epoch=UPDATE_BUDGET_CHECK_STEPS_PER_EPOCH,
+            eval_every=2,
+        )
+
+        self.assertEqual(contract["steps_per_epoch"], 300)
+        self.assertEqual(_argument(command, "--epochs"), "12")
+        self.assertEqual(_argument(command, "--steps-per-epoch"), "300")
+        self.assertEqual(_argument(command, "--eval-every"), "2")
+        self.assertEqual(_argument(command, "--snapshot-every"), "2")
+
+    def test_s02_formal_longtrain_is_full_model_three_seed_forty_epoch(self) -> None:
+        specs = _specs(
+            FORMAL_FULL_STAGE,
+            ("full",),
+            (SCAN_CONFIGS[2],),
+            FORMAL_SEEDS,
+            FORMAL_EPOCHS,
+        )
+
+        self.assertEqual(len(specs), 3)
+        self.assertEqual({spec[1] for spec in specs}, {"full"})
+        self.assertEqual({spec[2]["name"] for spec in specs}, {SCAN_CONFIGS[2]["name"]})
+        self.assertEqual({spec[3] for spec in specs}, set(FORMAL_SEEDS))
+        self.assertEqual({spec[4] for spec in specs}, {40})
+        contract = _member_contract(Path("/tmp/member"), specs[0])
+        command = build_train_command(
+            DATA_ROOT,
+            Path("/tmp/member"),
+            specs[0][2],
+            specs[0][1],
+            seed=specs[0][3],
+            epochs=specs[0][4],
+            steps_per_epoch=FORMAL_STEPS_PER_EPOCH,
+        )
+        self.assertEqual(contract["steps_per_epoch"], 900)
+        self.assertEqual(_argument(command, "--steps-per-epoch"), "900")
+        self.assertEqual(
+            _argument(command, "--calibration-bootstrap-replicates"), "10000"
+        )
+
+    def test_s02_formal_ablation_matrix_has_four_variants_and_three_seeds(self) -> None:
+        specs = _specs(
+            FORMAL_ABLATION_STAGE,
+            FORMAL_ABLATIONS,
+            (SCAN_CONFIGS[2],),
+            FORMAL_SEEDS,
+            FORMAL_EPOCHS,
+        )
+
+        self.assertEqual(len(specs), 12)
+        self.assertNotIn("full", FORMAL_ABLATIONS)
+        self.assertEqual(set(FORMAL_ABLATIONS), set(FORMAL_VARIANTS) - {"full"})
+        self.assertEqual({spec[3] for spec in specs}, set(FORMAL_SEEDS))
+        self.assertEqual({spec[4] for spec in specs}, {40})
+        for spec in specs:
+            contract = _member_contract(Path("/tmp/member"), spec)
+            self.assertEqual(contract["steps_per_epoch"], 900)
+
+    def test_formal_runner_rejects_historical_2000_replicate_calibration(self) -> None:
+        spec = (
+            FORMAL_FULL_STAGE,
+            "full",
+            SCAN_CONFIGS[2],
+            FORMAL_SEEDS[0],
+            FORMAL_EPOCHS,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            member = Path(directory)
+            summary = {
+                "calibration": {"bootstrapReplicates": 2_000},
+                "testRead": False,
+            }
+            (member / "calibration_ready_summary.json").write_text(
+                json.dumps(summary), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "reaudit"):
+                _require_formal_bootstrap_protocol(member, spec)
+
+            summary["calibration"]["bootstrapReplicates"] = (
+                FORMAL_BOOTSTRAP_REPLICATES
+            )
+            (member / "calibration_ready_summary.json").write_text(
+                json.dumps(summary), encoding="utf-8"
+            )
+            _require_formal_bootstrap_protocol(member, spec)
 
     def test_loss_ablations_change_only_the_registered_loss_component(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -180,7 +299,7 @@ class IntegratedVisibilityMainlineRunnerTests(unittest.TestCase):
             output.write_text(json.dumps(payload), encoding="utf-8")
             self.assertFalse(_evaluation_matches_member(output, member, spec))
 
-    def test_formal80_rejects_an_incomplete_scan_summary(self) -> None:
+    def test_scan_validation_rejects_an_incomplete_summary(self) -> None:
         specs = _specs(
             "scan", ("full",), SCAN_CONFIGS, (SCAN_SEED,), SCAN_EPOCHS
         )

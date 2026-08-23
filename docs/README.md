@@ -1,6 +1,6 @@
 # NeuralStreamWeb3D 文档索引
 
-更新时间：2026-08-21
+更新时间：2026-08-23
 
 这里的文档只服务于当前可运行版本、正式保留证据和 v4 实验链。当前唯一待执行优化入口是 V4 综合可见性主线：固定分层关系与逐实例校准生存场、视点区域矩包络频谱，并使用逐 pose 平衡分类、单侧 RVL 加权召回保护和共享困难边界对比的综合损失。旧 108 维尾部分离和逐位姿安全前沿结果只作为历史诊断，不再续跑。当前默认 checkpoint、阈值和前端资产保持不变。
 
@@ -8,7 +8,7 @@
 
 | 文档 | 内容 |
 |---|---|
-| [`experiments/pvs_v4_integrated_visibility_mainline_v1_2026-08-21.md`](experiments/pvs_v4_integrated_visibility_mainline_v1_2026-08-21.md) | 当前唯一执行协议：固定三项论文机制、恢复后的 5926/659/730/684 主 split、非重复综合损失、8 组快速扫描和五变体三种子 80 epoch 长训 |
+| [`experiments/pvs_v4_integrated_visibility_mainline_v1_2026-08-21.md`](experiments/pvs_v4_integrated_visibility_mainline_v1_2026-08-21.md) | 当前执行协议：固定三项论文机制、5926/659/730/684 主 split、综合损失、快速扫描和五变体三种子 40×900 正式长训 |
 | [`evaluation/pvs_pose_balanced_frontier_visibility_loss_v1_formal40_2026-08-19.md`](evaluation/pvs_pose_balanced_frontier_visibility_loss_v1_formal40_2026-08-19.md) | 逐 pose 平衡 BCE 加动态安全前沿损失的两轮扫描、三种子 40 epoch 正式结果及与旧 V4 的同口径比较；结果未晋级默认模型 |
 | [`experiments/pvs_pose_balanced_frontier_visibility_loss_v1_2026-08-19.md`](experiments/pvs_pose_balanced_frontier_visibility_loss_v1_2026-08-19.md) | 新损失的设计、输入输出、扫描配置、从头训练协议和保留规则 |
 | [`experiments/pvs_joint_108d_query_tail_separator_from_scratch_v1_2026-08-19.md`](experiments/pvs_joint_108d_query_tail_separator_from_scratch_v1_2026-08-19.md) | 已停止的 108 维联合分离器矩阵计划；只保留历史协议和已有产物，不再训练或续跑 |
@@ -42,6 +42,7 @@
 
 | 文档 | 内容 |
 |---|---|
+| [`evaluation/pvs_v4_integrated_visibility_mainline_v1_protocolfix_2026-08-23.md`](evaluation/pvs_v4_integrated_visibility_mainline_v1_protocolfix_2026-08-23.md) | 当前 V4 五变体正式 validation：Full 30 个保留 checkpoint 统一以 10,000 次 bootstrap 重审计，三种子阈值冻结及五变体 paired bootstrap 结论 |
 | [`evaluation/pvs_pose_balanced_frontier_visibility_loss_v1_formal40_2026-08-19.md`](evaluation/pvs_pose_balanced_frontier_visibility_loss_v1_formal40_2026-08-19.md) | 新损失两轮参数扫描、三种子从头 40 epoch 结果、安全阈值、分类/剔除/资源指标和未晋级结论 |
 | [`evaluation/unified_pvs_metrics_evaluation.md`](evaluation/unified_pvs_metrics_evaluation.md) | pose/aggregate、weighted recall、accuracy、balanced accuracy、useful cull 和资源指标定义 |
 | [`evaluation/test_split_benchmark_protocol.md`](evaluation/test_split_benchmark_protocol.md) | calibration、validation、test 的冻结关系 |

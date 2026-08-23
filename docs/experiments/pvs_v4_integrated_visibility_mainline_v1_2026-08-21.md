@@ -76,9 +76,11 @@ RVL 保护项以 aggregate weighted recall 为主体，并加入较小的最差 
 
 即使 8 组都未达到安全门，也选择相对最优配置继续正式长训，不允许 pilot 门控取消长训。
 
-## 80 epoch 正式矩阵
+## 40 epoch 正式长训与矩阵
 
-选定配置后，以下 5 个成员均使用 `20260801/02/03` 三个种子，从头训练 80 epoch：
+历史方向代理 `full40` 的每个 epoch 固定为 `900 step`。因此本轮正式长训也固定为 `40 epoch × 900 step = 36000` 次参数更新，不能再用早期 runner 中的 `100 step/epoch` 充当同等级长训。
+
+`s02` 完整模型和以下核心消融均使用 `20260801/02/03` 三个种子从头训练 40 epoch。为充分使用四张 GPU，完整模型与消融可以并行执行；它们使用独立输出目录，最终仍按相同训练预算比较：
 
 | 成员 | 分层关系/生存场 | 区域矩频谱 | RVL 召回保护 | 表征对比 |
 |---|---|---|---|---|
@@ -109,7 +111,15 @@ conda run -n slm_pvs python \
 
 conda run -n slm_pvs python \
   neural_instance_culling/benchmark/run_pvs_v4_integrated_visibility_mainline_v1.py \
-  formal80 --data-root /mnt/sda/rhyang/slm --gpu-ids 0 1 2 3
+  update-budget-check12x300 --data-root /mnt/sda/rhyang/slm --gpu-ids 0 1
+
+conda run -n slm_pvs python \
+  neural_instance_culling/benchmark/run_pvs_v4_integrated_visibility_mainline_v1.py \
+  formal40-s02-full --data-root /mnt/sda/rhyang/slm --gpu-ids 2 3 0
+
+conda run -n slm_pvs python \
+  neural_instance_culling/benchmark/run_pvs_v4_integrated_visibility_mainline_v1.py \
+  formal40-s02-ablation --data-root /mnt/sda/rhyang/slm --gpu-ids 1
 ```
 
 ## 扫描前代码审计修正
@@ -120,7 +130,7 @@ conda run -n slm_pvs python \
 - 最佳安全 checkpoint 的阈值仍只来自该 epoch 的 calibration；通过 calibration 与 validation 双重 weighted recall 安全门后，epoch 按 validation 的 balanced accuracy、precision、accuracy、useful cull 和平均预测数量依次选择，calibration useful cull 只作最后平局项。
 - 独立 validation 重放同时计算 weighted recall 点估计和单侧置信下界，runner 只有在两者都大于 `0.99` 时才把成员列为安全成员。
 - runner 会核对成员的 seed、变体、训练轮数和综合损失参数。不完整或不匹配的本实验成员会从头重跑；完整成员保持不动。
-- 已存在的 validation 结果必须与当前选定 checkpoint、epoch、seed、阈值、模型描述和 calibration 摘要一致，否则强制重评。`formal80` 还会验证八组扫描和对应评价全部完成，不能用部分或旧扫描摘要启动长训。
+- 已存在的 validation 结果必须与当前选定 checkpoint、epoch、seed、阈值、模型描述和 calibration 摘要一致，否则强制重评。正式成员的 calibration bootstrap 少于 `10,000` 次时 runner 必须拒绝汇总，不能用较小重采样数生成正式结论。
 
 ## 快速扫描结果
 
@@ -137,9 +147,11 @@ conda run -n slm_pvs python \
 | s06 | 0.34 | 0.99967 | 0.99953 | 0.50941 | 0.05971 | 0.02340 | 0.03719 | 4569.2 |
 | s07 | 0.22 | 0.99809 | 0.99736 | 0.61655 | 0.33519 | 0.03061 | 0.31426 | 3246.2 |
 
-按预登记的“安全成员中先比较 balanced accuracy，再比较 precision、accuracy、useful cull 和预测数量”规则，正式长训选择 `s01`：学习率 `2e-4`、召回保护权重 `0.30`、共享边界权重 `0.15`、对比混合比例 `0.15`、logit 间隔 `0.50`。其 pose 宏平均 precision、recall、weighted recall 和 balanced accuracy 分别为 `0.12919`、`0.95593`、`0.99590` 和 `0.74738`。
+早期预登记的“安全成员中先比较 balanced accuracy，再比较 precision、accuracy、useful cull 和预测数量”规则曾选择 `s01`：学习率 `2e-4`、召回保护权重 `0.30`、共享边界权重 `0.15`、对比混合比例 `0.15`、logit 间隔 `0.50`。其 pose 宏平均 precision、recall、weighted recall 和 balanced accuracy分别为 `0.12919`、`0.95593`、`0.99590` 和 `0.74738`。
 
-`s02` 在 accuracy、precision、useful cull 和平均预测数上更好，但 balanced accuracy 明显低于 `s01`，说明它通过漏掉更多普通可见实例换取了剔除；其 aggregate recall 仅为 `0.49755`。它因此不覆盖预登记排序成为正式配置。扫描轮数较短，以上结果只用于固定长训超参数，不能作为论文最终结果。
+`s02` 在 accuracy、precision、useful cull 和平均预测数上更好，但 balanced accuracy 明显低于 `s01`，说明它通过漏掉更多普通可见实例换取了剔除；其 aggregate recall 为 `0.49755`。进一步审计发现该扫描只有 `10×100=1000` 次更新，而下午的旧方向代理对比学习扫描为 `12×300=3600` 次更新，旧正式 `full40` 更是每个 epoch `900 step`。因此这批短扫描不足以可靠决定正式长训配置。
+
+2026-08-21 已停止刚启动的 `s01 80×100` 正式矩阵，部分输出只作为中止诊断，不能进入正式结果。当前先以独立名称复核 `s01/s02 12×300`，同时将三种子正式完整模型改为 `s02 40×900`。这一调整不修改候选、GT、split、阈值冻结规则或前端资产。
 
 ## 当前验证状态
 
@@ -148,4 +160,21 @@ conda run -n slm_pvs python \
 - 主 split、固定架构、禁止 checkpoint 初始化和关闭非可见性目标的 preflight 已通过。
 - 使用完整正式关系表完成单步 CUDA 前向、反向、校准和 checkpoint 写出；总损失为 `2.0564`，峰值 CUDA 显存约 `3.03 GiB`，未出现非有限数值。
 - 综合损失、多目标梯度投影、关系构建、训练主入口、导出、数据契约、评价器和 runner 共 `152` 项相关 unittest 已通过。
-- 八组快速扫描已经完成并选定 `s01`；下一步执行五变体、三种子、80 epoch 正式长训。正式长训仍不得修改当前默认 checkpoint、阈值和前端资产。
+- 八组 `10×100` 快速扫描已经完成，但不再单独用于冻结正式配置。
+- `s01/s02 12×300` 等更新预算复核使用独立输出；`s02` 三种子完整模型正式长训固定为 `40×900`。
+- 三个 `s02` 正式种子同时运行；seed 03 在快速复核期间与 GPU 0 共享显卡，复核结束后独占该卡。A6000 显存足以容纳两个进程，运行日志仍分别保存。
+- `s02` 快速复核完成后，空闲的 GPU 1 立即承接四个核心消融的三种子 `40×900` 队列；完整模型和消融使用独立 stage 与输出目录，不互相覆盖。
+- `s01 80×100` 矩阵已中止，不得汇入正式表格。正式长训仍不得修改当前默认 checkpoint、阈值和前端资产。
+
+## 2026-08-23 正式评价协议修正
+
+训练完成后审计发现，三种子 Full 在训练期 checkpoint 选择中使用了 `2,000` 次 bootstrap，四组消融使用了 `10,000` 次。网络权重本身有效，但二者不能按正式同口径直接比较。修正入口固定重放 Full 每个种子的 epoch `4, 8, ..., 40` 十个保留 checkpoint，使用各 checkpoint 自己的 calibration 冻结阈值，再在 validation 上选择安全 checkpoint；全过程不读取 test、不补 GT、不改变候选，也不重训模型。
+
+```bash
+conda run -n slm_pvs python \
+  neural_instance_culling/benchmark/reaudit_pvs_v4_integrated_visibility_mainline_v1.py \
+  run --data-root /mnt/sda/rhyang/slm --bootstrap-replicates 10000 \
+  --gpu-ids 0 1 2 3
+```
+
+修正后 Full 三种子仍选择 epoch `40/24/32` 和阈值 `0.46/0.60/0.56`，validation weighted recall 下界分别为 `0.99746/0.99636/0.99593`，均通过安全门。五变体三种子使用相同 `730` 个 validation pose 完成 `10,000` 次 paired bootstrap。完整指标和结论见 [`../evaluation/pvs_v4_integrated_visibility_mainline_v1_protocolfix_2026-08-23.md`](../evaluation/pvs_v4_integrated_visibility_mainline_v1_protocolfix_2026-08-23.md)。旧 `2,000` 次 Full 汇总不再作为正式结果，runner 也会拒绝再次接受该口径。

@@ -730,6 +730,13 @@ def _diagnostic_recalibration(
     replicates = int(getattr(args, "recalibration_bootstrap_replicates", 2000))
     if replicates <= 0:
         raise ValueError("diagnostic recalibration bootstrap count must be positive")
+    calibration_seed = int(args.seed)
+    validation_seed_arg = getattr(args, "recalibration_validation_seed", None)
+    validation_seed = (
+        calibration_seed + 1
+        if validation_seed_arg is None
+        else int(validation_seed_arg)
+    )
     calibration_split = dataset.split("calibration")
     validation_split = dataset.split("validation")
     calibration_rows = evaluate_thresholds(
@@ -741,7 +748,7 @@ def _diagnostic_recalibration(
         poses_per_batch=max(1, int(args.poses_per_batch)),
         max_steps=None,
         max_candidates_per_pose=0,
-        seed=int(args.seed),
+        seed=calibration_seed,
         thresholds=threshold_grid(),
         collect_pose_stats=True,
         allow_candidate_visible_union=False,
@@ -769,7 +776,7 @@ def _diagnostic_recalibration(
             poses_per_batch=max(1, int(args.poses_per_batch)),
             max_steps=None,
             max_candidates_per_pose=0,
-            seed=int(args.seed) + 1,
+            seed=validation_seed,
             thresholds=np.asarray([float(chosen["threshold"])], dtype=np.float32),
             collect_pose_stats=True,
             allow_candidate_visible_union=False,
@@ -789,6 +796,10 @@ def _diagnostic_recalibration(
         "seed": int(protocol.get("seed", args.seed)) if isinstance(protocol, Mapping) else int(args.seed),
         "selectionRule": aggregate_weighted_cull_selection_rule(0.99, 0.99),
         "bootstrapReplicates": replicates,
+        "bootstrapSeeds": {
+            "calibration": calibration_seed,
+            "validation": validation_seed,
+        },
         "calibrationPoseCount": int(calibration_split.pose_indices.size),
         "validationPoseCount": int(validation_split.pose_indices.size),
         "selectedSafe": _json_safe_metadata(selected),
@@ -1219,6 +1230,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--calibration", type=Path, default=None)
     parser.add_argument("--diagnostic-recalibrate", action="store_true")
     parser.add_argument("--recalibration-bootstrap-replicates", type=int, default=2000)
+    parser.add_argument("--recalibration-validation-seed", type=int, default=None)
     return parser.parse_args(argv)
 
 

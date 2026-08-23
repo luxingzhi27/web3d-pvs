@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the fixed V4 visibility-only mainline, scan, and 80-epoch ablations.
+"""Run the fixed V4 visibility-only mainline, scan, and 40-epoch ablations.
 
 The runner never selects a threshold on test and never initializes from an
 existing checkpoint.  It fixes the V4 relation/survival and view-cell moment
@@ -32,8 +32,15 @@ OUTPUT_TAG = f"{EXPERIMENT}_20260821"
 SCAN_SEED = 20260801
 FORMAL_SEEDS = (20260801, 20260802, 20260803)
 SCAN_EPOCHS = 10
-FORMAL_EPOCHS = 80
+FORMAL_EPOCHS = 40
 STEPS_PER_EPOCH = 100
+FORMAL_STEPS_PER_EPOCH = 900
+FORMAL_BOOTSTRAP_REPLICATES = 10000
+UPDATE_BUDGET_CHECK_EPOCHS = 12
+UPDATE_BUDGET_CHECK_STEPS_PER_EPOCH = 300
+UPDATE_BUDGET_CHECK_STAGE = "update_budget_check12x300"
+FORMAL_FULL_STAGE = "formal40_s02_full"
+FORMAL_ABLATION_STAGE = "formal40_s02_ablation"
 EXPECTED_SPLITS = {
     "train": 5926,
     "calibration": 659,
@@ -56,6 +63,11 @@ SCAN_CONFIGS: tuple[dict[str, Any], ...] = (
     {"name": "s05_guard045_sep030_mix035", "lr": 1e-4, "guard": 0.45, "separation": 0.30, "mix": 0.35, "margin": 0.75},
     {"name": "s06_guard020_sep020_mix000", "lr": 2e-4, "guard": 0.20, "separation": 0.20, "mix": 0.00, "margin": 0.50},
     {"name": "s07_guard045_sep015_mix050", "lr": 3e-4, "guard": 0.45, "separation": 0.15, "mix": 0.50, "margin": 0.50},
+)
+
+UPDATE_BUDGET_CHECK_CONFIGS: tuple[dict[str, Any], ...] = (
+    SCAN_CONFIGS[1],
+    SCAN_CONFIGS[2],
 )
 
 FORMAL_VARIANTS: dict[str, dict[str, Any]] = {
@@ -87,6 +99,7 @@ FORMAL_VARIANTS: dict[str, dict[str, Any]] = {
         "mix": 0.0,
     },
 }
+FORMAL_ABLATIONS = tuple(name for name in FORMAL_VARIANTS if name != "full")
 
 
 def _paths(data_root: Path) -> dict[str, Path]:
@@ -163,6 +176,7 @@ def preflight(data_root: Path) -> dict[str, Any]:
         "formalVariants": list(FORMAL_VARIANTS),
         "formalSeeds": list(FORMAL_SEEDS),
         "formalEpochs": FORMAL_EPOCHS,
+        "formalStepsPerEpoch": FORMAL_STEPS_PER_EPOCH,
         "testRead": False,
         "paths": {key: str(value.resolve()) for key, value in paths.items()},
     }
@@ -193,6 +207,8 @@ def build_train_command(
     seed: int,
     epochs: int,
     smoke: bool = False,
+    steps_per_epoch: int = STEPS_PER_EPOCH,
+    eval_every: int = 4,
 ) -> list[str]:
     paths = _paths(data_root)
     spec = FORMAL_VARIANTS[variant_name]
@@ -216,13 +232,13 @@ def build_train_command(
         "--loss-variant", "pose_balanced_rvl_contrastive",
         "--refinement-scope", "all",
         "--epochs", "1" if smoke else str(int(epochs)),
-        "--steps-per-epoch", "1" if smoke else str(STEPS_PER_EPOCH),
+        "--steps-per-epoch", "1" if smoke else str(int(steps_per_epoch)),
         "--poses-per-batch", "4",
         "--observation-batch-size", "32768" if smoke else "8192",
-        "--eval-every", "1" if smoke else "4",
-        "--snapshot-every", "1" if smoke else "4",
+        "--eval-every", "1" if smoke else str(int(eval_every)),
+        "--snapshot-every", "1" if smoke else str(int(eval_every)),
         "--max-eval-poses", "2" if smoke else "0",
-        "--calibration-bootstrap-replicates", "2" if smoke else ("10000" if int(epochs) == FORMAL_EPOCHS else "2000"),
+        "--calibration-bootstrap-replicates", "2" if smoke else (str(FORMAL_BOOTSTRAP_REPLICATES) if int(epochs) == FORMAL_EPOCHS else "2000"),
         "--seed", str(int(seed)),
         "--device", "cuda",
         "--learning-rate", str(float(hp["lr"])),
@@ -286,7 +302,7 @@ def _member_contract(
         "instance_calibration_mode": "residual",
         "loss_variant": "pose_balanced_rvl_contrastive",
         "epochs": int(epochs),
-        "steps_per_epoch": STEPS_PER_EPOCH,
+        "steps_per_epoch": _steps_per_epoch(_stage),
         "seed": int(seed),
         "learning_rate": float(hp["lr"]),
         "integrated_rvl_recall_guard_weight": float(hp["guard"]),
@@ -297,6 +313,20 @@ def _member_contract(
         "download_loss_weight": 0.0,
         "glb_resource_weight": 0.0,
     }
+
+
+def _steps_per_epoch(stage: str) -> int:
+    if stage == UPDATE_BUDGET_CHECK_STAGE:
+        return UPDATE_BUDGET_CHECK_STEPS_PER_EPOCH
+    if stage in {FORMAL_FULL_STAGE, FORMAL_ABLATION_STAGE}:
+        return FORMAL_STEPS_PER_EPOCH
+    return STEPS_PER_EPOCH
+
+
+def _eval_every(stage: str) -> int:
+    if stage == UPDATE_BUDGET_CHECK_STAGE:
+        return 2
+    return 4
 
 
 def _member_complete(
@@ -335,6 +365,30 @@ def _evaluation_checkpoint(member: Path) -> Path:
     if not path.is_file():
         raise FileNotFoundError(path)
     return path
+
+
+def _calibration_bootstrap_replicates(member: Path) -> int:
+    summary = _load_json(member / "calibration_ready_summary.json")
+    calibration = summary.get("calibration")
+    if not isinstance(calibration, Mapping):
+        return 0
+    return int(calibration.get("bootstrapReplicates", 0))
+
+
+def _require_formal_bootstrap_protocol(
+    member: Path,
+    spec: tuple[str, str, Mapping[str, Any], int, int],
+) -> None:
+    stage = str(spec[0])
+    if stage not in {FORMAL_FULL_STAGE, FORMAL_ABLATION_STAGE}:
+        return
+    replicates = _calibration_bootstrap_replicates(member)
+    if replicates < FORMAL_BOOTSTRAP_REPLICATES:
+        raise ValueError(
+            f"formal member {member.name} used {replicates} calibration bootstrap "
+            "replicates; run reaudit_pvs_v4_integrated_visibility_mainline_v1.py "
+            "instead of accepting or regenerating a mixed-protocol summary"
+        )
 
 
 def build_evaluate_command(data_root: Path, member: Path, output: Path, *, seed: int) -> list[str]:
@@ -464,7 +518,21 @@ def _run_specs(data_root: Path, model_root: Path, benchmark_root: Path, specs: S
         if not _member_complete(member, spec):
             if member.exists():
                 shutil.rmtree(member)
-            train_jobs.append((member.name, build_train_command(data_root, member, config, variant, seed=seed, epochs=epochs)))
+            train_jobs.append(
+                (
+                    member.name,
+                    build_train_command(
+                        data_root,
+                        member,
+                        config,
+                        variant,
+                        seed=seed,
+                        epochs=epochs,
+                        steps_per_epoch=_steps_per_epoch(stage),
+                        eval_every=_eval_every(stage),
+                    ),
+                )
+            )
     if train_jobs:
         _run_queue(train_jobs, gpu_ids, benchmark_root / "logs" / "train")
     eval_jobs: list[tuple[str, Sequence[str]]] = []
@@ -472,6 +540,7 @@ def _run_specs(data_root: Path, model_root: Path, benchmark_root: Path, specs: S
         member = _member_for_spec(model_root, spec)
         if not _member_complete(member, spec):
             raise RuntimeError(f"training member is incomplete: {member}")
+        _require_formal_bootstrap_protocol(member, spec)
         output = _evaluation_path(benchmark_root, member)
         if not _evaluation_matches_member(output, member, spec):
             if output.exists():
@@ -485,6 +554,7 @@ def _run_specs(data_root: Path, model_root: Path, benchmark_root: Path, specs: S
 def _result_row(model_root: Path, benchmark_root: Path, spec: tuple[str, str, Mapping[str, Any], int, int]) -> dict[str, Any]:
     stage, variant, config, seed, epochs = spec
     member = _member_for_spec(model_root, spec)
+    _require_formal_bootstrap_protocol(member, spec)
     calibration = _load_json(member / "calibration_ready_summary.json")
     evaluation = _load_json(_evaluation_path(benchmark_root, member))
     if evaluation.get("split") != "validation" or evaluation.get("testRead") is not False:
@@ -574,7 +644,7 @@ def _validate_scan_summary(
         raise ValueError("scan summary does not satisfy the current mainline protocol")
     rows = summary.get("rows")
     if not isinstance(rows, list) or len(rows) != len(specs):
-        raise ValueError("formal80 requires the complete registered scan matrix")
+        raise ValueError("scan validation requires the complete registered scan matrix")
     expected = {
         _member_for_spec(model_root, spec).name: spec for spec in specs
     }
@@ -632,7 +702,17 @@ def _formal_seed_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("preflight", "smoke", "scan", "formal80", "all"))
+    parser.add_argument(
+        "mode",
+        choices=(
+            "preflight",
+            "smoke",
+            "update-budget-check12x300",
+            "formal40-s02-full",
+            "formal40-s02-ablation",
+            "scan",
+        ),
+    )
     parser.add_argument("--data-root", type=Path, default=Path("/mnt/sda/rhyang/slm"))
     parser.add_argument("--model-root", type=Path, default=ROOT / "neural_instance_culling/model/out" / OUTPUT_TAG)
     parser.add_argument("--benchmark-root", type=Path, default=ROOT / "neural_instance_culling/benchmark/out" / OUTPUT_TAG)
@@ -658,36 +738,166 @@ def main(argv: list[str] | None = None) -> None:
         _run_queue([(member.name, command)], args.gpu_ids[:1], args.benchmark_root / "logs/smoke")
         return
 
-    scan_specs = _specs("scan", ("full",), SCAN_CONFIGS, (SCAN_SEED,), SCAN_EPOCHS)
-    if args.mode in {"scan", "all"}:
+    if args.mode == "update-budget-check12x300":
+        specs = _specs(
+            UPDATE_BUDGET_CHECK_STAGE,
+            ("full",),
+            UPDATE_BUDGET_CHECK_CONFIGS,
+            (SCAN_SEED,),
+            UPDATE_BUDGET_CHECK_EPOCHS,
+        )
         if args.dry_run:
-            commands = [build_train_command(args.data_root, _member_for_spec(args.model_root, spec), spec[2], spec[1], seed=spec[3], epochs=spec[4]) for spec in scan_specs]
+            commands = [
+                build_train_command(
+                    args.data_root,
+                    _member_for_spec(args.model_root, spec),
+                    spec[2],
+                    spec[1],
+                    seed=spec[3],
+                    epochs=spec[4],
+                    steps_per_epoch=UPDATE_BUDGET_CHECK_STEPS_PER_EPOCH,
+                    eval_every=2,
+                )
+                for spec in specs
+            ]
             print(json.dumps({"commands": commands, "testRead": False}, indent=2))
             return
-        _run_specs(args.data_root, args.model_root, args.benchmark_root, scan_specs, args.gpu_ids)
-        scan_summary = _summarize(args.model_root, args.benchmark_root, scan_specs, args.benchmark_root / "selected_configuration.json")
-    else:
-        selection_path = args.benchmark_root / "selected_configuration.json"
-        if not selection_path.is_file():
-            raise FileNotFoundError("run scan before formal80")
-        scan_summary = _load_json(selection_path)
+        _run_specs(
+            args.data_root,
+            args.model_root,
+            args.benchmark_root,
+            specs,
+            args.gpu_ids,
+        )
+        _summarize(
+            args.model_root,
+            args.benchmark_root,
+            specs,
+            args.benchmark_root / "update_budget_check_12x300_summary.json",
+        )
+        return
 
-    selected_config = _validate_scan_summary(
-        scan_summary, args.model_root, args.benchmark_root, scan_specs
-    )
-    formal_specs = _specs("formal80", tuple(FORMAL_VARIANTS), (selected_config,), FORMAL_SEEDS, FORMAL_EPOCHS)
-    if args.mode in {"formal80", "all"}:
+    if args.mode == "formal40-s02-full":
+        specs = _specs(
+            FORMAL_FULL_STAGE,
+            ("full",),
+            (SCAN_CONFIGS[2],),
+            FORMAL_SEEDS,
+            FORMAL_EPOCHS,
+        )
         if args.dry_run:
-            commands = [build_train_command(args.data_root, _member_for_spec(args.model_root, spec), spec[2], spec[1], seed=spec[3], epochs=spec[4]) for spec in formal_specs]
+            commands = [
+                build_train_command(
+                    args.data_root,
+                    _member_for_spec(args.model_root, spec),
+                    spec[2],
+                    spec[1],
+                    seed=spec[3],
+                    epochs=spec[4],
+                    steps_per_epoch=FORMAL_STEPS_PER_EPOCH,
+                    eval_every=4,
+                )
+                for spec in specs
+            ]
             print(json.dumps({"commands": commands, "testRead": False}, indent=2))
             return
-        _run_specs(args.data_root, args.model_root, args.benchmark_root, formal_specs, args.gpu_ids)
-        formal = _summarize(args.model_root, args.benchmark_root, formal_specs, args.benchmark_root / "formal80_summary.json")
-        formal["selectedScanConfiguration"] = selected_config
-        formal["seedAggregate"] = _formal_seed_summary(formal["rows"])
-        formal["epochs"] = FORMAL_EPOCHS
-        formal["seeds"] = list(FORMAL_SEEDS)
-        _write_json(args.benchmark_root / "formal80_summary.json", formal)
+        _run_specs(
+            args.data_root,
+            args.model_root,
+            args.benchmark_root,
+            specs,
+            args.gpu_ids,
+        )
+        summary = _summarize(
+            args.model_root,
+            args.benchmark_root,
+            specs,
+            args.benchmark_root / "formal40_s02_full_summary.json",
+        )
+        summary["epochs"] = FORMAL_EPOCHS
+        summary["seeds"] = list(FORMAL_SEEDS)
+        summary["seedAggregate"] = _formal_seed_summary(summary["rows"])
+        _write_json(
+            args.benchmark_root / "formal40_s02_full_summary.json",
+            summary,
+        )
+        return
+
+    if args.mode == "formal40-s02-ablation":
+        specs = _specs(
+            FORMAL_ABLATION_STAGE,
+            FORMAL_ABLATIONS,
+            (SCAN_CONFIGS[2],),
+            FORMAL_SEEDS,
+            FORMAL_EPOCHS,
+        )
+        if args.dry_run:
+            commands = [
+                build_train_command(
+                    args.data_root,
+                    _member_for_spec(args.model_root, spec),
+                    spec[2],
+                    spec[1],
+                    seed=spec[3],
+                    epochs=spec[4],
+                    steps_per_epoch=FORMAL_STEPS_PER_EPOCH,
+                    eval_every=4,
+                )
+                for spec in specs
+            ]
+            print(json.dumps({"commands": commands, "testRead": False}, indent=2))
+            return
+        _run_specs(
+            args.data_root,
+            args.model_root,
+            args.benchmark_root,
+            specs,
+            args.gpu_ids,
+        )
+        summary = _summarize(
+            args.model_root,
+            args.benchmark_root,
+            specs,
+            args.benchmark_root / "formal40_s02_ablation_summary.json",
+        )
+        summary["selectedScanConfiguration"] = dict(SCAN_CONFIGS[2])
+        summary["epochs"] = FORMAL_EPOCHS
+        summary["seeds"] = list(FORMAL_SEEDS)
+        summary["seedAggregate"] = _formal_seed_summary(summary["rows"])
+        _write_json(
+            args.benchmark_root / "formal40_s02_ablation_summary.json",
+            summary,
+        )
+        return
+
+    scan_specs = _specs("scan", ("full",), SCAN_CONFIGS, (SCAN_SEED,), SCAN_EPOCHS)
+    if args.dry_run:
+        commands = [
+            build_train_command(
+                args.data_root,
+                _member_for_spec(args.model_root, spec),
+                spec[2],
+                spec[1],
+                seed=spec[3],
+                epochs=spec[4],
+            )
+            for spec in scan_specs
+        ]
+        print(json.dumps({"commands": commands, "testRead": False}, indent=2))
+        return
+    _run_specs(
+        args.data_root,
+        args.model_root,
+        args.benchmark_root,
+        scan_specs,
+        args.gpu_ids,
+    )
+    _summarize(
+        args.model_root,
+        args.benchmark_root,
+        scan_specs,
+        args.benchmark_root / "selected_configuration.json",
+    )
 
 
 if __name__ == "__main__":
