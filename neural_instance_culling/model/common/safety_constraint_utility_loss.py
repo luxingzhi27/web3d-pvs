@@ -161,12 +161,34 @@ def rvl_strong_v2_visibility_loss(
     pose_offsets: torch.Tensor,
     visible_weights: torch.Tensor,
     evidence: torch.Tensor,
+    *,
+    bce_positive_weight: float = 14.0,
+    tversky_fn_weight: float = 7.0,
+    count_weight: float = 0.10,
+    fp_normalization: str = "positive",
+    rank_weight: float = 0.45,
+    rank_negative_top_k: int = 256,
+    budget_scale: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compact registered control matching the current rvl_strong_v2 intent."""
+    if float(bce_positive_weight) <= 0.0 or float(tversky_fn_weight) <= 0.0:
+        raise ValueError("RVL positive weights must be positive")
+    if float(count_weight) < 0.0:
+        raise ValueError("RVL count weight must be non-negative")
+    if float(rank_weight) < 0.0 or int(rank_negative_top_k) <= 0:
+        raise ValueError("RVL rank weight must be non-negative and top-k must be positive")
+    if not 0.0 <= float(budget_scale) <= 1.0:
+        raise ValueError("RVL budget scale must lie in [0, 1]")
+    if str(fp_normalization) not in {"positive", "negative", "candidate"}:
+        raise ValueError("RVL FP normalization must be positive, negative, or candidate")
     scores = torch.sigmoid(logits.float().view(-1))
     y = target.float().view(-1)
     weights = torch.clamp(visible_weights.float().view(-1), min=0.0)
-    bce = F.binary_cross_entropy_with_logits(logits.float().view(-1), y, pos_weight=torch.tensor(14.0, device=logits.device))
+    bce = F.binary_cross_entropy_with_logits(
+        logits.float().view(-1),
+        y,
+        pos_weight=torch.tensor(float(bce_positive_weight), device=logits.device),
+    )
     tversky: list[torch.Tensor] = []
     count: list[torch.Tensor] = []
     rank: list[torch.Tensor] = []
@@ -181,15 +203,36 @@ def rvl_strong_v2_visibility_loss(
         soft_tp = (p * local_y).sum()
         soft_fp = (p * (1.0 - local_y)).sum()
         soft_fn = ((1.0 - p) * local_y).sum()
-        tversky.append(1.0 - (soft_tp + 1e-6) / (soft_tp + soft_fp + 7.0 * soft_fn + 1e-6))
+        tversky.append(
+            1.0
+            - (soft_tp + 1e-6)
+            / (soft_tp + soft_fp + float(tversky_fn_weight) * soft_fn + 1e-6)
+        )
         count.append(F.smooth_l1_loss(p.sum() / torch.clamp(local_y.sum(), min=1.0), torch.ones((), device=p.device)))
         pos = logits.view(-1)[start:end][local_y > 0.5]
         neg = logits.view(-1)[start:end][local_y <= 0.5]
         if pos.numel() and neg.numel():
-            rank.append(F.softplus(torch.topk(neg, k=min(256, neg.numel())).values[:, None] - pos[None, :] + 0.3).mean())
+            rank.append(
+                F.softplus(
+                    torch.topk(
+                        neg, k=min(int(rank_negative_top_k), neg.numel())
+                    ).values[:, None]
+                    - pos[None, :]
+                    + 0.3
+                ).mean()
+            )
         evidence_local = torch.clamp(evidence.float().view(-1)[start:end], 0.0, 1.0)
         fn.append(((1.0 - p) * local_y * (1.0 + weights[start:end])).sum() / torch.clamp(local_y.sum(), min=1.0))
-        fp.append((p * (1.0 - local_y) * (1.0 + evidence_local)).sum() / torch.clamp(local_y.sum(), min=1.0))
+        if fp_normalization == "positive":
+            fp_denominator = local_y.sum()
+        elif fp_normalization == "negative":
+            fp_denominator = (1.0 - local_y).sum()
+        else:
+            fp_denominator = local_y.new_tensor(float(local_y.numel()))
+        fp.append(
+            (p * (1.0 - local_y) * (1.0 + evidence_local)).sum()
+            / torch.clamp(fp_denominator, min=1.0)
+        )
     parts = {
         "lossBce": bce,
         "lossTversky": _mean_or_zero(tversky, logits.device, logits.dtype),
@@ -198,7 +241,18 @@ def rvl_strong_v2_visibility_loss(
         "lossRvlFn": _mean_or_zero(fn, logits.device, logits.dtype),
         "lossRvlFp": _mean_or_zero(fp, logits.device, logits.dtype),
     }
-    loss = 0.28 * parts["lossBce"] + 1.35 * parts["lossTversky"] + 0.10 * parts["lossCount"] + 0.45 * parts["lossRank"] + 0.12 * (0.25 * parts["lossRvlFn"] + parts["lossRvlFp"])
+    loss = (
+        0.28 * parts["lossBce"]
+        + 1.35 * parts["lossTversky"]
+        + float(budget_scale) * float(count_weight) * parts["lossCount"]
+        + float(rank_weight) * parts["lossRank"]
+        + 0.12
+        * (
+            0.25 * parts["lossRvlFn"]
+            + float(budget_scale) * parts["lossRvlFp"]
+        )
+    )
+    parts["rvlBudgetScale"] = logits.new_tensor(float(budget_scale))
     parts["lossRvlStrongV2"] = loss
     return loss, parts
 

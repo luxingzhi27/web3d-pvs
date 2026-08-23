@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
+
 MODEL_DIR = Path(__file__).resolve().parents[2] / "model"
 sys.path.insert(0, str(MODEL_DIR))
 
@@ -95,6 +97,9 @@ class TrainingCalibrationControlTests(unittest.TestCase):
         self.assertLessEqual(float(thresholds[1]), 1e-8 * 1.01)
         self.assertLessEqual(float(thresholds[-1]), 0.9)
         self.assertEqual(len(thresholds), len(set(float(value) for value in thresholds)))
+        low = thresholds[np.logical_and(thresholds >= 1e-4, thresholds <= 1e-2)]
+        self.assertGreater(low.size, 20)
+        self.assertLess(float(np.max(low[1:] / low[:-1])), 1.2)
 
     def test_explicit_rvl_off_overrides_profile_default(self) -> None:
         args = SimpleNamespace(loss_profile="rvl_strong_v2", rvl_mode="off")

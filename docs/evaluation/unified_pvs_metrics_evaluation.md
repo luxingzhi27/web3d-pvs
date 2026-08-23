@@ -108,4 +108,4 @@ conda run --no-capture-output -n slm_pvs python -u \
   --device cuda
 ```
 
-正式 test 的全量遍历规则见 [`test_split_benchmark_protocol.md`](test_split_benchmark_protocol.md)，图像级评价见 [`viewcell_image_per_evaluation.md`](viewcell_image_per_evaluation.md)，当前优化阶段的具体结果见 [`../current/optimization_restart_2026-08-10.md`](../current/optimization_restart_2026-08-10.md)。
+正式 test 的全量遍历规则见 [`test_split_benchmark_protocol.md`](test_split_benchmark_protocol.md)，图像级评价见 [`viewcell_image_per_evaluation.md`](viewcell_image_per_evaluation.md)，当前论文模型与指标见 [`../current/pvs_mainline_2026-08-23.md`](../current/pvs_mainline_2026-08-23.md)。

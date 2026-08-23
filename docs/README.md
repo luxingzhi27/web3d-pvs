@@ -1,69 +1,70 @@
 # NeuralStreamWeb3D 文档索引
 
-更新时间：2026-08-17
+更新时间：2026-08-23
 
-这里的文档只服务于当前可运行版本、正式保留证据和唯一的 v4 实验执行链。重复路线报告和被修正的旧汇总已经清理；当前前端资产、正式训练权重、正式 benchmark、采样数据和硬件证据保持不变。v2 `formal80` 及 v3 纠错设计只作为历史诊断依据，不再作为 runner 或训练入口。v4 已完成共享关系先验、逐实例校准残差、checkpoint 专属运行表、validation weighted recall 评价、图像指标回填协议和真实 CUDA smoke；执行链已收敛为八组快速扫描及五变体三种子长训，当前没有相关实验进程。本轮只登记后处理计划，不启动新任务。
+仓库文档只索引当前可运行系统、当前论文模型和仍需复现的正式基线。失败的旧整合网络、尾部分离探针、独立安全前沿 runner 及重复计划已删除；历史结论仍可从 Git 提交记录追溯，不再占用当前入口。
 
-## 先读这几份
+## 当前主线
 
 | 文档 | 内容 |
 |---|---|
-| [`current/optimization_restart_2026-08-10.md`](current/optimization_restart_2026-08-10.md) | 当前优化阶段、最新正式证据、v4 当前入口和统一实验规则 |
-| [`current/pvs_bounded_relation_survival_moment_v4_implementation_2026-08-15.md`](current/pvs_bounded_relation_survival_moment_v4_implementation_2026-08-15.md) | v4 已完成实现：共享关系先验加逐实例校准残差、正式关系/置乱数据、真实 CUDA smoke、关系负边语义与 55.2 倍训练性能纠错、checkpoint 专属 124 维运行表、validation 安全门、图像回填协议和 4.53 MiB 导出预算 |
-| [`experiments/pvs_bounded_relation_survival_moment_v4_run_and_ablation_2026-08-15.md`](experiments/pvs_bounded_relation_survival_moment_v4_run_and_ablation_2026-08-15.md) | 唯一当前执行手册：先登记八组单种子快速扫描、无条件冻结配置、五变体三种子共 15 成员 formal80、配对统计、图像/资源与最终 WebGPU 评价；当前不启动新任务 |
-| [`experiments/pvs_bounded_relation_survival_moment_envelope_safety_reserve_plan_2026-08-14.md`](experiments/pvs_bounded_relation_survival_moment_envelope_safety_reserve_plan_2026-08-14.md) | v3 历史纠错设计依据；其共享生存生成器已由 v4 的逐实例校准残差修正，不再直接执行 |
-| [`experiments/pvs_full_innovation_hyperparameter_scan_longtrain_ablation_2026-08-13.md`](experiments/pvs_full_innovation_hyperparameter_scan_longtrain_ablation_2026-08-13.md) | 已完成的 v2 扫参、冻结配置和 15 成员 formal80 预登记；保留用于解释历史训练，不再作为后续代码改进入口 |
-| [`experiments/pvs_hierarchical_occlusion_survival_viewcell_spectral_query_2026-08-13.md`](experiments/pvs_hierarchical_occlusion_survival_viewcell_spectral_query_2026-08-13.md) | v1 分层关系生存网络、视点区域积分频谱和质量/资源 RVL 的架构、实现、pilot 与学习曲线历史记录 |
-| [`experiments/pvs_integrated_spectral_survival_field_diagnosis_2026-08-14.md`](experiments/pvs_integrated_spectral_survival_field_diagnosis_2026-08-14.md) | 对当前 validation 结果、积分公式/中心、退化关系层级、固定生存观察、事件语义、置乱对照和资源梯度的完整代码审计 |
-| [`current/current_instance_pvs_versions.md`](current/current_instance_pvs_versions.md) | 两个场景、默认模型、前端资产和保留边界 |
-| [`current/neuralstreamweb3d_architecture_technical.md`](current/neuralstreamweb3d_architecture_technical.md) | 离线编码、模型查询、实例渲染和 GLB 调度的系统架构 |
-| [`current/neuralstreamweb3d_model_pipeline.md`](current/neuralstreamweb3d_model_pipeline.md) | 模型输入、方向遮挡代理、RVL 损失、训练和导出 |
-| [`current/neuralstreamweb3d_dataset_protocol.md`](current/neuralstreamweb3d_dataset_protocol.md) | 66° view-cell/subpose 采样、Color-ID、候选集合和 CSR 语义 |
-| [`current/hardware_gpu_execution_policy.md`](current/hardware_gpu_execution_policy.md) | Chrome NVIDIA 硬件 GPU 采样和评价的准入与证据 |
-| [`experiments/pvs_ray_context_survival_owrb_protocol_2026-08-11.md`](experiments/pvs_ray_context_survival_owrb_protocol_2026-08-11.md) | 2026-08-11 正式矩阵的历史协议，仅供复核保留结果和数据/GPU 口径；不得作为当前 8/16/80 epoch 计划的训练协议 |
-| [`experiments/pvs_ray_context_survival_owrb_literature_matrix_2026-08-11.md`](experiments/pvs_ray_context_survival_owrb_literature_matrix_2026-08-11.md) | 相关工作与本项目实现边界的对照矩阵 |
+| [`current/pvs_mainline_2026-08-23.md`](current/pvs_mainline_2026-08-23.md) | 当前模型架构、代码入口、数据依赖、正式指标与保留边界 |
+| [`experiments/pvs_mainline_training_2026-08-21.md`](experiments/pvs_mainline_training_2026-08-21.md) | 八组扫描、三种子完整模型和四个核心消融的固定训练协议 |
+| [`evaluation/pvs_mainline_validation_2026-08-23.md`](evaluation/pvs_mainline_validation_2026-08-23.md) | 10,000 次 bootstrap 重审计、三种子 validation 指标和消融结论 |
+| [`evaluation/unified_pvs_metrics_evaluation.md`](evaluation/unified_pvs_metrics_evaluation.md) | pose/aggregate、weighted recall、accuracy、balanced accuracy、useful cull 和资源指标定义 |
+| [`evaluation/test_split_benchmark_protocol.md`](evaluation/test_split_benchmark_protocol.md) | train、calibration、validation 和冻结 test 的职责边界 |
+
+当前代码入口：
+
+```text
+neural_instance_culling/model/pvs_model.py
+neural_instance_culling/model/train_pvs.py
+neural_instance_culling/model/export_pvs.py
+neural_instance_culling/benchmark/run_pvs.py
+neural_instance_culling/benchmark/evaluate_pvs.py
+neural_instance_culling/benchmark/summarize_pvs.py
+neural_instance_culling/benchmark/reaudit_pvs.py
+```
+
+## 数据与系统
+
+| 文档 | 内容 |
+|---|---|
+| [`current/current_instance_pvs_versions.md`](current/current_instance_pvs_versions.md) | 当前部署场景、模型、阈值和前端资产边界 |
+| [`current/neuralstreamweb3d_architecture_technical.md`](current/neuralstreamweb3d_architecture_technical.md) | 离线编码、实例可见性查询、渲染过滤和 GLB 调度架构 |
+| [`current/neuralstreamweb3d_model_pipeline.md`](current/neuralstreamweb3d_model_pipeline.md) | 当前部署方向代理模型的训练与导出链 |
+| [`current/neuralstreamweb3d_dataset_protocol.md`](current/neuralstreamweb3d_dataset_protocol.md) | 66° view-cell、subpose、Color-ID、候选和 CSR 数据语义 |
+| [`current/hardware_gpu_execution_policy.md`](current/hardware_gpu_execution_policy.md) | Chrome NVIDIA Vulkan/ANGLE 硬件采样和 WebGPU 证据要求 |
+| [`evaluation/viewcell_image_per_evaluation.md`](evaluation/viewcell_image_per_evaluation.md) | Color-ID 图像漏检、错误实例和额外实例评价 |
+
+统一相机口径为真实渲染 `60°`，采样、后退候选和模型查询 `66°`。阈值只能由 checkpoint 自己的 calibration split 冻结；validation 用于配置与 checkpoint 比较，test 只能在模型和阈值冻结后读取。
 
 ## 前端与部署
 
 | 文档 | 内容 |
 |---|---|
 | [`frontend/neuralstreamweb3d_runtime_implementation.md`](frontend/neuralstreamweb3d_runtime_implementation.md) | Worker 候选、WebGPU 推理、真实视锥过滤和实例级渲染 |
-| [`frontend/lightweight_frontend_pvs_scheduler.md`](frontend/lightweight_frontend_pvs_scheduler.md) | 当前调度器、预测门控、驻留和运行资产 |
-| [`frontend/neuralstreamweb3d_deployment_assets.md`](frontend/neuralstreamweb3d_deployment_assets.md) | 导出、按场景打包、模型压缩和 nginx 目录 |
-| [`../slm2viewer/README_DEPLOY.md`](../slm2viewer/README_DEPLOY.md) | 发布包上传、远端目录和 nginx 验证命令 |
+| [`frontend/lightweight_frontend_pvs_scheduler.md`](frontend/lightweight_frontend_pvs_scheduler.md) | 当前预测门控、资源驻留和调度逻辑 |
+| [`frontend/neuralstreamweb3d_deployment_assets.md`](frontend/neuralstreamweb3d_deployment_assets.md) | 导出、按场景打包和 nginx 部署资产 |
+| [`../slm2viewer/README_DEPLOY.md`](../slm2viewer/README_DEPLOY.md) | 发布包上传和远端验证命令 |
 
-## 评价协议与保留结果
+当前部署仍使用已冻结的方向遮挡代理模型。论文主线训练结果尚未替换默认 checkpoint、阈值或前端资产。
 
-| 文档 | 内容 |
+## 保留实验
+
+以下历史实验仍有正式复现价值，因此保留代码、文档和本地结果：
+
+| 文档 | 保留原因 |
 |---|---|
-| [`evaluation/unified_pvs_metrics_evaluation.md`](evaluation/unified_pvs_metrics_evaluation.md) | pose/aggregate、weighted recall、accuracy、balanced accuracy、useful cull 和资源指标定义 |
-| [`evaluation/test_split_benchmark_protocol.md`](evaluation/test_split_benchmark_protocol.md) | calibration、validation、test 的冻结关系 |
-| [`evaluation/viewcell_image_per_evaluation.md`](evaluation/viewcell_image_per_evaluation.md) | Color-ID 图像漏检、错误实例和额外实例指标 |
-| [`evaluation/pvs_direction_depth_relation_survival_constrained_v1_surface_fallback_owrb_formal40_pooled_context_20260811_formal_validation.md`](evaluation/pvs_direction_depth_relation_survival_constrained_v1_surface_fallback_owrb_formal40_pooled_context_20260811_formal_validation.md) | 2026-08-11 修正 pooled-context 定义后的正式 8×3×40 validation 汇总、因子效应、图像评价和硬件门状态 |
-| [`evaluation/pvs_direction_depth_relation_survival_constrained_v1_surface_fallback_owrb_formal40_pooled_context_20260811_conclusion.md`](evaluation/pvs_direction_depth_relation_survival_constrained_v1_surface_fallback_owrb_formal40_pooled_context_20260811_conclusion.md) | 同一正式矩阵的路线判定、冻结成员、test 结果和论文结论 |
-| [`evaluation/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_formal_validation.md`](evaluation/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_formal_validation.md) | 5 个补充机制变体、15 个成员、10,000 次 paired bootstrap 和硬件 Color-ID 图像评价 |
-| [`evaluation/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_conclusion.md`](evaluation/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_conclusion.md) | 补充矩阵的上下文容量、Fourier ray、单调参数化和 AABB 证据结论 |
-| [`evaluation/hkust_fov66_rvl_w042_full40_test_2026-07-31.md`](evaluation/hkust_fov66_rvl_w042_full40_test_2026-07-31.md) | HKUST 已部署模型的 FOV66 基线 test 结果 |
-| [`evaluation/ifc_metropolis_instanced_v2_test_eval_2026-07-15.md`](evaluation/ifc_metropolis_instanced_v2_test_eval_2026-07-15.md) | IFCBench Metropolis 场景基线 test 结果 |
-| [`evaluation/pvs_hierarchical_relation_survival_integrated_spectral_quality_rvl_v1_pilot.md`](evaluation/pvs_hierarchical_relation_survival_integrated_spectral_quality_rvl_v1_pilot.md) | 2026-08-13 新路线三个单 seed pilot 的完整 validation 诊断；calibration 仅 32 pose，weighted recall 安全门未通过，未读取 test |
-| [`evaluation/pvs_hierarchical_relation_survival_learning_curve_e32_2026-08-13.md`](evaluation/pvs_hierarchical_relation_survival_learning_curve_e32_2026-08-13.md) | R0/R2 双 seed、32 epoch 学习曲线；R2 达到 weighted recall 安全门但未通过效率晋级门，旧 Formal80 未启动 |
+| [`experiments/pvs_ray_context_survival_owrb_protocol_2026-08-11.md`](experiments/pvs_ray_context_survival_owrb_protocol_2026-08-11.md) | 2026-08-11 修正正式矩阵及硬件深度层缓存的数据协议 |
+| [`experiments/pvs_ray_context_survival_owrb_literature_matrix_2026-08-11.md`](experiments/pvs_ray_context_survival_owrb_literature_matrix_2026-08-11.md) | 相关工作与实现边界 |
+| [`evaluation/pvs_direction_depth_relation_survival_constrained_v1_surface_fallback_owrb_formal40_pooled_context_20260811_formal_validation.md`](evaluation/pvs_direction_depth_relation_survival_constrained_v1_surface_fallback_owrb_formal40_pooled_context_20260811_formal_validation.md) | 8×3×40 正式矩阵及硬件图像评价 |
+| [`evaluation/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_formal_validation.md`](evaluation/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_formal_validation.md) | Fourier、上下文容量和单调参数化补充矩阵 |
+| [`evaluation/hkust_fov66_rvl_w042_full40_test_2026-07-31.md`](evaluation/hkust_fov66_rvl_w042_full40_test_2026-07-31.md) | 当前 HKUST 部署基线的冻结 test 结果 |
+| [`evaluation/ifc_metropolis_instanced_v2_test_eval_2026-07-15.md`](evaluation/ifc_metropolis_instanced_v2_test_eval_2026-07-15.md) | Metropolis 部署基线的冻结 test 结果 |
 
-## 场景和入口
+## 文档规则
 
-当前保留两个场景：
-
-| 场景 | 路由 | 实例数 | GLB 数 |
-|---|---|---:|---:|
-| HKUST v3 | `?scene=hkust-v3` | 18,831 | 3,273 |
-| IFCBench Fantasy Metropolis 实例化 v2 | `?scene=ifcbench_fantasy_metropolis_instanced_v2` | 41,298 | 3,669 |
-
-前端默认模型映射以 [`slm2viewer/src/neuralCullingBackendMode.js`](../slm2viewer/src/neuralCullingBackendMode.js) 为准，训练 benchmark 默认映射以 [`neural_instance_culling/benchmark/model_runners.py`](../neural_instance_culling/benchmark/model_runners.py) 为准。两者的用途不同，不能仅凭目录名判断默认模型。
-
-统一相机口径为：真实渲染 `60°`，采样、后退候选和模型查询 `66°`。正式浏览器采样和 Color-ID 评价必须使用 NVIDIA Vulkan/ANGLE 硬件 GPU，并保存页面后端、Chrome 日志及 `nvidia-smi`/`pmon` 证据。
-
-## 编写规则
-
-- 当前状态写入 `current/`，评价口径和结果写入 `evaluation/`，前端和部署写入 `frontend/`，正在进行的实验写入 `experiments/`。
-- 每个新实验必须有独立名称、输入/输出、指标、阈值来源和保留条件。
-- 结果必须区分画面安全、有效剔除、资源效率和运行成本；不能只写 precision、F1 或候选削减。
-- test split 只能在模型、阈值和资产冻结后读取一次；validation 结果不能写成 test 结论。
+- `current/` 记录当前系统和研究主线，`evaluation/` 记录指标协议与正式结果，`frontend/` 记录运行和部署，`experiments/` 只保留仍可复现的正式实验协议。
+- 结果必须同时报告画面安全、分类诊断、有效剔除、资源效率和运行成本。
+- 已失败且不再复现的实验直接从当前文档和 runner 删除，通过 Git 历史追溯，不保留兼容入口。

@@ -138,9 +138,14 @@ def threshold_grid() -> np.ndarray:
     # Spatially held-out positives can occupy the low-score tail even when
     # calibration still has a safe workpoint.  The grid must cover that tail
     # without turning threshold selection into test-time tuning.
-    low = np.geomspace(1e-8, 1e-3, 17, dtype=np.float32)
+    # A coarse geometric grid can hide real improvements when the safe
+    # boundary lies around 1e-4--1e-3: adjacent values in the former grid were
+    # more than twofold apart.  Model scores are computed once, so a denser
+    # calibration-only grid adds negligible inference cost and avoids freezing
+    # an unnecessarily conservative threshold.
+    low = np.geomspace(1e-8, 1e-2, 97, dtype=np.float32)
     low = np.concatenate([np.asarray([0.0], dtype=np.float32), low])
-    mid = np.asarray([0.001, 0.002, 0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.2], dtype=np.float32)
+    mid = np.asarray([0.0125, 0.015, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.2], dtype=np.float32)
     high = np.linspace(0.22, 0.9, 35, dtype=np.float32)
     return np.unique(np.concatenate([low, mid, high]))
 
@@ -263,9 +268,18 @@ def score_distribution_summary(
             "scoreCount": 0,
             "positiveCount": 0,
             "negativeCount": 0,
+            "positiveWeightedQ005": None,
+            "positiveWeightedQ01": None,
             "positiveWeightedQ05": None,
             "negativeQ95": None,
+            "negativeQ99": None,
+            "negativeQ995": None,
+            "positiveNegativeGapQ01Q99": None,
+            "positiveNegativeGapQ005Q995": None,
             "positiveNegativeGapQ05Q95": None,
+            "rocAuc": None,
+            "averagePrecision": None,
+            "weightedRocAuc": None,
             "brierScore": None,
             "expectedCalibrationError": None,
         }
@@ -274,9 +288,55 @@ def score_distribution_summary(
     positive = labels > 0.5
     negative = ~positive
     positive_weights = np.maximum(visible, 1e-6)
+    positive_q005 = _weighted_quantile(values[positive], positive_weights[positive], 0.005)
+    positive_q01 = _weighted_quantile(values[positive], positive_weights[positive], 0.01)
     positive_q05 = _weighted_quantile(values[positive], positive_weights[positive], 0.05)
     negative_q95 = _weighted_quantile(values[negative], np.ones(np.count_nonzero(negative)), 0.95)
+    negative_q99 = _weighted_quantile(values[negative], np.ones(np.count_nonzero(negative)), 0.99)
+    negative_q995 = _weighted_quantile(values[negative], np.ones(np.count_nonzero(negative)), 0.995)
     gap = positive_q05 - negative_q95 if np.isfinite(positive_q05) and np.isfinite(negative_q95) else float("nan")
+    gap_q01_q99 = positive_q01 - negative_q99 if np.isfinite(positive_q01) and np.isfinite(negative_q99) else float("nan")
+    gap_q005_q995 = positive_q005 - negative_q995 if np.isfinite(positive_q005) and np.isfinite(negative_q995) else float("nan")
+
+    unique_scores, inverse = np.unique(values, return_inverse=True)
+    positive_counts = np.bincount(inverse, weights=positive.astype(np.float64), minlength=unique_scores.size)
+    positive_mass = np.bincount(
+        inverse,
+        weights=np.where(positive, positive_weights, 0.0),
+        minlength=unique_scores.size,
+    )
+    negative_counts = np.bincount(inverse, weights=negative.astype(np.float64), minlength=unique_scores.size)
+    total_positive = float(positive_counts.sum())
+    total_positive_mass = float(positive_mass.sum())
+    total_negative = float(negative_counts.sum())
+    negatives_before = np.cumsum(negative_counts) - negative_counts
+    roc_auc = (
+        float(np.sum(positive_counts * (negatives_before + 0.5 * negative_counts)))
+        / (total_positive * total_negative)
+        if total_positive > 0.0 and total_negative > 0.0
+        else float("nan")
+    )
+    weighted_roc_auc = (
+        float(np.sum(positive_mass * (negatives_before + 0.5 * negative_counts)))
+        / (total_positive_mass * total_negative)
+        if total_positive_mass > 0.0 and total_negative > 0.0
+        else float("nan")
+    )
+    descending_positive = positive_counts[::-1]
+    descending_negative = negative_counts[::-1]
+    cumulative_positive = np.cumsum(descending_positive)
+    cumulative_negative = np.cumsum(descending_negative)
+    average_precision = (
+        float(
+            np.sum(
+                (descending_positive / total_positive)
+                * cumulative_positive
+                / np.maximum(cumulative_positive + cumulative_negative, 1e-12)
+            )
+        )
+        if total_positive > 0.0
+        else float("nan")
+    )
 
     evaluation_weights = np.where(positive, positive_weights, 1.0)
     brier = float(
@@ -300,9 +360,18 @@ def score_distribution_summary(
         "scoreCount": int(values.size),
         "positiveCount": int(np.count_nonzero(positive)),
         "negativeCount": int(np.count_nonzero(negative)),
+        "positiveWeightedQ005": None if not np.isfinite(positive_q005) else float(positive_q005),
+        "positiveWeightedQ01": None if not np.isfinite(positive_q01) else float(positive_q01),
         "positiveWeightedQ05": None if not np.isfinite(positive_q05) else float(positive_q05),
         "negativeQ95": None if not np.isfinite(negative_q95) else float(negative_q95),
+        "negativeQ99": None if not np.isfinite(negative_q99) else float(negative_q99),
+        "negativeQ995": None if not np.isfinite(negative_q995) else float(negative_q995),
+        "positiveNegativeGapQ01Q99": None if not np.isfinite(gap_q01_q99) else float(gap_q01_q99),
+        "positiveNegativeGapQ005Q995": None if not np.isfinite(gap_q005_q995) else float(gap_q005_q995),
         "positiveNegativeGapQ05Q95": None if not np.isfinite(gap) else float(gap),
+        "rocAuc": None if not np.isfinite(roc_auc) else float(roc_auc),
+        "averagePrecision": None if not np.isfinite(average_precision) else float(average_precision),
+        "weightedRocAuc": None if not np.isfinite(weighted_roc_auc) else float(weighted_roc_auc),
         "positiveMean": float(np.mean(values[positive])) if np.any(positive) else None,
         "negativeMean": float(np.mean(values[negative])) if np.any(negative) else None,
         "brierScore": brier,
@@ -432,9 +501,12 @@ def evaluate_thresholds(
     bootstrap_replicates: int = 0,
     collect_score_stats: bool = False,
     collect_per_pose: bool = False,
+    collect_raw_scores: bool = False,
     instance_to_glb: np.ndarray | None = None,
     glb_bytes: np.ndarray | None = None,
 ) -> list[dict[str, Any]]:
+    if collect_raw_scores and not collect_per_pose:
+        raise ValueError("raw score capture requires per-pose collection")
     model.eval()
     rng = np.random.default_rng(seed)
     th = thresholds.astype(np.float32)
@@ -534,6 +606,9 @@ def evaluate_thresholds(
                     per_pose_values[threshold_index].append({
                         "poseIndex": int(pose_indices[row_index]),
                         "candidateIds": [], "predictedIds": [],
+                        "candidateScores": [] if collect_raw_scores else None,
+                        "targets": [] if collect_raw_scores else None,
+                        "visibleWeights": [] if collect_raw_scores else None,
                         "metrics": dict(empty_metrics),
                     })
             pose_count += 1
@@ -553,6 +628,7 @@ def evaluate_thresholds(
             runtime_features=runtime_features,
             query_center_world=query_center_world,
             viewcell_radius_m=viewcell_radius_m,
+            pose_offsets=batch["pose_offsets"],
         )
         scores = torch.sigmoid(logits).detach().cpu().numpy().reshape(-1)
         target = batch["target"].astype(bool, copy=False)
@@ -657,6 +733,21 @@ def evaluate_thresholds(
                         "poseIndex": int(pose_indices[i]),
                         "candidateIds": candidate_ids.tolist(),
                         "predictedIds": local_pred_ids.tolist(),
+                        "candidateScores": (
+                            scores[start:end].astype(float).tolist()
+                            if collect_raw_scores
+                            else None
+                        ),
+                        "targets": (
+                            target[start:end].astype(np.uint8).tolist()
+                            if collect_raw_scores
+                            else None
+                        ),
+                        "visibleWeights": (
+                            weights[start:end].astype(float).tolist()
+                            if collect_raw_scores
+                            else None
+                        ),
                         "metrics": {
                             "precision": float(precision[threshold_index]),
                             "recall": float(recall[threshold_index]),
