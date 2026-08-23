@@ -21,7 +21,7 @@ from common.threshold_selection import (  # noqa: E402
     target_weighted_recall_from_payload,
 )
 from directional_occlusion_proxy_encoder_model import DirectionalOcclusionProxyEncoderPVSModel  # noqa: E402
-from bounded_relation_survival_moment_model import (  # noqa: E402
+from pvs_model import (  # noqa: E402
     BoundedRelationSurvivalMomentModel,
     MODEL_SCHEMA as BOUNDED_RELATION_SURVIVAL_MOMENT_SCHEMA,
     RUNTIME_FEATURE_DIM as BOUNDED_RELATION_SURVIVAL_MOMENT_RUNTIME_DIM,

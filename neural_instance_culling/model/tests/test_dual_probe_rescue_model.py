@@ -11,7 +11,7 @@ MODEL_DIR = Path(__file__).resolve().parents[1]
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
 
-from bounded_relation_survival_moment_model import (  # noqa: E402
+from pvs_model import (  # noqa: E402
     BoundedRelationSurvivalMomentModel,
     DUAL_PROBE_RAW_QUERY_DIM,
     RUNTIME_FEATURE_DIM,

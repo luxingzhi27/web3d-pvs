@@ -65,4 +65,4 @@ slm2viewer/public_deploy/assets/neural_instance_culling/
 
 正式阈值在 calibration split 冻结，优先满足 `weighted recall > 0.99` 及其置信下界要求，再比较 precision、F1、useful cull、GLB 字节和延迟。当前优化阶段暂不把 `bad cull` 置信区间上界作为路线否决条件，但 `bad cull` 仍必须报告。
 
-最新实验结果见[`optimization_restart_2026-08-10.md`](optimization_restart_2026-08-10.md)、[修正正式矩阵](../evaluation/pvs_direction_depth_relation_survival_constrained_v1_surface_fallback_owrb_formal40_pooled_context_20260811_formal_validation.md)和[Fourier 补充矩阵](../evaluation/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_formal_validation.md)。当前唯一后续计划见[分层关系生存、区域积分频谱与质量风险损失计划](../experiments/pvs_hierarchical_occlusion_survival_viewcell_spectral_query_2026-08-13.md)。
+当前论文模型、正式 validation 结果和代码入口见 [`pvs_mainline_2026-08-23.md`](pvs_mainline_2026-08-23.md)。2026-08-11 修正正式矩阵与 [Fourier 补充矩阵](../evaluation/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_formal_validation.md)继续作为保留基线，不再作为当前训练入口。

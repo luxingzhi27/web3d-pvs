@@ -103,4 +103,4 @@ RVL 位于可见性主损失中，不是 dynamic-pool 伪标签。它直接使�
 
 - [`2026-08-11 修正正式矩阵`](../evaluation/pvs_direction_depth_relation_survival_constrained_v1_surface_fallback_owrb_formal40_pooled_context_20260811_formal_validation.md)；
 - [`2026-08-12 Fourier 补充矩阵`](../evaluation/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_formal_validation.md)；
-- [`当前三创新实施计划`](../experiments/pvs_hierarchical_occlusion_survival_viewcell_spectral_query_2026-08-13.md)。
+- [`当前论文模型`](pvs_mainline_2026-08-23.md)。
