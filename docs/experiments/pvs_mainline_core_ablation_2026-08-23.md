@@ -1,7 +1,7 @@
 # PVS 主线核心消融补全计划
 
 日期：2026-08-23  
-状态：待实现与执行
+状态：执行中
 
 ## 目标
 
@@ -111,3 +111,9 @@
 每个成员必须报告 weighted recall 及其下界、pose/aggregate precision、recall、accuracy、balanced accuracy、specificity、useful cull、bad cull、平均预测数、GLB 数量和字节、特征表大小与 CUDA 延迟。能够导出运行资产的三个生存表示模式还需执行浏览器数值 parity；硬件 WebGPU 延迟只有 adapter 通过 NVIDIA/Vulkan 门时才能报告。图像 Color-ID 评价使用现有硬件缓存和同一 validation pose，不补 GT。
 
 最终报告明确区分：生存场是否有效、结构化生存场是否优于同容量实例记忆、分层关系是否有效，以及两项核心损失分别改善安全性还是分类边界。正式评价完成前不修改默认 checkpoint、阈值或前端资产。
+
+## 执行记录
+
+2026-08-23 已完成三种遮挡表示的模型、训练器、checkpoint、评价器、导出器和运行时重载实现。专门测试覆盖 96/124 维固定表、118/130 维查询输入、通用 28 维的可见性梯度、非生存模式不读取关系监督且辅助损失归零，以及六变体三种子的完整 runner 矩阵。三种模式均通过真实 CUDA 单步训练、checkpoint 保存、730-pose validation 重放和导出 dry-run。
+
+正式 18 成员队列已按四张 GPU 并行启动，运行输出仍使用本计划登记的独立目录。最终统计使用独立汇总器完成完整模型对每个消融的 10,000 次配对分层 bootstrap；正式训练和评价结束前不读取 test，也不修改默认前端模型。
