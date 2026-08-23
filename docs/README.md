@@ -10,6 +10,7 @@
 |---|---|
 | [`current/pvs_mainline_2026-08-23.md`](current/pvs_mainline_2026-08-23.md) | 当前模型架构、代码入口、数据依赖、正式指标与保留边界 |
 | [`experiments/pvs_mainline_training_2026-08-21.md`](experiments/pvs_mainline_training_2026-08-21.md) | 八组扫描、三种子完整模型和四个核心消融的固定训练协议 |
+| [`experiments/pvs_mainline_core_ablation_2026-08-23.md`](experiments/pvs_mainline_core_ablation_2026-08-23.md) | 补全无生存场、通用 28 维容量对照及精简核心损失消融的执行计划 |
 | [`evaluation/pvs_mainline_validation_2026-08-23.md`](evaluation/pvs_mainline_validation_2026-08-23.md) | 10,000 次 bootstrap 重审计、三种子 validation 指标和消融结论 |
 | [`evaluation/unified_pvs_metrics_evaluation.md`](evaluation/unified_pvs_metrics_evaluation.md) | pose/aggregate、weighted recall、accuracy、balanced accuracy、useful cull 和资源指标定义 |
 | [`evaluation/test_split_benchmark_protocol.md`](evaluation/test_split_benchmark_protocol.md) | train、calibration、validation 和冻结 test 的职责边界 |
