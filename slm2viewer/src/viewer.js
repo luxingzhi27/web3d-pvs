@@ -80,7 +80,7 @@ const MAP_NAMES = [
 ];
 
 Cache.enabled = true;
-const VIEWER_CONFIG_CACHE_VERSION = 'flatblock-v3-http-adaptive-20260424';
+const VIEWER_CONFIG_CACHE_VERSION = 'pvs-v4-gpu-hkust-liteweb3d-20260825';
 const WHITE = new Color(0xffffff);
 const FRONTEND_RUNTIME_ASSET_ESTIMATE = {
   label: 'PVS V4 固定实例特征与查询网络，约 5.48 MB，不含按需 GLB',
