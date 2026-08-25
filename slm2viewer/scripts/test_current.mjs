@@ -84,6 +84,11 @@ const workerSource = fs.readFileSync(requireFile('src/LightweightPVSWorker.js'),
 const dispatcherSource = fs.readFileSync(requireFile('src/LightweightPVSDispatcher.js'), 'utf8');
 const loaderSource = fs.readFileSync(requireFile('slm2/SLM2Loader.js'), 'utf8');
 const viewerSource = fs.readFileSync(requireFile('src/viewer.js'), 'utf8');
+const hkustGlbBaseUrl = 'https://www.liteweb3d.com/data/hkust-v3/';
+if (config.scenes?.default_config?.loaderConfig?.glbResourcesBaseUrl !== hkustGlbBaseUrl
+    || config.scenes?.['hkust-v3']?.loaderConfig?.glbResourcesBaseUrl !== hkustGlbBaseUrl) {
+  throw new Error('All HKUST source entries must use the liteweb3d GLB origin.');
+}
 if (fs.existsSync(path.join(viewerDir, 'src/NeuralPVS.js'))) {
   throw new Error('The unused legacy ONNX visibility backend must not return.');
 }

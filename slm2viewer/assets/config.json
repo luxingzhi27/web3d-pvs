@@ -17,7 +17,7 @@
         "resourcesWS": "",
         "rcServerAddress": "",
         "schedulingStrategy": "auto",
-        "glbResourcesBaseUrl": "./scene_glbs/hkust-v3"
+        "glbResourcesBaseUrl": "https://www.liteweb3d.com/data/hkust-v3/"
       }
     },
     "hkust-v3": {
@@ -34,7 +34,7 @@
       "loaderConfig": {
         "resourcesBaseUrl": "./assets/scenes/hkust-v3",
         "schedulingStrategy": "auto",
-        "glbResourcesBaseUrl": "./scene_glbs/hkust-v3",
+        "glbResourcesBaseUrl": "https://www.liteweb3d.com/data/hkust-v3/",
         "resourcesWS": "",
         "rcServerAddress": ""
       }

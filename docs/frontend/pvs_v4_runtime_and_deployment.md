@@ -38,6 +38,8 @@ slm2viewer/assets/neural_instance_culling/pvs_mainline_v4
 
 六个二进制文件合计约 `5.03 MiB`，加元数据约 `5.48 MB`。运行包不包含 checkpoint、训练点云、关系边、子视点、邻居表或场景 GLB。
 
+源码配置中的 HKUST GLB 根地址固定为 `https://www.liteweb3d.com/data/hkust-v3/`；默认场景和显式 `hkust-v3` 入口使用同一地址。`resourcesBaseUrl` 仍指向本地的小型场景元数据目录，只有实际 GLB、纹理等大型构件资源从该远端根地址下载。
+
 ## 单次预测数据流
 
 1. 主线程把真实相机位置、旋转、宽高比和裁剪范围发送给 Worker。
