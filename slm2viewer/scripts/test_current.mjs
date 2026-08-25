@@ -130,8 +130,28 @@ if (!runtimeSource.includes('let shared_variance = 0.5 * (1.0 - chi_squared);')
 }
 if (!workerSource.includes('buildCamera(snapshot, FRONTEND_RENDER_FOV_Y_DEG)')
     || !workerSource.includes('buildCandidateCamera(snapshot)')
-    || !workerSource.includes('renderComponentModelList: Uint32Array.from(renderComponentIds)')) {
+    || !workerSource.includes('renderCamera: activeCamera')
+    || !workerSource.includes('renderComponentModelList: renderComponentIds')) {
   throw new Error('The worker no longer follows the 60-degree render / 66-degree candidate contract.');
+}
+if (!runtimeSource.includes("source: 'gpu_v4_back_frustum_aabb'")
+    || !runtimeSource.includes('fn intersects_frustum(instance_id: u32, render_frustum: bool)')
+    || !runtimeSource.includes('atomicMax(&results[')
+    || !runtimeSource.includes('_buildGlbCompactionShader()')) {
+  throw new Error('The V4 runtime no longer performs candidate, render and GLB aggregation on the GPU.');
+}
+for (const forbidden of [
+  'function intersectsComponent(',
+  'function filterComponentsByFrustum(',
+  'function componentIdsToGlbIds(',
+  'worker-aabb-fallback',
+  'this.device.queue.writeBuffer(this.candidateBuffer',
+  'TrajectoryPrefetcher',
+  '_scheduleTrajectoryPrefetch',
+]) {
+  if (runtimeSource.includes(forbidden) || workerSource.includes(forbidden) || loaderSource.includes(forbidden)) {
+    throw new Error(`CPU neural-culling compatibility path returned: ${forbidden}`);
+  }
 }
 if (!loaderSource.includes('predictionPayload.renderComponentModelList')
     || !loaderSource.includes('this._applyInstancedVisibility(renderComponentIds)')) {

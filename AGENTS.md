@@ -230,6 +230,8 @@ conda run -n slm_pvs python slm2viewer/scripts/verify_v4_frontend_parity.py \
 - 如果新增 runtime schema，必须保证旧 schema 要么明确兼容，要么明确移除并更新文档。
 - 上下文化实例点云路线的前端首版必须保持“固定上下文化实例特征表 + 轻量视角查询头”；不能把 camera hash 作为唯一或主要可见性记忆来源。
 - 完整 AABB 8 角点 MVP 投影默认不进入前端首版运行时。如果后续确实上线，必须只在 Worker/WebGPU 中对候选实例低频计算，禁止主线程逐帧或全量实例计算，并必须报告额外耗时。
+- 当前 V4 神经运行时必须在 WebGPU 内完成后退 `66°` 视锥 AABB 候选、模型阈值筛选、真实 `60°` 视锥过滤、实例编号压缩和按 GLB 的最高分聚合。普通运行只允许回读最终实例编号和压缩后的 GLB 队列；逐候选编号、概率和中间特征只允许在显式 parity 调试模式回读。不得恢复 Worker CPU 全实例扫描、CPU 二次真实视锥过滤或 WebGPU 失败后的隐式 AABB fallback；无神经权重场景使用独立的显式 AABB 视锥模式。
+- 当前 Three.js 主渲染器是 WebGLRenderer，不能零拷贝读取 WebGPU storage buffer。禁止为了宣称“渲染着色器读取可见性位图”而把 WebGPU 位图回读 CPU 后再上传 WebGL；真正共享位图必须先完成 WebGPURenderer 全链路迁移与材质、后处理、移动端验证。
 
 ## 9. 采样与数据集准则
 

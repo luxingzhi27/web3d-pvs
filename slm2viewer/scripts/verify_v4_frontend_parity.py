@@ -109,6 +109,59 @@ def apply_exported_query_parameters(
     model.load_state_dict(state, strict=True)
 
 
+def quaternion_rotation_matrix(quaternion: np.ndarray) -> np.ndarray:
+    x, y, z, w = quaternion / max(float(np.linalg.norm(quaternion)), 1e-12)
+    return np.asarray(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+
+
+def frustum_aabb_ids(
+    aabbs: np.ndarray,
+    position: np.ndarray,
+    quaternion: np.ndarray,
+    fov_y_degrees: float,
+    aspect: float,
+    near: float,
+    far: float,
+) -> set[int]:
+    rotation = quaternion_rotation_matrix(quaternion)
+    view = np.eye(4, dtype=np.float64)
+    view[:3, :3] = rotation.T
+    view[:3, 3] = -rotation.T @ position
+    focal = 1.0 / np.tan(np.deg2rad(fov_y_degrees) * 0.5)
+    projection = np.zeros((4, 4), dtype=np.float64)
+    projection[0, 0] = focal / aspect
+    projection[1, 1] = focal
+    projection[2, 2] = (far + near) / (near - far)
+    projection[2, 3] = 2.0 * far * near / (near - far)
+    projection[3, 2] = -1.0
+    clip = projection @ view
+    planes = np.stack(
+        [
+            clip[3] - clip[0],
+            clip[3] + clip[0],
+            clip[3] + clip[1],
+            clip[3] - clip[1],
+            clip[3] - clip[2],
+            clip[3] + clip[2],
+        ]
+    )
+    planes /= np.maximum(np.linalg.norm(planes[:, :3], axis=1, keepdims=True), 1e-12)
+    minimum = aabbs[:, :3].astype(np.float64)
+    maximum = aabbs[:, 3:].astype(np.float64)
+    inside = np.ones(aabbs.shape[0], dtype=bool)
+    for plane in planes:
+        positive = np.where(plane[:3] >= 0, maximum, minimum)
+        inside &= positive @ plane[:3] + plane[3] >= 0
+    return set(np.flatnonzero(inside).tolist())
+
+
 @torch.no_grad()
 def main() -> int:
     args = parse_args()
@@ -190,6 +243,32 @@ def main() -> int:
     browser_visible = set(candidate_ids[browser_scores >= threshold].tolist())
     reference_visible = set(candidate_ids[reference_scores >= threshold].tolist())
     reported_visible = set(int(value) for value in capture.get("visibleInstanceIds", []))
+    camera_position = np.asarray(camera["position"], dtype=np.float64)
+    camera_quaternion = np.asarray(camera["quaternion"], dtype=np.float64)
+    camera_forward = np.asarray(camera["forward"], dtype=np.float64)
+    camera_forward /= max(float(np.linalg.norm(camera_forward)), 1e-12)
+    back_position = camera_position - camera_forward * float(meta["query"]["candidateCameraBackOffsetM"])
+    cpu_candidate_ids = frustum_aabb_ids(
+        aabbs,
+        back_position,
+        camera_quaternion,
+        float(meta["query"]["modelInputFovYDeg"]),
+        float(camera["aspect"]),
+        float(camera["near"]),
+        float(camera["far"]),
+    )
+    cpu_render_frustum_ids = frustum_aabb_ids(
+        aabbs,
+        camera_position,
+        camera_quaternion,
+        float(meta["query"]["frontendRenderFovYDeg"]),
+        float(camera["aspect"]),
+        float(camera["near"]),
+        float(camera["far"]),
+    )
+    browser_candidate_ids = set(candidate_ids.tolist())
+    reported_render_visible = set(int(value) for value in capture.get("renderVisibleInstanceIds", []))
+    expected_render_visible = reported_visible & cpu_render_frustum_ids
     report = {
         "candidateCount": int(candidate_ids.size),
         "threshold": threshold,
@@ -197,6 +276,8 @@ def main() -> int:
         "meanAbsoluteProbabilityError": float(absolute.mean()),
         "thresholdDecisionMismatchCount": len(browser_visible ^ reference_visible),
         "workerVisibleSetMismatchCount": len(browser_visible ^ reported_visible),
+        "gpuCandidateVsCpuFrustumMismatchCount": len(browser_candidate_ids ^ cpu_candidate_ids),
+        "gpuRenderVsCpuFrustumMismatchCount": len(reported_render_visible ^ expected_render_visible),
         "browserVisibleCount": len(browser_visible),
         "referenceVisibleCount": len(reference_visible),
         "stageParity": stage_reports,
@@ -217,7 +298,12 @@ def main() -> int:
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if report["maximumAbsoluteProbabilityError"] > float(args.max_absolute_error):
         return 1
-    if report["thresholdDecisionMismatchCount"] != 0 or report["workerVisibleSetMismatchCount"] != 0:
+    if (
+        report["thresholdDecisionMismatchCount"] != 0
+        or report["workerVisibleSetMismatchCount"] != 0
+        or report["gpuCandidateVsCpuFrustumMismatchCount"] != 0
+        or report["gpuRenderVsCpuFrustumMismatchCount"] != 0
+    ):
         return 1
     return 0
 

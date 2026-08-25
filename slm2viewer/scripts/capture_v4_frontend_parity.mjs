@@ -241,6 +241,8 @@ async function capturePage(page, timeoutMs) {
         forward,
         aspect: camera.aspect,
         fov: camera.fov,
+        near: camera.near,
+        far: camera.far,
       },
       candidateInstanceIds: Array.from(prediction.candidateInstanceIds),
       candidateScores: Array.from(prediction.candidateScores),

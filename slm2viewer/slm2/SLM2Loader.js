@@ -72,7 +72,6 @@ import { Vector2 } from 'three';
 import { getInstancePVSAssetBaseUrl } from '../src/neuralCullingBackendMode.js';
 import { LightweightPVSDispatcher } from '../src/LightweightPVSDispatcher.js';
 import { CameraPredictionGate } from '../src/CameraPredictionGate.js';
-import { TrajectoryPrefetcher } from '../src/TrajectoryPrefetcher.js';
 import { RenderVisibilitySystem } from '../src/RenderVisibilitySystem.js';
 import { NeuralResourceWSPool } from '../src/NeuralResourceWSPool.js';
 import { startupLog, stopStartupLog } from '../src/startupTimeline.js';
@@ -218,10 +217,6 @@ export class SLM2Loader
       aspectDelta: 0.08,
       minIntervalMs: 350,
     });
-    this.trajectoryPrefetcher = new TrajectoryPrefetcher({
-      historyWindowMs: 500,
-      horizonsMs: [800, 1600],
-    });
     this.neuralDebugNoCache = false;
     this.neuralRenderPolicy = 'culled';
     this.neuralDownloadPlanMode = 'viewcell-priority';
@@ -238,9 +233,6 @@ export class SLM2Loader
     this.forceNextNeuralPrediction = false;
     this.neuralPredictionInFlight = false;
     this.neuralPendingPredictionAfterCurrent = false;
-    this.neuralTrajectoryPrefetchInFlight = false;
-    this.lastNeuralTrajectoryPrefetchAt = 0;
-    this.neuralTrajectoryPrefetchMinIntervalMs = 2000;
     this.lastVisibilityMetrics = null;
     this.visibilityMetricsSerial = 0;
     this.lastBenchmarkVisibilityIds = {
@@ -3738,7 +3730,6 @@ export class SLM2Loader
         if (this.neuralPVS && this.neuralPVS.isReady) {
           if (logThisCulling) startupLog('slm2:sceneCulling:neural-ready');
           this.neuralPVSInitWarningShown = false;
-          this.trajectoryPrefetcher.record(this.activeCamera);
           var forceNeuralPrediction = Boolean(this.forceNextNeuralPrediction);
           if (this.neuralPredictionInFlight)
           {
@@ -4222,93 +4213,6 @@ export class SLM2Loader
     {
       return null;
     }
-  }
-
-  async _enqueuePrefetchPrediction(prediction)
-  {
-    if (!prediction)
-    {
-      return;
-    }
-    var combined = this._makeGlobalGlbModelInfos(
-      prediction.prefetchGlbIds || prediction.modelList || [],
-      prediction.prefetchWeights || prediction.weightList || [],
-      'global-glb',
-      { prefetch: true, deferredVisible: true }
-    );
-    var existing = new Set(this.pendingPrefetchList.map(function(item)
-    {
-      return item && item.id;
-    }));
-
-    for (var i = 0; i < combined.length; ++i)
-    {
-      var item = combined[i];
-      if (existing.has(item.id)) continue;
-      item.prefetch = true;
-      this.pendingPrefetchList.push(item);
-      existing.add(item.id);
-    }
-    this.pendingPrefetchList.sort(function(a, b)
-    {
-      return (b.weight || 0) - (a.weight || 0);
-    });
-  }
-
-  _scheduleTrajectoryPrefetch()
-  {
-    if (!this.useNeuralPVS || !this.neuralPVS || !this.neuralPVS.isReady)
-    {
-      return;
-    }
-    var nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
-    if (this.neuralTrajectoryPrefetchInFlight ||
-        nowMs - this.lastNeuralTrajectoryPrefetchAt < this.neuralTrajectoryPrefetchMinIntervalMs)
-    {
-      return;
-    }
-
-    var futurePoses = this.trajectoryPrefetcher.predictFuturePoses();
-    if (!futurePoses.length)
-    {
-      return;
-    }
-
-    var scope = this;
-    this.neuralTrajectoryPrefetchInFlight = true;
-    this.lastNeuralTrajectoryPrefetchAt = nowMs;
-    setTimeout(async function()
-    {
-      try
-      {
-        for (var i = 0; i < futurePoses.length; ++i)
-        {
-          if (!scope.useNeuralPVS) return;
-          var pose = futurePoses[i];
-          var futureCamera = null;
-          if (scope.activeCamera && typeof scope.activeCamera.clone === 'function')
-          {
-            futureCamera = scope.activeCamera.clone();
-            if (pose.position && futureCamera.position && typeof futureCamera.position.copy === 'function')
-            {
-              futureCamera.position.copy(pose.position);
-            }
-            if (pose.rotation && futureCamera.rotation && typeof futureCamera.rotation.copy === 'function')
-            {
-              futureCamera.rotation.copy(pose.rotation);
-            }
-            futureCamera.updateMatrixWorld(true);
-            futureCamera.updateProjectionMatrix();
-          }
-          var pred = await scope.neuralPVS.predict(futureCamera);
-          await scope._enqueuePrefetchPrediction(pred);
-        }
-      }
-      finally
-      {
-        scope.neuralTrajectoryPrefetchInFlight = false;
-      }
-    }, 0);
   }
 
   _getRenderVisibilityOptions(idMode)
@@ -5384,8 +5288,6 @@ export class SLM2Loader
     this.hasFullLoaded = false;
     this.neuralPredictionInFlight = false;
     this.neuralPendingPredictionAfterCurrent = false;
-    this.neuralTrajectoryPrefetchInFlight = false;
-    this.lastNeuralTrajectoryPrefetchAt = 0;
     this.neuralDebugLogs = params['neuralDebugLogs'] === 'true' || params['debugNeural'] === 'true';
     this.neuralPVSInitScheduled = false;
     this.materialConfigLoadScheduled = false;
