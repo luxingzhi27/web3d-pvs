@@ -26,9 +26,17 @@ const deployDir = resolve(rootDir, outputDirValue || 'public_deploy');
 const deployAssetProxyPath = '/hkust-v3-assets';
 const remoteAssetBaseUrl = 'https://smart3d.hkust-gz.edu.cn/proxy/hkust-v3/assets';
 const sceneModelDirByName = Object.freeze({
-  'hkust-v3': 'pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best',
-  'ifcbench_fantasy_metropolis_instanced_v2': 'pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40_best',
+  'hkust-v3': 'pvs_mainline_v4',
 });
+const v4RuntimeFiles = Object.freeze([
+  'model_meta.json',
+  'instance_runtime_features_fp16.bin',
+  'instance_aabb_fp32.bin',
+  'instance_to_glb_uint32.bin',
+  'query_weights_fp16.bin',
+  'frequency_cycles_fp32.bin',
+  'chi_table_fp32.bin',
+]);
 const sceneEqualsArg = process.argv.find((arg) => arg.startsWith('--scene='));
 const sceneFlagIndex = process.argv.indexOf('--scene');
 const selectedSceneName = sceneEqualsArg
@@ -67,15 +75,12 @@ if (selectedSceneName) {
   if (!sourceConfig?.scenes?.[selectedSceneName]) {
     throw new Error(`Unknown --scene ${selectedSceneName}. Check assets/config.json.`);
   }
-  if (!sceneModelDirByName[selectedSceneName]) {
-    throw new Error(`No runtime model mapping is registered for --scene ${selectedSceneName}.`);
-  }
 }
 
 // 未指定场景时保留当前源目录中的全部运行模型；指定场景时只保留该场景对应的模型。
 const localNeuralInstanceCullingRoot = resolve(rootDir, 'assets', 'neural_instance_culling');
 const selectedModelDirs = selectedSceneName
-  ? new Set([sceneModelDirByName[selectedSceneName]])
+  ? new Set(sceneModelDirByName[selectedSceneName] ? [sceneModelDirByName[selectedSceneName]] : [])
   : null;
 const runtimeNeuralFiles = new Set();
 if (existsSync(localNeuralInstanceCullingRoot)) {
@@ -83,19 +88,18 @@ if (existsSync(localNeuralInstanceCullingRoot)) {
     if (selectedModelDirs && !selectedModelDirs.has(entry)) continue;
     const modelDir = resolve(localNeuralInstanceCullingRoot, entry);
     if (!existsSync(modelDir)) continue;
-    const bin = resolve(modelDir, 'instance_pvs_assets.bin');
-    const meta = resolve(modelDir, 'instance_model_meta.json');
     const toRel = (p) => toPosix(relative(rootDir, p));
-    if (existsSync(bin)) runtimeNeuralFiles.add(toRel(bin));
-    if (existsSync(meta)) runtimeNeuralFiles.add(toRel(meta));
+    for (const file of v4RuntimeFiles) {
+      const source = resolve(modelDir, file);
+      if (existsSync(source)) runtimeNeuralFiles.add(toRel(source));
+    }
   }
 }
-if (selectedSceneName) {
+if (selectedSceneName && sceneModelDirByName[selectedSceneName]) {
   const modelDir = sceneModelDirByName[selectedSceneName];
-  const requiredModelFiles = [
-    `assets/neural_instance_culling/${modelDir}/instance_pvs_assets.bin`,
-    `assets/neural_instance_culling/${modelDir}/instance_model_meta.json`,
-  ];
+  const requiredModelFiles = v4RuntimeFiles.map(
+    (file) => `assets/neural_instance_culling/${modelDir}/${file}`,
+  );
   const missing = requiredModelFiles.filter((rel) => !runtimeNeuralFiles.has(rel));
   if (missing.length > 0) {
     throw new Error(`Runtime assets for --scene ${selectedSceneName} are missing: ${missing.join(', ')}`);

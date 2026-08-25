@@ -48,9 +48,9 @@ neural_instance_culling/benchmark/out/pvs_ray_context_survival_owrb_v1_subpose5_
 | Three.js Color-ID 采样 | `neural_instance_culling/sampler/run_scene_viewcell_colorid_sampling.mjs` |
 | Pose CSR 构建 | `neural_instance_culling/dataset/build_color_id_pose_csr.py`、`build_rvc_viewcell_pose_csr.py` |
 | 方向遮挡证据 | `neural_instance_culling/dataset/build_directional_occlusion_evidence.py` |
-| 模型训练 | `neural_instance_culling/model/train_directional_occlusion_proxy_encoder.py` |
-| 前端导出 | `neural_instance_culling/model/export_directional_occlusion_proxy_frontend.py` |
-| benchmark runner | `neural_instance_culling/benchmark/model_runners.py` |
+| 模型训练 | `neural_instance_culling/model/train_pvs.py` |
+| 前端导出 | `neural_instance_culling/model/export_pvs.py` |
+| benchmark runner | `neural_instance_culling/benchmark/run_pvs.py` |
 | 前端 Worker | `slm2viewer/src/LightweightPVSWorker.js` |
 | 前端调度与实例渲染 | `slm2viewer/src/LightweightPVSDispatcher.js`、`InstancePVS.js`、`RenderVisibilitySystem.js` |
 | 按场景打包 | `slm2viewer/scripts/package_deploy.mjs`、`package_scene_glb.mjs` |

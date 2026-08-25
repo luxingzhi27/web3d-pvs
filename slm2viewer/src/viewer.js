@@ -83,9 +83,7 @@ Cache.enabled = true;
 const VIEWER_CONFIG_CACHE_VERSION = 'flatblock-v3-http-adaptive-20260424';
 const WHITE = new Color(0xffffff);
 const FRONTEND_RUNTIME_ASSET_ESTIMATE = {
-  rawMB: 16.72,
-  gzipMB: 6.78,
-  label: 'Directional Proxy full40 best，约 16.7MB / gzip 约 6.8MB，不含按需 GLB',
+  label: 'PVS V4 固定实例特征与查询网络，约 5.48 MB，不含按需 GLB',
 };
 
 export class Viewer 
@@ -551,7 +549,7 @@ export class Viewer
     const initTimings = neural.initTimings || {};
     const gate = neural.predictionGate || {};
     const modelInfo = neural.modelInfo || (neural.predictTimings ? neural.predictTimings.modelInfo : null) || {};
-    const workpoint = modelInfo.testWorkpoint || {};
+    const workpoint = modelInfo.calibrationWorkpoint || {};
     const notes = visibility.notes || {};
     const predictionAge = visibility.timestamp ? Math.max(0, performance.now() - visibility.timestamp) : null;
     const predictDebug = this.predictionDebugLastStats || {};
@@ -564,7 +562,7 @@ export class Viewer
 
     this.queueDebugContent.textContent = [
       `model=${modelInfo.runtimeModelDisplayName || modelInfo.runtimeModelName || '-'} schema=${modelInfo.runtimeSchema || '-'} threshold=${fmt(modelInfo.visibilityThreshold, 3)} selection=${modelInfo.thresholdSelection || '-'} priority=${modelInfo.outputsDownloadPriority === true}`,
-      `test F1=${fmt(workpoint.poseF1, 3)} recall=${fmt(workpoint.poseRecall, 3)} weighted=${fmt(workpoint.poseWeightedRecall, 3)} precision=${fmt(workpoint.posePrecision, 3)} avgPred=${fmt(workpoint.avgPred, 1)} poses=${workpoint.evalPoseCount || '-'}`,
+      `calibration weighted=${fmt(workpoint.aggregateWeightedRecall, 4)} lower=${fmt(workpoint.aggregateWeightedRecallLowerConfidenceBound, 4)} poseWeighted=${fmt(workpoint.poseWeightedRecall, 4)} testReads=${workpoint.testEvaluationCount || 0}`,
       `culling=${neural.cullingMode || '-'} mode=${visibility.mode || '-'} idMode=${neural.idMode || visibility.idMode || '-'} backend=${neural.backend || '-'} ready=${neural.ready}`,
       `neural=${neural.enabled} transport=${neural.resourceTransport || 'http'} ws=${neural.resourcesWSConfigured ? (neural.resourcesWSConnected ? 'connected' : 'pending') : 'none'} renderPolicy=${neural.renderPolicy} cpu=${neural.cpuPerfMode}`,
       `wsPool ready=${resourceWS.readyConnections || 0}/${resourceWS.configuredConnections || 0} batch=${resourceWS.inFlightBatches || 0} models=${resourceWS.inFlightModels || 0} parse=${resourceWS.pendingParseCount || 0}/${resourceWS.activeParseCount || 0} parseMB=${fmt(resourceWS.pendingParseMB, 1)}`,
@@ -724,7 +722,7 @@ export class Viewer
     const initTimings = neural.initTimings || {};
     const gate = neural.predictionGate || {};
     const modelInfo = neural.modelInfo || predictTimings.modelInfo || {};
-    const workpoint = modelInfo.testWorkpoint || {};
+    const workpoint = modelInfo.calibrationWorkpoint || {};
     const notes = visibility.notes || {};
     const predictDebug = this.predictionDebugLastStats || {};
     const predictionAge = visibility.timestamp ? Math.max(0, performance.now() - visibility.timestamp) : null;
@@ -734,7 +732,7 @@ export class Viewer
     this.runtimeDebugState.cullingMode = neural.cullingMode || this.slm2Loader.getCullingMode();
     this.runtimeDebugState.pvsModelVersion = modelInfo.runtimeModelDisplayName || modelInfo.runtimeModelName || '-';
     this.runtimeDebugState.pvsModelSchema = `${modelInfo.runtimeSchema || '-'} / threshold ${this._formatRuntimeDebugNumber(modelInfo.visibilityThreshold, 3)} / ${modelInfo.thresholdSelection || '-'}`;
-    this.runtimeDebugState.pvsModelWorkpoint = `F1 ${this._formatRuntimeDebugNumber(workpoint.poseF1, 3)}, recall ${this._formatRuntimeDebugNumber(workpoint.poseRecall, 3)}, weighted ${this._formatRuntimeDebugNumber(workpoint.poseWeightedRecall, 3)}, avgPred ${this._formatRuntimeDebugNumber(workpoint.avgPred, 1)}, poses ${workpoint.evalPoseCount || '-'}`;
+    this.runtimeDebugState.pvsModelWorkpoint = `weighted ${this._formatRuntimeDebugNumber(workpoint.aggregateWeightedRecall, 4)}, lower ${this._formatRuntimeDebugNumber(workpoint.aggregateWeightedRecallLowerConfidenceBound, 4)}, poseWeighted ${this._formatRuntimeDebugNumber(workpoint.poseWeightedRecall, 4)}, testReads ${workpoint.testEvaluationCount || 0}`;
     this.runtimeDebugState.pvsCullingSource = this._describeRuntimeCullingSource(stats);
     this.runtimeDebugState.pvsBackend = neural.backend || visibility.backend || neural.neuralBackend || '-';
     this.runtimeDebugState.pvsReady = neural.ready ? '是' : '否';
@@ -2236,7 +2234,7 @@ export class Viewer
     addRuntimeStatus('frontendAssetEstimate', '前端资产估算');
     addRuntimeStatus('pvsModelVersion', '模型版本');
     addRuntimeStatus('pvsModelSchema', '模型Schema/阈值');
-    addRuntimeStatus('pvsModelWorkpoint', 'Test工作点');
+    addRuntimeStatus('pvsModelWorkpoint', 'Calibration安全工作点');
     addRuntimeStatus('pvsCullingSource', '当前剔除来源');
     addRuntimeStatus('pvsBackend', 'Worker后端');
     addRuntimeStatus('pvsReady', '模型就绪');
@@ -2251,8 +2249,8 @@ export class Viewer
     addRuntimeStatus('pvsRawGlbs', '后退视锥模型GLB');
     addRuntimeStatus('pvsImmediateGlbs', '立即下载GLB');
     addRuntimeStatus('pvsPrefetchGlbs', '预取GLB');
-    addRuntimeStatus('pvsRenderInstances', '当前视锥候选构件');
-    addRuntimeStatus('pvsRenderGlbs', '当前视锥候选GLB');
+    addRuntimeStatus('pvsRenderInstances', '当前视锥显示构件');
+    addRuntimeStatus('pvsRenderGlbs', '当前视锥显示GLB');
     addRuntimeStatus('pvsActualRender', '实际可见Mesh/实例');
     addRuntimeStatus('pvsDownloadQueue', '下载队列');
     addRuntimeStatus('pvsPrefetchQueue', '预取队列');

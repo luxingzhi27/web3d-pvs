@@ -2,8 +2,8 @@
 
 当前状态和场景边界以 `../docs/README.md`、`../docs/current/repository_layout_2026-07-31.md` 和 `assets/config.json` 为准。本文只描述当前两场景发布流程。
 
-完整的导出、压缩、场景模型映射和 nginx 资产边界见
-`../docs/frontend/neuralstreamweb3d_deployment_assets.md`；本文保留可直接执行的部署步骤。
+完整的 V4 运行、资产和部署边界见
+`../docs/frontend/pvs_v4_runtime_and_deployment.md`；本文保留可直接执行的部署步骤。
 
 ## 包里有什么
 
@@ -16,16 +16,20 @@ public_deploy/
 ├── favicon.df682a99.ico
 ├── assets/
 │   ├── config.json                    # 场景配置(控制 ?scene= 切换哪些场景)
-│   ├── neural_instance_culling/       # PVS 运行时模型(训练结果,每次会变)
-│   │   ├── <model_1>/                 
-│   │   │   ├── instance_pvs_assets.bin    # 模型权重
-│   │   │   └── instance_model_meta.json   # 模型元信息
-│   │   └── <model_2>/...
+│   ├── neural_instance_culling/
+│   │   └── pvs_mainline_v4/
+│   │       ├── model_meta.json
+│   │       ├── instance_runtime_features_fp16.bin
+│   │       ├── instance_aabb_fp32.bin
+│   │       ├── instance_to_glb_uint32.bin
+│   │       ├── query_weights_fp16.bin
+│   │       ├── frequency_cycles_fp32.bin
+│   │       └── chi_table_fp32.bin
 │   └── scenes/                        # 场景元数据(不含 GLB 本体)
 │       └── <scene>/
 │           ├── sceneWeb.json          # 场景结构(构件树/分组/包围盒)
 │           ├── glbIndex.json          # 构件ID→GLB文件路径映射
-│           ├── runtimeVisibilityMeta.json  # 每个构件的AABB/GLO映射
+│           ├── runtimeVisibilityMeta.json  # 每个构件的AABB/GLB映射
 │           └── task-*/proxy/proxy.glb     # AABB代理模型(小文件,几个MB)
 ```
 
@@ -52,7 +56,7 @@ public_deploy/
 
 ## 按场景生成部署包
 
-默认命令生成包含当前两个场景的多场景包：
+默认命令生成包含当前两个场景的多场景包；其中只有 HKUST 携带 V4 神经运行资产：
 
 ```bash
 cd slm2viewer
@@ -66,8 +70,7 @@ npm run package:scene-glb -- --scene hkust-v3
 npm run package:scene-glb -- --scene ifcbench_fantasy_metropolis_instanced_v2
 ```
 
-也可以只生成一个场景。场景专用包只包含该场景的元数据、对应实例级模型和配置，
-不会把另一个场景的模型带进去：
+也可以只生成一个场景。HKUST 专用包包含 V4 资产；Metropolis 专用包只包含场景元数据并使用 AABB 视锥模式：
 
 ```bash
 npm run package:deploy:direct -- --scene hkust-v3
@@ -81,8 +84,8 @@ npm run package:deploy:direct -- --scene hkust-v3 --output-dir public_deploy_hku
 npm run package:deploy:direct -- --scene ifcbench_fantasy_metropolis_instanced_v2 --output-dir public_deploy_metropolis
 ```
 
-`--scene` 的值必须是 `assets/config.json` 中注册的场景名，并且必须有对应的模型映射。当前模型映射还需要同步维护在
-`scripts/package_deploy.mjs` 和 `src/neuralCullingBackendMode.js` 中。混淆默认开启；如需调试可显式追加
+`--scene` 的值必须是 `assets/config.json` 中注册的场景名。只有确实导出并校验过 V4 资产的场景才需要同步维护
+`scripts/package_deploy.mjs` 和 `src/neuralCullingBackendMode.js` 中的模型映射。混淆默认开启；如需调试可显式追加
 `--obfuscate-js=false`，正式发布不要关闭。
 
 ## 部署步骤
@@ -189,7 +192,7 @@ https://<域名>/?scene=ifcbench_fantasy_metropolis_instanced_v2
    }
    ```
 3. 把新场景 GLB 传到 `scene_glbs/<新场景>/`。
-4. 在 `scripts/package_deploy.mjs` 注册场景到神经模型的映射。
-5. 在 `src/neuralCullingBackendMode.js` 注册前端场景到模型的映射，并更新 `verify_deploy_assets.sh` 的检查路径。
+4. 如果该场景已有匹配的 V4 导出，在 `scripts/package_deploy.mjs` 和 `src/neuralCullingBackendMode.js` 注册同一个模型目录；否则保持 AABB 视锥模式。
+5. 在 `verify_deploy_assets.sh` 中登记新场景的部署检查口径。
 
 删场景:从 `public_deploy/assets/config.json` 里删掉对应条目即可。

@@ -36,7 +36,7 @@
 - Three.js Color-ID 采样入口 `neural_instance_culling/sampler/run_sampler.mjs` 使用系统 Chrome/Chromium，并传入：
   `--disable-dev-shm-usage`、`--ignore-gpu-blocklist`、`--enable-gpu`、`--enable-webgl`、`--use-angle=vulkan`、`--enable-accelerated-2d-canvas`、`--enable-zero-copy`。正式采样必须再传 `--require-hardware-gpu`，脚本据此追加 `--disable-software-rasterizer`。
 - view-cell 采样入口 `run_scene_viewcell_colorid_sampling.mjs` 不自行启动渲染器，而是为每个分片调用上述 `run_sampler.mjs`，强制传递 `--require-hardware-gpu`；所有分片都必须生成 GPU evidence，最后由 `gpu_execution_summary.json` 汇总检查。
-- WebGPU/WGSL parity 入口 `slm2viewer/scripts/benchmark_ray_context_survival_owrb_webgpu_parity.mjs` 使用：
+- 当前 V4 WebGPU/WGSL 页面采集入口 `slm2viewer/scripts/capture_v4_frontend_parity.mjs` 使用：
   `--headless=new`、`--ozone-platform=headless`、`--ozone-override-screen-size=1280,720`、`--no-sandbox`、`--no-first-run`、`--disable-dev-shm-usage`、`--disable-background-networking`、`--disable-extensions`、`--enable-gpu`、`--enable-unsafe-webgpu`、`--enable-webgpu`、`--enable-webgl`、`--enable-features=Vulkan`、`--use-vulkan`、`--use-angle=vulkan`、`--enable-accelerated-2d-canvas`、`--enable-zero-copy`、`--ignore-gpu-blocklist` 和 `--disable-gpu-sandbox`；正式模式再追加 `--disable-software-rasterizer`。脚本还记录 `VK_ICD_FILENAMES` 和 Chrome DevTools `SystemInfo.getInfo`，用于区分 WebGL ANGLE 后端与 WebGPU adapter 后端。`--enable-unsafe-webgpu`、`--enable-webgpu`、`--enable-features=Vulkan` 和 `--use-vulkan` 是 WebGPU 路径的额外参数，不能误加到只做 WebGL 采样的脚本中作为替代证据。
 - WebGPU 页面必须调用 `navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })`，保存 `adapter.info.vendor`、`architecture`、`device`、`description`，并同时保存 WebGL renderer 作为辅助诊断。适配器或 renderer 文本含 `SwiftShader`、`llvmpipe`、`softpipe`、`swrast`、`software` 或为空时，硬件门失败。
 - 硬件门不是由命令退出码决定：采样和 WebGPU parity 都必须保存 API 后端字段、Chrome 启动参数，以及浏览器执行窗口的 `nvidia-smi` 和 `nvidia-smi pmon` before/during/after 证据。WebGL 的 NVIDIA/ANGLE 证据只能证明 WebGL 光栅化硬件路径，不能证明 WebGPU adapter 使用 NVIDIA 硬件。
@@ -50,11 +50,15 @@ node neural_instance_culling/sampler/run_sampler.mjs \
   --output <formal-output.jsonl> \
   --require-hardware-gpu
 
-node slm2viewer/scripts/benchmark_ray_context_survival_owrb_webgpu_parity.mjs \
-  --bundle <exported-runtime-bundle> \
-  --cases <parity-cases.json> \
-  --out <parity-capture.json> \
+node slm2viewer/scripts/capture_v4_frontend_parity.mjs \
+  --viewer-dir slm2viewer/public \
+  --out <v4-parity-capture.json> \
   --require-hardware-gpu
+
+conda run -n slm_pvs python slm2viewer/scripts/verify_v4_frontend_parity.py \
+  --checkpoint <best_safe.pt> \
+  --asset-dir slm2viewer/assets/neural_instance_culling/pvs_mainline_v4 \
+  --capture <v4-parity-capture.json>
 ```
 
 若 WebGPU 当前只能返回 SwiftShader，必须记录为“WebGPU 软件数值 parity 通过、硬件门失败”，不能写成硬件 WebGPU 延迟或移动端性能结果；不得通过删除 `--disable-software-rasterizer`、加入 SwiftShader 参数或复用 WebGL 证据绕过该门。
@@ -266,14 +270,12 @@ node slm2viewer/scripts/benchmark_ray_context_survival_owrb_webgpu_parity.mjs \
 
 ## 11. 当前项目特定约束
 
-- 当前保留模型名：
-  - `baseline_aabb_hzb`
-  - `pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best`
-- 当前 HKUST 前端默认训练输出为 `neural_instance_culling/model/out/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_hkust_spatial_fov66_seed20260801_protocolfix_retry2`，包括 `best.pt`、`last.pt`、epoch 快照、训练日志、导出特征和校准摘要；清理旧实验时不能删除。
-- 当前默认模型运行时读取离线固定实例特征表，不在前端运行 PointNet++、Graph U-Net、Triplane、dynamic-pool 或任何动态图传播。
-- 当前 HKUST 前端资产默认路径为 `slm2viewer/public/assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best`，冻结阈值约为 `0.02`，并同步保留 `slm2viewer/assets/` 与已构建部署目录中的同名资产。`pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_best` 只作为历史 benchmark，不是当前前端默认模型。
+- 当前 HKUST 前端只允许加载 `pvs_mainline_v4`，运行 schema 为 `pvs-bounded-relation-prior-instance-calibrated-moment-runtime-v4`。旧方向代理模型和 `baseline_aabb_hzb` 可以作为历史 benchmark 保留，但不能再出现在前端兼容分支、默认资产映射或部署包中。
+- 当前 HKUST 前端 checkpoint 为 `pvs_v4_integrated_visibility_mainline_v1_20260821/formal40_s02_ablation_without_contrastive_separation_s02_guard030_sep020_mix025_seed20260802_e40/best_safe.pt`，导出选中 epoch 36，calibration 阈值为 `0.6800000071525574`。
+- 当前默认模型运行时读取 `96` 维几何和 `28` 维融合生存场组成的 `124` 维离线固定实例特征表，不在前端运行 PointNet++、Graph U-Net、分层关系网络、Triplane、dynamic-pool 或任何动态图传播。
+- 当前 HKUST 前端资产路径为 `slm2viewer/assets/neural_instance_culling/pvs_mainline_v4`，生产构建同步到 `slm2viewer/public/assets/neural_instance_culling/pvs_mainline_v4`。其他场景没有匹配 V4 权重时必须使用实例 AABB 视锥模式，不得复用 HKUST 权重或回退旧神经模型。
 - 必须保留 2026-08-11 修正正式矩阵、2026-08-12 Fourier 补充矩阵的 model/benchmark 输出，以及 `neural_instance_culling/benchmark/out/pvs_ray_context_survival_owrb_v1_subpose5_20260811_directchrome` 三角形深度层硬件缓存；后者是新分层关系网络构建 train-only 遮挡关系 CSR 的数据依赖。
-- 当前论文模型唯一训练主线由共享分层遮挡关系先验与逐实例校准生存场、视点区域矩包络频谱查询和综合可见性损失组成。计划、runner、评价和前缀分别为 `docs/experiments/pvs_mainline_training_2026-08-21.md`、`neural_instance_culling/benchmark/run_pvs.py`、`neural_instance_culling/benchmark/reaudit_pvs.py` 与 `pvs_v4_integrated_visibility_mainline_v1`。研究结果尚未替换当前部署 checkpoint、阈值或前端资产。
+- 当前论文模型唯一训练主线由共享分层遮挡关系先验与逐实例校准生存场、视点区域矩包络频谱查询和综合可见性损失组成。计划、runner、评价和前缀分别为 `docs/experiments/pvs_mainline_training_2026-08-21.md`、`neural_instance_culling/benchmark/run_pvs.py`、`neural_instance_culling/benchmark/reaudit_pvs.py` 与 `pvs_v4_integrated_visibility_mainline_v1`；HKUST 当前前端已使用该主线的冻结 V4 导出。
 - 历史字段 `visible_pixels.bin` 当前按 `visible_weights` 处理，不能宣称是真实 pixel coverage。
 - 后退扩大视锥候选上的 no-hash 主线相机输入必须参考 `Neural Visibility of Point Sets` 的视角条件化方式：以“当前相机到实例中心的单位视线方向 / ray direction”及轻量 ray-space 标量查询固定实例特征，不能把 raw camera xyz 或 raw world-space delta xyz 直接作为 visibility MLP 的主要输入。camera hash 只能作为消融或辅助，不得替代这种 view-ray 查询叙事。
 

@@ -4,10 +4,11 @@ set -euo pipefail
 # Verify that neural runtime assets are served from the deployed viewer origin.
 #
 # Usage:
-#   bash verify_deploy_assets.sh http://SERVER_IP:8080
+#   bash verify_deploy_assets.sh http://SERVER_IP:8080 hkust-v3
 
 BASE_URL="${1:-http://127.0.0.1:8080}"
 BASE_URL="${BASE_URL%/}"
+SCENE="${2:-hkust-v3}"
 
 command -v curl >/dev/null 2>&1 || {
   echo "curl is required." >&2
@@ -19,8 +20,27 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 
 failures=0
 
-while IFS= read -r path; do
-  [[ -n "${path}" ]] || continue
+paths=(
+  "/assets/config.json"
+  "/assets/scenes/${SCENE}/glbIndex.json"
+  "/assets/scenes/${SCENE}/runtimeVisibilityMeta.json"
+)
+if [[ "${SCENE}" == "hkust-v3" ]]; then
+  paths+=(
+    "/assets/neural_instance_culling/pvs_mainline_v4/model_meta.json"
+    "/assets/neural_instance_culling/pvs_mainline_v4/instance_runtime_features_fp16.bin"
+    "/assets/neural_instance_culling/pvs_mainline_v4/instance_aabb_fp32.bin"
+    "/assets/neural_instance_culling/pvs_mainline_v4/instance_to_glb_uint32.bin"
+    "/assets/neural_instance_culling/pvs_mainline_v4/query_weights_fp16.bin"
+    "/assets/neural_instance_culling/pvs_mainline_v4/frequency_cycles_fp32.bin"
+    "/assets/neural_instance_culling/pvs_mainline_v4/chi_table_fp32.bin"
+  )
+elif [[ "${SCENE}" != "ifcbench_fantasy_metropolis_instanced_v2" ]]; then
+  echo "Unsupported scene: ${SCENE}" >&2
+  exit 2
+fi
+
+for path in "${paths[@]}"; do
   url="${BASE_URL}${path}"
   out="${tmp_dir}/asset"
   headers="${tmp_dir}/headers"
@@ -51,23 +71,13 @@ while IFS= read -r path; do
     failures=$((failures + 1))
   fi
 
-  if [[ "${path}" == *.bin && "${bytes}" -lt 1000000 ]]; then
-    echo "ERROR: pvs_assets.bin is unexpectedly small. It may be missing or served as HTML." >&2
+  if [[ "${path}" == *.bin && "${bytes}" -lt 32 ]]; then
+    echo "ERROR: runtime binary is unexpectedly small. It may be missing or served as HTML." >&2
     failures=$((failures + 1))
   fi
 
   echo ""
-done <<'EOF'
-/assets/config.json
-/assets/scenes/hkust-v3/glbIndex.json
-/assets/scenes/hkust-v3/runtimeVisibilityMeta.json
-/assets/scenes/ifcbench_fantasy_metropolis_instanced_v2/glbIndex.json
-/assets/scenes/ifcbench_fantasy_metropolis_instanced_v2/runtimeVisibilityMeta.json
-/assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best/instance_pvs_assets.bin
-/assets/neural_instance_culling/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best/instance_model_meta.json
-/assets/neural_instance_culling/pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40_best/instance_pvs_assets.bin
-/assets/neural_instance_culling/pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40_best/instance_model_meta.json
-EOF
+done
 
 if [[ "${failures}" -gt 0 ]]; then
   echo "Asset verification failed: ${failures} issue(s)." >&2

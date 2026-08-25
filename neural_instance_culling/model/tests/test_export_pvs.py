@@ -99,6 +99,18 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
         geometry.tofile(geometry_path)
         dataset_path = root / "dataset"
         dataset_path.mkdir(exist_ok=True)
+        (dataset_path / "dataset_meta.json").write_text(
+            json.dumps(
+                {
+                    "modelInputFovYDeg": 66.0,
+                    "frontendRenderFovYDeg": 60.0,
+                    "stats": {
+                        "pvsBackOffsetRange": [3.464101552963257, 3.464101552963257]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
         relation_path = root / "relation"
         relation_path.mkdir(exist_ok=True)
         (relation_path / "relation_csr_meta.json").write_text(
@@ -339,6 +351,7 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
             self.assertEqual(meta["schema"], EXPORT_SCHEMA)
             self.assertIs(meta["testRead"], False)
             self.assertEqual(meta["modelSchema"], MODEL_SCHEMA)
+            self.assertEqual(meta["experimentName"], "pvs_mainline_v4")
             self.assertEqual(meta["fixedTable"]["shape"], [3, 124])
             self.assertEqual(meta["fixedTable"]["dtype"], "float16")
             self.assertEqual(
@@ -357,6 +370,12 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
             )
             self.assertEqual(meta["viewcell"]["shape"], "horizontal_disk")
             self.assertEqual(meta["viewcell"]["radiusM"], 2.0)
+            self.assertAlmostEqual(
+                meta["viewcell"]["candidateCameraBackOffsetM"],
+                3.464101552963257,
+            )
+            self.assertEqual(meta["query"]["modelInputFovYDeg"], 66.0)
+            self.assertEqual(meta["query"]["frontendRenderFovYDeg"], 60.0)
             ray_space = meta["query"]["raySpace"]
             self.assertEqual(meta["raySpace"], ray_space)
             self.assertEqual(meta["diskAxisBound"], ray_space["diskAxisBound"])

@@ -36,13 +36,8 @@ function matrixElements(matrix) {
 export class LightweightPVSDispatcher {
   constructor(assetBaseUrl, options = {}) {
     this.assetBaseUrl = (assetBaseUrl || '').replace(/\/$/, '');
-    this.runtimeMetaUrl = options.runtimeMetaUrl || null;
-    // 预加载的元数据(主线程 fetch 后通过 setPreloadedMeta 注入,避免 worker 重复 fetch)
-    this.preloadedModelMeta = null;
-    this.preloadedRuntimeMeta = null;
     this.assetVersion = options.assetVersion || null;
     this.debugLogging = Boolean(options.debugLogging);
-    this.forceFallback = Boolean(options.forceFallback);
     this.cpuPerfMode = options.cpuPerfMode === 'mobile' ? 'mobile' : 'balanced';
     this.maxImmediate = Number(options.maxImmediate || (this.cpuPerfMode === 'mobile' ? 160 : 384));
     this.maxPrefetch = Number(options.maxPrefetch || (this.cpuPerfMode === 'mobile' ? 768 : 2048));
@@ -61,8 +56,6 @@ export class LightweightPVSDispatcher {
     this.modelInfo = null;
     this.predictSerial = 0;
     this.pending = new Map();
-    this.m12RequestSerial = 0;
-    this.m12Pending = new Map();
     this.pendingInitResolve = null;
     this.pendingInitReject = null;
   }
@@ -111,13 +104,8 @@ export class LightweightPVSDispatcher {
       this.worker.postMessage({
         type: 'init',
         assetBaseUrl: resolveUrl(this.assetBaseUrl),
-        runtimeMetaUrl: resolveUrl(this.runtimeMetaUrl),
-        // 主线程已加载的元数据 — 优先复用,避免 worker 再 fetch 同一份 27MB+ 文件。
-        preloadedModelMeta: this.preloadedModelMeta,
-        preloadedRuntimeMeta: this.preloadedRuntimeMeta,
         assetVersion: this.assetVersion,
         debugLogging: this.debugLogging,
-        forceFallback: this.forceFallback,
         maxImmediate: this.maxImmediate,
         maxPrefetch: this.maxPrefetch,
         prefetchThreshold: this.prefetchThreshold,
@@ -147,16 +135,6 @@ export class LightweightPVSDispatcher {
       return;
     }
 
-    if (data.type === 'upgraded') {
-      this.backend = data.backend || this.backend;
-      this.lastInitTimings = data.timings || this.lastInitTimings;
-      this.modelInfo = data.modelInfo || this.modelInfo;
-      if (this.debugLogging && typeof console !== 'undefined') {
-        console.log('[LightweightPVSDispatcher] Worker backend updated:', this.backend, this.lastInitTimings);
-      }
-      return;
-    }
-
     if (data.type === 'error') {
       const error = new Error(data.message || 'Lightweight PVS worker error.');
       error.stack = data.stack || error.stack;
@@ -172,20 +150,6 @@ export class LightweightPVSDispatcher {
         this.pendingInitResolve = null;
       }
       this.initError = error;
-      return;
-    }
-
-    if (data.type === 'm12-result' || data.type === 'm12-error') {
-      const pending = this.m12Pending.get(data.requestId);
-      if (!pending) return;
-      this.m12Pending.delete(data.requestId);
-      if (data.type === 'm12-error') {
-        const error = new Error(data.message || 'M12 WebGPU parity probe failed.');
-        error.stack = data.stack || error.stack;
-        pending.reject(error);
-      } else {
-        pending.resolve(data);
-      }
       return;
     }
 
@@ -223,11 +187,8 @@ export class LightweightPVSDispatcher {
     };
   }
 
-  async predict(cameraOrPosition, rotationOrOptions = {}, maybeCamera = null) {
+  async predict(renderCamera) {
     if (!this.isReady) return null;
-    const renderCamera = maybeCamera && maybeCamera.projectionMatrix
-      ? maybeCamera
-      : (cameraOrPosition && cameraOrPosition.projectionMatrix ? cameraOrPosition : rotationOrOptions.camera);
     const serial = ++this.predictSerial;
     const snapshot = this._cameraSnapshot(renderCamera);
     return new Promise((resolve, reject) => {
@@ -238,29 +199,6 @@ export class LightweightPVSDispatcher {
         snapshot,
       });
     });
-  }
-
-  /**
-   * Run the opt-in M12 FP32/FP16/WebGPU parity probe through the real worker.
-   * This method is intentionally unused by the viewer scheduler.
-   */
-  async benchmarkM12(cases, options = {}) {
-    if (!this.isReady) await this.init();
-    if (!this.worker) throw new Error('M12 parity probe requires a live PVS worker.');
-    const requestId = ++this.m12RequestSerial;
-    return new Promise((resolve, reject) => {
-      this.m12Pending.set(requestId, { resolve, reject });
-      this.worker.postMessage({
-        type: 'm12-probe',
-        requestId,
-        cases,
-        debugStages: Boolean(options.debugStages),
-      });
-    });
-  }
-
-  requestWebGPUUpgrade() {
-    return this.backend === 'worker-webgpu';
   }
 
   setDownloadPlanMode(value) {
@@ -274,32 +212,12 @@ export class LightweightPVSDispatcher {
     return this.downloadPlanMode;
   }
 
-  setRuntimeMeta(runtimeMeta) {
-    // 主线程已加载的 runtimeMeta 注入(避免 worker 重复 fetch 27MB+ 同一份)
-    this.preloadedRuntimeMeta = runtimeMeta || null;
-    if (this.worker) {
-      this.worker.postMessage({ type: 'setRuntimeMeta', runtimeMeta: this.preloadedRuntimeMeta });
-    }
-  }
-
-  setModelMeta(modelMeta) {
-    // 主线程已加载的 model_meta 注入
-    this.preloadedModelMeta = modelMeta || null;
-    if (this.worker) {
-      this.worker.postMessage({ type: 'setModelMeta', modelMeta: this.preloadedModelMeta });
-    }
-  }
-
   dispose() {
     if (this.worker) {
       this.worker.terminate();
       this.worker = null;
     }
     this.pending.clear();
-    for (const pending of this.m12Pending.values()) {
-      pending.reject(new Error('PVS dispatcher disposed during M12 parity probe.'));
-    }
-    this.m12Pending.clear();
     this.isReady = false;
   }
 }

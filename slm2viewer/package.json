@@ -26,7 +26,6 @@
     "package:deploy:hkust-liteweb3d": "node ./scripts/package_hkust_liteweb3d_deploy.mjs",
     "package:scene-glb": "node ./scripts/package_scene_glb.mjs",
     "test": "node ./scripts/test_current.mjs",
-    "test:m9": "node ./scripts/test_m9_frontend.mjs",
     "caddy:script": "echo scripts/install_caddy_site.sh",
     "nginx:script": "echo scripts/install_nginx_site.sh",
     "verify:deploy-assets": "echo scripts/verify_deploy_assets.sh",
@@ -45,7 +44,6 @@
     "gltf-validator": "^2.0.0-dev.3.5",
     "handlebars": "^4.7.6",
     "n8ao": "^1.9.2",
-    "onnxruntime-web": "^1.24.3",
     "postprocessing": "^6.36.3",
     "query-string": "^7.1.1",
     "sequential-promise-map": "^1.2.0",
@@ -58,6 +56,7 @@
     "javascript-obfuscator": "^5.4.2",
     "node-fetch": "^3.2.3",
     "parcel-bundler": "^1.12.4",
-    "parcel-plugin-static-files-copy": "^2.5.0"
+    "parcel-plugin-static-files-copy": "^2.5.0",
+    "playwright": "^1.62.1"
   }
 }

@@ -18,7 +18,16 @@ const viewerDir = path.resolve(scriptDir, '..');
 const defaultSourceDir = path.join(viewerDir, 'public_deploy');
 const defaultOutputDir = path.join(viewerDir, 'public_deploy_hkust_liteweb3d');
 const defaultArchive = path.join(viewerDir, 'hkust_v3_public_deploy_liteweb3d.tar.gz');
-const hkustModelDir = 'pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best';
+const hkustModelDir = 'pvs_mainline_v4';
+const hkustModelFiles = [
+  'model_meta.json',
+  'instance_runtime_features_fp16.bin',
+  'instance_aabb_fp32.bin',
+  'instance_to_glb_uint32.bin',
+  'query_weights_fp16.bin',
+  'frequency_cycles_fp32.bin',
+  'chi_table_fp32.bin',
+];
 const defaultAssetBaseUrl = 'https://www.liteweb3d.com/data/hkust-v3/';
 
 function parseArgs() {
@@ -242,8 +251,7 @@ function main() {
     'neural_instance_culling',
     hkustModelDir,
   );
-  if (!fs.existsSync(path.join(sourceModelDir, 'instance_pvs_assets.bin')) ||
-      !fs.existsSync(path.join(sourceModelDir, 'instance_model_meta.json'))) {
+  if (hkustModelFiles.some((file) => !fs.existsSync(path.join(sourceModelDir, file)))) {
     throw new Error(`HKUST runtime model is incomplete: ${sourceModelDir}`);
   }
 

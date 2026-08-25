@@ -2,211 +2,92 @@ import { Box3, Frustum, Matrix4, PerspectiveCamera, Quaternion, Vector3 } from '
 import { InstancePVS } from './InstancePVS.js';
 import { FRONTEND_RENDER_FOV_Y_DEG, MODEL_INPUT_FOV_Y_DEG } from './neuralPvsFovProtocol.js';
 
+const RUNTIME_SCHEMA = 'pvs-bounded-relation-prior-instance-calibrated-moment-runtime-v4';
 const _box = new Box3();
 const _matrix = new Matrix4();
 const _frustum = new Frustum();
-const _quat = new Quaternion();
+const _quaternion = new Quaternion();
 const _forward = new Vector3();
 
 let state = {
   assetBaseUrl: '',
-  runtimeMetaUrl: '',
+  assetVersion: null,
   meta: null,
-  runtimeMeta: null,
   pvs: null,
-  m12Pvs: null,
   componentAabbs: null,
   instanceToGlobalGlb: null,
-  localToGlobalInstance: null,
-  globalToLocalInstance: null,
   ready: false,
   backend: 'uninitialized',
   initTimings: null,
-  forceFallback: false,
   maxImmediate: 384,
   maxPrefetch: 2048,
   prefetchThreshold: 0.04,
   downloadPlanMode: 'viewcell-priority',
-  assetVersion: null,
+  diagnostics: false,
 };
 
 function nowMs() {
   return typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
 }
 
-function clampNumber(value, fallback) {
-  const numeric = Number(value);
-  return Number.isFinite(numeric) ? numeric : fallback;
+function finiteOr(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function versionedUrl(url) {
+  if (!state.assetVersion) return url;
+  return `${url}${url.includes('?') ? '&' : '?'}v=${encodeURIComponent(state.assetVersion)}`;
 }
 
 async function fetchJson(url) {
   const response = await fetch(url, { cache: 'force-cache' });
   if (!response.ok) throw new Error(`Failed to fetch ${url}: ${response.status}`);
   const text = await response.text();
-  if (text.trimStart().charAt(0) === '<') {
-    throw new Error(`Expected JSON from ${url}, but received HTML. Check the asset path or server fallback.`);
-  }
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    throw new Error(`Failed to parse JSON ${url}: ${error && error.message ? error.message : String(error)}`);
-  }
+  if (text.trimStart().startsWith('<')) throw new Error(`Expected JSON from ${url}, received HTML.`);
+  return JSON.parse(text);
 }
 
-function versionedAssetUrl(path) {
-  if (!state.assetVersion) return path;
-  return `${path}${path.indexOf('?') >= 0 ? '&' : '?'}v=${encodeURIComponent(state.assetVersion)}`;
-}
-
-function buildFallbackTables(meta, runtimeMeta) {
-  const records = Array.isArray(runtimeMeta?.componentRecords) ? runtimeMeta.componentRecords : [];
-  const numInstances = Number(meta?.numInstances || records.length || 0);
-  const aabbs = new Float32Array(numInstances * 6);
-  const instanceToGlb = new Uint32Array(numInstances);
-  const globalIds = Array.isArray(meta?.globalInstanceIds) ? meta.globalInstanceIds : null;
-  const globalToLocal = new Map();
-  for (let localId = 0; localId < numInstances; localId += 1) {
-    const globalId = globalIds && globalIds[localId] != null ? Number(globalIds[localId]) : localId;
-    if (Number.isFinite(globalId) && globalId >= 0) globalToLocal.set(globalId, localId);
-  }
-  for (let i = 0; i < numInstances; i += 1) {
-    instanceToGlb[i] = 0xffffffff;
-    const base = i * 6;
-    aabbs[base + 0] = Number.POSITIVE_INFINITY;
-    aabbs[base + 1] = Number.POSITIVE_INFINITY;
-    aabbs[base + 2] = Number.POSITIVE_INFINITY;
-    aabbs[base + 3] = Number.NEGATIVE_INFINITY;
-    aabbs[base + 4] = Number.NEGATIVE_INFINITY;
-    aabbs[base + 5] = Number.NEGATIVE_INFINITY;
-  }
-
-  if (Array.isArray(meta?.instanceToGlobalGlb)) {
-    const limit = Math.min(numInstances, meta.instanceToGlobalGlb.length);
-    for (let i = 0; i < limit; i += 1) {
-      const glb = Number(meta.instanceToGlobalGlb[i]);
-      instanceToGlb[i] = Number.isFinite(glb) && glb >= 0 ? glb >>> 0 : 0xffffffff;
-    }
-  }
-
-  for (const record of records) {
-    const globalId = Number(record?.componentGlobalId);
-    if (!Number.isFinite(globalId)) continue;
-    const id = globalToLocal.has(globalId)
-      ? globalToLocal.get(globalId)
-      : (globalIds ? null : globalId);
-    if (id == null || id < 0 || id >= numInstances) continue;
-    if (record.globalGlbId != null) {
-      const glb = Number(record.globalGlbId);
-      if (Number.isFinite(glb) && glb >= 0) instanceToGlb[id] = glb >>> 0;
-    }
-    const bounds = record.bounds || null;
-    if (!bounds) continue;
-    let min = null;
-    let max = null;
-    if (Array.isArray(bounds.min) && Array.isArray(bounds.max)) {
-      min = bounds.min;
-      max = bounds.max;
-    } else if (Array.isArray(bounds.center) && Array.isArray(bounds.size)) {
-      min = [
-        Number(bounds.center[0]) - Number(bounds.size[0]) * 0.5,
-        Number(bounds.center[1]) - Number(bounds.size[1]) * 0.5,
-        Number(bounds.center[2]) - Number(bounds.size[2]) * 0.5,
-      ];
-      max = [
-        Number(bounds.center[0]) + Number(bounds.size[0]) * 0.5,
-        Number(bounds.center[1]) + Number(bounds.size[1]) * 0.5,
-        Number(bounds.center[2]) + Number(bounds.size[2]) * 0.5,
-      ];
-    }
-    if (!min || !max) continue;
-    const base = id * 6;
-    aabbs[base + 0] = Number(min[0]);
-    aabbs[base + 1] = Number(min[1]);
-    aabbs[base + 2] = Number(min[2]);
-    aabbs[base + 3] = Number(max[0]);
-    aabbs[base + 4] = Number(max[1]);
-    aabbs[base + 5] = Number(max[2]);
-  }
-
-  return { aabbs, instanceToGlb, globalToLocal };
-}
-
-function buildLocalToGlobal(meta) {
-  const count = Number(meta?.numInstances || 0);
-  const configured = Array.isArray(meta?.globalInstanceIds) ? meta.globalInstanceIds : null;
-  const localToGlobal = new Array(count);
-  const globalToLocal = new Map();
-  for (let localId = 0; localId < count; localId += 1) {
-    const value = configured && configured[localId] != null ? Number(configured[localId]) : localId;
-    const globalId = Number.isFinite(value) && value >= 0 ? value : localId;
-    localToGlobal[localId] = globalId;
-    globalToLocal.set(globalId, localId);
-  }
-  return { localToGlobal, globalToLocal };
-}
-
-function globalIdsToLocal(ids) {
-  const result = [];
-  const map = state.globalToLocalInstance || new Map();
-  for (const value of ids || []) {
-    const localId = map.get(Number(value));
-    if (localId != null) result.push(localId);
-  }
-  return Array.from(new Set(result));
-}
-
-function localIdToGlobal(localId) {
-  const value = state.localToGlobalInstance?.[Number(localId)];
-  return value == null ? Number(localId) : Number(value);
-}
-
-function buildCamera(snapshot, options = {}) {
-  const fov = clampNumber(options.fov, FRONTEND_RENDER_FOV_Y_DEG);
-  const aspect = Math.max(1e-4, clampNumber(options.aspect, clampNumber(snapshot.aspect, 16 / 9)));
-  const near = Math.max(1e-4, clampNumber(snapshot.near, 0.1));
-  const far = Math.max(near + 1, clampNumber(snapshot.far, 20000));
+function buildCamera(snapshot, fov, position = null) {
+  const aspect = Math.max(1e-4, finiteOr(snapshot.aspect, 16 / 9));
+  const near = Math.max(1e-4, finiteOr(snapshot.near, 0.1));
+  const far = Math.max(near + 1, finiteOr(snapshot.far, 20000));
   const camera = new PerspectiveCamera(fov, aspect, near, far);
+  const sourcePosition = position || snapshot.position || [0, 0, 0];
   camera.position.set(
-    clampNumber(snapshot.position?.[0], 0),
-    clampNumber(snapshot.position?.[1], 0),
-    clampNumber(snapshot.position?.[2], 0),
+    finiteOr(sourcePosition[0], 0),
+    finiteOr(sourcePosition[1], 0),
+    finiteOr(sourcePosition[2], 0),
   );
   camera.quaternion.set(
-    clampNumber(snapshot.quaternion?.[0], 0),
-    clampNumber(snapshot.quaternion?.[1], 0),
-    clampNumber(snapshot.quaternion?.[2], 0),
-    clampNumber(snapshot.quaternion?.[3], 1),
+    finiteOr(snapshot.quaternion?.[0], 0),
+    finiteOr(snapshot.quaternion?.[1], 0),
+    finiteOr(snapshot.quaternion?.[2], 0),
+    finiteOr(snapshot.quaternion?.[3], 1),
   );
-  if (options.position) {
-    camera.position.set(options.position[0], options.position[1], options.position[2]);
-  }
   camera.updateProjectionMatrix();
   camera.updateMatrixWorld(true);
   return camera;
 }
 
-function buildPredictionCamera(snapshot, meta) {
-  const mode = String(meta?.predictionCameraMode || '').toLowerCase();
-  // The runtime has exactly two FOVs: 60° for the displayed camera and 66°
-  // for the model query camera. Do not reintroduce an exported PVS/buffer FOV.
-  const fovY = MODEL_INPUT_FOV_Y_DEG;
-  const aspect = clampNumber(snapshot.aspect, 16 / 9);
-  const backOffset = mode === 'viewcell-back-camera'
-    ? Math.max(0, clampNumber(meta?.pvsBackOffsetM, 0))
-    : 0;
-  _quat.set(
-    clampNumber(snapshot.quaternion?.[0], 0),
-    clampNumber(snapshot.quaternion?.[1], 0),
-    clampNumber(snapshot.quaternion?.[2], 0),
-    clampNumber(snapshot.quaternion?.[3], 1),
+function buildCandidateCamera(snapshot) {
+  const backOffset = Number(state.meta?.query?.candidateCameraBackOffsetM);
+  if (!Number.isFinite(backOffset) || backOffset < 0) {
+    throw new Error('V4 metadata has no valid candidate-camera back offset.');
+  }
+  _quaternion.set(
+    finiteOr(snapshot.quaternion?.[0], 0),
+    finiteOr(snapshot.quaternion?.[1], 0),
+    finiteOr(snapshot.quaternion?.[2], 0),
+    finiteOr(snapshot.quaternion?.[3], 1),
   );
-  _forward.set(0, 0, -1).applyQuaternion(_quat).normalize();
+  _forward.set(0, 0, -1).applyQuaternion(_quaternion).normalize();
   const position = [
-    clampNumber(snapshot.position?.[0], 0) - _forward.x * backOffset,
-    clampNumber(snapshot.position?.[1], 0) - _forward.y * backOffset,
-    clampNumber(snapshot.position?.[2], 0) - _forward.z * backOffset,
+    finiteOr(snapshot.position?.[0], 0) - _forward.x * backOffset,
+    finiteOr(snapshot.position?.[1], 0) - _forward.y * backOffset,
+    finiteOr(snapshot.position?.[2], 0) - _forward.z * backOffset,
   ];
-  return buildCamera(snapshot, { fov: fovY, aspect, position });
+  return buildCamera(snapshot, MODEL_INPUT_FOV_Y_DEG, position);
 }
 
 function frustumForCamera(camera) {
@@ -217,190 +98,102 @@ function frustumForCamera(camera) {
 
 function intersectsComponent(componentId, frustum) {
   const aabbs = state.componentAabbs;
-  const base = componentId * 6;
-  if (!aabbs || base + 5 >= aabbs.length) return true;
-  const minX = aabbs[base + 0];
-  const minY = aabbs[base + 1];
-  const minZ = aabbs[base + 2];
-  const maxX = aabbs[base + 3];
-  const maxY = aabbs[base + 4];
-  const maxZ = aabbs[base + 5];
-  if (![minX, minY, minZ, maxX, maxY, maxZ].every(Number.isFinite)) return true;
-  _box.min.set(minX, minY, minZ);
-  _box.max.set(maxX, maxY, maxZ);
+  const offset = componentId * 6;
+  if (!aabbs || offset + 5 >= aabbs.length) return false;
+  _box.min.set(aabbs[offset], aabbs[offset + 1], aabbs[offset + 2]);
+  _box.max.set(aabbs[offset + 3], aabbs[offset + 4], aabbs[offset + 5]);
   return frustum.intersectsBox(_box);
 }
 
 function filterComponentsByFrustum(componentIds, camera) {
   const frustum = frustumForCamera(camera);
-  const out = [];
-  for (const id of componentIds || []) {
-    const componentId = Number(id);
-    if (Number.isFinite(componentId) && componentId >= 0 && intersectsComponent(componentId, frustum)) {
-      out.push(componentId >>> 0);
-    }
+  const result = [];
+  for (const value of componentIds || []) {
+    const id = Number(value);
+    if (Number.isInteger(id) && id >= 0 && intersectsComponent(id, frustum)) result.push(id >>> 0);
   }
-  return out;
+  return result;
 }
 
 function componentIdsToGlbIds(componentIds) {
-  const set = new Set();
-  const map = state.instanceToGlobalGlb;
+  const glbs = new Set();
   for (const id of componentIds || []) {
-    const glb = map && id < map.length ? map[id] : 0xffffffff;
-    if (glb !== 0xffffffff) set.add(glb >>> 0);
+    if (id < state.instanceToGlobalGlb.length) glbs.add(state.instanceToGlobalGlb[id] >>> 0);
   }
-  return Array.from(set).sort((a, b) => a - b);
+  return Array.from(glbs).sort((a, b) => a - b);
 }
 
-function normalizeCandidateSelection(value, fallbackCount = null) {
-  if (!value || typeof value !== 'object') return null;
-  const numberOrNull = (item) => {
-    const number = Number(item);
-    return Number.isFinite(number) ? number : null;
-  };
-  return {
-    source: value.source ? String(value.source) : null,
-    candidateCount: numberOrNull(value.candidateCount) ?? numberOrNull(fallbackCount),
-    queryCellCount: numberOrNull(value.queryCellCount),
-    indexedInstanceCount: numberOrNull(value.indexedInstanceCount),
-    overflowInstanceCount: numberOrNull(value.overflowInstanceCount),
-  };
+function priority(item) {
+  const value = Number(item?.downloadPriority ?? item?.visibilityScore ?? item?.confidence ?? 0);
+  return Number.isFinite(value) ? value : 0;
 }
 
-function candidatePriority(item, fallback = 0) {
-  const downloadPriority = Number(item?.downloadPriority);
-  if (Number.isFinite(downloadPriority)) return downloadPriority;
-  const confidence = Number(item?.confidence);
-  if (Number.isFinite(confidence)) return confidence;
-  const importance = Number(item?.importance);
-  if (Number.isFinite(importance)) return importance;
-  return fallback;
+function sortByPriority(a, b) {
+  return priority(b) - priority(a) || Number(a.globalGlbId) - Number(b.globalGlbId);
 }
 
-function compareCandidatesByPriority(a, b) {
-  return candidatePriority(b) - candidatePriority(a)
-    || Number(a?.globalGlbId || 0) - Number(b?.globalGlbId || 0);
-}
-
-function candidateFromVisibleComponents(componentIds) {
+function candidatesFromComponents(componentIds, score = 1, source = 'aabb-fallback') {
   const byGlb = new Map();
-  const map = state.instanceToGlobalGlb;
   for (const id of componentIds || []) {
-    const glb = map && id < map.length ? map[id] : 0xffffffff;
-    if (glb === 0xffffffff) continue;
-    let item = byGlb.get(glb);
+    const glbId = state.instanceToGlobalGlb[id];
+    let item = byGlb.get(glbId);
     if (!item) {
       item = {
-        globalGlbId: glb >>> 0,
-        confidence: 1,
-        importance: 1,
-        downloadPriority: 1,
-        visibilityScore: 1,
-        prioritySource: 'aabb-fallback',
+        globalGlbId: glbId >>> 0,
+        confidence: score,
+        importance: score,
+        downloadPriority: score,
+        visibilityScore: score,
+        prioritySource: source,
         sourceComponentIds: [],
         sourceComponents: [],
       };
-      byGlb.set(glb, item);
+      byGlb.set(glbId, item);
     }
     item.sourceComponentIds.push(id >>> 0);
     item.sourceComponents.push({
       componentId: id >>> 0,
-      confidence: 1,
-      importance: 1,
-      downloadPriority: 1,
-      visibilityScore: 1,
+      visibilityScore: score,
+      downloadPriority: score,
       visible: true,
     });
   }
-  return Array.from(byGlb.values()).sort(compareCandidatesByPriority);
+  return Array.from(byGlb.values()).sort(sortByPriority);
 }
 
-function normalizeDownloadPlanMode(value) {
-  return value === 'raw-visible' ? 'raw-visible' : 'viewcell-priority';
-}
-
-function splitDownloadPlan(visibleCandidates, prefetchCandidates, activeGlbIds = [], options = {}) {
+function splitDownloadPlan(visibleCandidates, prefetchCandidates, activeGlbIds) {
   const immediate = [];
   const prefetch = [];
   const seen = new Set();
-  const activeSet = activeGlbIds instanceof Set ? activeGlbIds : new Set(activeGlbIds || []);
-  const maxImmediate = Math.max(0, Number(state.maxImmediate || 0));
-  const maxPrefetch = Math.max(0, Number(state.maxPrefetch || 0));
-  const modelPriority = Boolean(options.modelPriority);
-  const sortedVisible = (visibleCandidates || []).slice().sort(compareCandidatesByPriority);
-  const activeVisible = [];
-  const viewcellPrefetchVisible = [];
-  for (const item of sortedVisible) {
-    const id = Number(item.globalGlbId);
-    if (!Number.isFinite(id)) continue;
-    if (activeSet.has(id >>> 0)) activeVisible.push(item);
-    else viewcellPrefetchVisible.push(item);
-  }
-
+  const active = new Set(activeGlbIds || []);
+  const sortedVisible = (visibleCandidates || []).slice().sort(sortByPriority);
   if (state.downloadPlanMode === 'raw-visible') {
     return {
       immediate: sortedVisible,
       prefetch: [],
-      all: sortedVisible,
-      activeVisibleCount: activeVisible.length,
-      viewcellPrefetchVisibleCount: viewcellPrefetchVisible.length,
+      activeVisibleCount: sortedVisible.filter((item) => active.has(item.globalGlbId)).length,
+      viewcellPrefetchVisibleCount: sortedVisible.filter((item) => !active.has(item.globalGlbId)).length,
     };
   }
-
-  if (modelPriority) {
-    for (const item of activeVisible) {
-      const id = Number(item.globalGlbId);
-      if (!Number.isFinite(id) || seen.has(id)) continue;
-      seen.add(id);
-      if (immediate.length < maxImmediate) immediate.push(item);
-      else if (prefetch.length < maxPrefetch) prefetch.push(item);
-    }
-    for (const item of viewcellPrefetchVisible) {
-      const id = Number(item.globalGlbId);
-      if (!Number.isFinite(id) || seen.has(id) || prefetch.length >= maxPrefetch) continue;
-      seen.add(id);
-      prefetch.push(item);
-    }
-    const sortedPrefetch = (prefetchCandidates || []).slice().sort(compareCandidatesByPriority);
-    for (const item of sortedPrefetch) {
-      const id = Number(item.globalGlbId);
-      if (!Number.isFinite(id) || seen.has(id) || prefetch.length >= maxPrefetch) continue;
-      seen.add(id);
-      prefetch.push(item);
-    }
-    return {
-      immediate,
-      prefetch,
-      all: sortedVisible,
-      activeVisibleCount: activeVisible.length,
-      viewcellPrefetchVisibleCount: viewcellPrefetchVisible.length,
-    };
-  }
-
-  // Viewcell PVS is intentionally conservative. Download the current-camera
-  // subset first; the rest of the viewcell union is prefetch, not immediate.
+  const activeVisible = sortedVisible.filter((item) => active.has(item.globalGlbId));
+  const viewcellVisible = sortedVisible.filter((item) => !active.has(item.globalGlbId));
   for (const item of activeVisible) {
-    const id = Number(item.globalGlbId);
-    if (!Number.isFinite(id) || seen.has(id)) continue;
-    seen.add(id);
-    if (immediate.length < maxImmediate) immediate.push(item);
-    else if (prefetch.length < maxPrefetch) prefetch.push(item);
+    if (seen.has(item.globalGlbId)) continue;
+    seen.add(item.globalGlbId);
+    if (immediate.length < state.maxImmediate) immediate.push(item);
+    else if (prefetch.length < state.maxPrefetch) prefetch.push(item);
   }
-  for (const item of viewcellPrefetchVisible) {
-    const id = Number(item.globalGlbId);
-    if (!Number.isFinite(id) || seen.has(id) || prefetch.length >= maxPrefetch) continue;
-    seen.add(id);
+  for (const item of [...viewcellVisible, ...(prefetchCandidates || []).slice().sort(sortByPriority)]) {
+    if (seen.has(item.globalGlbId) || prefetch.length >= state.maxPrefetch) continue;
+    seen.add(item.globalGlbId);
     prefetch.push(item);
   }
-  const sortedPrefetch = (prefetchCandidates || []).slice().sort(compareCandidatesByPriority);
-  for (const item of sortedPrefetch) {
-    const id = Number(item.globalGlbId);
-    if (!Number.isFinite(id) || seen.has(id) || prefetch.length >= maxPrefetch) continue;
-    seen.add(id);
-    prefetch.push(item);
-  }
-  return { immediate, prefetch, all: sortedVisible, activeVisibleCount: activeVisible.length, viewcellPrefetchVisibleCount: viewcellPrefetchVisible.length };
+  return {
+    immediate,
+    prefetch,
+    activeVisibleCount: activeVisible.length,
+    viewcellPrefetchVisibleCount: viewcellVisible.length,
+  };
 }
 
 function idsFromCandidates(items) {
@@ -408,31 +201,36 @@ function idsFromCandidates(items) {
 }
 
 function weightsFromCandidates(items) {
-  return Float32Array.from((items || []).map((item) => Math.max(0.000001, candidatePriority(item, 1))));
+  return Float32Array.from((items || []).map((item) => Math.max(0.000001, priority(item))));
 }
 
-function buildModelInfo(meta) {
-  const workpoint = meta?.testWorkpoint || {};
+function modelInfo() {
+  const selected = state.meta?.calibration?.selected || {};
   return {
-    runtimeModelName: meta?.runtimeModelName || meta?.experimentName || meta?.modelName || '-',
-    runtimeModelDisplayName: meta?.runtimeModelDisplayName || meta?.runtimeModelName || '-',
-    runtimeSchema: meta?.runtimeSchema || '-',
-    assetFile: meta?.assetFile || 'instance_pvs_assets.bin',
-    thresholdSelection: meta?.thresholdSelection || meta?.selectionRule || '-',
-    visibilityThreshold: Number(meta?.visibilityThreshold),
-    prefetchThreshold: Number(meta?.prefetchThreshold),
-    outputsDownloadPriority: meta?.outputsDownloadPriority === true || meta?.outputsGlbPriority === true,
-    usesDynamicOcclusionPool: meta?.usesDynamicOcclusionPool === true,
-    usesFixedInstanceFeatures: meta?.usesFixedInstanceFeatures !== false,
-    testWorkpoint: {
-      posePrecision: Number(workpoint.posePrecision),
-      poseRecall: Number(workpoint.poseRecall),
-      poseF1: Number(workpoint.poseF1),
-      poseWeightedRecall: Number(workpoint.poseWeightedRecall),
-      avgPred: Number(workpoint.avgPred),
-      avgCandidate: Number(workpoint.avgCandidate),
-      candidateReduction: Number(workpoint.candidateReduction),
-      evalPoseCount: Number(workpoint.evalPoseCount),
+    runtimeModelName: state.meta?.experimentName || 'pvs_mainline_v4',
+    runtimeModelDisplayName: 'PVS V4 分层生存场',
+    runtimeSchema: state.meta?.schema || '-',
+    assetFile: 'V4 six-file runtime bundle',
+    thresholdSelection: state.meta?.calibration?.source || 'checkpoint calibration',
+    visibilityThreshold: Number(state.meta?.threshold),
+    prefetchThreshold: state.prefetchThreshold,
+    outputsDownloadPriority: false,
+    usesDynamicOcclusionPool: false,
+    usesFixedInstanceFeatures: true,
+    runtimeFeatureDim: Number(state.meta?.modelConfig?.runtimeFeatureDim),
+    runtimeFeatureBytes: Number(state.meta?.files?.runtimeFeatures?.byteLength),
+    viewcellRadiusM: Number(state.meta?.query?.viewcellRadiusM),
+    candidateCameraBackOffsetM: Number(state.meta?.query?.candidateCameraBackOffsetM),
+    calibrationWorkpoint: {
+      aggregateWeightedRecall: Number(selected.aggregateWeightedRecall),
+      aggregateWeightedRecallLowerConfidenceBound: Number(
+        selected.aggregateWeightedRecallLowerConfidenceBound,
+      ),
+      poseWeightedRecall: Number(selected.poseMacroWeightedRecall),
+      poseWeightedRecallLowerConfidenceBound: Number(
+        selected.poseMacroWeightedRecallLowerConfidenceBound,
+      ),
+      testEvaluationCount: Number(state.meta?.calibration?.testEvaluationCount || 0),
     },
   };
 }
@@ -440,328 +238,183 @@ function buildModelInfo(meta) {
 function postResult(payload) {
   const transfers = [];
   for (const key of [
-    'componentModelList',
-    'modelList',
-    'weightList',
-    'immediateGlbIds',
-    'immediateWeights',
-    'prefetchGlbIds',
-    'prefetchWeights',
-    'renderComponentModelList',
-    'renderModelList',
+    'componentModelList', 'modelList', 'weightList', 'immediateGlbIds', 'immediateWeights',
+    'prefetchGlbIds', 'prefetchWeights', 'renderComponentModelList', 'renderModelList',
+    'candidateInstanceIds', 'candidateScores', 'candidateDiagnostics',
   ]) {
-    if (payload[key] && payload[key].buffer) transfers.push(payload[key].buffer);
+    if (payload[key]?.buffer) transfers.push(payload[key].buffer);
   }
   self.postMessage(payload, transfers);
 }
 
 async function initWorker(message) {
-  const initStart = nowMs();
+  const startedAt = nowMs();
   state = {
     ...state,
     assetBaseUrl: String(message.assetBaseUrl || '').replace(/\/$/, ''),
-    runtimeMetaUrl: String(message.runtimeMetaUrl || ''),
-    // 主线程已加载的元数据 — 优先复用,避免重复 fetch 同一份 27MB+ 文件。
-    preloadedModelMeta: message.preloadedModelMeta || null,
-    preloadedRuntimeMeta: message.preloadedRuntimeMeta || null,
-    forceFallback: Boolean(message.forceFallback),
+    assetVersion: message.assetVersion || null,
     maxImmediate: Math.max(1, Number(message.maxImmediate || 384)),
     maxPrefetch: Math.max(0, Number(message.maxPrefetch || 2048)),
-    prefetchThreshold: Number.isFinite(Number(message.prefetchThreshold))
+    prefetchThreshold: message.prefetchThreshold != null
+      && Number.isFinite(Number(message.prefetchThreshold))
       ? Math.max(0, Math.min(1, Number(message.prefetchThreshold)))
-      : null,
-    downloadPlanMode: normalizeDownloadPlanMode(message.downloadPlanMode),
-    assetVersion: message.assetVersion || null,
-    m12Pvs: null,
+      : 0.04,
+    downloadPlanMode: message.downloadPlanMode === 'raw-visible' ? 'raw-visible' : 'viewcell-priority',
+    diagnostics: Boolean(message.debugLogging),
   };
-
-  const metaStart = nowMs();
-  // 优先用主线程 postMessage 传过来的 model_meta(已含二进制缓冲引用,零成本);
-  // 缺省时才自己 fetch。
-  state.meta = state.preloadedModelMeta
-    || await fetchJson(versionedAssetUrl(`${state.assetBaseUrl}/instance_model_meta.json`));
-  const idMaps = buildLocalToGlobal(state.meta);
-  state.localToGlobalInstance = idMaps.localToGlobal;
-  state.globalToLocalInstance = idMaps.globalToLocal;
-  if (state.prefetchThreshold == null) {
-    state.prefetchThreshold = Math.max(0, Math.min(1, Number(state.meta.prefetchThreshold ?? 0.04)));
+  state.meta = await fetchJson(versionedUrl(`${state.assetBaseUrl}/model_meta.json`));
+  if (state.meta?.schema !== RUNTIME_SCHEMA) {
+    throw new Error(`The worker only accepts the current V4 runtime, got ${state.meta?.schema || 'missing'}.`);
   }
-  // 同样:runtimeMeta 优先用主线程传的(避免 worker 再 fetch 27MB),
-  // 缺省时才回退 URL。
-  state.runtimeMeta = state.preloadedRuntimeMeta
-    || (state.runtimeMetaUrl ? await fetchJson(state.runtimeMetaUrl) : { componentRecords: [] });
-  const fallbackTables = buildFallbackTables(state.meta, state.runtimeMeta);
-  state.componentAabbs = fallbackTables.aabbs;
-  state.instanceToGlobalGlb = fallbackTables.instanceToGlb;
-  const metaEnd = nowMs();
-
-  if (!state.forceFallback) {
-    state.backend = 'worker-aabb-fallback-warming';
-    state.ready = true;
-    state.initTimings = {
-      totalMs: nowMs() - initStart,
-      metaMs: metaEnd - metaStart,
-      fallbackReason: 'webgpu-warming',
-    };
-    self.postMessage({ type: 'ready', backend: state.backend, timings: state.initTimings, fallbackReason: 'webgpu-warming', modelInfo: buildModelInfo(state.meta) });
-
-    const warmupPvs = new InstancePVS(state.assetBaseUrl, {
-        runtimeMetaUrl: state.runtimeMetaUrl,
-        debugLogging: Boolean(message.debugLogging),
-        assetVersion: message.assetVersion || null,
-        inferenceFovYDeg: MODEL_INPUT_FOV_Y_DEG,
-        deferRuntimeMeta: false,
-    });
-    state.pvs = warmupPvs;
-    warmupPvs.init()
-      .then(() => {
-        if (state.pvs !== warmupPvs) return;
-        state.backend = 'worker-webgpu';
-        state.initTimings = {
-          totalMs: nowMs() - initStart,
-          metaMs: metaEnd - metaStart,
-          pvs: warmupPvs.lastInitTimings || null,
-        };
-        self.postMessage({ type: 'upgraded', backend: state.backend, timings: state.initTimings, modelInfo: buildModelInfo(state.meta) });
-      })
-      .catch((error) => {
-        if (state.pvs !== warmupPvs) return;
-        state.pvs = null;
-        state.backend = 'worker-aabb-fallback';
-        state.initTimings = {
-          totalMs: nowMs() - initStart,
-          metaMs: metaEnd - metaStart,
-          fallbackReason: error && error.message ? error.message : String(error),
-        };
-        self.postMessage({
-          type: 'upgraded',
-          backend: state.backend,
-          timings: state.initTimings,
-          fallbackReason: state.initTimings.fallbackReason,
-          modelInfo: buildModelInfo(state.meta),
-        });
-      });
-    return;
+  const pvs = new InstancePVS(state.assetBaseUrl, {
+    assetVersion: state.assetVersion,
+    preloadedMeta: state.meta,
+    debugLogging: Boolean(message.debugLogging),
+  });
+  state.pvs = pvs;
+  try {
+    await pvs.init();
+    state.backend = 'worker-webgpu-v4';
+  } catch (error) {
+    if (!pvs.instanceAabbs || !pvs.instanceToGlobalGlbArray) throw error;
+    state.backend = 'worker-aabb-fallback';
+    state.fallbackReason = error?.message || String(error);
   }
-
-  state.backend = 'worker-aabb-fallback';
+  state.componentAabbs = pvs.instanceAabbs;
+  state.instanceToGlobalGlb = pvs.instanceToGlobalGlbArray;
   state.ready = true;
   state.initTimings = {
-    totalMs: nowMs() - initStart,
-    metaMs: metaEnd - metaStart,
-    fallbackReason: 'forced-fallback',
+    totalMs: nowMs() - startedAt,
+    pvs: pvs.lastInitTimings,
+    fallbackReason: state.fallbackReason || null,
   };
-  self.postMessage({ type: 'ready', backend: state.backend, timings: state.initTimings, fallbackReason: 'forced-fallback', modelInfo: buildModelInfo(state.meta) });
+  self.postMessage({
+    type: 'ready',
+    backend: state.backend,
+    timings: state.initTimings,
+    fallbackReason: state.fallbackReason || null,
+    modelInfo: modelInfo(),
+  });
 }
 
 async function predictWorker(message) {
-  const start = nowMs();
-  if (!state.ready) throw new Error('Lightweight PVS worker is not ready.');
+  if (!state.ready) throw new Error('PVS worker is not ready.');
+  const startedAt = nowMs();
   const snapshot = message.snapshot || {};
-  const activeCamera = buildCamera(snapshot);
-  const predictionCamera = buildPredictionCamera(snapshot, state.meta);
-  let rawComponentIds = [];
-  let visibleCandidates = [];
-  let prefetchCandidates = [];
-  let candidateCount = 0;
-  let backend = state.backend;
-  let fallbackReason = null;
+  const activeCamera = buildCamera(snapshot, FRONTEND_RENDER_FOV_Y_DEG);
+  const candidateCamera = buildCandidateCamera(snapshot);
+  let componentIds;
+  let visibleCandidates;
+  let prefetchCandidates;
+  let candidateCount;
+  let candidateSelection;
+  let candidateInstanceIds = null;
+  let candidateScores = null;
+  let candidateDiagnostics = null;
+  let diagnosticOutputFloats = 0;
   let inferenceMs = 0;
-  let candidateMs = 0;
-  let candidateSelection = null;
-  let hasModelDownloadPriority = false;
-  let pvsOutputUsesGlobalIds = false;
 
-  if (state.pvs && state.backend === 'worker-webgpu') {
-    const inferenceStart = nowMs();
-    const pred = await state.pvs.predict(predictionCamera, {
-      camera: predictionCamera,
+  if (state.backend === 'worker-webgpu-v4') {
+    const inferenceStartedAt = nowMs();
+    const prediction = await state.pvs.predict(activeCamera, {
+      candidateCamera,
       returnAllScores: true,
+      returnScores: state.diagnostics,
+      returnCandidateIds: state.diagnostics,
       prefetchThreshold: state.prefetchThreshold,
-    }, predictionCamera);
-    inferenceMs = nowMs() - inferenceStart;
-    candidateMs = Number(pred?.timings?.candidateMs || 0);
-    rawComponentIds = Array.isArray(pred?.componentModelList) ? pred.componentModelList : [];
-    pvsOutputUsesGlobalIds = true;
-    visibleCandidates = Array.isArray(pred?.candidates) ? pred.candidates : [];
-    prefetchCandidates = Array.isArray(pred?.prefetchCandidates) ? pred.prefetchCandidates : [];
-    candidateCount = Number(pred?.candidateCount || 0);
-    candidateSelection = normalizeCandidateSelection(
-      pred?.timings?.candidateSelection || pred?.candidateSelection,
-      candidateCount,
-    );
-    hasModelDownloadPriority = Boolean(pred?.hasModelDownloadPriority);
-  } else {
-    fallbackReason = state.initTimings?.fallbackReason || 'webgpu-unavailable';
-    backend = 'worker-aabb-fallback';
-    const frustum = frustumForCamera(predictionCamera);
-    const numInstances = Number(state.meta?.numInstances || 0);
-    for (let id = 0; id < numInstances; id += 1) {
-      if (intersectsComponent(id, frustum)) rawComponentIds.push(id >>> 0);
+    });
+    inferenceMs = nowMs() - inferenceStartedAt;
+    componentIds = prediction.componentModelList || [];
+    visibleCandidates = prediction.candidates || [];
+    prefetchCandidates = prediction.prefetchCandidates || [];
+    candidateCount = Number(prediction.candidateCount || 0);
+    candidateSelection = prediction.timings?.candidateSelection || null;
+    if (state.diagnostics) {
+      candidateInstanceIds = Uint32Array.from(prediction.rawCandidateIds || []);
+      candidateScores = Float32Array.from(prediction.scores || []);
+      candidateDiagnostics = prediction.diagnosticRows || null;
+      diagnosticOutputFloats = Number(prediction.diagnosticOutputFloats || 0);
     }
-    candidateCount = rawComponentIds.length;
-    candidateSelection = normalizeCandidateSelection({
-      source: 'worker_full_aabb_scan',
-      candidateCount,
-    }, candidateCount);
-    visibleCandidates = candidateFromVisibleComponents(rawComponentIds);
-    hasModelDownloadPriority = false;
+  } else {
+    const frustum = frustumForCamera(candidateCamera);
+    componentIds = [];
+    for (let id = 0; id < state.meta.numInstances; id += 1) {
+      if (intersectsComponent(id, frustum)) componentIds.push(id >>> 0);
+    }
+    visibleCandidates = candidatesFromComponents(componentIds);
+    prefetchCandidates = [];
+    candidateCount = componentIds.length;
+    candidateSelection = { source: 'worker_v4_aabb_fallback', candidateCount };
   }
 
-  const localRawComponentIds = pvsOutputUsesGlobalIds
-    ? globalIdsToLocal(rawComponentIds)
-    : rawComponentIds;
-  const renderComponentIds = filterComponentsByFrustum(localRawComponentIds, activeCamera);
-  const outputRawComponentIds = pvsOutputUsesGlobalIds
-    ? rawComponentIds
-    : rawComponentIds.map(localIdToGlobal);
-  const outputRenderComponentIds = renderComponentIds.map(localIdToGlobal);
+  const renderComponentIds = filterComponentsByFrustum(componentIds, activeCamera);
   const renderGlbIds = componentIdsToGlbIds(renderComponentIds);
+  const plan = splitDownloadPlan(visibleCandidates, prefetchCandidates, renderGlbIds);
   const modelList = idsFromCandidates(visibleCandidates);
   const weightList = weightsFromCandidates(visibleCandidates);
-  const plan = splitDownloadPlan(visibleCandidates, prefetchCandidates, renderGlbIds, {
-    modelPriority: hasModelDownloadPriority,
-  });
-  const end = nowMs();
-
+  const finishedAt = nowMs();
   postResult({
     type: 'result',
     serial: message.serial,
-    idMode: 'global-glb',
-    backend,
-    fallbackReason,
-    componentModelList: Uint32Array.from(outputRawComponentIds),
+    idMode: 'global-glb-priority',
+    backend: state.backend,
+    fallbackReason: state.fallbackReason || null,
+    componentModelList: Uint32Array.from(componentIds),
     modelList,
     weightList,
     immediateGlbIds: idsFromCandidates(plan.immediate),
     immediateWeights: weightsFromCandidates(plan.immediate),
     prefetchGlbIds: idsFromCandidates(plan.prefetch),
     prefetchWeights: weightsFromCandidates(plan.prefetch),
-    renderComponentModelList: Uint32Array.from(outputRenderComponentIds),
+    renderComponentModelList: Uint32Array.from(renderComponentIds),
     renderModelList: Uint32Array.from(renderGlbIds),
+    candidateInstanceIds,
+    candidateScores,
+    candidateDiagnostics,
+    diagnosticOutputFloats,
     candidateCount,
     candidateSelection,
-    visibleInstanceCount: rawComponentIds.length,
-    hasModelDownloadPriority,
-    executionTime: end - start,
+    visibleInstanceCount: componentIds.length,
+    hasModelDownloadPriority: false,
+    executionTime: finishedAt - startedAt,
     timings: {
-      totalMs: end - start,
+      totalMs: finishedAt - startedAt,
       inferenceMs,
-      candidateMs,
-      postMs: end - start - inferenceMs,
+      candidateMs: Number(state.pvs?.lastPredictTimings?.candidateMs || 0),
+      postMs: finishedAt - startedAt - inferenceMs,
       candidateSelection,
-      rawInstanceCount: outputRawComponentIds.length,
+      rawInstanceCount: componentIds.length,
       rawGlbCount: modelList.length,
       immediateGlbCount: plan.immediate.length,
       prefetchGlbCount: plan.prefetch.length,
-      downloadPlanMode: state.downloadPlanMode,
       activeVisibleGlbCount: plan.activeVisibleCount,
       viewcellPrefetchGlbCount: plan.viewcellPrefetchVisibleCount,
       renderInstanceCount: renderComponentIds.length,
       renderGlbCount: renderGlbIds.length,
-      hasModelDownloadPriority,
-      prioritySource: hasModelDownloadPriority ? 'model-download-priority' : 'visibility-fallback',
-      modelInfo: buildModelInfo(state.meta),
+      downloadPlanMode: state.downloadPlanMode,
+      hasModelDownloadPriority: false,
+      prioritySource: 'visibility-probability',
+      modelInfo: modelInfo(),
     },
-  });
-}
-
-async function m12ProbeWorker(message) {
-  if (!state.ready) throw new Error('Lightweight PVS worker is not ready.');
-  if (!state.m12Pvs) {
-    const probe = new InstancePVS(state.assetBaseUrl, {
-      runtimeMetaUrl: '',
-      debugLogging: false,
-      assetVersion: state.assetVersion,
-      inferenceFovYDeg: MODEL_INPUT_FOV_Y_DEG,
-      deferRuntimeMeta: true,
-      benchmarkRawOutput: true,
-      benchmarkDebugStages: Boolean(message.debugStages),
-    });
-    try {
-      await probe.init();
-    } catch (error) {
-      const detail = probe.lastWebGPUTimings?.error || probe.lastWebGPUTimings?.unavailableReason;
-      if (detail && !String(error.message || '').includes(detail)) {
-        error.message = `${error.message || error} (${detail})`;
-      }
-      throw error;
-    }
-    state.m12Pvs = probe;
-  }
-  const cases = Array.isArray(message.cases) ? message.cases : [];
-  const results = [];
-  for (const item of cases) {
-    // M12 cases are generated offline with a `camera` field; accepting the
-    // older `snapshot` spelling keeps captured probes backwards compatible.
-    const snapshot = item && (item.snapshot || item.camera) ? (item.snapshot || item.camera) : {};
-    const camera = buildPredictionCamera(snapshot, state.meta);
-    const candidateIds = Array.isArray(item?.candidateIds)
-      ? item.candidateIds.map((value) => Number(value) >>> 0)
-      : [];
-    const prediction = await state.m12Pvs.predict(camera, {
-      camera,
-      candidateIds,
-      returnRawOutput: true,
-    }, camera);
-    results.push({
-      caseId: item?.caseId == null ? results.length : item.caseId,
-      backend: prediction?.backend || state.m12Pvs.backend,
-      candidateIds: prediction?.rawCandidateIds || candidateIds,
-      rawOutput: prediction?.rawOutput || [],
-      timings: prediction?.timings || null,
-    });
-  }
-  self.postMessage({
-    type: 'm12-result',
-    requestId: message.requestId,
-    backend: state.m12Pvs.backend,
-    results,
   });
 }
 
 self.onmessage = (event) => {
   const message = event.data || {};
-  Promise.resolve()
-    .then(async () => {
-      if (message.type === 'init') {
-        await initWorker(message);
-      } else if (message.type === 'setDownloadPlanMode') {
-        state.downloadPlanMode = normalizeDownloadPlanMode(message.downloadPlanMode);
-      } else if (message.type === 'setRuntimeMeta') {
-        // 主线程在 init 后注入 runtimeMeta(避免 worker 重复 fetch 27MB+ 同一份)
-        state.runtimeMeta = message.runtimeMeta || state.runtimeMeta;
-        const fallbackTables = buildFallbackTables(state.meta, state.runtimeMeta);
-        state.componentAabbs = fallbackTables.aabbs;
-        state.instanceToGlobalGlb = fallbackTables.instanceToGlb;
-      } else if (message.type === 'setModelMeta') {
-        // 主线程注入 model_meta(替换 placeholder,重建 fallback tables)
-        if (message.modelMeta) {
-          state.meta = message.modelMeta;
-          const idMaps = buildLocalToGlobal(state.meta);
-          state.localToGlobalInstance = idMaps.localToGlobal;
-          state.globalToLocalInstance = idMaps.globalToLocal;
-          if (state.prefetchThreshold == null) {
-            state.prefetchThreshold = Math.max(0, Math.min(1, Number(state.meta.prefetchThreshold ?? 0.04)));
-          }
-          const fallbackTables = buildFallbackTables(state.meta, state.runtimeMeta);
-          state.componentAabbs = fallbackTables.aabbs;
-          state.instanceToGlobalGlb = fallbackTables.instanceToGlb;
-        }
-      } else if (message.type === 'predict') {
-        await predictWorker(message);
-      } else if (message.type === 'm12-probe') {
-        await m12ProbeWorker(message);
-      }
-    })
-    .catch((error) => {
-      const payload = {
-        type: message.type === 'm12-probe' ? 'm12-error' : 'error',
-        serial: message.serial,
-        requestId: message.requestId,
-        message: error && error.message ? error.message : String(error),
-        stack: error && error.stack ? error.stack : null,
-      };
-      self.postMessage(payload);
+  Promise.resolve().then(async () => {
+    if (message.type === 'init') {
+      await initWorker(message);
+    } else if (message.type === 'setDownloadPlanMode') {
+      state.downloadPlanMode = message.downloadPlanMode === 'raw-visible' ? 'raw-visible' : 'viewcell-priority';
+    } else if (message.type === 'predict') {
+      await predictWorker(message);
+    }
+  }).catch((error) => {
+    self.postMessage({
+      type: 'error',
+      serial: message.serial,
+      message: error?.message || String(error),
+      stack: error?.stack || null,
     });
+  });
 };

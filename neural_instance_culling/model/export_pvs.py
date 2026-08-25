@@ -1124,6 +1124,38 @@ def _viewcell_contract(checkpoint: Mapping[str, Any], config: Mapping[str, Any])
     radius = _finite_float(radius_value, "viewcell radius")
     if radius <= 0.0:
         raise ValueError("viewcell radius must be positive")
+
+    protocol = _as_mapping(checkpoint.get("protocol"), "checkpoint.protocol")
+    dataset = _as_mapping(protocol.get("dataset"), "checkpoint.protocol.dataset")
+    dataset_path = Path(str(dataset.get("path", ""))).expanduser().resolve()
+    dataset_meta_path = dataset_path / "dataset_meta.json"
+    if not dataset_meta_path.is_file():
+        raise FileNotFoundError(
+            f"v4 export requires the checkpoint dataset metadata: {dataset_meta_path}"
+        )
+    try:
+        dataset_meta = json.loads(dataset_meta_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid checkpoint dataset metadata: {dataset_meta_path}") from exc
+    dataset_meta = _as_mapping(dataset_meta, "checkpoint dataset metadata")
+    dataset_stats = _as_mapping(dataset_meta.get("stats"), "checkpoint dataset metadata.stats")
+    back_offset_range = dataset_stats.get("pvsBackOffsetRange")
+    if not isinstance(back_offset_range, (list, tuple)) or len(back_offset_range) != 2:
+        raise ValueError(
+            "v4 export requires dataset_meta.stats.pvsBackOffsetRange with two values"
+        )
+    back_offset_min = _finite_float(back_offset_range[0], "pvsBackOffsetRange[0]")
+    back_offset_max = _finite_float(back_offset_range[1], "pvsBackOffsetRange[1]")
+    if back_offset_min < 0.0 or abs(back_offset_max - back_offset_min) > 1e-6:
+        raise ValueError("v4 runtime requires one fixed non-negative candidate-camera back offset")
+    model_fov = _finite_float(
+        dataset_meta.get("modelInputFovYDeg"), "dataset_meta.modelInputFovYDeg"
+    )
+    render_fov = _finite_float(
+        dataset_meta.get("frontendRenderFovYDeg"), "dataset_meta.frontendRenderFovYDeg"
+    )
+    if abs(model_fov - 66.0) > 1e-6 or abs(render_fov - 60.0) > 1e-6:
+        raise ValueError("v4 export requires the registered 66-degree model / 60-degree render FOV contract")
     candidate_semantics = _find_nested_value(candidates, ("candidateCameraSemantics",))
     query_semantics = _find_nested_value(candidates, ("queryCenterSemantics",))
     expected_candidate = "66-degree back-camera candidate identity only"
@@ -1139,6 +1171,9 @@ def _viewcell_contract(checkpoint: Mapping[str, Any], config: Mapping[str, Any])
         "candidateCameraSemantics": expected_candidate,
         "queryCenterSemantics": expected_query,
         "candidateCameraFormula": "candidate_camera_world = query_center_world - forward * back_offset",
+        "candidateCameraBackOffsetM": back_offset_min,
+        "modelInputFovYDeg": model_fov,
+        "frontendRenderFovYDeg": render_fov,
         "queryCenterFormula": "query_center_world = view-cell center",
         "horizontalPlane": "world XZ; no world Y displacement",
     }
@@ -1259,6 +1294,8 @@ def _build_model_meta(
         "testRead": False,
         "checkpointSchema": checkpoint.get("schema", MODEL_SCHEMA),
         "modelSchema": MODEL_SCHEMA,
+        "experimentName": str(checkpoint.get("experimentName", "pvs_mainline_v4")),
+        "checkpointEpoch": int(checkpoint.get("epoch", 0)),
         "numInstances": int(runtime_config["numInstances"]),
         "numGlbs": int(runtime_config["numGlbs"]),
         "modelConfig": dict(runtime_config),
@@ -1282,6 +1319,11 @@ def _build_model_meta(
             "queryCenterSemantics": viewcell["queryCenterSemantics"],
             "viewcellShape": DEFAULT_VIEWCELL_SHAPE,
             "viewcellRadiusM": float(viewcell["radiusM"]),
+            "candidateCameraBackOffsetM": float(
+                viewcell["candidateCameraBackOffsetM"]
+            ),
+            "modelInputFovYDeg": float(viewcell["modelInputFovYDeg"]),
+            "frontendRenderFovYDeg": float(viewcell["frontendRenderFovYDeg"]),
             "raySpaceDim": VIEW_DIM,
             "diskAxisShape": [VIEW_DIM, DISK_AXIS_DIM],
             "diskAxisBound": ray_space["diskAxisBound"],

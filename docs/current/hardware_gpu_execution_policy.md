@@ -97,7 +97,7 @@ WebGL 的硬件门只证明 WebGL/ANGLE 的光栅化路径；它不能推断 Web
 
 ### 无头 Playwright 的 WebGPU Vulkan 路径
 
-无头模式本身不是软件回退的充分条件。当前 OWRB parity 入口在 Playwright 启动 Chrome 时使用：
+无头模式本身不是软件回退的充分条件。当前 V4 页面采集入口在 Playwright 启动 Chrome 时使用：
 
 ```text
 --headless=new --enable-gpu --enable-unsafe-webgpu --enable-webgpu
@@ -115,21 +115,24 @@ Color-ID 采样不需要 WebGPU 专用的 `--enable-unsafe-webgpu` 和 `--enable
 
 ```bash
 VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json \
-node slm2viewer/scripts/benchmark_ray_context_survival_owrb_webgpu_parity.mjs \
-  --bundle <exported-runtime-bundle> --cases <parity-cases.json> \
-  --out <parity-capture.json> --require-hardware-gpu
+node slm2viewer/scripts/capture_v4_frontend_parity.mjs \
+  --viewer-dir slm2viewer/public \
+  --out <v4-parity-capture.json> \
+  --require-hardware-gpu
 ```
 
 该变量只是选择 Vulkan ICD 的尝试，不能直接证明硬件成功。最终仍必须看到
 `navigator.gpu.requestAdapter({powerPreference: "high-performance"})` 返回的适配器包含 NVIDIA
 信息，并通过 `gpuGate.hardware=true`；若返回 `google/swiftshader`，即使 WebGL renderer 是 NVIDIA，
-也只能登记为 WebGPU 软件数值 parity。2026-08-12 使用 Playwright 无头 Chrome 追加
+也只能登记为 WebGPU 软件数值 parity。2026-08-25 使用当前 V4 前端和 Playwright 无头 Chrome 追加
 `--ozone-platform=headless`、`--ozone-override-screen-size=1280,720`，并指定
 `VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json` 复核；当前 Chrome `146.0.7680.177`
 仍返回 `google/swiftshader`。Chrome CDP 的 `SystemInfo.getInfo` 同时显示 WebGL 为 NVIDIA
 Vulkan/ANGLE，但 WebGPU 的硬件门仍失败。因此无头 Playwright 可以继续用于正式 WebGL 采样、图像评价
 和软件 WebGPU 数值 parity；在本机未出现 NVIDIA WebGPU adapter 之前，不能报告 WebGPU 硬件延迟，
-也不能用 `nvidia-smi` 中出现 Chrome 进程来替代 adapter 证据。
+也不能用 `nvidia-smi` 中出现 Chrome 进程来替代 adapter 证据。软件数值验证使用
+`--allow-software-gpu` 生成 capture，再由 `verify_v4_frontend_parity.py` 与同一 checkpoint 的
+PyTorch 输出逐候选比较；这只验证实现一致性，不产生硬件延迟结论。
 
 ## 结果验收
 

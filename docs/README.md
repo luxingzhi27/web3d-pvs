@@ -1,6 +1,6 @@
 # NeuralStreamWeb3D 文档索引
 
-更新时间：2026-08-23
+更新时间：2026-08-25
 
 仓库文档只索引当前可运行系统、当前论文模型和仍需复现的正式基线。失败的旧整合网络、尾部分离探针、独立安全前沿 runner 及重复计划已删除；历史结论仍可从 Git 提交记录追溯，不再占用当前入口。
 
@@ -33,7 +33,6 @@ neural_instance_culling/benchmark/reaudit_pvs.py
 |---|---|
 | [`current/current_instance_pvs_versions.md`](current/current_instance_pvs_versions.md) | 当前部署场景、模型、阈值和前端资产边界 |
 | [`current/neuralstreamweb3d_architecture_technical.md`](current/neuralstreamweb3d_architecture_technical.md) | 离线编码、实例可见性查询、渲染过滤和 GLB 调度架构 |
-| [`current/neuralstreamweb3d_model_pipeline.md`](current/neuralstreamweb3d_model_pipeline.md) | 当前部署方向代理模型的训练与导出链 |
 | [`current/neuralstreamweb3d_dataset_protocol.md`](current/neuralstreamweb3d_dataset_protocol.md) | 66° view-cell、subpose、Color-ID、候选和 CSR 数据语义 |
 | [`current/hardware_gpu_execution_policy.md`](current/hardware_gpu_execution_policy.md) | Chrome NVIDIA Vulkan/ANGLE 硬件采样和 WebGPU 证据要求 |
 | [`evaluation/viewcell_image_per_evaluation.md`](evaluation/viewcell_image_per_evaluation.md) | Color-ID 图像漏检、错误实例和额外实例评价 |
@@ -44,12 +43,10 @@ neural_instance_culling/benchmark/reaudit_pvs.py
 
 | 文档 | 内容 |
 |---|---|
-| [`frontend/neuralstreamweb3d_runtime_implementation.md`](frontend/neuralstreamweb3d_runtime_implementation.md) | Worker 候选、WebGPU 推理、真实视锥过滤和实例级渲染 |
-| [`frontend/lightweight_frontend_pvs_scheduler.md`](frontend/lightweight_frontend_pvs_scheduler.md) | 当前预测门控、资源驻留和调度逻辑 |
-| [`frontend/neuralstreamweb3d_deployment_assets.md`](frontend/neuralstreamweb3d_deployment_assets.md) | 导出、按场景打包和 nginx 部署资产 |
+| [`frontend/pvs_v4_runtime_and_deployment.md`](frontend/pvs_v4_runtime_and_deployment.md) | V4 运行资产、Worker/WebGPU 查询、实例级显示、数值 parity 和部署 |
 | [`../slm2viewer/README_DEPLOY.md`](../slm2viewer/README_DEPLOY.md) | 发布包上传和远端验证命令 |
 
-当前部署仍使用已冻结的方向遮挡代理模型。论文主线训练结果尚未替换默认 checkpoint、阈值或前端资产。
+当前 HKUST 前端只加载 `pvs_mainline_v4`，阈值为 `0.6800000071525574`。没有匹配 V4 资产的场景使用实例 AABB 视锥模式，不复用 HKUST 权重或旧神经模型。
 
 ## 保留实验
 
