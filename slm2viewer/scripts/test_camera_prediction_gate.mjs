@@ -34,12 +34,19 @@ assert.equal(state.modelInputFovYDeg, 66);
 
 assert.equal(gate.shouldPredict(makeCamera({ x: 1.99 }), 100), false);
 assert.equal(gate.shouldPredict(makeCamera({ x: 2 }), 100), true);
+assert.equal(gate.shouldRefilter(makeCamera()), false);
+assert.equal(gate.shouldRefilter(makeCamera({ x: 1.25 })), true);
+assert.equal(gate.shouldRefilter(makeCamera({ x: 2 })), false);
+gate.commitRender(makeCamera({ x: 1.25 }));
+assert.equal(gate.shouldRefilter(makeCamera({ x: 1.25 })), false);
+assert.equal(gate.shouldRefilter(makeCamera({ x: 1.5 })), true);
 
 const verticalGate = committedGate();
 assert.equal(verticalGate.shouldPredict(makeCamera({ y: 0.01 }), 100), true);
 
 const orientationGate = committedGate();
 assert.equal(orientationGate.shouldPredict(makeCamera({ yaw: 0.5 * Math.PI / 180 }), 100), true);
+assert.equal(orientationGate.shouldRefilter(makeCamera({ yaw: 0.5 * Math.PI / 180 })), false);
 
 const fovGate = committedGate();
 assert.equal(fovGate.shouldPredict(makeCamera({ fov: 61 }), 100), true);

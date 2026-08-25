@@ -297,6 +297,31 @@ async function predictWorker(message) {
   });
 }
 
+async function filterWorker(message) {
+  if (!state.ready) throw new Error('PVS worker is not ready.');
+  const startedAt = nowMs();
+  const activeCamera = buildCamera(message.snapshot || {}, FRONTEND_RENDER_FOV_Y_DEG);
+  const filtered = await state.pvs.refilter(activeCamera);
+  if (!filtered) throw new Error('No cached model prediction is available for render refiltering.');
+  const renderComponentIds = filtered.renderComponentModelList || new Uint32Array();
+  const renderGlbIds = filtered.renderModelList || new Uint32Array();
+  const finishedAt = nowMs();
+  postResult({
+    type: 'filter-result',
+    serial: message.serial,
+    idMode: 'global-glb-priority',
+    backend: filtered.backend || `${state.backend}-cached-render-filter`,
+    renderComponentModelList: renderComponentIds,
+    renderModelList: renderGlbIds,
+    executionTime: finishedAt - startedAt,
+    timings: {
+      ...(filtered.timings || {}),
+      totalMs: finishedAt - startedAt,
+      modelInfo: modelInfo(),
+    },
+  });
+}
+
 self.onmessage = (event) => {
   const message = event.data || {};
   Promise.resolve().then(async () => {
@@ -306,6 +331,8 @@ self.onmessage = (event) => {
       state.downloadPlanMode = message.downloadPlanMode === 'raw-visible' ? 'raw-visible' : 'viewcell-priority';
     } else if (message.type === 'predict') {
       await predictWorker(message);
+    } else if (message.type === 'filter') {
+      await filterWorker(message);
     }
   }).catch((error) => {
     self.postMessage({

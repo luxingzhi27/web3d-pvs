@@ -12,6 +12,7 @@ const HKUST_VIEWCELL_RADIUS_M = 2;
 const VIEWCELL_VERTICAL_EPSILON_M = 1e-4;
 const VIEWCELL_ORIENTATION_EPSILON_DEG = 1e-4;
 const VIEWCELL_FOV_EPSILON_DEG = 1e-4;
+const RENDER_POSITION_EPSILON_M = 1e-4;
 
 function finiteNumber(value, fallback) {
   const numeric = Number(value);
@@ -33,6 +34,10 @@ export class CameraPredictionGate {
     this.lastPitchDeg = null;
     this.lastFov = null;
     this.lastAspect = null;
+    this.lastRenderPosition = null;
+    this.lastRenderQuaternion = null;
+    this.lastRenderFov = null;
+    this.lastRenderAspect = null;
     this.lastPredictionAt = 0;
   }
 
@@ -62,6 +67,10 @@ export class CameraPredictionGate {
     this.lastPitchDeg = null;
     this.lastFov = null;
     this.lastAspect = null;
+    this.lastRenderPosition = null;
+    this.lastRenderQuaternion = null;
+    this.lastRenderFov = null;
+    this.lastRenderAspect = null;
     this.lastPredictionAt = 0;
   }
 
@@ -123,6 +132,29 @@ export class CameraPredictionGate {
       aspectDelta >= this.aspectDelta;
   }
 
+  shouldRefilter(camera) {
+    if (!camera || !this.lastPosition || this.shouldPredict(camera)) return false;
+    const current = this._readCamera(camera);
+    if (!this.lastRenderPosition || !this.lastRenderQuaternion) return true;
+    const positionDelta = this.lastRenderPosition.distanceTo(current.position);
+    const quaternionDelta = 2 * Math.acos(
+      Math.min(1, Math.abs(this.lastRenderQuaternion.dot(current.quaternion))),
+    ) * RAD_TO_DEG;
+    return positionDelta > RENDER_POSITION_EPSILON_M
+      || quaternionDelta > VIEWCELL_ORIENTATION_EPSILON_DEG
+      || Math.abs(current.fov - finiteNumber(this.lastRenderFov, current.fov)) > VIEWCELL_FOV_EPSILON_DEG
+      || Math.abs(current.aspect - finiteNumber(this.lastRenderAspect, current.aspect)) > 1e-6;
+  }
+
+  commitRender(camera) {
+    if (!camera) return;
+    const current = this._readCamera(camera);
+    this.lastRenderPosition = current.position;
+    this.lastRenderQuaternion = current.quaternion;
+    this.lastRenderFov = current.fov;
+    this.lastRenderAspect = current.aspect;
+  }
+
   commit(camera, nowMs = performance.now()) {
     if (!camera) return;
     const current = this._readCamera(camera);
@@ -133,6 +165,10 @@ export class CameraPredictionGate {
     this.lastFov = current.fov;
     this.lastAspect = current.aspect;
     this.lastPredictionAt = nowMs;
+    this.lastRenderPosition = current.position.clone();
+    this.lastRenderQuaternion = current.quaternion.clone();
+    this.lastRenderFov = current.fov;
+    this.lastRenderAspect = current.aspect;
   }
 
   getState() {
@@ -152,6 +188,7 @@ export class CameraPredictionGate {
       renderFovYDeg: FRONTEND_RENDER_FOV_Y_DEG,
       modelInputFovYDeg: MODEL_INPUT_FOV_Y_DEG,
       hasCommittedPrediction: Boolean(this.lastPosition && this.lastQuaternion),
+      hasCommittedRenderFilter: Boolean(this.lastRenderPosition && this.lastRenderQuaternion),
     };
   }
 }

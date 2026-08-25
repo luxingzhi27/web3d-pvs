@@ -52,7 +52,6 @@ const THREE_PATH = `https://unpkg.com/three@0.${REVISION}.x`
 const DRACO_LOADER = new DRACOLoader( MANAGER ).setDecoderPath( `${THREE_PATH}/examples/js/libs/draco/gltf/` );
 const KTX2_LOADER = new KTX2Loader( MANAGER ).setTranscoderPath( `${THREE_PATH}/examples/js/libs/basis/` );
 const LOCAL_RUNTIME_ASSET_VERSION = 'pvs-mainline-v4-hkust-20260825';
-const INSTANCED_VISIBILITY_MATRIX = new Matrix4();
 
 function withLocalRuntimeVersion(url)
 {
@@ -98,7 +97,7 @@ export class SLM2Loader
     this.expectedInstancedVisibilityHashes = new Set();
     this.loadedInstancedVisibilityStatesByHash = {};
     this.lastRenderableComponentIdsForInstancing = [];
-    this.instancedRetainUntilByComponentId = new Map();
+    this.instancedWantedIndicesByHash = new Map();
     this.runtimeFrustumFilterEnabled = true;
     this.runtimeFrustumFilterSource = 'back-camera';
     this.runtimeFrustumFilterDebug = false;
@@ -220,8 +219,6 @@ export class SLM2Loader
     this.neuralDebugNoCache = false;
     this.neuralRenderPolicy = 'culled';
     this.neuralDownloadPlanMode = 'viewcell-priority';
-    this.neuralRenderRetainMs = 0;
-    this.neuralRenderMissTolerance = 0;
     this.lastRenderRefreshStats = null;
     this.actualRenderStatsCache = null;
     this.actualRenderStatsAt = 0;
@@ -235,7 +232,8 @@ export class SLM2Loader
     this.neuralPredictionLifecycleSerial = 0;
     this.forceNextNeuralPrediction = false;
     this.neuralPredictionInFlight = false;
-    this.neuralPendingPredictionAfterCurrent = false;
+    this.neuralPendingVisibilityUpdate = false;
+    this.lastNeuralRefilter = null;
     this.lastVisibilityMetrics = null;
     this.visibilityMetricsSerial = 0;
     this.lastBenchmarkVisibilityIds = {
@@ -333,11 +331,6 @@ export class SLM2Loader
     startupLog('slm2:constructor:end');
   }
 
-  getNeuralRenderRetainMs()
-  {
-    return Number(this.neuralRenderRetainMs || 0);
-  }
-
   getNeuralRenderPolicy()
   {
     return this.neuralRenderPolicy || 'culled';
@@ -396,7 +389,8 @@ export class SLM2Loader
     this.useNeuralPVS = normalized === 'neural';
     this.neuralPVSIdMode = this.useNeuralPVS ? 'global-glb-priority' : 'global-glb';
     this.neuralPredictionInFlight = false;
-    this.neuralPendingPredictionAfterCurrent = false;
+    this.neuralPendingVisibilityUpdate = false;
+    this.lastNeuralRefilter = null;
     this.forceNextNeuralPrediction = this.useNeuralPVS;
     this.neuralPVSInitScheduled = false;
     this.neuralPVSReadyCullingScheduled = false;
@@ -495,6 +489,14 @@ export class SLM2Loader
     if (normalized === 'resident')
     {
       this._showAllResidentObjects();
+    }
+    else if (this.renderVisibilitySystem)
+    {
+      // Resident inspection may have exposed objects outside the exact GPU
+      // working set. Reconcile once when returning to normal culling.
+      this.renderVisibilitySystem.syncVisibleResidentsFromCache();
+      this.renderVisibilitySystem.update();
+      this._syncAllLoadedInstancedVisibilityStates();
     }
 
     return normalized;
@@ -610,45 +612,15 @@ export class SLM2Loader
         // Resident/debug mode must preserve the same safety boundary as the
         // normal visibility path.  An invalid mapping is never shown whole.
         this._hideInvalidInstancedVisibilityState(state);
-        state.lastKey = '__invalid__';
         continue;
       }
 
-      for (var meshStateIndex = 0; meshStateIndex < state.meshStates.length; ++meshStateIndex)
+      var allIndices = new Array(state.originalCount);
+      for (var instanceIndex = 0; instanceIndex < state.originalCount; ++instanceIndex)
       {
-        var meshState = state.meshStates[meshStateIndex];
-        var mesh = meshState.mesh;
-        for (var instanceIndex = 0; instanceIndex < meshState.originalCount; ++instanceIndex)
-        {
-          mesh.setMatrixAt(instanceIndex, meshState.originalMatrices[instanceIndex]);
-        }
-        mesh.count = meshState.originalCount;
-        mesh.visible = meshState.originalCount > 0;
-        if (mesh.instanceMatrix)
-        {
-          mesh.instanceMatrix.needsUpdate = true;
-        }
-        this._refreshInstancedMeshBounds(mesh);
+        allIndices[instanceIndex] = instanceIndex;
       }
-      state.lastKey = '__all__';
-    }
-  }
-
-  _refreshInstancedMeshBounds(mesh)
-  {
-    if (!mesh)
-    {
-      return;
-    }
-
-    // InstancedMesh 的包围体不会在 count 或实例矩阵变化后自动更新。
-    // 若继续沿用上一次可见实例集合的包围球，Three.js 会在 draw call 层面
-    // 提前剔除仍位于当前视锥内的新实例集合。
-    mesh.boundingBox = null;
-    mesh.boundingSphere = null;
-    if (mesh.count > 0 && typeof mesh.computeBoundingSphere === 'function')
-    {
-      mesh.computeBoundingSphere();
+      this._applyInstancedVisibilityState(state, allIndices);
     }
   }
 
@@ -678,10 +650,7 @@ export class SLM2Loader
       this.frozenPredictionInspectTotal = renderInfos.length;
     }
 
-    var renderOptions = this._getRenderVisibilityOptions('global-glb');
-    renderOptions.retainVisibleMs = 0;
-    renderOptions.missTolerance = 0;
-    this.lastRenderRefreshStats = this.modelCacheMgr.refreshVisible(renderInfos, renderOptions);
+    this._updateCurrentNeuralRenderSet(renderInfos, 'global-glb');
     this._applyInstancedVisibility(this.frozenPredictionInspectComponentIds);
 
     return {
@@ -700,7 +669,7 @@ export class SLM2Loader
     this.frozenPredictionInspectGlbIds = this._normalizeIdList(glbIds);
     this.frozenPredictionInspectTotal = this.frozenPredictionInspectGlbIds.length;
     this.forceNextNeuralPrediction = false;
-    this.neuralPendingPredictionAfterCurrent = false;
+    this.neuralPendingVisibilityUpdate = false;
     this.modelCacheMgr.setSchedulingStrategy('manual');
     this._applyFrozenPredictionInspectSnapshot();
     return {
@@ -737,20 +706,6 @@ export class SLM2Loader
       active: this.frozenPredictionInspectActive,
       total: this.frozenPredictionInspectTotal,
     };
-  }
-
-  setNeuralRenderRetainMs(value)
-  {
-    var numeric = Number(value);
-    if (!Number.isFinite(numeric))
-    {
-      numeric = 0;
-    }
-
-    numeric = Math.max(0, Math.min(5000, Math.round(numeric)));
-    this.neuralRenderRetainMs = numeric;
-    if (this.neuralDebugLogs) console.log('[SLM2Loader] Neural render hide delay set to', numeric, 'ms');
-    return numeric;
   }
 
   _getPendingSceneInsertionCount()
@@ -1276,8 +1231,22 @@ export class SLM2Loader
   _setCurrentNeuralWorkingSet(modelInfos, idMode)
   {
     this.currentNeuralPredictionEpoch++;
-    this.renderVisibilitySystem.setWorkingSet(modelInfos, idMode, this.currentNeuralPredictionEpoch);
+    this.lastRenderRefreshStats = this.renderVisibilitySystem.setWorkingSet(
+      modelInfos,
+      idMode,
+      this.currentNeuralPredictionEpoch
+    );
     return this.currentNeuralPredictionEpoch;
+  }
+
+  _updateCurrentNeuralRenderSet(modelInfos, idMode)
+  {
+    this.lastRenderRefreshStats = this.renderVisibilitySystem.setWorkingSet(
+      modelInfos,
+      idMode,
+      this.currentNeuralPredictionEpoch
+    );
+    return this.lastRenderRefreshStats;
   }
 
   _isHashInCurrentNeuralRenderSet(hash)
@@ -2559,8 +2528,8 @@ export class SLM2Loader
 
     this.modelCacheMgr.update(time);
 
-    // This only reconciles resident render state.  RenderVisibilitySystem has
-    // its own time/camera gate and does not start neural predictions.
+    // This only reconciles newly resident GLBs against the latest exact GPU
+    // render set and never starts neural prediction or performs culling.
     if (this.renderVisibilitySystem && typeof this.renderVisibilitySystem.update === 'function')
     {
       this.renderVisibilitySystem.update();
@@ -2701,7 +2670,7 @@ export class SLM2Loader
       originalCount += Number(node.count || 0);
       meshStates.push({
         mesh: node,
-        originalMatrices: [],
+        originalMatrixArray: new Float32Array(),
         originalCount: Number(node.count || 0),
       });
     });
@@ -2714,7 +2683,7 @@ export class SLM2Loader
       componentIds: [],
       disabled: true,
       bindingError: 'missing-runtime-binding',
-      lastKey: '__invalid__',
+      activeIndices: [],
     };
     this.loadedInstancedVisibilityStatesByHash[hash] = state;
     item.instancedBindingInvalid = true;
@@ -2827,7 +2796,7 @@ export class SLM2Loader
         componentIds: componentIds,
         disabled: true,
         bindingError: reason,
-        lastKey: null,
+        activeIndices: [],
       };
       this.loadedInstancedVisibilityStatesByHash[hash] = state;
       item.instancedBindingInvalid = true;
@@ -2855,12 +2824,10 @@ export class SLM2Loader
         return;
       }
 
-      var originalMatrices = [];
-      for (var index = 0; index < node.count; ++index)
-      {
-        node.getMatrixAt(index, INSTANCED_VISIBILITY_MATRIX);
-        originalMatrices.push(INSTANCED_VISIBILITY_MATRIX.clone());
-      }
+      var originalMatrixArray = node.instanceMatrix && node.instanceMatrix.array
+        ? new Float32Array(node.instanceMatrix.array.slice(0, node.count * 16))
+        : new Float32Array();
+      node.frustumCulled = false;
 
       if (expectedCount == null)
       {
@@ -2873,7 +2840,7 @@ export class SLM2Loader
 
       meshStates.push({
         mesh: node,
-        originalMatrices: originalMatrices,
+        originalMatrixArray: originalMatrixArray,
         originalCount: node.count,
       });
     });
@@ -2919,7 +2886,7 @@ export class SLM2Loader
       componentIds: componentIds,
       disabled: false,
       bindingError: null,
-      lastKey: null,
+      activeIndices: null,
     };
     item.instancedBindingInvalid = false;
     this.loadedInstancedVisibilityStatesByHash[hash] = state;
@@ -2941,6 +2908,10 @@ export class SLM2Loader
         state.item.meshObject.visible = false;
       }
     }
+    if (this.renderVisibilitySystem && this.renderVisibilitySystem.visibleHashes)
+    {
+      this.renderVisibilitySystem.visibleHashes.delete(state.hash);
+    }
 
     for (var meshIdx = 0; meshIdx < (state.meshStates || []).length; ++meshIdx)
     {
@@ -2955,125 +2926,154 @@ export class SLM2Loader
       {
         mesh.instanceMatrix.needsUpdate = true;
       }
-      this._refreshInstancedMeshBounds(mesh);
     }
+    state.activeIndices = [];
   }
 
-  _applyInstancedVisibility(componentIds)
+  _applyInstancedVisibilityState(state, activeIndices)
   {
-    var previousRenderable = this.lastRenderableComponentIdsForInstancing || [];
-    var currentSet = new Set(this._normalizeIdList(componentIds));
-    var nowMs = this.modelCacheMgr && typeof this.modelCacheMgr.getNowMs === 'function'
-      ? this.modelCacheMgr.getNowMs()
-      : (typeof performance !== 'undefined' ? performance.now() : Date.now());
-    var retainMs = this.useNeuralPVS ? Math.max(0, Number(this.neuralRenderRetainMs || 0)) : 0;
-
-    // 实例化构件的显示也需要短暂保留，否则一次预测抖动会立刻把实例矩阵移走，视觉上就是闪烁。
-    if (!this.instancedRetainUntilByComponentId)
+    if (!state)
     {
-      this.instancedRetainUntilByComponentId = new Map();
+      return;
     }
-    if (retainMs > 0)
+    if (state.disabled)
     {
-      for (var prevIdx = 0; prevIdx < previousRenderable.length; ++prevIdx)
-      {
-        var previousId = previousRenderable[prevIdx];
-        if (!currentSet.has(previousId))
-        {
-          var existingRetainUntil = this.instancedRetainUntilByComponentId.get(previousId) || 0;
-          this.instancedRetainUntilByComponentId.set(previousId, Math.max(existingRetainUntil, nowMs + retainMs));
-        }
-      }
-      this.instancedRetainUntilByComponentId.forEach(function(retainUntil, componentId)
-      {
-        if (currentSet.has(componentId) || retainUntil <= nowMs)
-        {
-          this.instancedRetainUntilByComponentId.delete(componentId);
-        }
-        else
-        {
-          currentSet.add(componentId);
-        }
-      }, this);
-    }
-    else
-    {
-      this.instancedRetainUntilByComponentId.clear();
+      this._hideInvalidInstancedVisibilityState(state);
+      return;
     }
 
-    this.lastRenderableComponentIdsForInstancing = this._normalizeIdList(Array.from(currentSet));
-
-    if (!this.instancedVisibilityBindingByComponentId || Object.keys(this.instancedVisibilityBindingByComponentId).length === 0)
+    var previous = Array.isArray(state.activeIndices) ? state.activeIndices : [];
+    var firstChanged = 0;
+    while (firstChanged < previous.length && firstChanged < activeIndices.length &&
+           previous[firstChanged] === activeIndices[firstChanged])
+    {
+      firstChanged++;
+    }
+    if (Array.isArray(state.activeIndices) && firstChanged === previous.length &&
+        firstChanged === activeIndices.length)
     {
       return;
     }
 
-    var wantedByHash = {};
-    for (var i = 0; i < this.lastRenderableComponentIdsForInstancing.length; ++i)
+    for (var meshStateIdx = 0; meshStateIdx < state.meshStates.length; ++meshStateIdx)
     {
-      var componentId = this.lastRenderableComponentIdsForInstancing[i];
-      var binding = this.instancedVisibilityBindingByComponentId[componentId];
-      if (!binding || !binding.hash)
+      var meshState = state.meshStates[meshStateIdx];
+      var mesh = meshState.mesh;
+      var target = mesh && mesh.instanceMatrix ? mesh.instanceMatrix.array : null;
+      var source = meshState.originalMatrixArray;
+      if (!mesh || !target || !source || source.length < meshState.originalCount * 16)
       {
         continue;
       }
-      if (!wantedByHash[binding.hash])
+      for (var visibleIndex = firstChanged; visibleIndex < activeIndices.length; ++visibleIndex)
       {
-        wantedByHash[binding.hash] = [];
+        var sourceOffset = activeIndices[visibleIndex] * 16;
+        target.set(source.subarray(sourceOffset, sourceOffset + 16), visibleIndex * 16);
       }
-      wantedByHash[binding.hash].push(binding.instanceIndex);
-    }
-
-    var touchedHashes = new Set(Object.keys(this.loadedInstancedVisibilityStatesByHash || {}));
-    for (var hashKey in wantedByHash)
-    {
-      touchedHashes.add(hashKey);
-    }
-
-    touchedHashes.forEach((hash) =>
-    {
-      var state = this._ensureLoadedInstancedVisibilityState(hash);
-      if (!state)
+      mesh.count = activeIndices.length;
+      mesh.visible = activeIndices.length > 0;
+      mesh.frustumCulled = false;
+      if (firstChanged < activeIndices.length)
       {
-        return;
-      }
-
-      var activeIndices = (wantedByHash[hash] || []).filter(function(index)
-      {
-        return Number.isFinite(index) && index >= 0 && index < state.originalCount;
-      }).sort(function(a, b){ return a - b; });
-      var activeKey = activeIndices.join(',');
-
-      if (state.disabled)
-      {
-        this._hideInvalidInstancedVisibilityState(state);
-        state.lastKey = '__invalid__';
-        return;
-      }
-
-      if (state.lastKey === activeKey)
-      {
-        return;
-      }
-
-      for (var meshStateIdx = 0; meshStateIdx < state.meshStates.length; ++meshStateIdx)
-      {
-        var meshState = state.meshStates[meshStateIdx];
-        for (var visibleIndex = 0; visibleIndex < activeIndices.length; ++visibleIndex)
+        if (typeof mesh.instanceMatrix.clearUpdateRanges === 'function')
         {
-          meshState.mesh.setMatrixAt(visibleIndex, meshState.originalMatrices[activeIndices[visibleIndex]]);
+          mesh.instanceMatrix.clearUpdateRanges();
         }
-        meshState.mesh.count = activeIndices.length;
-        meshState.mesh.visible = activeIndices.length > 0;
-        if (meshState.mesh.instanceMatrix)
+        if (typeof mesh.instanceMatrix.addUpdateRange === 'function')
         {
-          meshState.mesh.instanceMatrix.needsUpdate = true;
+          mesh.instanceMatrix.addUpdateRange(
+            firstChanged * 16,
+            (activeIndices.length - firstChanged) * 16
+          );
         }
-        this._refreshInstancedMeshBounds(meshState.mesh);
+        mesh.instanceMatrix.needsUpdate = true;
       }
+    }
+    state.activeIndices = activeIndices.slice();
+  }
 
-      state.lastKey = activeKey;
-    });
+  _syncInstancedVisibilityHash(hash)
+  {
+    var state = this._ensureLoadedInstancedVisibilityState(hash);
+    if (!state)
+    {
+      return;
+    }
+    var wanted = this.instancedWantedIndicesByHash.get(hash);
+    var activeIndices = wanted ? Array.from(wanted) : [];
+    activeIndices = activeIndices.filter(function(index)
+    {
+      return Number.isInteger(index) && index >= 0 && index < state.originalCount;
+    }).sort(function(a, b){ return a - b; });
+    this._applyInstancedVisibilityState(state, activeIndices);
+  }
+
+  _syncAllLoadedInstancedVisibilityStates()
+  {
+    var states = this.loadedInstancedVisibilityStatesByHash || {};
+    for (var hash in states)
+    {
+      this._syncInstancedVisibilityHash(hash);
+    }
+  }
+
+  _updateWantedInstancedComponent(componentId, add, dirtyHashes)
+  {
+    var binding = this.instancedVisibilityBindingByComponentId[componentId];
+    if (!binding || !binding.hash)
+    {
+      return;
+    }
+    var wanted = this.instancedWantedIndicesByHash.get(binding.hash);
+    if (!wanted)
+    {
+      wanted = new Set();
+      this.instancedWantedIndicesByHash.set(binding.hash, wanted);
+    }
+    if (add)
+    {
+      wanted.add(Number(binding.instanceIndex));
+    }
+    else
+    {
+      wanted.delete(Number(binding.instanceIndex));
+      if (wanted.size === 0)
+      {
+        this.instancedWantedIndicesByHash.delete(binding.hash);
+      }
+    }
+    dirtyHashes.add(binding.hash);
+  }
+
+  _applyInstancedVisibility(componentIds)
+  {
+    var previous = this.lastRenderableComponentIdsForInstancing || [];
+    var next = this._normalizeIdList(componentIds);
+    var dirtyHashes = new Set();
+    var previousIndex = 0;
+    var nextIndex = 0;
+    while (previousIndex < previous.length || nextIndex < next.length)
+    {
+      var previousId = previousIndex < previous.length ? previous[previousIndex] : Number.POSITIVE_INFINITY;
+      var nextId = nextIndex < next.length ? next[nextIndex] : Number.POSITIVE_INFINITY;
+      if (previousId === nextId)
+      {
+        previousIndex++;
+        nextIndex++;
+      }
+      else if (previousId < nextId)
+      {
+        this._updateWantedInstancedComponent(previousId, false, dirtyHashes);
+        previousIndex++;
+      }
+      else
+      {
+        this._updateWantedInstancedComponent(nextId, true, dirtyHashes);
+        nextIndex++;
+      }
+    }
+    this.lastRenderableComponentIdsForInstancing = next;
+    dirtyHashes.forEach((hash) => this._syncInstancedVisibilityHash(hash));
   }
 
   _componentIdsToGlbIds(componentIds)
@@ -3350,6 +3350,7 @@ export class SLM2Loader
         modelInfo: this.neuralPVS ? (this.neuralPVS.modelInfo || (this.neuralPVS.lastPredictTimings ? this.neuralPVS.lastPredictTimings.modelInfo : null)) : null,
         initTimings: this.neuralPVS ? this.neuralPVS.lastInitTimings : null,
         predictTimings: this.neuralPVS ? this.neuralPVS.lastPredictTimings : null,
+        filterTimings: this.neuralPVS ? this.neuralPVS.lastFilterTimings : null,
         idMode: this.neuralPVSIdMode,
         resourceTransport: this.neuralUseResourcesWS ? 'resourcesWS' : 'http',
         resourcesWSConfigured: Boolean(this.resourcesWS),
@@ -3599,7 +3600,96 @@ export class SLM2Loader
     this.backCamera.updateMatrixWorld();
   }
 
-  sceneCulling() 
+  _cloneVisibilityCamera()
+  {
+    var camera = this.activeCamera.clone();
+    camera.updateProjectionMatrix();
+    camera.updateMatrixWorld(true);
+    return camera;
+  }
+
+  _schedulePendingNeuralVisibilityUpdate()
+  {
+    if (!this.neuralPendingVisibilityUpdate && !this.forceNextNeuralPrediction)
+    {
+      return;
+    }
+    this.neuralPendingVisibilityUpdate = false;
+    setTimeout(() =>
+    {
+      if (this.useNeuralPVS && !this.frozenPredictionInspectActive)
+      {
+        this.sceneCulling();
+      }
+    }, 0);
+  }
+
+  _runCachedNeuralRenderFilter(predictionDispatcher, camera, groupSerial, lifecycleSerial, cameraHash)
+  {
+    var filterProcess = async () =>
+    {
+      this.neuralPredictionInFlight = true;
+      var filterStartedAt = performance.now();
+      try
+      {
+        var filtered = await predictionDispatcher.refilter(camera);
+        if (!filtered || filtered.stale ||
+            groupSerial !== this.neuralGroupSwitchSerial ||
+            lifecycleSerial !== this.neuralPredictionLifecycleSerial ||
+            this.frozenPredictionInspectActive)
+        {
+          return;
+        }
+        this.neuralPredictionGate.commitRender(camera);
+        this.lastNeuralRefilter = filtered;
+        var applied = this._applyLightweightNeuralRefilter(
+          filtered,
+          filtered.idMode || this.neuralPVSIdMode
+        );
+        var previousIds = this.lastBenchmarkVisibilityIds || {};
+        this._updateBenchmarkVisibilityIds({
+          serial: previousIds.serial,
+          mode: 'neural',
+          rawComponentIds: previousIds.rawComponentIds || [],
+          rawGlbIds: previousIds.rawGlbIds || [],
+          scheduledComponentIds: previousIds.scheduledComponentIds || [],
+          scheduledGlbIds: previousIds.scheduledGlbIds || [],
+          renderComponentIds: applied.renderComponentModelList,
+          renderGlbIds: applied.renderModelList,
+          prefetchComponentIds: previousIds.prefetchComponentIds || [],
+          prefetchGlbIds: previousIds.prefetchGlbIds || [],
+          priorityItems: previousIds.priorityItems || [],
+          candidateSelection: previousIds.candidateSelection || null,
+        });
+        this._recordVisibilityMetrics({
+          mode: 'neural',
+          idMode: filtered.idMode || this.neuralPVSIdMode,
+          backend: filtered.backend,
+          latencyMs: performance.now() - filterStartedAt,
+          rawCount: previousIds.rawGlbIds ? previousIds.rawGlbIds.length : 0,
+          visibleCount: applied.renderModelList.length,
+          rawGlbCount: previousIds.rawGlbIds ? previousIds.rawGlbIds.length : 0,
+          visibleGlbCount: applied.renderModelList.length,
+          rawInstanceCount: previousIds.rawComponentIds ? previousIds.rawComponentIds.length : 0,
+          visibleInstanceCount: applied.renderComponentModelList.length,
+          cameraHash: cameraHash,
+          notes: {
+            cachedModelPrediction: true,
+            renderCandidateGlbCount: applied.renderModelList.length,
+            renderResidentCount: this.renderVisibilitySystem.visibleHashes.size,
+          },
+        });
+      }
+      finally
+      {
+        this.neuralPredictionInFlight = false;
+        this._schedulePendingNeuralVisibilityUpdate();
+      }
+    };
+    filterProcess();
+  }
+
+  sceneCulling()
   {
     var logThisCulling = this.startupSceneCullingLogCount < 20;
     if (logThisCulling)
@@ -3767,22 +3857,36 @@ export class SLM2Loader
           if (logThisCulling) startupLog('slm2:sceneCulling:neural-ready');
           this.neuralPVSInitWarningShown = false;
           var forceNeuralPrediction = Boolean(this.forceNextNeuralPrediction);
+          var needsFullPrediction = forceNeuralPrediction || this.neuralPredictionGate.shouldPredict(this.activeCamera);
+          var needsRenderRefilter = !needsFullPrediction && this.neuralPredictionGate.shouldRefilter(this.activeCamera);
           if (this.neuralPredictionInFlight)
           {
-            if (forceNeuralPrediction)
+            if (needsFullPrediction || needsRenderRefilter)
             {
-              this.neuralPendingPredictionAfterCurrent = true;
+              this.neuralPendingVisibilityUpdate = true;
             }
             return;
           }
-          if (!forceNeuralPrediction && !this.neuralPredictionGate.shouldPredict(this.activeCamera))
+          if (!needsFullPrediction && !needsRenderRefilter)
           {
             return;
           }
-          this.forceNextNeuralPrediction = false;
           const predictionDispatcher = this.neuralPVS;
           const predictionGroupSerial = this.neuralGroupSwitchSerial;
           const predictionLifecycleSerial = this.neuralPredictionLifecycleSerial;
+          const visibilityCamera = this._cloneVisibilityCamera();
+          if (needsRenderRefilter)
+          {
+            this._runCachedNeuralRenderFilter(
+              predictionDispatcher,
+              visibilityCamera,
+              predictionGroupSerial,
+              predictionLifecycleSerial,
+              newCameraHash
+            );
+            return;
+          }
+          this.forceNextNeuralPrediction = false;
           const predictionProcess = async () => {
             this.neuralPredictionInFlight = true;
             const predictionStart = performance.now();
@@ -3790,7 +3894,7 @@ export class SLM2Loader
             try {
               startupLog('slm2:neural:predict-start');
               var rawPredictionStart = performance.now();
-              const pred = await predictionDispatcher.predict(this.activeCamera);
+              const pred = await predictionDispatcher.predict(visibilityCamera);
               var rawPredictionMs = performance.now() - rawPredictionStart;
               if (predictionGroupSerial !== this.neuralGroupSwitchSerial ||
                   predictionLifecycleSerial !== this.neuralPredictionLifecycleSerial ||
@@ -3809,7 +3913,7 @@ export class SLM2Loader
                 this.startupMetrics.firstPredictionRawMs = rawPredictionMs;
               }
               if (pred) {
-                this.neuralPredictionGate.commit(this.activeCamera);
+                this.neuralPredictionGate.commit(visibilityCamera);
                 this.lastNeuralPrediction = pred;
                 var predIdMode = pred.idMode || this.neuralPVSIdMode;
                 if (this.neuralDebugLogs) console.log('[SLM2Loader] NeuralPVS raw prediction', {
@@ -3887,11 +3991,7 @@ export class SLM2Loader
               }
             } finally {
               this.neuralPredictionInFlight = false;
-              if (this.neuralPendingPredictionAfterCurrent)
-              {
-                this.neuralPendingPredictionAfterCurrent = false;
-                this.forceNextNeuralPrediction = true;
-              }
+              this._schedulePendingNeuralVisibilityUpdate();
             }
           };
           predictionProcess();
@@ -4266,8 +4366,6 @@ export class SLM2Loader
         (idMode === 'global-glb-priority' || idMode === 'global-glb'))
     {
       renderOptions = {
-        retainVisibleMs: this.neuralRenderRetainMs,
-        missTolerance: this.neuralRenderMissTolerance,
         attachVisibleToScene: true,
         detachHiddenFromScene: true,
         renderRoot: this.rootScene,
@@ -4719,7 +4817,15 @@ export class SLM2Loader
       // validated before it can become visible. Missing metadata is a hard
       // error, never permission to render the complete GLB.
       this._ensureLoadedInstancedVisibilityState(extras.hashCode);
-      this._applyInstancedVisibility(this.lastRenderableComponentIdsForInstancing || []);
+      this._syncInstancedVisibilityHash(extras.hashCode);
+    }
+    if (extras && extras.hashCode && this.renderVisibilitySystem)
+    {
+      // setWorkingSet may have run before this GLB became resident. Register
+      // the completed insertion so the incremental reconciler tracks the
+      // actual scene state without waiting for another visibility result.
+      this.renderVisibilitySystem.markResidentChanged(extras.hashCode);
+      this.lastRenderRefreshStats = this.renderVisibilitySystem.lastStats;
     }
     return scene;
   }
@@ -5013,10 +5119,10 @@ export class SLM2Loader
     }
     this.pendingPrefetchList = prefetchInfos.slice();
 
-    this.lastRenderRefreshStats = this.modelCacheMgr.refreshVisible(
-      renderInfos,
-      this._getRenderVisibilityOptions(appliedIdMode)
-    );
+    if (this._isResidentRenderPolicy())
+    {
+      this.lastRenderRefreshStats = this._showAllResidentObjects();
+    }
 
     this._applyInstancedVisibility(renderComponentIds);
 
@@ -5070,6 +5176,47 @@ export class SLM2Loader
       deferredSkippedComponentModelList: [],
       schedulerStats: schedulerStats,
       priorityItems: [],
+    };
+  }
+
+  _applyLightweightNeuralRefilter(filterPayload, idMode)
+  {
+    var appliedIdMode = idMode === 'global-glb-priority' ? 'global-glb' : (idMode || 'global-glb');
+    var renderComponentIds = this._normalizeIdList(
+      filterPayload && filterPayload.renderComponentModelList
+        ? Array.from(filterPayload.renderComponentModelList)
+        : []
+    );
+    var renderGlbIds = this._normalizeIdList(
+      filterPayload && filterPayload.renderModelList
+        ? Array.from(filterPayload.renderModelList)
+        : []
+    );
+    var renderInfos = this._makeGlobalGlbModelInfos(renderGlbIds, null, appliedIdMode);
+    if (this._isResidentRenderPolicy())
+    {
+      this.lastRenderRefreshStats = this._showAllResidentObjects();
+    }
+    else
+    {
+      this._updateCurrentNeuralRenderSet(renderInfos, appliedIdMode);
+    }
+    this._applyInstancedVisibility(renderComponentIds);
+
+    var previousScheduler = this.lastLightweightPVSSchedulerStats || {};
+    this.lastLightweightPVSSchedulerStats = Object.assign({}, previousScheduler, {
+      scheduler: 'pvs-v4-worker-cached-render-filter',
+      backend: filterPayload ? filterPayload.backend : null,
+      renderInstanceCount: renderComponentIds.length,
+      renderGlbCount: renderGlbIds.length,
+      filterTimings: filterPayload ? filterPayload.timings || null : null,
+      reusedModelPrediction: true,
+    });
+    return {
+      renderModelList: renderGlbIds,
+      renderComponentModelList: renderComponentIds,
+      renderVisibleCount: renderGlbIds.length,
+      schedulerStats: this.lastLightweightPVSSchedulerStats,
     };
   }
 
@@ -5148,10 +5295,7 @@ export class SLM2Loader
       this._pruneStalePendingInsertions();
       var renderStatsV1 = this._isResidentRenderPolicy()
         ? this._showAllResidentObjects()
-        : this.modelCacheMgr.refreshVisible(
-          neuralWorkingInfos,
-          this._getRenderVisibilityOptions(idMode || this.defaultVisibilityIdMode)
-        );
+        : this.renderVisibilitySystem.lastStats;
       this.lastRenderRefreshStats = renderStatsV1;
       appliedVisibility.renderVisibleCount = renderStatsV1 ? renderStatsV1.visibleCount : null;
       var rawComponentIds = predictionPayload && predictionPayload.componentModelList
@@ -5326,7 +5470,7 @@ export class SLM2Loader
     this.fullLoadMode = this.cullingMode === 'false';
     this.hasFullLoaded = false;
     this.neuralPredictionInFlight = false;
-    this.neuralPendingPredictionAfterCurrent = false;
+    this.neuralPendingVisibilityUpdate = false;
     this.neuralDebugLogs = params['neuralDebugLogs'] === 'true' || params['debugNeural'] === 'true';
     this.neuralPVSInitScheduled = false;
     this.materialConfigLoadScheduled = false;
@@ -5387,10 +5531,6 @@ export class SLM2Loader
       : { desktopMinUpdateMs: 50 });
     if (this.neuralDebugLogs) console.log('[SLM2Loader] CPU perf mode:', this.cpuPerfMode);
     if (this.neuralDebugLogs) console.log('[SLM2Loader] Neural resource transport:', this.neuralUseResourcesWS ? 'resourcesWS' : 'http', this.resourcesWS || null);
-    if (params['neuralRenderRetainMs'] != null)
-    {
-      this.setNeuralRenderRetainMs(params['neuralRenderRetainMs']);
-    }
     if (params['neuralLoadSkippedAsDeferred'] != null)
     {
       this.neuralLoadSkippedAsDeferred = !(params['neuralLoadSkippedAsDeferred'] === 'false' ||
@@ -5914,7 +6054,9 @@ export class SLM2Loader
     }
     this.neuralPVS = null;
     this.neuralPredictionInFlight = false;
+    this.neuralPendingVisibilityUpdate = false;
     this.lastNeuralPrediction = null;
+    this.lastNeuralRefilter = null;
     this.modelToLoadList = [];
     this.pendingPrefetchList = [];
     this.pendingSceneInsertions = [];
@@ -5936,10 +6078,7 @@ export class SLM2Loader
     }
     this.loadedInstancedVisibilityStatesByHash = {};
     this.lastRenderableComponentIdsForInstancing = [];
-    if (this.instancedRetainUntilByComponentId && typeof this.instancedRetainUntilByComponentId.clear === 'function')
-    {
-      this.instancedRetainUntilByComponentId.clear();
-    }
+    this.instancedWantedIndicesByHash = new Map();
     try
     {
       if (this.modelCacheMgr && typeof this.modelCacheMgr.refreshVisible === 'function')

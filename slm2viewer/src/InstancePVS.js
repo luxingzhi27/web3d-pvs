@@ -220,6 +220,15 @@ export class InstancePVS {
     this.bindGroup = null;
     this.glbPipeline = null;
     this.glbBindGroup = null;
+    this.filterPipeline = null;
+    this.filterGlbPipeline = null;
+    this.filterResultBuffer = null;
+    this.filterReadbackBuffer = null;
+    this.filterBindGroup = null;
+    this.filterGlbBindGroup = null;
+    this.filterResultLayout = null;
+    this.filterReadbackLayout = null;
+    this.hasCachedPrediction = false;
     this.resultLayout = null;
     this.readbackLayout = null;
 
@@ -454,6 +463,33 @@ export class InstancePVS {
     this.glbPipeline = this.device.createComputePipelineAsync
       ? await this.device.createComputePipelineAsync(glbDescriptor)
       : this.device.createComputePipeline(glbDescriptor);
+    const filterShaderModule = this.device.createShaderModule({ code: this._buildRenderFilterShader() });
+    if (typeof filterShaderModule.getCompilationInfo === 'function') {
+      const info = await filterShaderModule.getCompilationInfo();
+      const errors = (info.messages || [])
+        .filter((message) => message.type === 'error')
+        .map((message) => `${message.lineNum || 0}:${message.linePos || 0} ${message.message}`);
+      if (errors.length) throw new Error(`V4 render refilter WGSL compilation failed: ${errors.join('; ')}`);
+    }
+    const filterDescriptor = { layout: 'auto', compute: { module: filterShaderModule, entryPoint: 'main' } };
+    this.filterPipeline = this.device.createComputePipelineAsync
+      ? await this.device.createComputePipelineAsync(filterDescriptor)
+      : this.device.createComputePipeline(filterDescriptor);
+    const filterGlbShaderModule = this.device.createShaderModule({ code: this._buildRenderGlbCompactionShader() });
+    if (typeof filterGlbShaderModule.getCompilationInfo === 'function') {
+      const info = await filterGlbShaderModule.getCompilationInfo();
+      const errors = (info.messages || [])
+        .filter((message) => message.type === 'error')
+        .map((message) => `${message.lineNum || 0}:${message.linePos || 0} ${message.message}`);
+      if (errors.length) throw new Error(`V4 render GLB refilter WGSL compilation failed: ${errors.join('; ')}`);
+    }
+    const filterGlbDescriptor = {
+      layout: 'auto',
+      compute: { module: filterGlbShaderModule, entryPoint: 'main' },
+    };
+    this.filterGlbPipeline = this.device.createComputePipelineAsync
+      ? await this.device.createComputePipelineAsync(filterGlbDescriptor)
+      : this.device.createComputePipeline(filterGlbDescriptor);
     this._createRuntimeBuffers();
     this.instanceAabbs = null;
     this.instanceToGlobalGlbArray = null;
@@ -527,6 +563,34 @@ export class InstancePVS {
     return layout;
   }
 
+  _makeFilterResultLayout() {
+    const numInstances = Number(this.meta.numInstances);
+    const numGlbs = Number(this.meta.numGlbs);
+    let offset = 2;
+    const layout = { counters: 0 };
+    layout.renderVisibleIds = offset;
+    offset += numInstances;
+    layout.glbFlags = offset;
+    offset += numGlbs;
+    layout.glbIds = offset;
+    offset += numGlbs;
+    layout.totalWords = offset;
+    return layout;
+  }
+
+  _makeFilterReadbackLayout() {
+    const numInstances = Number(this.meta.numInstances);
+    const numGlbs = Number(this.meta.numGlbs);
+    let offset = 2;
+    const layout = { counters: 0 };
+    layout.renderVisibleIds = offset;
+    offset += numInstances;
+    layout.glbIds = offset;
+    offset += numGlbs;
+    layout.totalWords = offset;
+    return layout;
+  }
+
   _createRuntimeBuffers() {
     const resultByteLength = this.resultLayout.totalWords * 4;
     const readbackByteLength = this.readbackLayout.totalWords * 4;
@@ -536,6 +600,16 @@ export class InstancePVS {
     });
     this.readbackBuffer = this.device.createBuffer({
       size: readbackByteLength,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    this.filterResultLayout = this._makeFilterResultLayout();
+    this.filterReadbackLayout = this._makeFilterReadbackLayout();
+    this.filterResultBuffer = this.device.createBuffer({
+      size: this.filterResultLayout.totalWords * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    this.filterReadbackBuffer = this.device.createBuffer({
+      size: this.filterReadbackLayout.totalWords * 4,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     this.bindGroup = this.device.createBindGroup({
@@ -556,6 +630,22 @@ export class InstancePVS {
       entries: [
         { binding: 0, resource: { buffer: this.uniformBuffer } },
         { binding: 1, resource: { buffer: this.resultBuffer } },
+      ],
+    });
+    this.filterBindGroup = this.device.createBindGroup({
+      layout: this.filterPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.uniformBuffer } },
+        { binding: 1, resource: { buffer: this.aabbBuffer } },
+        { binding: 2, resource: { buffer: this.instanceToGlbBuffer } },
+        { binding: 3, resource: { buffer: this.resultBuffer } },
+        { binding: 4, resource: { buffer: this.filterResultBuffer } },
+      ],
+    });
+    this.filterGlbBindGroup = this.device.createBindGroup({
+      layout: this.filterGlbPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.filterResultBuffer } },
       ],
     });
   }
@@ -650,6 +740,48 @@ export class InstancePVS {
     await this.readbackBuffer.mapAsync(GPUMapMode.READ, 0, outputBytes);
     const output = this.readbackBuffer.getMappedRange(0, outputBytes).slice(0);
     this.readbackBuffer.unmap();
+    this.hasCachedPrediction = true;
+    return output;
+  }
+
+  async _refilterWebGPU(renderCamera) {
+    const uniform = new Float32Array(64);
+    uniform.set(this._frustumPlanes(renderCamera, 'current 60-degree render'), 40);
+    this.device.queue.writeBuffer(this.uniformBuffer, 0, uniform);
+
+    const numInstances = Number(this.meta.numInstances);
+    const numGlbs = Number(this.meta.numGlbs);
+    const outputBytes = this.filterReadbackLayout.totalWords * 4;
+    const encoder = this.device.createCommandEncoder();
+    encoder.clearBuffer(this.filterResultBuffer);
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.filterPipeline);
+    pass.setBindGroup(0, this.filterBindGroup);
+    pass.dispatchWorkgroups(Math.ceil(numInstances / WORKGROUP_SIZE));
+    pass.end();
+    const glbPass = encoder.beginComputePass();
+    glbPass.setPipeline(this.filterGlbPipeline);
+    glbPass.setBindGroup(0, this.filterGlbBindGroup);
+    glbPass.dispatchWorkgroups(Math.ceil(numGlbs / WORKGROUP_SIZE));
+    glbPass.end();
+    encoder.copyBufferToBuffer(
+      this.filterResultBuffer,
+      0,
+      this.filterReadbackBuffer,
+      0,
+      (2 + numInstances) * 4,
+    );
+    encoder.copyBufferToBuffer(
+      this.filterResultBuffer,
+      this.filterResultLayout.glbIds * 4,
+      this.filterReadbackBuffer,
+      this.filterReadbackLayout.glbIds * 4,
+      numGlbs * 4,
+    );
+    this.device.queue.submit([encoder.finish()]);
+    await this.filterReadbackBuffer.mapAsync(GPUMapMode.READ, 0, outputBytes);
+    const output = this.filterReadbackBuffer.getMappedRange(0, outputBytes).slice(0);
+    this.filterReadbackBuffer.unmap();
     return output;
   }
 
@@ -657,6 +789,48 @@ export class InstancePVS {
     const run = this.predictQueue.catch(() => {}).then(() => this._predictUnlocked(queryCamera, options));
     this.predictQueue = run.catch(() => {});
     return run;
+  }
+
+  async refilter(renderCamera) {
+    const run = this.predictQueue.catch(() => {}).then(() => this._refilterUnlocked(renderCamera));
+    this.predictQueue = run.catch(() => {});
+    return run;
+  }
+
+  async _refilterUnlocked(renderCamera) {
+    if (!this.isReady || !this.hasCachedPrediction) return null;
+    const startedAt = nowMs();
+    const rawBuffer = await this._refilterWebGPU(renderCamera);
+    const words = new Uint32Array(rawBuffer);
+    const renderCount = Math.min(words[0], Number(this.meta.numInstances));
+    const glbCount = Math.min(words[1], Number(this.meta.numGlbs));
+    const renderVisibleInstances = words.slice(
+      this.filterReadbackLayout.renderVisibleIds,
+      this.filterReadbackLayout.renderVisibleIds + renderCount,
+    );
+    const renderModelList = words.slice(
+      this.filterReadbackLayout.glbIds,
+      this.filterReadbackLayout.glbIds + glbCount,
+    );
+    renderVisibleInstances.sort();
+    renderModelList.sort();
+    const finishedAt = nowMs();
+    return {
+      idMode: 'global-glb-priority',
+      renderComponentModelList: renderVisibleInstances,
+      renderModelList,
+      backend: `${this.backend}-cached-render-filter`,
+      executionTime: finishedAt - startedAt,
+      timings: {
+        totalMs: finishedAt - startedAt,
+        inferenceMs: 0,
+        filterMs: finishedAt - startedAt,
+        renderInstanceCount: renderVisibleInstances.length,
+        renderGlbCount: renderModelList.length,
+        cachedModelPrediction: true,
+        readbackBytes: rawBuffer.byteLength,
+      },
+    };
   }
 
   async _predictUnlocked(queryCamera, options) {
@@ -794,7 +968,10 @@ export class InstancePVS {
       this.instanceToGlbBuffer,
       this.resultBuffer,
       this.readbackBuffer,
+      this.filterResultBuffer,
+      this.filterReadbackBuffer,
     ]) buffer?.destroy();
+    this.hasCachedPrediction = false;
     this.isReady = false;
   }
 
@@ -1269,6 +1446,77 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   atomicStore(&results[${layout.glbQueueIds}u + queue_index], glb_id);
   atomicStore(&results[${layout.glbQueueScores}u + queue_index], score_bits);
   atomicStore(&results[${layout.glbQueueFlags}u + queue_index], flags);
+}`;
+  }
+
+  _buildRenderFilterShader() {
+    const sourceLayout = this.resultLayout;
+    const filterLayout = this.filterResultLayout || this._makeFilterResultLayout();
+    return `
+struct Uniforms {
+  query_center_threshold: vec4<f32>,
+  forward_tan_x: vec4<f32>,
+  query_parameters: vec4<f32>,
+  depth_count: vec4<f32>,
+  candidate_planes: array<vec4<f32>, 6>,
+  render_planes: array<vec4<f32>, 6>,
+};
+
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(1) var<storage, read> instance_aabbs: array<f32>;
+@group(0) @binding(2) var<storage, read> instance_to_glb: array<u32>;
+@group(0) @binding(3) var<storage, read_write> prediction_results: array<atomic<u32>>;
+@group(0) @binding(4) var<storage, read_write> filter_results: array<atomic<u32>>;
+
+fn intersects_render_frustum(instance_id: u32) -> bool {
+  let aabb_offset = instance_id * 6u;
+  let minimum = vec3<f32>(
+    instance_aabbs[aabb_offset],
+    instance_aabbs[aabb_offset + 1u],
+    instance_aabbs[aabb_offset + 2u]
+  );
+  let maximum = vec3<f32>(
+    instance_aabbs[aabb_offset + 3u],
+    instance_aabbs[aabb_offset + 4u],
+    instance_aabbs[aabb_offset + 5u]
+  );
+  for (var plane_index = 0u; plane_index < 6u; plane_index += 1u) {
+    let plane = uniforms.render_planes[plane_index];
+    let positive = select(minimum, maximum, plane.xyz >= vec3<f32>(0.0));
+    if (dot(plane.xyz, positive) + plane.w < 0.0) { return false; }
+  }
+  return true;
+}
+
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let prediction_index = global_id.x;
+  let prediction_count = atomicLoad(&prediction_results[1]);
+  if (prediction_index >= prediction_count) { return; }
+  let instance_id = atomicLoad(
+    &prediction_results[${sourceLayout.modelVisibleIds}u + prediction_index]
+  );
+  if (!intersects_render_frustum(instance_id)) { return; }
+  let render_index = atomicAdd(&filter_results[0], 1u);
+  atomicStore(&filter_results[${filterLayout.renderVisibleIds}u + render_index], instance_id);
+  let glb_id = instance_to_glb[instance_id];
+  atomicOr(&filter_results[${filterLayout.glbFlags}u + glb_id], 1u);
+}`;
+  }
+
+  _buildRenderGlbCompactionShader() {
+    const layout = this.filterResultLayout || this._makeFilterResultLayout();
+    const numGlbs = Number(this.meta.numGlbs);
+    return `
+@group(0) @binding(0) var<storage, read_write> filter_results: array<atomic<u32>>;
+
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let glb_id = global_id.x;
+  if (glb_id >= ${numGlbs}u) { return; }
+  if (atomicLoad(&filter_results[${layout.glbFlags}u + glb_id]) == 0u) { return; }
+  let queue_index = atomicAdd(&filter_results[1], 1u);
+  atomicStore(&filter_results[${layout.glbIds}u + queue_index], glb_id);
 }`;
   }
 }

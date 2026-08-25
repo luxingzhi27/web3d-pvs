@@ -19,8 +19,6 @@ export class TrajectoryCollector {
         this.fullLoadToggleHud = document.getElementById('full-load-toggle-hud');
         this.neuralPVSToggleHud = document.getElementById('neural-pvs-toggle-hud');
         this.neuralDebugNoCacheToggleHud = document.getElementById('neural-debug-nocache-toggle-hud');
-        this.neuralRenderDelaySliderHud = document.getElementById('neural-render-delay-slider-hud');
-        this.neuralRenderDelayValueHud = document.getElementById('neural-render-delay-value-hud');
         this.trajectoryEnabled = this.viewer.paramJson &&
             (this.viewer.paramJson['trajectory'] === 'true' || this.viewer.paramJson['recordTrajectory'] === 'true');
 
@@ -87,20 +85,6 @@ export class TrajectoryCollector {
             });
         }
 
-        if (this.neuralRenderDelaySliderHud) {
-            this.neuralRenderDelaySliderHud.addEventListener('input', (e) => {
-                const value = Number(e.target.value || 0);
-                if (typeof this.viewer.setNeuralRenderRetainMs === 'function') {
-                    this.viewer.setNeuralRenderRetainMs(value);
-                } else if (this.viewer.slm2Loader) {
-                    this.viewer.slm2Loader.setNeuralRenderRetainMs(value);
-                }
-                this.setNeuralRenderRetainMsUI(value);
-            });
-        }
-
-        const initialDelay = this.viewer.slm2Loader ? this.viewer.slm2Loader.getNeuralRenderRetainMs() : 500;
-        this.setNeuralRenderRetainMsUI(initialDelay);
         
         // Lock controls initially
         this.viewer.controls.enabled = false;
@@ -117,16 +101,6 @@ export class TrajectoryCollector {
         if (this.viewer.touchMoveController) this.viewer.touchMoveController.setEnabled(true);
     }
 
-    setNeuralRenderRetainMsUI(value) {
-        const numeric = Math.max(0, Math.round(Number(value || 0)));
-        if (this.neuralRenderDelaySliderHud && Number(this.neuralRenderDelaySliderHud.value) !== numeric) {
-            this.neuralRenderDelaySliderHud.value = String(numeric);
-        }
-        if (this.neuralRenderDelayValueHud) {
-            this.neuralRenderDelayValueHud.innerText = `${numeric} ms`;
-        }
-    }
-    
     fallbackStart() {
         const bounds = this.viewer.sceneBounds;
         if (bounds && bounds.center && bounds.size) {

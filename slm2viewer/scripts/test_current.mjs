@@ -139,13 +139,16 @@ if (!runtimeSource.includes('let shared_variance = 0.5 * (1.0 - chi_squared);')
 if (!workerSource.includes('buildCamera(snapshot, FRONTEND_RENDER_FOV_Y_DEG)')
     || !workerSource.includes('buildCandidateCamera(snapshot)')
     || !workerSource.includes('renderCamera: activeCamera')
-    || !workerSource.includes('renderComponentModelList: renderComponentIds')) {
+    || !workerSource.includes('renderComponentModelList: renderComponentIds')
+    || !workerSource.includes("message.type === 'filter'")) {
   throw new Error('The worker no longer follows the 60-degree render / 66-degree candidate contract.');
 }
 if (!runtimeSource.includes("source: 'gpu_v4_back_frustum_aabb'")
     || !runtimeSource.includes('fn intersects_frustum(instance_id: u32, render_frustum: bool)')
     || !runtimeSource.includes('atomicMax(&results[')
-    || !runtimeSource.includes('_buildGlbCompactionShader()')) {
+    || !runtimeSource.includes('_buildGlbCompactionShader()')
+    || !runtimeSource.includes('_buildRenderFilterShader()')
+    || !runtimeSource.includes('cached-render-filter')) {
   throw new Error('The V4 runtime no longer performs candidate, render and GLB aggregation on the GPU.');
 }
 for (const forbidden of [
@@ -162,8 +165,25 @@ for (const forbidden of [
   }
 }
 if (!loaderSource.includes('predictionPayload.renderComponentModelList')
-    || !loaderSource.includes('this._applyInstancedVisibility(renderComponentIds)')) {
+    || !loaderSource.includes('this._applyInstancedVisibility(renderComponentIds)')
+    || !loaderSource.includes('_applyLightweightNeuralRefilter(')
+    || !loaderSource.includes('mesh.instanceMatrix.array')
+    || !loaderSource.includes('state.activeIndices = activeIndices.slice()')) {
   throw new Error('The main thread no longer applies the worker result at instance granularity.');
+}
+for (const forbidden of [
+  '_projectedAreaForHash(',
+  '_preciseProjectedAreaForBox(',
+  '_fastProjectedAreaForBox(',
+  'areaRejected++',
+  'state.lastKey',
+  'mesh.setMatrixAt(visibleIndex',
+  'computeBoundingSphere()',
+  'neuralRenderRetainMs',
+]) {
+  if (renderVisibilitySource.includes(forbidden) || loaderSource.includes(forbidden)) {
+    throw new Error(`Duplicate CPU culling or full instanced update returned: ${forbidden}`);
+  }
 }
 if (!loaderSource.includes('var imageConfigUrl = joinUrlPath(')
     || !loaderSource.includes('scope.glbResourcesBaseUrl || scope.resourcesBaseUrl')
@@ -183,7 +203,7 @@ if (!viewerSource.includes('ids.renderComponentIds')
 if (!loaderSource.includes('this.frozenPredictionInspectComponentIds = this._normalizeIdList(componentIds)')
     || !loaderSource.includes('this.frozenPredictionInspectGlbIds = this._normalizeIdList(glbIds)')
     || !loaderSource.includes('this._applyInstancedVisibility(this.frozenPredictionInspectComponentIds)')
-    || !renderVisibilitySource.includes('skippedByFrozenSnapshot')) {
+    || !renderVisibilitySource.includes('duplicateCullRemoved: true')) {
   throw new Error('Frozen inspection no longer preserves its instance-level visibility snapshot.');
 }
 const frozenSceneBranch = loaderSource.match(/else if \(this\.frozenPredictionInspectActive\)[\s\S]*?\r?\n    else\r?\n    \{/);

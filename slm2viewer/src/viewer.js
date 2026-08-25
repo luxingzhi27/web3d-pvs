@@ -240,7 +240,6 @@ export class Viewer
     startupLog('viewer:runtime-helpers-ready');
     this.runtimeDebugState = {
       cullingMode: this.slm2Loader.getCullingMode(),
-      neuralRenderRetainMs: this.slm2Loader.getNeuralRenderRetainMs(),
       neuralRenderPolicy: this.slm2Loader.getNeuralRenderPolicy(),
       neuralDownloadPlanMode: this.slm2Loader.getNeuralDownloadPlanMode(),
       frontendAssetEstimate: FRONTEND_RUNTIME_ASSET_ESTIMATE.label,
@@ -275,7 +274,6 @@ export class Viewer
       pvsRenderSummary: '-',
       pvsPredictionDebugSummary: '-',
     };
-    this.neuralRenderRetainMsController = null;
     this.cullingModeController = null;
     this.neuralRenderPolicyController = null;
     this.neuralDownloadPlanModeController = null;
@@ -580,8 +578,7 @@ export class Viewer
       `cache total=${cache.totalNums || 0} visible=${cache.visibleNums || 0} invisible=${cache.invisibleNums || 0} inSceneHidden=${cache.inSceneNums || 0} mem=${fmt((cache.memoryUsedKB || 0) / 1024, 0)}MB`,
       `render working=${render.workingSetSize || 0} activeEval=${render.activeEvaluationSize || 0} evaluated=${render.evaluatedCount || 0} visible=${render.visibleCount || 0} skipped=${render.skippedByGate}`,
       `actual visibleMesh=${actualRender.visibleMeshCount || 0}/${actualRender.meshCount || 0} instancedMesh=${actualRender.visibleInstancedMeshCount || 0}/${actualRender.instancedMeshCount || 0} drawnInst=${actualRender.drawnInstanceCount || 0} tri≈${fmt(actualRender.visibleTriangleEstimate, 0)}`,
-      `render keepOutside=${render.keptVisibleOutsideWorkingSet || 0} retain=${render.retainedByDelay || 0} frustumReject=${render.frustumRejected || 0} areaReject=${render.areaRejected || 0}`,
-      `projection precise=${render.preciseProjectionCount || 0} fast=${render.fastProjectionCount || 0} renderMs=${fmt(render.durationMs, 3)}`,
+      `render delta=+${render.addedCount || 0}/-${render.removedCount || 0} evaluated=${render.evaluatedCount || 0} attach=${render.attachedCount || 0} detach=${render.detachedCount || 0} renderMs=${fmt(render.durationMs, 3)}`,
       `scheduler total=${scheduler.total || 0} now=${scheduler.visibleNow || 0} prefetch=${scheduler.prefetch || 0} skipped=${scheduler.skipped || 0} tested=${scheduler.testedComponents || 0}`,
       `predictRed enabled=${predictDebug.enabled || false} frozen=${predictDebug.frozen || false} predictedComp=${predictDebug.predicted || 0} loadedHash=${predictDebug.loaded || 0} markedInst=${predictDebug.marked || 0} missing=${predictDebug.missing || 0} attached=${predictDebug.attached || 0} restored=${predictDebug.restored || 0} shot=${predictDebug.snapshot || '-'}`,
       `freezeInspect active=${frozenInspect.active || false} queued=${frozenInspect.queued || false} glb=${frozenInspect.total || 0} inst=${frozenInspect.componentCount || 0}`,
@@ -719,6 +716,10 @@ export class Viewer
     const actualRender = neural.actualRender || {};
     const httpAdaptive = load.httpAdaptive || {};
     const predictTimings = neural.predictTimings || {};
+    const filterTimings = neural.filterTimings || {};
+    const currentRenderTimings = Number(filterTimings.serial || 0) > Number(predictTimings.serial || 0)
+      ? filterTimings
+      : predictTimings;
     const scheduler = neural.priorityScheduler || {};
     const initTimings = neural.initTimings || {};
     const gate = neural.predictionGate || {};
@@ -735,7 +736,7 @@ export class Viewer
     this.runtimeDebugState.pvsModelSchema = `${modelInfo.runtimeSchema || '-'} / threshold ${this._formatRuntimeDebugNumber(modelInfo.visibilityThreshold, 3)} / ${modelInfo.thresholdSelection || '-'}`;
     this.runtimeDebugState.pvsModelWorkpoint = `weighted ${this._formatRuntimeDebugNumber(workpoint.aggregateWeightedRecall, 4)}, lower ${this._formatRuntimeDebugNumber(workpoint.aggregateWeightedRecallLowerConfidenceBound, 4)}, poseWeighted ${this._formatRuntimeDebugNumber(workpoint.poseWeightedRecall, 4)}, testReads ${workpoint.testEvaluationCount || 0}`;
     this.runtimeDebugState.pvsCullingSource = this._describeRuntimeCullingSource(stats);
-    this.runtimeDebugState.pvsBackend = neural.backend || visibility.backend || neural.neuralBackend || '-';
+    this.runtimeDebugState.pvsBackend = visibility.backend || neural.backend || neural.neuralBackend || '-';
     this.runtimeDebugState.pvsReady = neural.ready ? '是' : '否';
     this.runtimeDebugState.pvsFallbackReason = predictTimings.fallbackReason || initTimings.fallbackReason || '-';
     this.runtimeDebugState.pvsPredictMs = this._formatRuntimeDebugNumber(
@@ -761,10 +762,14 @@ export class Viewer
       predictTimings.prefetchGlbCount != null ? predictTimings.prefetchGlbCount : load.prefetchQueueLength
     );
     this.runtimeDebugState.pvsRenderInstances = this._formatRuntimeDebugInt(
-      predictTimings.renderInstanceCount != null ? predictTimings.renderInstanceCount : render.visibleCount
+      currentRenderTimings.renderInstanceCount != null
+        ? currentRenderTimings.renderInstanceCount
+        : visibility.visibleInstanceCount
     );
     this.runtimeDebugState.pvsRenderGlbs = this._formatRuntimeDebugInt(
-      predictTimings.renderGlbCount != null ? predictTimings.renderGlbCount : notes.renderResidentCount
+      currentRenderTimings.renderGlbCount != null
+        ? currentRenderTimings.renderGlbCount
+        : notes.renderCandidateGlbCount
     );
     this.runtimeDebugState.pvsDownloadQueue = this._formatRuntimeDebugInt(load.queueLength);
     this.runtimeDebugState.pvsPrefetchQueue = this._formatRuntimeDebugInt(load.prefetchQueueLength);
@@ -774,7 +779,7 @@ export class Viewer
     this.runtimeDebugState.pvsHttpMbps = this._describeRuntimeBandwidth(load, neural);
     this.runtimeDebugState.pvsHttpConcurrency = this._describeRuntimeConcurrency(load);
     this.runtimeDebugState.pvsCacheSummary = `total ${cache.totalNums || 0}, visible ${cache.visibleNums || 0}, hidden ${cache.invisibleNums || 0}`;
-    this.runtimeDebugState.pvsRenderSummary = `work ${render.workingSetSize || 0}, visible ${render.visibleCount || 0}, retain ${render.retainedByDelay || 0}`;
+    this.runtimeDebugState.pvsRenderSummary = `work ${render.workingSetSize || 0}, resident ${render.visibleCount || 0}, delta +${render.addedCount || 0}/-${render.removedCount || 0}`;
     this.runtimeDebugState.pvsActualRender = `mesh ${actualRender.visibleMeshCount || 0}/${actualRender.meshCount || 0}, instancedMesh ${actualRender.visibleInstancedMeshCount || 0}/${actualRender.instancedMeshCount || 0}, drawnInst ${actualRender.drawnInstanceCount || 0}, tri≈${this._formatRuntimeDebugInt(actualRender.visibleTriangleEstimate)}`;
     this.runtimeDebugState.pvsPredictionDebugSummary = `red ${predictDebug.enabled ? 'on' : 'off'}, frozen ${predictDebug.frozen ? 'on' : 'off'}, marked ${predictDebug.marked || 0}, missing ${predictDebug.missing || 0}`;
 
@@ -856,13 +861,13 @@ export class Viewer
       ? this.slm2Loader.loadedInstancedVisibilityStatesByHash
       : {};
     const state = states[hash];
-    if (!state || state.disabled || !state.lastKey || state.lastKey === '__all__')
+    if (!state || state.disabled || !Array.isArray(state.activeIndices))
     {
       return null;
     }
 
     const slotMap = new Map();
-    const activeIndices = String(state.lastKey).split(',');
+    const activeIndices = state.activeIndices;
     for (let slot = 0; slot < activeIndices.length; ++slot)
     {
       const originalIndex = Number(activeIndices[slot]);
@@ -1506,7 +1511,6 @@ export class Viewer
         }
 
         scope.addGUI();
-        scope.setNeuralRenderRetainMs(scope.slm2Loader.getNeuralRenderRetainMs());
         startupLog('viewer:slm2Loader-callback:end');
       });
 
@@ -1745,24 +1749,6 @@ export class Viewer
 
     this.sceneGround = root;
     this.scene.add(root);
-  }
-
-  setNeuralRenderRetainMs(value)
-  {
-    var applied = this.slm2Loader ? this.slm2Loader.setNeuralRenderRetainMs(value) : Number(value);
-    this.runtimeDebugState.neuralRenderRetainMs = applied;
-
-    if (this.neuralRenderRetainMsController)
-    {
-      this.neuralRenderRetainMsController.updateDisplay();
-    }
-
-    if (this.trajectoryCollector && typeof this.trajectoryCollector.setNeuralRenderRetainMsUI === 'function')
-    {
-      this.trajectoryCollector.setNeuralRenderRetainMsUI(applied);
-    }
-
-    return applied;
   }
 
   setCullingMode(value)
@@ -2186,7 +2172,6 @@ export class Viewer
       })
       .name('剔除模式');
     this.cullingModeController.onChange((value) => this.setCullingMode(value));
-    this.runtimeDebugState.neuralRenderRetainMs = this.slm2Loader.getNeuralRenderRetainMs();
     this.runtimeDebugState.neuralRenderPolicy = this.slm2Loader.getNeuralRenderPolicy();
     this.runtimeDebugState.neuralDownloadPlanMode = this.slm2Loader.getNeuralDownloadPlanMode();
     this.neuralRenderPolicyController = perfFolder
@@ -2200,11 +2185,6 @@ export class Viewer
       })
       .name('下载调度模式');
     this.neuralDownloadPlanModeController.onChange((value) => this.setNeuralDownloadPlanMode(value));
-    this.neuralRenderRetainMsController = perfFolder
-      .add(this.runtimeDebugState, 'neuralRenderRetainMs', 0, 3000, 50)
-      .name('神经隐藏延时(ms)');
-    this.neuralRenderRetainMsController.onChange((value) => this.setNeuralRenderRetainMs(value));
-
     const pvsDebugFolder = gui.addFolder('PVS调试');
     const addRuntimeStatus = (property, label) => {
       const row = document.createElement('li');

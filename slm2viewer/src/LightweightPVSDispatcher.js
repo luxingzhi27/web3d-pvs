@@ -53,6 +53,7 @@ export class LightweightPVSDispatcher {
     this.initPromise = null;
     this.lastInitTimings = null;
     this.lastPredictTimings = null;
+    this.lastFilterTimings = null;
     this.modelInfo = null;
     this.predictSerial = 0;
     this.pending = new Map();
@@ -153,13 +154,13 @@ export class LightweightPVSDispatcher {
       return;
     }
 
-    if (data.type !== 'result') return;
+    if (data.type !== 'result' && data.type !== 'filter-result') return;
     const pending = this.pending.get(data.serial);
     if (!pending) return;
     this.pending.delete(data.serial);
     data.stale = data.serial !== this.predictSerial;
     this.backend = data.backend || this.backend;
-    this.lastPredictTimings = {
+    const timings = {
       serial: data.serial,
       ...(data.timings || {}),
       candidateSelection: data.candidateSelection || data.timings?.candidateSelection || null,
@@ -168,6 +169,8 @@ export class LightweightPVSDispatcher {
       fallbackReason: data.fallbackReason || null,
       modelInfo: (data.timings && data.timings.modelInfo) || data.modelInfo || this.modelInfo || null,
     };
+    if (data.type === 'filter-result') this.lastFilterTimings = timings;
+    else this.lastPredictTimings = timings;
     pending.resolve(data);
   }
 
@@ -195,6 +198,20 @@ export class LightweightPVSDispatcher {
       this.pending.set(serial, { resolve, reject, startedAt: nowMs() });
       this.worker.postMessage({
         type: 'predict',
+        serial,
+        snapshot,
+      });
+    });
+  }
+
+  async refilter(renderCamera) {
+    if (!this.isReady) return null;
+    const serial = ++this.predictSerial;
+    const snapshot = this._cameraSnapshot(renderCamera);
+    return new Promise((resolve, reject) => {
+      this.pending.set(serial, { resolve, reject, startedAt: nowMs(), operation: 'filter' });
+      this.worker.postMessage({
+        type: 'filter',
         serial,
         snapshot,
       });

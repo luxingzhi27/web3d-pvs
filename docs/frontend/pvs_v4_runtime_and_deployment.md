@@ -40,7 +40,7 @@ slm2viewer/assets/neural_instance_culling/pvs_mainline_v4
 
 源码配置中的 HKUST GLB 根地址固定为 `https://www.liteweb3d.com/data/hkust-v3/`；默认场景和显式 `hkust-v3` 入口使用同一地址。`resourcesBaseUrl` 仍指向本地的小型场景元数据目录，只有实际 GLB、纹理等大型构件资源从该远端根地址下载。
 
-## 单次预测数据流
+## 完整预测与视锥重过滤
 
 1. 主线程把真实相机位置、旋转、宽高比和裁剪范围发送给 Worker。
 2. Worker 从真实相机建立后退 `3.4641 m`、垂直 FOV `66°` 的候选相机，并把候选相机和真实 `60°` 相机的十二个视锥平面写入 WebGPU 常量缓冲。
@@ -49,15 +49,29 @@ slm2viewer/assets/neural_instance_culling/pvs_mainline_v4
 5. 第二个 GPU 计算阶段遍历 GLB 聚合表，压缩得到下载队列及其最高可见性分数。
 6. 普通运行只回读后退区域可见实例编号、真实视锥最终实例编号和 GLB 下载队列，不回读逐候选概率。Worker 只做队列排序与数量限制，主线程只更新实例化渲染状态。
 
+完整预测结束后，GPU `resultBuffer` 中的后退区域模型可见实例集合保持驻留。相机仍在已登记的水平 `2 m` view-cell 内且方向、垂直位置、FOV 和宽高比契约没有变化时，浏览器不再运行可见性 MLP，也不改变下载/预取队列。Worker 只启动独立的 WebGPU 重过滤管线：读取缓存实例编号，使用最新真实 `60°` 相机重新测试实例 AABB，在 GPU 上压缩最终实例编号并聚合最终 GLB 编号。到达 view-cell 边界或契约发生变化时才重新运行完整预测。
+
+重过滤请求与完整预测共用串行 GPU 队列。相机在请求期间继续移动时，主线程只登记一次待处理更新，并在当前请求结束后立即处理最新相机；不会并发改写统一缓冲，也不会使用固定低频定时器偷偷重跑模型。
+
 未达到阈值但分数不低于预取阈值 `0.04` 的实例可以参与 GLB 预取。当前 checkpoint 没有独立下载头，GLB 优先级由所属实例的最高可见性概率聚合得到；这属于当前部署实现，不应描述成模型已经学习了独立资源效用。
 
 HKUST 普通模式的固定回读布局为 `4 + 2×18831 + 3×3273` 个 32 位字，即 `189940 bytes`。其中只预留最终实例列表和 GLB 队列容量，不包含逐候选概率。开启 `neuralDebugLogs=true` 时才额外回读候选编号、概率和中间特征，用于数值 parity；调试模式的传输量和延迟不能代表生产运行。
+
+缓存重过滤的固定回读布局为 `2 + 18831 + 3273` 个 32 位字，即 `88424 bytes`。它不回读概率、不运行查询网络，也不重新生成下载优先级。
+
+## 增量显示更新
+
+WebGPU 输出的真实 `60°` 最终实例集合是神经模式下唯一的显示依据。旧 `RenderVisibilitySystem` 中的 CPU GLB AABB、八角点投影、屏幕面积阈值、迟滞阈值和隐藏延时已经删除；屏幕面积以后只能用于 LOD 或下载排序，不能再次删除 GPU 判定为显示的实例。
+
+GLB 工作集使用新旧集合差分，只处理新增、移除和刚完成下载的 GLB。普通相机更新不再遍历全部驻留资源。实例化 GLB 维护逐原型的有序活动实例下标；新旧最终实例集合先用双指针计算变化，再只标记受影响原型。每个原型保存原始 `instanceMatrix` 的连续 `Float32Array`，更新时直接批量复制变化后的矩阵后缀，不再构造逗号字符串、不再逐实例调用 `setMatrixAt()`，也不再反复计算实例化包围球。由于实例已经通过显式 GPU 真实视锥过滤，这些 `InstancedMesh` 设置为 `frustumCulled=false`，避免 Three.js 使用过期动态包围体再次提前剔除。
+
+GLB 编号仍只负责资源下载、驻留和根节点挂载；最终显示始终由实例编号控制。一个实例化 GLB 中只有进入最终集合的实例矩阵会计入 `InstancedMesh.count`。
 
 ## 冻结结果检查
 
 2026-08-25 修正了调试面板的冻结语义。冻结按钮保存当前一次 GPU 查询经过真实 `60°` 相机视锥过滤后的最终实例编号和最终 GLB 编号。实例编号决定实际显示，GLB 编号只决定需要下载哪些资源；冻结期间不再请求全场 GLB，也不再显示全部已驻留对象。
 
-冻结后即使移动检查相机，Loader 仍保持这份实例级快照。冻结前已经开始但尚未返回的预测会被丢弃，后续才下载完成的实例化 GLB 也会立即按照同一份冻结实例编号压缩实例矩阵。解除冻结后恢复自动缓存调度并强制发起一次新预测。该修正涉及 `src/viewer.js`、`slm2/SLM2Loader.js`、`src/RenderVisibilitySystem.js` 和 `scripts/test_current.mjs`，不修改模型、阈值、运行特征表或场景元数据。
+冻结后即使移动检查相机，Loader 仍保持这份实例级快照。冻结前已经开始但尚未返回的预测会被丢弃，后续才下载完成的实例化 GLB 也会立即按照同一份冻结实例编号压缩实例矩阵。解除冻结后恢复自动缓存调度并强制发起一次新预测。冻结路径与普通路径共用精确工作集和增量实例更新，不再依赖额外 CPU 视锥或面积判断。
 
 静态契约要求冻结入口只能读取 `renderComponentIds` 和 `renderGlbIds`，并禁止冻结分支调用全驻留显示或读取后退视锥原始实例集合。验证命令为 `cd slm2viewer && npm test && npm run build`。
 
@@ -75,9 +89,11 @@ HKUST 页面功能 smoke 中，冻结前的最终集合为 `3769` 个实例和 `
 |---|---|
 | `src/InstancePVS.js` | V4 资产校验、GPU AABB 候选、WGSL 查询、GPU 压缩和 GLB 聚合 |
 | `src/LightweightPVSWorker.js` | 构造 66°/60° 相机、排序 GPU 下载队列并传递最终结果 |
-| `src/LightweightPVSDispatcher.js` | 相机快照、Worker 生命周期和请求串行号 |
+| `src/LightweightPVSDispatcher.js` | 相机快照、完整预测/缓存重过滤消息和请求串行号 |
+| `src/CameraPredictionGate.js` | 判断是否越过 view-cell 需要完整预测，以及 cell 内是否需要重过滤 |
 | `src/neuralCullingBackendMode.js` | 只为有 V4 资产的场景启用神经模式 |
-| `slm2/SLM2Loader.js` | 实例级显示状态和 GLB 下载队列接入 |
+| `src/RenderVisibilitySystem.js` | 按 GPU 最终 GLB 集合增量挂载和移除驻留资源 |
+| `slm2/SLM2Loader.js` | 下载队列接入、实例集合差分和批量实例矩阵更新 |
 | `scripts/test_current.mjs` | 当前单模型静态契约检查 |
 | `scripts/capture_v4_frontend_parity.mjs` | 从真实 V4 页面采集一次候选、概率和 WebGPU 后端证据 |
 | `scripts/verify_v4_frontend_parity.py` | PyTorch 与 WebGPU 同位姿数值比较 |
@@ -99,9 +115,19 @@ WGSL 必须与训练端依次对齐九维中心视角、`9×2` 视点区域轴�
 | GPU 候选与 Three.js CPU 视锥集合差异 | `0` |
 | GPU 60° 最终集合与 Three.js CPU 参考差异 | `0` |
 
-无头 Chrome 的 WebGPU adapter 回报 `google/swiftshader`，因此该次运行只证明数值正确，不构成硬件性能数据。
+重复剔除与增量更新修正后的浏览器 smoke 结果：
 
-功能 smoke 可以使用软件 WebGPU，但不能报告为硬件性能。正式 WebGPU 延迟必须读取 adapter 信息并通过 NVIDIA/Vulkan 硬件门；WebGL 硬件证据不能替代 WebGPU adapter 证据。
+| 项目 | 结果 |
+|---|---:|
+| 完整预测真实视锥实例 / GLB | `3769 / 1268` |
+| 同相机完整预测与缓存重过滤集合差异 | `0 / 0` |
+| view-cell 内水平平移 `0.5 m` 后实例数 | `3766` |
+| 平移后缓存重过滤与相同 AABB CPU 参考差异 | `0` |
+| 平移期间完整预测序号变化 | `0` |
+| 重过滤网络推理时间字段 | `0 ms` |
+| Loader 最终实例集合与 Worker 重过滤差异 | `0` |
+
+该 smoke 的无头 Chrome WebGPU adapter 回报 `google/swiftshader`，仅证明功能和集合一致性。`totalMs` 不构成硬件或移动端性能结果；正式 WebGPU 延迟必须读取 adapter 信息并通过仓库 NVIDIA/Vulkan 硬件门，WebGL 硬件证据不能替代 WebGPU adapter 证据。
 
 ## 验证与打包
 
@@ -109,8 +135,11 @@ WGSL 必须与训练端依次对齐九维中心视角、`9×2` 视点区域轴�
 cd slm2viewer
 npm test
 npm run build
+npm run smoke:refilter
 npm run package:deploy -- --scene hkust-v3
 ```
+
+`smoke:refilter` 显式使用 `--allow-software-gpu`，只验证缓存重过滤、CPU AABB 参考、Loader 最终集合和“未重跑 MLP”语义，不输出硬件性能结论。
 
 同位姿数值检查分为页面采集和 PyTorch 对照两步：
 

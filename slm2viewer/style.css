@@ -538,28 +538,6 @@ header h1 + .separator {
   gap: 10px;
 }
 
-.neural-delay-control {
-  width: 100%;
-  margin-top: 6px;
-  padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.14);
-}
-
-.neural-delay-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 0.92rem;
-  color: #dbeafe;
-  margin-bottom: 6px;
-  gap: 12px;
-}
-
-#neural-render-delay-slider-hud {
-  width: 100%;
-  accent-color: #7dd3fc;
-}
-
 .speed-label {
   font-weight: bold;
   font-size: 1rem;
