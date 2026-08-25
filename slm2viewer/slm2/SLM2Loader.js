@@ -230,6 +230,9 @@ export class SLM2Loader
     this.frozenPredictionInspectActive = false;
     this.frozenPredictionInspectQueued = false;
     this.frozenPredictionInspectTotal = 0;
+    this.frozenPredictionInspectComponentIds = [];
+    this.frozenPredictionInspectGlbIds = [];
+    this.neuralPredictionLifecycleSerial = 0;
     this.forceNextNeuralPrediction = false;
     this.neuralPredictionInFlight = false;
     this.neuralPendingPredictionAfterCurrent = false;
@@ -481,6 +484,11 @@ export class SLM2Loader
     var normalized = value === 'resident' || value === true || value === 'true'
       ? 'resident'
       : 'culled';
+    if (this.frozenPredictionInspectActive && normalized === 'resident')
+    {
+      console.warn('[SLM2Loader] Resident rendering is unavailable while a final visibility snapshot is frozen.');
+      return this.neuralRenderPolicy;
+    }
     this.neuralRenderPolicy = normalized;
     if (this.neuralDebugLogs) console.log('[SLM2Loader] Neural render policy set to', normalized);
 
@@ -644,72 +652,72 @@ export class SLM2Loader
     }
   }
 
-  _queueFrozenPredictionInspectLoads()
+  _applyFrozenPredictionInspectSnapshot()
   {
-    if (this.frozenPredictionInspectQueued)
+    var renderInfos = this._makeGlobalGlbModelInfos(
+      this.frozenPredictionInspectGlbIds,
+      null,
+      'global-glb'
+    );
+
+    if (!this.frozenPredictionInspectQueued)
     {
-      return {
-        queued: false,
-        total: this.frozenPredictionInspectTotal,
-      };
+      var predictionEpoch = this._setCurrentNeuralWorkingSet(renderInfos, 'global-glb');
+      this._setCurrentDownloadWantedHashes(renderInfos);
+      this._pruneStalePendingInsertions();
+
+      this.modelToLoadList = [];
+      this.pendingPrefetchList = [];
+      for (var i = renderInfos.length - 1; i >= 0; --i)
+      {
+        renderInfos[i].predictionEpoch = predictionEpoch;
+        this.modelToLoadList.push(renderInfos[i]);
+      }
+
+      this.frozenPredictionInspectQueued = true;
+      this.frozenPredictionInspectTotal = renderInfos.length;
     }
 
-    var total = this.globalGlbEntries && this.globalGlbEntries.length > 0
-      ? this.globalGlbEntries.length
-      : 0;
-    if (total <= 0)
-    {
-      console.warn('[SLM2Loader] Frozen prediction inspect mode requires glbIndex/globalGlbEntries.');
-      return {
-        queued: false,
-        total: 0,
-      };
-    }
-
-    this.modelToLoadList = [];
-    this.pendingPrefetchList = [];
-    for (var i = total - 1; i >= 0; --i)
-    {
-      this.modelToLoadList.push({
-        id: i,
-        weight: 999,
-        idMode: 'global-glb',
-      });
-    }
-
-    this._setCurrentDownloadWantedHashes(this.modelToLoadList);
-    this.frozenPredictionInspectQueued = true;
-    this.frozenPredictionInspectTotal = total;
-    console.log('[SLM2Loader] Frozen prediction inspect queued all global GLBs for download.', {
-      total: total,
-    });
+    var renderOptions = this._getRenderVisibilityOptions('global-glb');
+    renderOptions.retainVisibleMs = 0;
+    renderOptions.missTolerance = 0;
+    this.lastRenderRefreshStats = this.modelCacheMgr.refreshVisible(renderInfos, renderOptions);
+    this._applyInstancedVisibility(this.frozenPredictionInspectComponentIds);
 
     return {
-      queued: true,
-      total: total,
+      queued: this.frozenPredictionInspectQueued,
+      total: this.frozenPredictionInspectTotal,
+      componentCount: this.frozenPredictionInspectComponentIds.length,
     };
   }
 
-  startFrozenPredictionInspectSession()
+  startFrozenPredictionInspectSession(componentIds, glbIds)
   {
+    this.neuralPredictionLifecycleSerial++;
     this.frozenPredictionInspectActive = true;
     this.frozenPredictionInspectQueued = false;
-    this.frozenPredictionInspectTotal = 0;
+    this.frozenPredictionInspectComponentIds = this._normalizeIdList(componentIds);
+    this.frozenPredictionInspectGlbIds = this._normalizeIdList(glbIds);
+    this.frozenPredictionInspectTotal = this.frozenPredictionInspectGlbIds.length;
     this.forceNextNeuralPrediction = false;
     this.neuralPendingPredictionAfterCurrent = false;
     this.modelCacheMgr.setSchedulingStrategy('manual');
-    this.sceneCulling();
+    this._applyFrozenPredictionInspectSnapshot();
     return {
       active: this.frozenPredictionInspectActive,
       total: this.frozenPredictionInspectTotal,
+      componentCount: this.frozenPredictionInspectComponentIds.length,
     };
   }
 
   stopFrozenPredictionInspectSession()
   {
+    this.neuralPredictionLifecycleSerial++;
     this.frozenPredictionInspectActive = false;
     this.frozenPredictionInspectQueued = false;
     this.frozenPredictionInspectTotal = 0;
+    this.frozenPredictionInspectComponentIds = [];
+    this.frozenPredictionInspectGlbIds = [];
     if (!this.fullLoadMode)
     {
       this.modelCacheMgr.setSchedulingStrategy('auto');
@@ -3335,6 +3343,7 @@ export class SLM2Loader
           active: this.frozenPredictionInspectActive,
           queued: this.frozenPredictionInspectQueued,
           total: this.frozenPredictionInspectTotal,
+          componentCount: this.frozenPredictionInspectComponentIds.length,
         },
         currentEpoch: this.currentNeuralPredictionEpoch,
       }
@@ -3624,8 +3633,7 @@ export class SLM2Loader
     else if (this.frozenPredictionInspectActive)
     {
       this.modelCacheMgr.setSchedulingStrategy('manual');
-      this._queueFrozenPredictionInspectLoads();
-      this._showAllResidentObjects();
+      this._applyFrozenPredictionInspectSnapshot();
       return;
     }
     else
@@ -3746,6 +3754,7 @@ export class SLM2Loader
           this.forceNextNeuralPrediction = false;
           const predictionDispatcher = this.neuralPVS;
           const predictionGroupSerial = this.neuralGroupSwitchSerial;
+          const predictionLifecycleSerial = this.neuralPredictionLifecycleSerial;
           const predictionProcess = async () => {
             this.neuralPredictionInFlight = true;
             const predictionStart = performance.now();
@@ -3755,7 +3764,9 @@ export class SLM2Loader
               var rawPredictionStart = performance.now();
               const pred = await predictionDispatcher.predict(this.activeCamera);
               var rawPredictionMs = performance.now() - rawPredictionStart;
-              if (predictionGroupSerial !== this.neuralGroupSwitchSerial)
+              if (predictionGroupSerial !== this.neuralGroupSwitchSerial ||
+                  predictionLifecycleSerial !== this.neuralPredictionLifecycleSerial ||
+                  this.frozenPredictionInspectActive)
               {
                 return;
               }

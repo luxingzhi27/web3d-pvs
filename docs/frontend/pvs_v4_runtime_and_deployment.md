@@ -53,6 +53,16 @@ slm2viewer/assets/neural_instance_culling/pvs_mainline_v4
 
 HKUST 普通模式的固定回读布局为 `4 + 2×18831 + 3×3273` 个 32 位字，即 `189940 bytes`。其中只预留最终实例列表和 GLB 队列容量，不包含逐候选概率。开启 `neuralDebugLogs=true` 时才额外回读候选编号、概率和中间特征，用于数值 parity；调试模式的传输量和延迟不能代表生产运行。
 
+## 冻结结果检查
+
+2026-08-25 修正了调试面板的冻结语义。冻结按钮保存当前一次 GPU 查询经过真实 `60°` 相机视锥过滤后的最终实例编号和最终 GLB 编号。实例编号决定实际显示，GLB 编号只决定需要下载哪些资源；冻结期间不再请求全场 GLB，也不再显示全部已驻留对象。
+
+冻结后即使移动检查相机，Loader 仍保持这份实例级快照。冻结前已经开始但尚未返回的预测会被丢弃，后续才下载完成的实例化 GLB 也会立即按照同一份冻结实例编号压缩实例矩阵。解除冻结后恢复自动缓存调度并强制发起一次新预测。该修正涉及 `src/viewer.js`、`slm2/SLM2Loader.js`、`src/RenderVisibilitySystem.js` 和 `scripts/test_current.mjs`，不修改模型、阈值、运行特征表或场景元数据。
+
+静态契约要求冻结入口只能读取 `renderComponentIds` 和 `renderGlbIds`，并禁止冻结分支调用全驻留显示或读取后退视锥原始实例集合。验证命令为 `cd slm2viewer && npm test && npm run build`。
+
+HKUST 页面功能 smoke 中，冻结前的最终集合为 `3769` 个实例和 `1268` 个 GLB；冻结后页面快照、Loader 快照和实例矩阵过滤集合完全一致，下载工作集保持 `1268/3273` 个 GLB。检查相机平移 `1000 m` 后实例集合仍未变化。该 smoke 没有记录 WebGPU 硬件性能数据。
+
 ## 代码边界
 
 | 模块 | 责任 |

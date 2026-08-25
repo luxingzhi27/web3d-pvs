@@ -84,6 +84,7 @@ const workerSource = fs.readFileSync(requireFile('src/LightweightPVSWorker.js'),
 const dispatcherSource = fs.readFileSync(requireFile('src/LightweightPVSDispatcher.js'), 'utf8');
 const loaderSource = fs.readFileSync(requireFile('slm2/SLM2Loader.js'), 'utf8');
 const viewerSource = fs.readFileSync(requireFile('src/viewer.js'), 'utf8');
+const renderVisibilitySource = fs.readFileSync(requireFile('src/RenderVisibilitySystem.js'), 'utf8');
 const hkustGlbBaseUrl = 'https://www.liteweb3d.com/data/hkust-v3/';
 if (config.scenes?.default_config?.loaderConfig?.glbResourcesBaseUrl !== hkustGlbBaseUrl
     || config.scenes?.['hkust-v3']?.loaderConfig?.glbResourcesBaseUrl !== hkustGlbBaseUrl) {
@@ -161,6 +162,26 @@ for (const forbidden of [
 if (!loaderSource.includes('predictionPayload.renderComponentModelList')
     || !loaderSource.includes('this._applyInstancedVisibility(renderComponentIds)')) {
   throw new Error('The main thread no longer applies the worker result at instance granularity.');
+}
+if (!viewerSource.includes('ids.renderComponentIds')
+    || !viewerSource.includes('ids.renderGlbIds')
+    || !viewerSource.includes("ids.mode === 'neural' && currentMode === 'neural'")
+    || !viewerSource.includes('startFrozenPredictionInspectSession(\n        this.predictionDebugFrozenComponentIds,\n        this.predictionDebugFrozenGlbIds')) {
+  throw new Error('Frozen inspection no longer captures the final render-frustum instance and GLB sets.');
+}
+if (!loaderSource.includes('this.frozenPredictionInspectComponentIds = this._normalizeIdList(componentIds)')
+    || !loaderSource.includes('this.frozenPredictionInspectGlbIds = this._normalizeIdList(glbIds)')
+    || !loaderSource.includes('this._applyInstancedVisibility(this.frozenPredictionInspectComponentIds)')
+    || !renderVisibilitySource.includes('skippedByFrozenSnapshot')) {
+  throw new Error('Frozen inspection no longer preserves its instance-level visibility snapshot.');
+}
+const frozenSceneBranch = loaderSource.match(/else if \(this\.frozenPredictionInspectActive\)[\s\S]*?\r?\n    else\r?\n    \{/);
+if (!frozenSceneBranch
+    || frozenSceneBranch[0].includes('_showAllResidentObjects()')
+    || viewerSource.includes('_getRawPredictionDebugComponentIds')
+    || viewerSource.includes('freeze all')
+    || viewerSource.includes('download/show all GLBs')) {
+  throw new Error('Frozen inspection returned to raw back-frustum or all-resident rendering.');
 }
 
 console.log(

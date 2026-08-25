@@ -302,6 +302,7 @@ export class Viewer
     this.predictionDebugTouched = new Map();
     this.predictionDebugFrozenMode = false;
     this.predictionDebugFrozenComponentIds = [];
+    this.predictionDebugFrozenGlbIds = [];
     this.predictionDebugLastStats = {
       enabled: this.predictionDebugEnabled,
       predicted: 0,
@@ -481,8 +482,8 @@ export class Viewer
 
     const freezeButton = document.createElement('button');
     freezeButton.type = 'button';
-    freezeButton.textContent = 'freeze all';
-    freezeButton.title = 'Freeze the latest neural component/instance set, then download/show all GLBs for occlusion inspection.';
+    freezeButton.textContent = 'freeze view';
+    freezeButton.title = 'Freeze the final instance set visible in the current 60-degree render frustum.';
     freezeButton.addEventListener('click', () => {
       this.toggleFrozenPredictionInspectMode();
     });
@@ -583,7 +584,7 @@ export class Viewer
       `projection precise=${render.preciseProjectionCount || 0} fast=${render.fastProjectionCount || 0} renderMs=${fmt(render.durationMs, 3)}`,
       `scheduler total=${scheduler.total || 0} now=${scheduler.visibleNow || 0} prefetch=${scheduler.prefetch || 0} skipped=${scheduler.skipped || 0} tested=${scheduler.testedComponents || 0}`,
       `predictRed enabled=${predictDebug.enabled || false} frozen=${predictDebug.frozen || false} predictedComp=${predictDebug.predicted || 0} loadedHash=${predictDebug.loaded || 0} markedInst=${predictDebug.marked || 0} missing=${predictDebug.missing || 0} attached=${predictDebug.attached || 0} restored=${predictDebug.restored || 0} shot=${predictDebug.snapshot || '-'}`,
-      `freezeInspect active=${frozenInspect.active || false} queued=${frozenInspect.queued || false} total=${frozenInspect.total || 0}`,
+      `freezeInspect active=${frozenInspect.active || false} queued=${frozenInspect.queued || false} glb=${frozenInspect.total || 0} inst=${frozenInspect.componentCount || 0}`,
       `nextLoad: ${ids(load.queuePreview) || '-'}`,
       `prefetch: ${ids(load.prefetchPreview) || '-'}`,
     ].join('\n');
@@ -820,45 +821,33 @@ export class Viewer
       return this.predictionDebugFrozenComponentIds.slice();
     }
 
-    const rawIds = this._getRawPredictionDebugComponentIds();
-    if (rawIds.length > 0)
-    {
-      return rawIds;
-    }
-
-    if (!this.slm2Loader || typeof this.slm2Loader.getBenchmarkVisibilityIds !== 'function')
-    {
-      return [];
-    }
-
-    const ids = this.slm2Loader.getBenchmarkVisibilityIds();
-    if (ids && Array.isArray(ids.renderComponentIds) && ids.renderComponentIds.length > 0)
-    {
-      return ids.renderComponentIds;
-    }
-
-    if (ids && Array.isArray(ids.scheduledComponentIds) && ids.scheduledComponentIds.length > 0)
-    {
-      return ids.scheduledComponentIds;
-    }
-
-    return [];
+    return this._getFinalPredictionDebugSnapshot().componentIds;
   }
 
-  _getRawPredictionDebugComponentIds()
+  _getFinalPredictionDebugSnapshot()
   {
     if (!this.slm2Loader || typeof this.slm2Loader.getBenchmarkVisibilityIds !== 'function')
     {
-      return [];
+      return {
+        available: false,
+        componentIds: [],
+        glbIds: [],
+      };
     }
 
     const ids = this.slm2Loader.getBenchmarkVisibilityIds();
-    if (ids && Array.isArray(ids.rawComponentIds))
-    {
-      return ids.rawComponentIds.slice();
-    }
-
-    return [];
+    const currentMode = typeof this.slm2Loader.getCullingMode === 'function'
+      ? this.slm2Loader.getCullingMode()
+      : null;
+    return {
+      available: Boolean(ids && Number(ids.serial || 0) > 0 && ids.mode === 'neural' && currentMode === 'neural'),
+      componentIds: ids && Array.isArray(ids.renderComponentIds)
+        ? ids.renderComponentIds.slice()
+        : [],
+      glbIds: ids && Array.isArray(ids.renderGlbIds)
+        ? ids.renderGlbIds.slice()
+        : [],
+    };
   }
 
   _getPredictionDebugInstancedSlotMap(hash)
@@ -1354,9 +1343,10 @@ export class Viewer
     {
       this.predictionDebugFrozenMode = false;
       this.predictionDebugFrozenComponentIds = [];
+      this.predictionDebugFrozenGlbIds = [];
       if (this.predictionDebugFreezeButton)
       {
-        this.predictionDebugFreezeButton.textContent = 'freeze all';
+        this.predictionDebugFreezeButton.textContent = 'freeze view';
       }
       if (this.slm2Loader && typeof this.slm2Loader.stopFrozenPredictionInspectSession === 'function')
       {
@@ -1366,15 +1356,16 @@ export class Viewer
       return;
     }
 
-    const frozenIds = this._getRawPredictionDebugComponentIds();
-    if (!frozenIds || frozenIds.length === 0)
+    const snapshot = this._getFinalPredictionDebugSnapshot();
+    if (!snapshot.available)
     {
-      console.warn('[Viewer] Cannot start frozen prediction inspect mode without a prediction result.');
+      console.warn('[Viewer] Cannot freeze the current render-frustum result before the first visibility result is available.');
       return;
     }
 
     this.predictionDebugFrozenMode = true;
-    this.predictionDebugFrozenComponentIds = frozenIds.slice();
+    this.predictionDebugFrozenComponentIds = snapshot.componentIds.slice();
+    this.predictionDebugFrozenGlbIds = snapshot.glbIds.slice();
     if (this.predictionDebugFreezeButton)
     {
       this.predictionDebugFreezeButton.textContent = 'unfreeze';
@@ -1382,7 +1373,10 @@ export class Viewer
     this.setPredictionDebugEnabled(true);
     if (this.slm2Loader && typeof this.slm2Loader.startFrozenPredictionInspectSession === 'function')
     {
-      this.slm2Loader.startFrozenPredictionInspectSession();
+      this.slm2Loader.startFrozenPredictionInspectSession(
+        this.predictionDebugFrozenComponentIds,
+        this.predictionDebugFrozenGlbIds
+      );
     }
     this.updatePredictionDebugOverlay(true);
   }
@@ -1773,6 +1767,10 @@ export class Viewer
 
   setCullingMode(value)
   {
+    if (this.predictionDebugFrozenMode)
+    {
+      this.toggleFrozenPredictionInspectMode();
+    }
     var applied = this.slm2Loader
       ? this.slm2Loader.setCullingMode(value)
       : (String(value).toLowerCase() === 'frustum' ? 'frustum' : 'neural');

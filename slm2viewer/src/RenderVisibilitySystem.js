@@ -343,6 +343,18 @@ export class RenderVisibilitySystem {
       return this.lastStats;
     }
 
+    // A frozen inspection snapshot already contains the final 60-degree
+    // render-frustum result. Camera-driven reconciliation would mutate that
+    // snapshot while the user moves to inspect it from another viewpoint.
+    if (this.loader.frozenPredictionInspectActive) {
+      this.lastStats = {
+        ...(this.lastStats || {}),
+        skippedByFrozenSnapshot: true,
+        durationMs: 0,
+      };
+      return this.lastStats;
+    }
+
     const camera = this.loader.activeCamera;
     if (!camera) {
       return null;
