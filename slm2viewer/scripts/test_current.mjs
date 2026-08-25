@@ -85,6 +85,7 @@ const dispatcherSource = fs.readFileSync(requireFile('src/LightweightPVSDispatch
 const loaderSource = fs.readFileSync(requireFile('slm2/SLM2Loader.js'), 'utf8');
 const viewerSource = fs.readFileSync(requireFile('src/viewer.js'), 'utf8');
 const renderVisibilitySource = fs.readFileSync(requireFile('src/RenderVisibilitySystem.js'), 'utf8');
+const buildSource = fs.readFileSync(requireFile('scripts/build_parcel.mjs'), 'utf8');
 const hkustGlbBaseUrl = 'https://www.liteweb3d.com/data/hkust-v3/';
 if (config.scenes?.default_config?.loaderConfig?.glbResourcesBaseUrl !== hkustGlbBaseUrl
     || config.scenes?.['hkust-v3']?.loaderConfig?.glbResourcesBaseUrl !== hkustGlbBaseUrl) {
@@ -98,6 +99,7 @@ for (const forbidden of [
   'camera-hash-latent-geo',
   'dynamic-occlusion-pool',
   'spatial-feature-pages',
+  'RGBELoader',
 ]) {
   if ([backendSource, runtimeSource, workerSource, dispatcherSource, loaderSource, viewerSource]
     .some((source) => source.includes(forbidden))) {
@@ -162,6 +164,15 @@ for (const forbidden of [
 if (!loaderSource.includes('predictionPayload.renderComponentModelList')
     || !loaderSource.includes('this._applyInstancedVisibility(renderComponentIds)')) {
   throw new Error('The main thread no longer applies the worker result at instance granularity.');
+}
+if (!loaderSource.includes('var imageConfigUrl = joinUrlPath(')
+    || !loaderSource.includes('scope.glbResourcesBaseUrl || scope.resourcesBaseUrl')
+    || !loaderSource.includes("'task-' + item.groupId + '/images/LOD'")) {
+  throw new Error('Material metadata or textures no longer use the configured scene resource origin.');
+}
+if (!buildSource.includes('cache: false')
+    || !buildSource.includes("source.includes('__parcel__error__overlay__')")) {
+  throw new Error('Production builds are no longer protected from Parcel HMR cache contamination.');
 }
 if (!viewerSource.includes('ids.renderComponentIds')
     || !viewerSource.includes('ids.renderGlbIds')

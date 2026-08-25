@@ -43,7 +43,7 @@ import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
+import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
 import { EXRLoader } from 'three/examples/jsm/loaders/EXRLoader.js';
 import { MODEL_INPUT_FOV_Y_DEG } from '../src/neuralPvsFovProtocol.js';
 
@@ -187,7 +187,7 @@ export class SLM2Loader
     //TODO: Async image loading:
     // https://stackoverflow.com/questions/67775759/cant-use-three-js-texture-loader-in-javascript-worker
     this.textureLoader = new ImageBitmapLoader();//TextureLoader();
-    this.rgbeLoader = new RGBELoader().setDataType(FloatType);
+    this.hdrLoader = new HDRLoader().setDataType(FloatType);
     this.exrLoader = new EXRLoader().setDataType(FloatType);
     this.hdrjpgLoader = null;
 
@@ -1937,9 +1937,23 @@ export class SLM2Loader
             index: index,
             imageConfig: taskData.imageConfig,
           });
-          fileLoader.load(scope.resourcesBaseUrl + "/" + taskData.imageConfig, function(data) 
+          var imageConfigUrl = joinUrlPath(
+            scope.glbResourcesBaseUrl || scope.resourcesBaseUrl,
+            taskData.imageConfig
+          );
+          fileLoader.load(imageConfigUrl, function(data)
           {
-            var imageConfig = JSON.parse(data);
+            var imageConfig = null;
+            try
+            {
+              imageConfig = JSON.parse(data);
+            }
+            catch (error)
+            {
+              console.warn('[SLM2Loader] Invalid material image config response:', imageConfigUrl, error);
+              resolve(null);
+              return;
+            }
             startupLog('slm2:materialConfig:image-config-loaded', {
               index: index,
               ms: performance.now() - gltfLoadedAt,
@@ -1955,7 +1969,7 @@ export class SLM2Loader
               });
           }, null, function(err)
           {
-            console.warn('[SLM2Loader] Failed to load material image config:', taskData.imageConfig, err);
+            console.warn('[SLM2Loader] Failed to load material image config:', imageConfigUrl, err);
             resolve(null);
           });
         }, null, (err) =>{
@@ -2018,7 +2032,7 @@ export class SLM2Loader
     {
       return new Promise(function(resolve)
       {
-        var results = [];
+        var results = new Array(tasks.length);
         var runNext = function(index)
         {
           if (index >= tasks.length)
@@ -2034,10 +2048,7 @@ export class SLM2Loader
           {
             loadMtlProxy(tasks[index], index).then(function(result)
             {
-              if (result)
-              {
-                results.push(result);
-              }
+              results[index] = result;
               setTimeout(function()
               {
                 runNext(index + 1);
@@ -2061,10 +2072,15 @@ export class SLM2Loader
 
     loadMaterialProxyList(mtlConfigTask).then(results => 
     {
-      this.sceneConfig.materials.data = [];
+      this.sceneConfig.materials.data = new Array(this.sceneConfig.materials.proxy.length);
+      this.sceneConfig.materials.config = new Array(this.sceneConfig.materials.proxy.length);
 
       for (var i = 0; i < results.length; ++i)
       {
+        if (!results[i])
+        {
+          continue;
+        }
         var mtls = {};
         results[i].gltf.scene.traverse((node) => 
         {
@@ -2086,10 +2102,8 @@ export class SLM2Loader
           }
         });
 
-        if (this.sceneConfig.materials.config == undefined) this.sceneConfig.materials.config = [];
-        this.sceneConfig.materials.config.push(results[i].imageConfig);
-
-        this.sceneConfig.materials.data.push(mtls);
+        this.sceneConfig.materials.config[results[i].taskIndex] = results[i].imageConfig;
+        this.sceneConfig.materials.data[results[i].taskIndex] = mtls;
       }
 
       if (this.options.materialLoadedCallback)
@@ -2338,14 +2352,25 @@ export class SLM2Loader
       for (var key in this.materialImageLoadingTasks)
       {
         var item = this.materialImageLoadingTasks[key];
-        var mtlConfig = scope.sceneConfig.materials.data[item.groupId][key];
+        var materialGroup = scope.sceneConfig.materials.data[item.groupId];
+        var imageConfigGroup = scope.sceneConfig.materials.config[item.groupId];
+        if (!materialGroup || !imageConfigGroup)
+        {
+          continue;
+        }
+        var mtlConfig = materialGroup[key];
 
         if (mtlConfig != undefined && mtlConfig.textures != undefined)
         {
           for (var i = 0; i < mtlConfig.textures.length; ++i)
           {
             var texName = mtlConfig.textures[i].name;
-            var maxLodLevel = scope.sceneConfig.materials.config[item.groupId][texName].lod.length;
+            var imageConfig = imageConfigGroup[texName];
+            if (!imageConfig || !Array.isArray(imageConfig.lod))
+            {
+              continue;
+            }
+            var maxLodLevel = imageConfig.lod.length;
             if (mtlConfig.textures[i].level < maxLodLevel - 1)
             {
               var cachedInfo = scope.modelCacheMgr.objectsPool[item.gltfHash];
@@ -2358,7 +2383,10 @@ export class SLM2Loader
                     mtlName: key,
                     lodLevel: mtlConfig.textures[i].level,
                     texId: i,
-                    imageUrl: scope.resourcesBaseUrl + '/' + 'task-' + item.groupId + '/images' + '/LOD' + (mtlConfig.textures[i].level + 1) + '/' + encodeURIComponent(scope.sceneConfig.materials.config[item.groupId][texName].uri),
+                    imageUrl: joinUrlPath(
+                      scope.glbResourcesBaseUrl || scope.resourcesBaseUrl,
+                      'task-' + item.groupId + '/images/LOD' + (mtlConfig.textures[i].level + 1) + '/' + encodeURIComponent(imageConfig.uri)
+                    ),
                     weightNormalized: 1.0 - item.weightNormalized,
                     texName: texName,
                     isLightMap: mtlConfig.textures[i].channel == 'lightMap',
@@ -2417,7 +2445,7 @@ export class SLM2Loader
             {
               if (taskData.imageUrl.endsWith('.hdr'))
               {
-                loader = scope.rgbeLoader;
+                loader = scope.hdrLoader;
               }
               else if (taskData.imageUrl.endsWith('.exr'))
               {

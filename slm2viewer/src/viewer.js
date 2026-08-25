@@ -39,7 +39,7 @@ import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
+import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { GUI } from 'dat.gui';
 import { environments } from '../assets/environment/index.js';
@@ -1843,7 +1843,7 @@ export class Viewer
       if (testLM)
       {
         var lightmapUrl = 'assets/Lightmap-0_comp_light.hdr';
-        new RGBELoader().setDataType(FloatType).load(
+        new HDRLoader().setDataType(FloatType).load(
             lightmapUrl,
             function(lmTexture) 
             {
@@ -1968,7 +1968,7 @@ export class Viewer
 
       if (path.endsWith('.hdr'))
       {
-        new RGBELoader().load( path, ( texture ) => {
+        new HDRLoader().load( path, ( texture ) => {
 
           const envMap = this.pmremGenerator.fromEquirectangular( texture ).texture;
           this.pmremGenerator.dispose();

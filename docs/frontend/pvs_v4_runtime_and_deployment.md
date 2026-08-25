@@ -63,6 +63,12 @@ HKUST 普通模式的固定回读布局为 `4 + 2×18831 + 3×3273` 个 32 位�
 
 HKUST 页面功能 smoke 中，冻结前的最终集合为 `3769` 个实例和 `1268` 个 GLB；冻结后页面快照、Loader 快照和实例矩阵过滤集合完全一致，下载工作集保持 `1268/3273` 个 GLB。检查相机平移 `1000 m` 后实例集合仍未变化。该 smoke 没有记录 WebGPU 硬件性能数据。
 
+## 生产控制台诊断
+
+2026-08-25 修正了材质 LOD 配置的资源根路径。代理 GLB 继续来自本地小型场景元数据目录；`image_lod.json` 和后续纹理统一来自场景的 `glbResourcesBaseUrl`。JSON 响应解析增加了受控失败处理，某个 task 失败时保留原 task 索引，不再让后续材质组错位。Three.js 已由弃用的 `RGBELoader` 迁移到 `HDRLoader`。
+
+生产构建关闭 Parcel 缓存并使用独立构建缓存目录，构建结束时主动拒绝任何包含 HMR runtime 的 JavaScript。`npm test` 和 `npm run build` 均通过；静态生产页面检查确认五个 HKUST `image_lod.json` 均返回 `200 application/json`，材质组为 `5/5`，没有 JSON 解析错误、HMR WebSocket 或 RGBE 弃用警告。`content_main.js` 不属于仓库或生产包，是浏览器扩展注入脚本。
+
 ## 代码边界
 
 | 模块 | 责任 |
