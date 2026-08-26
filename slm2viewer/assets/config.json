@@ -1,5 +1,4 @@
 {
-  "lbs": null,
   "scenes": {
     "default_config": {
       "cameraPostion": [
@@ -14,8 +13,6 @@
       ],
       "loaderConfig": {
         "resourcesBaseUrl": "./assets/scenes/hkust-v3",
-        "resourcesWS": "",
-        "rcServerAddress": "",
         "schedulingStrategy": "auto",
         "glbResourcesBaseUrl": "https://www.liteweb3d.com/data/hkust-v3/"
       }
@@ -34,9 +31,7 @@
       "loaderConfig": {
         "resourcesBaseUrl": "./assets/scenes/hkust-v3",
         "schedulingStrategy": "auto",
-        "glbResourcesBaseUrl": "https://www.liteweb3d.com/data/hkust-v3/",
-        "resourcesWS": "",
-        "rcServerAddress": ""
+        "glbResourcesBaseUrl": "https://www.liteweb3d.com/data/hkust-v3/"
       }
     },
     "ifcbench_fantasy_metropolis_instanced_v2": {
@@ -65,8 +60,6 @@
       "loaderConfig": {
         "resourcesBaseUrl": "./assets/scenes/ifcbench_fantasy_metropolis_instanced_v2",
         "glbResourcesBaseUrl": "./scene_glbs/ifcbench_fantasy_metropolis_instanced_v2",
-        "resourcesWS": "",
-        "rcServerAddress": "",
         "schedulingStrategy": "auto"
       }
     }

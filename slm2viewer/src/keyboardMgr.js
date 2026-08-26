@@ -4,6 +4,9 @@ export class keyboardMgr {
   constructor(options) {
     this.camera = options.activeCamera;
     this.controls = options.controls;
+    this.requestRender = typeof options.requestRender === 'function'
+      ? options.requestRender.bind(options)
+      : () => {};
     this.enabled = true;
     this.isTouchDevice = typeof window !== 'undefined' && (('ontouchstart' in window) || (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0) || (typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches));
 
@@ -58,6 +61,7 @@ export class keyboardMgr {
       document.exitPointerLock();
       keyEvent.preventDefault();
     }
+    this.requestRender('keyboard-input');
   }
 
   keyup(keyEvent) {
@@ -70,6 +74,7 @@ export class keyboardMgr {
     else if (keyEvent.key == 'Shift') this.keyMap['shift'] = 0;
     else if (keyEvent.key == ' ') this.keyMap['up'] = 0;
     else if (keyEvent.key == 'Control') this.keyMap['up'] = 0;
+    this.requestRender('keyboard-input-end');
   }
 
   onMouseMove(event) {
@@ -89,6 +94,7 @@ export class keyboardMgr {
     this.camera.quaternion.setFromEuler(this.euler);
 
     this.syncOrbitTarget();
+    this.requestRender('pointer-look');
   }
 
   syncOrbitTarget() {
@@ -100,14 +106,14 @@ export class keyboardMgr {
   }
 
   update(dt) {
-    if (!this.enabled) return;
+    if (!this.enabled) return false;
     // update camera
-    if (!this.controls && !this.camera) return;
+    if (!this.controls && !this.camera) return false;
 
     var forward = this.keyMap['forward'] || 0;
     var right = this.keyMap['right'] || 0;
     var up = this.keyMap['up'] || 0;
-    if (forward == 0 && right == 0 && up == 0) return;
+    if (forward == 0 && right == 0 && up == 0) return false;
 
     // Sync vector calculations with camera's actual pointer-locked rotation
     var cameraForward = new Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
@@ -131,7 +137,11 @@ export class keyboardMgr {
 
     this.camera.position.add(moveVec);
     this.syncOrbitTarget();
+    return true;
+  }
 
-    this.controls.update();
+  hasActiveInput() {
+    if (!this.enabled) return false;
+    return Boolean(this.keyMap.forward || this.keyMap.right || this.keyMap.up);
   }
 }

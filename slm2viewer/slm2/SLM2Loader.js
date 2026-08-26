@@ -73,7 +73,14 @@ import { getInstancePVSAssetBaseUrl } from '../src/neuralCullingBackendMode.js';
 import { LightweightPVSDispatcher } from '../src/LightweightPVSDispatcher.js';
 import { CameraPredictionGate } from '../src/CameraPredictionGate.js';
 import { RenderVisibilitySystem } from '../src/RenderVisibilitySystem.js';
-import { NeuralResourceWSPool } from '../src/NeuralResourceWSPool.js';
+import { IdBitsetState } from '../src/IdBitsetState.js';
+import { StaticSceneOptimizer } from '../src/StaticSceneOptimizer.js';
+import {
+  applyDenseInstancedDelta,
+  clearDenseInstancedState,
+  initializeDenseInstancedState,
+  replaceDenseInstancedSlots,
+} from '../src/DenseInstancedSlots.js';
 import { startupLog, stopStartupLog } from '../src/startupTimeline.js';
 
 import { HDRJPGLoader } from '@monogrid/gainmap-js'
@@ -97,7 +104,8 @@ export class SLM2Loader
     this.instancedVisibilityBindingByComponentId = {};
     this.expectedInstancedVisibilityHashes = new Set();
     this.loadedInstancedVisibilityStatesByHash = {};
-    this.lastRenderableComponentIdsForInstancing = [];
+    this.renderComponentState = new IdBitsetState();
+    this.renderGlbState = new IdBitsetState();
     this.instancedWantedIndicesByHash = new Map();
     this.runtimeFrustumFilterEnabled = true;
     this.runtimeFrustumFilterSource = 'back-camera';
@@ -122,15 +130,9 @@ export class SLM2Loader
     this.neuralInitialLoadPending = false;
     this.neuralPVSOptions = null;
     this.neuralGroupSwitchSerial = 0;
-    this.rcServerAddress = null;
-    this.remoteResourcesWS = null;
     this.schedulingStrategy = 'auto';
-    this.connectedAssets = false;
 
     this.modelToLoadList = [];
-    this.neuralWSHTTPFallbackQueue = [];
-    this.modelIsLoading = false;
-    this.batchModelDescs = {};
     this.pendingSceneInsertions = [];
     this.pendingSceneInsertionCursor = 0;
     this.pendingSceneInsertionHashes = new Set();
@@ -139,19 +141,17 @@ export class SLM2Loader
     this.loadIntegrationBudgetMs = 6;
     this.integratedSceneCount = 0;
     this.activeDirectLoadCount = 0;
-    this.directLoaderCursor = 0;
+    this.directDownloadControllers = new Map();
+    this.parseLoaderCursor = 0;
     this.baseDirectLoadConcurrency = 5;
     this.fullLoadDirectLoadConcurrency = 16;
     this.neuralDirectLoadConcurrency = 16;
     this.neuralPrefetchDirectLoadConcurrency = 4;
-    this.neuralDisableLoadLimits = true;
-    this.neuralBandwidthSaturationMaxConcurrency = 96;
-    this.neuralBandwidthSaturationPrefetchMaxConcurrency = 64;
     this.httpAdaptiveConcurrencyEnabled = true;
     this.httpAdaptiveMinConcurrency = 3;
-    this.httpAdaptiveMaxConcurrency = 96;
+    this.httpAdaptiveMaxConcurrency = 24;
     this.httpAdaptivePrefetchMinConcurrency = 1;
-    this.httpAdaptivePrefetchMaxConcurrency = 64;
+    this.httpAdaptivePrefetchMaxConcurrency = 8;
     this.httpAdaptiveState = {
       current: 0,
       prefetchCurrent: 0,
@@ -168,15 +168,16 @@ export class SLM2Loader
       lastSuccess: true,
     };
     this.neuralMaxPendingSceneInsertions = 96;
-    this.neuralLoadIntegrationBudgetMs = 12;
-    this.neuralV2LoadIntegrationBudgetMs = 8;
+    this.neuralLoadIntegrationBudgetMs = 4;
     this.lastFrameDt = 0;
+    this.cameraUpdatePending = true;
     this.lastTextureTaskAt = 0;
     this.lastTextureTaskMs = 0;
     this.cpuPerfMode = 'balanced';
     this.neuralScheduleSerial = 0;
 
     this.modelCacheMgr = new CacheMgr({sceneMgr: this});
+    this.staticSceneOptimizer = new StaticSceneOptimizer(this);
 
     this.clientWidth = 800;
     this.clientHeight = 600;
@@ -202,7 +203,6 @@ export class SLM2Loader
     this.fullLoadMode = false;
     this.hasFullLoaded = false;
     this.defaultVisibilityIdMode = 'component';
-    this.rcServerIdMode = 'component';
     this.neuralPVSIdMode = 'global-glb-priority';
     this.lastNeuralPrediction = null;
     this.lastLightweightPVSSchedulerStats = null;
@@ -226,6 +226,8 @@ export class SLM2Loader
     this.actualRenderStatsAt = 0;
     this.currentNeuralPredictionEpoch = 0;
     this.currentDownloadWantedHashes = new Set();
+    this.neuralDownloadInfoByGlbId = new Map();
+    this.resourcePipelineSerial = 0;
     this.frozenPredictionInspectActive = false;
     this.frozenPredictionInspectQueued = false;
     this.frozenPredictionInspectTotal = 0;
@@ -245,8 +247,6 @@ export class SLM2Loader
       rawGlbIds: [],
       scheduledComponentIds: [],
       scheduledGlbIds: [],
-      renderComponentIds: [],
-      renderGlbIds: [],
       prefetchComponentIds: [],
       prefetchGlbIds: [],
       priorityItems: [],
@@ -260,6 +260,9 @@ export class SLM2Loader
       lastIntegratedAt: 0,
       staleCachedCount: 0,
       staleDroppedCount: 0,
+      promotedGlbCount: 0,
+      promotedParseCount: 0,
+      promotedInsertionCount: 0,
     };
     this.startupMetrics = {
       sceneWebMs: 0,
@@ -291,18 +294,8 @@ export class SLM2Loader
     this.neuralDebugLogs = false;
     this.neuralPVSReadyCullingScheduled = false;
     this.neuralPVSInitFallbackWarningShown = false;
-    this.neuralUseResourcesWS = false;
-    this.neuralResourceWSPool = null;
-    this.neuralWSConnectionCount = 4;
-    this.neuralWSBatchSize = 8;
-    this.neuralWSMaxInFlightModels = 32;
-    this.neuralWSBatchTimeoutMs = 20000;
-    this.neuralWSParseConcurrency = 2;
-    this.neuralWSMaxPendingParseBytes = 96 * 1024 * 1024;
-    this.neuralWSFallbackHttp = true;
-    this.neuralWSFallbackDelayMs = 1500;
-    this.neuralWSMaxRetries = 2;
-    this.neuralWSStartedAt = 0;
+    this.glbParseConcurrency = 2;
+    this.maxPendingGlbParseBytes = 96 * 1024 * 1024;
     this.neuralStaleCacheEnabled = true;
     this.neuralStaleCachePriorityThreshold = 0.12;
     this.neuralStaleCacheProjectedAreaThreshold = 0.02;
@@ -310,26 +303,10 @@ export class SLM2Loader
     this.neuralStaleCacheMaxMemoryRatio = 0.85;
     this.neuralLoadSkippedAsDeferred = false;
     this.neuralDeferredSkippedLoadLimit = 0;
-    this.pendingWSParseQueue = [];
-    this.pendingWSParseCursor = 0;
-    this.pendingWSParseBytes = 0;
-    this.activeWSParseCount = 0;
-    this.neuralWSRetryCounts = {};
-    this.neuralWSHTTPFallbackHashes = new Set();
-    this.lastNeuralWSStats = {
-      configuredConnections: 0,
-      readyConnections: 0,
-      inFlightBatches: 0,
-      inFlightModels: 0,
-      pendingParseCount: 0,
-      pendingParseMB: 0,
-      activeParseCount: 0,
-      retryCount: 0,
-      fallbackHttpCount: 0,
-      staleCachedCount: 0,
-      staleDropCount: 0,
-      timeoutCount: 0,
-    };
+    this.pendingGlbParseQueue = [];
+    this.pendingGlbParseCursor = 0;
+    this.pendingGlbParseBytes = 0;
+    this.activeGlbParseCount = 0;
     startupLog('slm2:constructor:end');
   }
 
@@ -338,16 +315,35 @@ export class SLM2Loader
     return this.neuralRenderPolicy || 'culled';
   }
 
+  requestRender(reason = 'loader')
+  {
+    if (this.options && typeof this.options.requestRender === 'function')
+    {
+      this.options.requestRender(reason);
+    }
+  }
+
+  notifyCameraChanged()
+  {
+    this.cameraUpdatePending = true;
+    this.requestRender('camera-change');
+  }
+
   getCullingMode()
   {
-    return this.cullingMode || (this.useNeuralPVS ? 'neural' : 'rvcServer');
+    return this.cullingMode || (this.useNeuralPVS ? 'neural' : 'frustum');
   }
 
   _resetCullingWorkingSet()
   {
+    this.resourcePipelineSerial++;
+    this._cancelAllDirectDownloads();
+    this._clearPendingGlbParseQueue();
+    this.inflightModelHashes = new Set();
     this.modelToLoadList = [];
     this.pendingPrefetchList = [];
     this.currentDownloadWantedHashes = new Set();
+    this.neuralDownloadInfoByGlbId = new Map();
     this.lastNeuralPrediction = null;
     this.lastRenderRefreshStats = null;
     this.lastLightweightPVSSchedulerStats = null;
@@ -359,6 +355,7 @@ export class SLM2Loader
     {
       this.modelCacheMgr.refreshVisible([], this._getRenderVisibilityOptions('global-glb'));
     }
+    this.renderGlbState.replace([], this._getGlbBitCount());
     this._applyInstancedVisibility([]);
   }
 
@@ -404,12 +401,6 @@ export class SLM2Loader
         this.neuralPVS.dispose();
       }
       this.neuralPVS = null;
-      if (this.neuralResourceWSPool)
-      {
-        this.neuralResourceWSPool.close();
-        this.neuralResourceWSPool = null;
-      }
-      this.connectedAssets = false;
     }
     else if (!this.neuralPVS)
     {
@@ -525,12 +516,6 @@ export class SLM2Loader
     if (!nextEnabled && this.renderVisibilitySystem)
     {
       this.renderVisibilitySystem.clear();
-      if (this.neuralResourceWSPool)
-      {
-        this.neuralResourceWSPool.close();
-        this.neuralResourceWSPool = null;
-        this.connectedAssets = false;
-      }
     }
 
     if (nextEnabled !== wasEnabled)
@@ -622,7 +607,7 @@ export class SLM2Loader
       {
         allIndices[instanceIndex] = instanceIndex;
       }
-      this._applyInstancedVisibilityState(state, allIndices);
+      replaceDenseInstancedSlots(state, allIndices);
     }
   }
 
@@ -732,14 +717,6 @@ export class SLM2Loader
 
   _getAdaptiveIntegrationBudget()
   {
-    if (this.useNeuralPVS && this.neuralDisableLoadLimits)
-    {
-      return {
-        budgetMs: Number.POSITIVE_INFINITY,
-        maxCount: Number.POSITIVE_INFINITY,
-      };
-    }
-
     if (!this.useNeuralPVS)
     {
       return {
@@ -750,7 +727,7 @@ export class SLM2Loader
 
     var dt = Number(this.lastFrameDt || 0);
     var budgetMs = this.loadIntegrationBudgetMs;
-    var maxCount = this.cpuPerfMode === 'mobile' ? 4 : 8;
+    var maxCount = this.cpuPerfMode === 'mobile' ? 2 : 4;
 
     if (dt > 33)
     {
@@ -765,8 +742,8 @@ export class SLM2Loader
 
     if (this.cpuPerfMode === 'mobile')
     {
-      budgetMs = Math.min(budgetMs, dt > 20 ? budgetMs : 4);
-      maxCount = Math.min(maxCount, 4);
+      budgetMs = Math.min(budgetMs, dt > 20 ? budgetMs : 2);
+      maxCount = Math.min(maxCount, 2);
     }
 
     return {
@@ -908,34 +885,29 @@ export class SLM2Loader
   {
     if (!Number.isFinite(Number(mbps)) || Number(mbps) <= 0)
     {
-      return mobile ? 32 : 64;
+      return mobile ? 8 : 16;
     }
     if (mobile)
     {
-      if (mbps <= 5) return 8;
-      if (mbps <= 15) return 16;
-      if (mbps <= 40) return 24;
-      if (mbps <= 80) return 40;
-      if (mbps <= 160) return 56;
-      return 64;
+      if (mbps <= 5) return 4;
+      if (mbps <= 15) return 6;
+      if (mbps <= 40) return 8;
+      return 10;
     }
-    if (mbps <= 5) return 12;
-    if (mbps <= 15) return 24;
-    if (mbps <= 40) return 40;
-    if (mbps <= 80) return 64;
-    if (mbps <= 160) return 80;
-    return 96;
+    if (mbps <= 5) return 6;
+    if (mbps <= 15) return 10;
+    if (mbps <= 40) return 16;
+    if (mbps <= 80) return 20;
+    return 24;
   }
 
   _configureHttpAdaptiveConcurrency()
   {
     var mobile = this.cpuPerfMode === 'mobile';
-    this.httpAdaptiveMinConcurrency = mobile ? 8 : 12;
-    this.httpAdaptiveMaxConcurrency = mobile ? 64 : 96;
-    this.httpAdaptivePrefetchMinConcurrency = mobile ? 4 : 8;
-    this.httpAdaptivePrefetchMaxConcurrency = mobile ? 32 : 64;
-    this.neuralBandwidthSaturationMaxConcurrency = mobile ? 64 : 96;
-    this.neuralBandwidthSaturationPrefetchMaxConcurrency = mobile ? 32 : 64;
+    this.httpAdaptiveMinConcurrency = mobile ? 4 : 6;
+    this.httpAdaptiveMaxConcurrency = mobile ? 10 : 24;
+    this.httpAdaptivePrefetchMinConcurrency = mobile ? 2 : 4;
+    this.httpAdaptivePrefetchMaxConcurrency = mobile ? 4 : 8;
     var downlink = this._getNetworkDownlinkMbps();
     var initial = this._concurrencyFromMbps(downlink, mobile);
     initial = Math.max(this.httpAdaptiveMinConcurrency, Math.min(this.httpAdaptiveMaxConcurrency, initial));
@@ -1033,22 +1005,21 @@ export class SLM2Loader
     var bandwidthMbps = measuredMbps > 0 ? measuredMbps : (downlink || state.downlinkMbps || 0);
     var desired = this._concurrencyFromMbps(bandwidthMbps, mobile);
     var pressure = 'bandwidth';
-    var ignoreFramePressure = this.useNeuralPVS && this.neuralDisableLoadLimits;
     var pendingInsertions = this._getPendingSceneInsertionCount();
     var frameDt = Number(this.lastFrameDt || 0);
     var pendingRatio = pendingInsertions / Math.max(1, Number(this.maxPendingSceneInsertions || 1));
 
-    if (!ignoreFramePressure && (frameDt > 45 || pendingRatio >= 0.75))
+    if (frameDt > 45 || pendingRatio >= 0.75)
     {
       desired = Math.min(desired, Math.max(this.httpAdaptiveMinConcurrency, Number(state.current || desired) - 3));
       pressure = frameDt > 45 ? 'frame-pressure' : 'integration-backpressure';
     }
-    else if (!ignoreFramePressure && (frameDt > 32 || pendingRatio >= 0.5))
+    else if (frameDt > 32 || pendingRatio >= 0.5)
     {
       desired = Math.min(desired, Math.max(this.httpAdaptiveMinConcurrency, Number(state.current || desired) - 1));
       pressure = frameDt > 32 ? 'frame-soft-pressure' : 'integration-soft-backpressure';
     }
-    else if (!ignoreFramePressure && state.samples >= 3 && state.ewmaLoadMs > 4500)
+    else if (state.samples >= 3 && state.ewmaLoadMs > 4500)
     {
       desired = Math.min(desired, Math.max(this.httpAdaptiveMinConcurrency, Number(state.current || desired) - 1));
       pressure = 'slow-load';
@@ -1091,11 +1062,6 @@ export class SLM2Loader
 
   _getHttpDirectLoadConcurrency(baseConcurrency, prefetchOnly = false)
   {
-    if (this.useNeuralPVS && this.neuralDisableLoadLimits)
-    {
-      return Math.max(1, Math.round(Number(baseConcurrency || 1)));
-    }
-
     if (!this.httpAdaptiveConcurrencyEnabled || (!this.useNeuralPVS && !this.fullLoadMode))
     {
       return baseConcurrency;
@@ -1110,110 +1076,12 @@ export class SLM2Loader
     return Math.max(1, Math.min(baseConcurrency, Math.round(adaptive)));
   }
 
-  _getUnlimitedNeuralDirectLoadTarget(prefetchOnly = false)
-  {
-    var queued = Array.isArray(this.modelToLoadList) ? this.modelToLoadList.length : 0;
-    var fallbackQueued = Array.isArray(this.neuralWSHTTPFallbackQueue) ? this.neuralWSHTTPFallbackQueue.length : 0;
-    var active = Math.max(0, Number(this.activeDirectLoadCount || 0));
-    var adaptive = prefetchOnly
-      ? Number(this.httpAdaptiveState && this.httpAdaptiveState.prefetchCurrent || 0)
-      : Number(this.httpAdaptiveState && this.httpAdaptiveState.current || 0);
-    var base = prefetchOnly
-      ? Math.max(1, Number(this.neuralPrefetchDirectLoadConcurrency || 1))
-      : Math.max(1, Number(this.neuralDirectLoadConcurrency || 1));
-    var cap = prefetchOnly
-      ? Math.max(base, Number(this.neuralBandwidthSaturationPrefetchMaxConcurrency || 32))
-      : Math.max(base, Number(this.neuralBandwidthSaturationMaxConcurrency || 64));
-    var desired = Math.max(base, adaptive || 0);
-    return Math.max(1, Math.min(cap, Math.ceil(active + queued + fallbackQueued + desired)));
-  }
-
-  _configureNeuralResourceWSOptions(params)
+  _configureGlbResourcePipelineOptions(params)
   {
     var mobile = this.cpuPerfMode === 'mobile';
-    this.neuralWSConnectionCount = this._parseIntParam(params, 'neuralWSConnections', mobile ? 2 : 4, 1, 8);
-    this.neuralWSBatchSize = this._parseIntParam(params, 'neuralWSBatchSize', 8, 1, 32);
-    this.neuralWSMaxInFlightModels = this._parseIntParam(params, 'neuralWSMaxInFlightModels', mobile ? 12 : 32, 1, 128);
-    this.neuralWSBatchTimeoutMs = this._parseIntParam(params, 'neuralWSBatchTimeoutMs', 20000, 2000, 120000);
-    this.neuralWSParseConcurrency = this._parseIntParam(params, 'neuralWSParseConcurrency', mobile ? 1 : 2, 1, 8);
-    var maxPendingParseMB = this._parseIntParam(params, 'neuralWSMaxPendingParseMB', mobile ? 48 : 96, 8, 512);
-    this.neuralWSMaxPendingParseBytes = maxPendingParseMB * 1024 * 1024;
-    this.neuralWSFallbackHttp = !(params['neuralWSFallbackHttp'] === 'false' || params['neuralWSFallbackHttp'] === '0');
-  }
-
-  _shouldUseNeuralResourceWSPool()
-  {
-    return this.useNeuralPVS &&
-      this.neuralUseResourcesWS &&
-      this.resourcesWS != null &&
-      this.resourcesWS !== '';
-  }
-
-  _ensureNeuralResourceWSPool()
-  {
-    if (!this._shouldUseNeuralResourceWSPool())
-    {
-      return null;
-    }
-
-    var scope = this;
-    if (!this.neuralResourceWSPool)
-    {
-      this.neuralResourceWSPool = new NeuralResourceWSPool({
-        url: this.resourcesWS,
-        connectionCount: this.neuralWSConnectionCount,
-        batchTimeoutMs: this.neuralWSBatchTimeoutMs,
-        debug: this.neuralDebugLogs,
-        onBatchResult: function(batch, buffers, meta)
-        {
-          scope._handleNeuralWSBatchResult(batch, buffers, meta);
-        },
-        onBatchError: function(batch, reason, error)
-        {
-          scope._handleNeuralWSBatchFailure(batch, reason, error);
-        },
-        onStatsChange: function(stats)
-        {
-          scope.connectedAssets = Number(stats.readyConnections || 0) > 0;
-          scope.lastNeuralWSStats = Object.assign({}, scope.lastNeuralWSStats || {}, stats);
-        },
-      });
-    }
-    else
-    {
-      this.neuralResourceWSPool.configure({
-        url: this.resourcesWS,
-        connectionCount: this.neuralWSConnectionCount,
-        batchTimeoutMs: this.neuralWSBatchTimeoutMs,
-        debug: this.neuralDebugLogs,
-      });
-    }
-
-    if (!this.neuralResourceWSPool.started)
-    {
-      this.neuralWSStartedAt = performance.now();
-      this.neuralResourceWSPool.start();
-    }
-    return this.neuralResourceWSPool;
-  }
-
-  _getNeuralWSStats()
-  {
-    var poolStats = this.neuralResourceWSPool ? this.neuralResourceWSPool.getStats() : {};
-    var stats = Object.assign({}, this.lastNeuralWSStats || {}, poolStats);
-    stats.pendingParseCount = this._getPendingWSParseCount();
-    stats.pendingParseMB = this.pendingWSParseBytes / 1048576;
-    stats.activeParseCount = this.activeWSParseCount;
-    stats.httpFallbackQueueLength = this.neuralWSHTTPFallbackQueue.length;
-    stats.config = {
-      connections: this.neuralWSConnectionCount,
-      batchSize: this.neuralWSBatchSize,
-      maxInFlightModels: this.neuralWSMaxInFlightModels,
-      parseConcurrency: this.neuralWSParseConcurrency,
-      maxPendingParseMB: this.neuralWSMaxPendingParseBytes / 1048576,
-      fallbackHttp: this.neuralWSFallbackHttp,
-    };
-    return stats;
+    this.glbParseConcurrency = this._parseIntParam(params, 'glbParseConcurrency', mobile ? 1 : 2, 1, 4);
+    var maxPendingParseMB = this._parseIntParam(params, 'glbMaxPendingParseMB', mobile ? 48 : 96, 8, 256);
+    this.maxPendingGlbParseBytes = maxPendingParseMB * 1024 * 1024;
   }
 
   _setCurrentDownloadWantedHashes(modelInfos)
@@ -1228,11 +1096,173 @@ export class SLM2Loader
         this.currentDownloadWantedHashes.add(decoded.hash);
       }
     }
+    this._cancelStaleDirectDownloads();
+  }
+
+  _promoteCurrentRenderGlbs(glbIds)
+  {
+    var promotedIds = this._normalizeIdList(glbIds);
+    if (promotedIds.length === 0)
+    {
+      return { promotedGlbCount: 0, parseCount: 0, insertionCount: 0 };
+    }
+
+    var promotedInfos = [];
+    var promotedHashes = new Set();
+    for (var index = 0; index < promotedIds.length; ++index)
+    {
+      var globalGlbId = promotedIds[index];
+      var stored = this.neuralDownloadInfoByGlbId.get(globalGlbId);
+      var modelInfo = Object.assign({}, stored || {
+        id: globalGlbId,
+        weight: 1,
+        idMode: 'global-glb',
+      }, {
+        prefetch: false,
+        deferredVisible: false,
+        predictionEpoch: this.currentNeuralPredictionEpoch,
+        renderPriorityPromotion: true,
+      });
+      var decoded = this.decodeModelInfo(modelInfo);
+      if (!decoded || !decoded.hash)
+      {
+        continue;
+      }
+      promotedInfos.push(modelInfo);
+      promotedHashes.add(decoded.hash);
+      this.currentDownloadWantedHashes.add(decoded.hash);
+      this.neuralDownloadInfoByGlbId.set(globalGlbId, modelInfo);
+    }
+
+    if (promotedInfos.length === 0)
+    {
+      return { promotedGlbCount: 0, parseCount: 0, insertionCount: 0 };
+    }
+
+    var isPromotedInfo = (item) =>
+    {
+      var decoded = item ? this.decodeModelInfo(item) : null;
+      return Boolean(decoded && promotedHashes.has(decoded.hash));
+    };
+    this.pendingPrefetchList = this.pendingPrefetchList.filter((item) => !isPromotedInfo(item));
+    this.modelToLoadList = this.modelToLoadList.filter((item) => !isPromotedInfo(item));
+
+    var parsePrefix = this.pendingGlbParseQueue.slice(0, this.pendingGlbParseCursor);
+    var parseUrgent = [];
+    var parseRest = [];
+    for (var parseIndex = this.pendingGlbParseCursor; parseIndex < this.pendingGlbParseQueue.length; ++parseIndex)
+    {
+      var parseItem = this.pendingGlbParseQueue[parseIndex];
+      if (parseItem && parseItem.modelDesc && promotedHashes.has(parseItem.modelDesc.hash))
+      {
+        parseItem.modelDesc.prefetch = false;
+        parseUrgent.push(parseItem);
+      }
+      else
+      {
+        parseRest.push(parseItem);
+      }
+    }
+    this.pendingGlbParseQueue = parsePrefix.concat(parseUrgent, parseRest);
+
+    var insertionPrefix = this.pendingSceneInsertions.slice(0, this.pendingSceneInsertionCursor);
+    var insertionUrgent = [];
+    var insertionRest = [];
+    for (var insertionIndex = this.pendingSceneInsertionCursor;
+      insertionIndex < this.pendingSceneInsertions.length; ++insertionIndex)
+    {
+      var insertionItem = this.pendingSceneInsertions[insertionIndex];
+      if (insertionItem && promotedHashes.has(insertionItem.hash))
+      {
+        insertionItem.prefetch = false;
+        if (insertionItem.modelDesc) insertionItem.modelDesc.prefetch = false;
+        insertionUrgent.push(insertionItem);
+      }
+      else
+      {
+        insertionRest.push(insertionItem);
+      }
+    }
+    this.pendingSceneInsertions = insertionPrefix.concat(insertionUrgent, insertionRest);
+
+    var queuedInfos = promotedInfos.filter((item) =>
+    {
+      var decoded = this.decodeModelInfo(item);
+      if (!decoded || !decoded.hash) return false;
+      if (this.modelCacheMgr.objectsPool[decoded.hash]) return false;
+      if (this.inflightModelHashes.has(decoded.hash)) return false;
+      return !this.pendingSceneInsertionHashes.has(decoded.hash);
+    });
+    queuedInfos.sort(function(a, b){ return Number(a.weight || 0) - Number(b.weight || 0); });
+    for (var queueIndex = 0; queueIndex < queuedInfos.length; ++queueIndex)
+    {
+      this.modelToLoadList.push(queuedInfos[queueIndex]);
+    }
+
+    this.lastLoadMetrics.promotedGlbCount = Number(this.lastLoadMetrics.promotedGlbCount || 0)
+      + promotedInfos.length;
+    this.lastLoadMetrics.promotedParseCount = Number(this.lastLoadMetrics.promotedParseCount || 0)
+      + parseUrgent.length;
+    this.lastLoadMetrics.promotedInsertionCount = Number(this.lastLoadMetrics.promotedInsertionCount || 0)
+      + insertionUrgent.length;
+    this.processGlbParseQueue();
+    this.processLoadingList();
+    return {
+      promotedGlbCount: promotedInfos.length,
+      queuedCount: queuedInfos.length,
+      parseCount: parseUrgent.length,
+      insertionCount: insertionUrgent.length,
+    };
+  }
+
+  _cancelStaleDirectDownloads()
+  {
+    if (!this.useNeuralPVS || !this.directDownloadControllers)
+    {
+      return 0;
+    }
+    var cancelled = 0;
+    this.directDownloadControllers.forEach((entry, hash) =>
+    {
+      if (this.currentDownloadWantedHashes.has(hash))
+      {
+        return;
+      }
+      entry.controller.abort();
+      cancelled++;
+    });
+    return cancelled;
+  }
+
+  _cancelAllDirectDownloads()
+  {
+    if (!this.directDownloadControllers)
+    {
+      return;
+    }
+    this.directDownloadControllers.forEach(function(entry)
+    {
+      entry.controller.abort();
+    });
+    this.directDownloadControllers.clear();
+  }
+
+  _clearPendingGlbParseQueue()
+  {
+    for (var index = this.pendingGlbParseCursor; index < this.pendingGlbParseQueue.length; ++index)
+    {
+      var item = this.pendingGlbParseQueue[index];
+      this._clearInflightHash(item && item.modelDesc);
+    }
+    this.pendingGlbParseQueue = [];
+    this.pendingGlbParseCursor = 0;
+    this.pendingGlbParseBytes = 0;
   }
 
   _setCurrentNeuralWorkingSet(modelInfos, idMode)
   {
     this.currentNeuralPredictionEpoch++;
+    this._replaceRenderGlbStateFromModelInfos(modelInfos);
     this.lastRenderRefreshStats = this.renderVisibilitySystem.setWorkingSet(
       modelInfos,
       idMode,
@@ -1243,12 +1273,22 @@ export class SLM2Loader
 
   _updateCurrentNeuralRenderSet(modelInfos, idMode)
   {
+    this._replaceRenderGlbStateFromModelInfos(modelInfos);
     this.lastRenderRefreshStats = this.renderVisibilitySystem.setWorkingSet(
       modelInfos,
       idMode,
       this.currentNeuralPredictionEpoch
     );
     return this.lastRenderRefreshStats;
+  }
+
+  _replaceRenderGlbStateFromModelInfos(modelInfos)
+  {
+    var glbIds = (modelInfos || []).map(function(item)
+    {
+      return Number(item && item.id);
+    });
+    return this.renderGlbState.replace(glbIds, this._getGlbBitCount());
   }
 
   _isHashInCurrentNeuralRenderSet(hash)
@@ -1362,18 +1402,6 @@ export class SLM2Loader
       return false;
     }
 
-    if (phase === 'ws-raw')
-    {
-      if (this.pendingWSParseBytes >= this.neuralWSMaxPendingParseBytes * 0.5)
-      {
-        return false;
-      }
-      if (Number(this.lastFrameDt || 0) > 33)
-      {
-        return false;
-      }
-    }
-
     return true;
   }
 
@@ -1412,7 +1440,7 @@ export class SLM2Loader
     var wasDeferredVisible = Boolean(modelDesc.deferredVisible || (info && info.deferredVisible));
     var wasUsefulPrefetch = tier === 'prefetch' &&
       projectedArea >= this.neuralStaleCachePrefetchAreaThreshold &&
-      phase !== 'ws-raw';
+      phase !== 'http-raw';
 
     return wasImmediate ||
       wasDeferredVisible ||
@@ -1424,10 +1452,6 @@ export class SLM2Loader
   _recordStaleDownloadDrop(modelDesc, reason)
   {
     this.lastLoadMetrics.staleDroppedCount = Number(this.lastLoadMetrics.staleDroppedCount || 0) + 1;
-    if (this.lastNeuralWSStats)
-    {
-      this.lastNeuralWSStats.staleDropCount = Number(this.lastNeuralWSStats.staleDropCount || 0) + 1;
-    }
   }
 
   _cacheStaleLoadedGltf(gltf, modelDesc = null, reason = 'stale-cache')
@@ -1445,7 +1469,6 @@ export class SLM2Loader
       this._clearInflightHash(modelDesc);
       this.pendingSceneInsertionHashes.delete(hash);
       this.lastLoadMetrics.staleCachedCount = Number(this.lastLoadMetrics.staleCachedCount || 0) + 1;
-      this.lastNeuralWSStats.staleCachedCount = Number(this.lastNeuralWSStats.staleCachedCount || 0) + 1;
       return true;
     }
 
@@ -1493,7 +1516,6 @@ export class SLM2Loader
       this.pendingSceneInsertionHashes.delete(hash);
     }
     this.lastLoadMetrics.staleCachedCount = Number(this.lastLoadMetrics.staleCachedCount || 0) + 1;
-    this.lastNeuralWSStats.staleCachedCount = Number(this.lastNeuralWSStats.staleCachedCount || 0) + 1;
     if (this.neuralDebugLogs)
     {
       console.log('[SLM2Loader] Cached stale neural asset in background', {
@@ -1512,8 +1534,7 @@ export class SLM2Loader
       return;
     }
 
-    this._pruneStaleWSParseQueue();
-    this._pruneStaleNeuralWSHttpFallbackQueue();
+    this._pruneStaleGlbParseQueue();
 
     if (!Array.isArray(this.pendingSceneInsertions) || this._getPendingSceneInsertionCount() === 0)
     {
@@ -1544,105 +1565,57 @@ export class SLM2Loader
     this.lastLoadMetrics.queueLength = this._getPendingSceneInsertionCount();
   }
 
-  _pruneStaleWSParseQueue()
+  _pruneStaleGlbParseQueue()
   {
-    if (!Array.isArray(this.pendingWSParseQueue) || this._getPendingWSParseCount() === 0)
+    if (!Array.isArray(this.pendingGlbParseQueue) || this._getPendingGlbParseCount() === 0)
     {
       return;
     }
 
     var kept = [];
-    var cursor = Number(this.pendingWSParseCursor || 0);
-    for (var i = cursor; i < this.pendingWSParseQueue.length; ++i)
+    var cursor = Number(this.pendingGlbParseCursor || 0);
+    for (var i = cursor; i < this.pendingGlbParseQueue.length; ++i)
     {
-      var item = this.pendingWSParseQueue[i];
+      var item = this.pendingGlbParseQueue[i];
       if (!item || !item.modelDesc || item.modelDesc.hash == null || this._isHashWantedForDownload(item.modelDesc.hash))
       {
         kept.push(item);
         continue;
       }
 
-      if (this._shouldRetainStaleDownload(item.modelDesc, 'ws-raw'))
+      if (this._shouldRetainStaleDownload(item.modelDesc, 'http-raw'))
       {
         kept.push(item);
         continue;
       }
 
-      this.pendingWSParseBytes = Math.max(0, this.pendingWSParseBytes - Number(item.byteLength || 0));
+      this.pendingGlbParseBytes = Math.max(0, this.pendingGlbParseBytes - Number(item.byteLength || 0));
       this._clearInflightHash(item.modelDesc);
-      this._recordStaleDownloadDrop(item.modelDesc, 'stale-ws-parse-queue');
+      this._recordStaleDownloadDrop(item.modelDesc, 'stale-glb-parse-queue');
     }
 
-    this.pendingWSParseQueue = kept;
-    this.pendingWSParseCursor = 0;
+    this.pendingGlbParseQueue = kept;
+    this.pendingGlbParseCursor = 0;
   }
 
-  _pruneStaleNeuralWSHttpFallbackQueue()
+  _getPendingGlbParseCount()
   {
-    if (!Array.isArray(this.neuralWSHTTPFallbackQueue) || this.neuralWSHTTPFallbackQueue.length === 0)
-    {
-      return;
-    }
-
-    var kept = [];
-    this.neuralWSHTTPFallbackHashes = new Set();
-    for (var i = 0; i < this.neuralWSHTTPFallbackQueue.length; ++i)
-    {
-      var item = this.neuralWSHTTPFallbackQueue[i];
-      var decoded = item ? this.decodeModelInfo(item) : null;
-      if (!decoded || !decoded.hash || this._isHashWantedForDownload(decoded.hash))
-      {
-        kept.push(item);
-        if (decoded && decoded.hash)
-        {
-          this.neuralWSHTTPFallbackHashes.add(decoded.hash);
-        }
-      }
-    }
-    this.neuralWSHTTPFallbackQueue = kept;
+    return Math.max(0, this.pendingGlbParseQueue.length - Number(this.pendingGlbParseCursor || 0));
   }
 
-  _getPendingWSParseCount()
+  _compactPendingGlbParseQueueIfNeeded(force = false)
   {
-    return Math.max(0, this.pendingWSParseQueue.length - Number(this.pendingWSParseCursor || 0));
-  }
-
-  _compactPendingWSParseQueueIfNeeded(force = false)
-  {
-    var cursor = Number(this.pendingWSParseCursor || 0);
+    var cursor = Number(this.pendingGlbParseCursor || 0);
     if (cursor <= 0)
     {
       return;
     }
 
-    if (force || cursor >= 64 || cursor >= this.pendingWSParseQueue.length * 0.5)
+    if (force || cursor >= 64 || cursor >= this.pendingGlbParseQueue.length * 0.5)
     {
-      this.pendingWSParseQueue = this.pendingWSParseQueue.slice(cursor);
-      this.pendingWSParseCursor = 0;
+      this.pendingGlbParseQueue = this.pendingGlbParseQueue.slice(cursor);
+      this.pendingGlbParseCursor = 0;
     }
-  }
-
-  _buildResourceWSRequestItem(modelDesc)
-  {
-    if (!modelDesc || modelDesc.group == null)
-    {
-      return null;
-    }
-
-    var baseId = modelDesc.baseId != null
-      ? Number(modelDesc.baseId)
-      : (modelDesc.hash ? Number.parseInt(String(modelDesc.hash).split('-')[1]) : NaN);
-
-    if (!Number.isFinite(baseId))
-    {
-      return null;
-    }
-
-    return {
-      g: modelDesc.group,
-      l: this.MeshLodLevel,
-      s: baseId,
-    };
   }
 
   _clearInflightHash(modelDesc)
@@ -1653,157 +1626,11 @@ export class SLM2Loader
     }
   }
 
-  _queueNeuralWSHttpFallback(modelDesc, reason)
+  processGlbParseQueue()
   {
-    if (!this.neuralWSFallbackHttp || !modelDesc || !modelDesc.sourceModelInfo)
+    if (!this.pendingGlbParseQueue || this._getPendingGlbParseCount() === 0)
     {
-      return;
-    }
-
-    if (modelDesc.hash && !this._isHashWantedForDownload(modelDesc.hash))
-    {
-      return;
-    }
-
-    if (modelDesc.hash && this.neuralWSHTTPFallbackHashes.has(modelDesc.hash))
-    {
-      return;
-    }
-
-    var sourceInfo = Object.assign({}, modelDesc.sourceModelInfo, {
-      forceHttp: true,
-    });
-    this.neuralWSHTTPFallbackQueue.push(sourceInfo);
-    if (modelDesc.hash)
-    {
-      this.neuralWSHTTPFallbackHashes.add(modelDesc.hash);
-    }
-    this.lastNeuralWSStats.fallbackHttpCount = Number(this.lastNeuralWSStats.fallbackHttpCount || 0) + 1;
-
-    if (this.neuralDebugLogs)
-    {
-      console.warn('[SLM2Loader] resourcesWS falling back to HTTP', {
-        hash: modelDesc.hash,
-        reason: reason,
-      });
-    }
-  }
-
-  _retryOrFallbackNeuralWSModel(modelDesc, reason)
-  {
-    this._clearInflightHash(modelDesc);
-
-    if (!modelDesc || (modelDesc.hash && !this._isHashWantedForDownload(modelDesc.hash)))
-    {
-      this.lastNeuralWSStats.staleDropCount = Number(this.lastNeuralWSStats.staleDropCount || 0) + 1;
-      return;
-    }
-
-    var hash = modelDesc.hash || '';
-    var retryCount = hash ? Number(this.neuralWSRetryCounts[hash] || 0) : this.neuralWSMaxRetries;
-    if (hash && retryCount < this.neuralWSMaxRetries && modelDesc.sourceModelInfo)
-    {
-      this.neuralWSRetryCounts[hash] = retryCount + 1;
-      this.modelToLoadList.push(modelDesc.sourceModelInfo);
-      this.lastNeuralWSStats.retryCount = Number(this.lastNeuralWSStats.retryCount || 0) + 1;
-      return;
-    }
-
-    this._queueNeuralWSHttpFallback(modelDesc, reason);
-  }
-
-  _handleNeuralWSBatchFailure(batch, reason, error)
-  {
-    if (reason === 'timeout')
-    {
-      this.lastNeuralWSStats.timeoutCount = Number(this.lastNeuralWSStats.timeoutCount || 0) + 1;
-    }
-
-    var descs = batch && Array.isArray(batch.reqDescs) ? batch.reqDescs : [];
-    for (var i = 0; i < descs.length; ++i)
-    {
-      this._retryOrFallbackNeuralWSModel(descs[i], reason);
-    }
-
-    if (this.neuralDebugLogs)
-    {
-      console.warn('[SLM2Loader] resourcesWS batch failed', {
-        batchId: batch ? batch.id : null,
-        socketId: batch ? batch.socketId : null,
-        reason: reason,
-        message: error && error.message ? error.message : error,
-        count: descs.length,
-      });
-    }
-  }
-
-  _handleNeuralWSBatchResult(batch, buffers, meta)
-  {
-    var descs = batch && Array.isArray(batch.reqDescs) ? batch.reqDescs : [];
-    var returnedCount = Array.isArray(buffers) ? buffers.length : 0;
-    var usableCount = Math.min(descs.length, returnedCount);
-
-    for (var i = 0; i < usableCount; ++i)
-    {
-      var modelDesc = descs[i];
-      var buffer = buffers[i];
-      var byteLength = buffer && buffer.byteLength ? buffer.byteLength : 0;
-      if (modelDesc && modelDesc.hash && !this._isHashWantedForDownload(modelDesc.hash))
-      {
-        if (!this._shouldRetainStaleDownload(modelDesc, 'ws-raw'))
-        {
-          this._clearInflightHash(modelDesc);
-          this._recordStaleDownloadDrop(modelDesc, 'stale-ws-response');
-          continue;
-        }
-      }
-
-      this.pendingWSParseQueue.push({
-        buffer: buffer,
-        modelDesc: modelDesc,
-        byteLength: byteLength,
-        batchId: batch.id,
-        socketId: batch.socketId,
-        receivedAt: performance.now(),
-      });
-      this.pendingWSParseBytes += byteLength;
-    }
-
-    for (var missingIdx = usableCount; missingIdx < descs.length; ++missingIdx)
-    {
-      this._retryOrFallbackNeuralWSModel(descs[missingIdx], 'missing-buffer');
-    }
-
-    if (returnedCount > descs.length && this.neuralDebugLogs)
-    {
-      console.warn('[SLM2Loader] resourcesWS returned extra buffers', {
-        batchId: batch.id,
-        requested: descs.length,
-        returned: returnedCount,
-      });
-    }
-
-    if (this.neuralDebugLogs)
-    {
-      console.log('[SLM2Loader] resourcesWS batch accepted', {
-        batchId: batch.id,
-        socketId: batch.socketId,
-        requested: descs.length,
-        returned: returnedCount,
-        queuedParse: usableCount,
-        latencyMs: meta ? meta.latencyMs : null,
-        bytes: meta ? meta.bytesReceived : null,
-      });
-    }
-
-    this.processNeuralWSParseQueue();
-  }
-
-  processNeuralWSParseQueue()
-  {
-    if (!this.pendingWSParseQueue || this._getPendingWSParseCount() === 0)
-    {
-      this._compactPendingWSParseQueueIfNeeded(true);
+      this._compactPendingGlbParseQueueIfNeeded(true);
       return;
     }
 
@@ -1812,11 +1639,11 @@ export class SLM2Loader
       return;
     }
 
-    while (this.activeWSParseCount < this.neuralWSParseConcurrency &&
-      this.pendingWSParseCursor < this.pendingWSParseQueue.length &&
+    while (this.activeGlbParseCount < this.glbParseConcurrency &&
+      this.pendingGlbParseCursor < this.pendingGlbParseQueue.length &&
       this._getPendingSceneInsertionCount() < this.maxPendingSceneInsertions)
     {
-      var item = this.pendingWSParseQueue[this.pendingWSParseCursor++];
+      var item = this.pendingGlbParseQueue[this.pendingGlbParseCursor++];
       if (!item)
       {
         continue;
@@ -1824,55 +1651,72 @@ export class SLM2Loader
 
       if (item.modelDesc && item.modelDesc.hash && !this._isHashWantedForDownload(item.modelDesc.hash))
       {
-        if (!this._shouldRetainStaleDownload(item.modelDesc, 'ws-raw'))
+        if (!this._shouldRetainStaleDownload(item.modelDesc, 'http-raw'))
         {
-          this.pendingWSParseBytes = Math.max(0, this.pendingWSParseBytes - Number(item.byteLength || 0));
+          this.pendingGlbParseBytes = Math.max(0, this.pendingGlbParseBytes - Number(item.byteLength || 0));
           this._clearInflightHash(item.modelDesc);
-          this._recordStaleDownloadDrop(item.modelDesc, 'stale-ws-before-parse');
+          this._recordStaleDownloadDrop(item.modelDesc, 'stale-glb-before-parse');
           continue;
         }
       }
 
-      this._parseNeuralWSBuffer(item);
+      this._parseGlbBuffer(item);
     }
 
-    this._compactPendingWSParseQueueIfNeeded();
+    this._compactPendingGlbParseQueueIfNeeded();
   }
 
-  _parseNeuralWSBuffer(item)
+  _parseGlbBuffer(item)
   {
     var scope = this;
-    var loader = this.gltfLoaders[this.directLoaderCursor % this.gltfLoaders.length];
-    this.directLoaderCursor++;
-    this.activeWSParseCount++;
-    var parseStartedAt = performance.now();
+    var loader = this.gltfLoaders[this.parseLoaderCursor % this.gltfLoaders.length];
+    this.parseLoaderCursor++;
+    this.activeGlbParseCount++;
 
-    loader.parse(item.buffer, '', function(gltf)
+    loader.parse(item.buffer, item.basePath || '', function(gltf)
     {
-      scope.activeWSParseCount = Math.max(0, scope.activeWSParseCount - 1);
-      scope.pendingWSParseBytes = Math.max(0, scope.pendingWSParseBytes - Number(item.byteLength || 0));
-
-      if (item.modelDesc && item.modelDesc.hash && !scope._isHashWantedForDownload(item.modelDesc.hash))
+      scope.activeGlbParseCount = Math.max(0, scope.activeGlbParseCount - 1);
+      if (item.pipelineSerial === scope.resourcePipelineSerial)
       {
-        if (!scope._cacheStaleLoadedGltf(gltf, item.modelDesc, 'stale-ws-after-parse'))
-        {
-          scope._clearInflightHash(item.modelDesc);
-          scope._recordStaleDownloadDrop(item.modelDesc, 'stale-ws-after-parse');
-          scope._disposeUnintegratedScene(gltf && (gltf.scene || (gltf.scenes && gltf.scenes[0])));
-        }
-        scope.processNeuralWSParseQueue();
+        scope.pendingGlbParseBytes = Math.max(0, scope.pendingGlbParseBytes - Number(item.byteLength || 0));
+      }
+
+      if (item.pipelineSerial !== scope.resourcePipelineSerial)
+      {
+        scope._disposeUnintegratedScene(gltf && (gltf.scene || (gltf.scenes && gltf.scenes[0])));
+        scope.processGlbParseQueue();
         return;
       }
 
-      scope.processLaodedGltf(gltf, item.modelDesc);
-      scope.processNeuralWSParseQueue();
+      if (item.modelDesc && item.modelDesc.hash && !scope._isHashWantedForDownload(item.modelDesc.hash))
+      {
+        if (!scope._cacheStaleLoadedGltf(gltf, item.modelDesc, 'stale-glb-after-parse'))
+        {
+          scope._clearInflightHash(item.modelDesc);
+          scope._recordStaleDownloadDrop(item.modelDesc, 'stale-glb-after-parse');
+          scope._disposeUnintegratedScene(gltf && (gltf.scene || (gltf.scenes && gltf.scenes[0])));
+        }
+        scope.processGlbParseQueue();
+        return;
+      }
+
+      scope.processLoadedGltf(gltf, item.modelDesc);
+      scope.processGlbParseQueue();
     }, function(err)
     {
-      scope.activeWSParseCount = Math.max(0, scope.activeWSParseCount - 1);
-      scope.pendingWSParseBytes = Math.max(0, scope.pendingWSParseBytes - Number(item.byteLength || 0));
-      console.error('[LoadError][resourcesWS-parse]', item.modelDesc ? item.modelDesc.hash : null, err);
-      scope._retryOrFallbackNeuralWSModel(item.modelDesc, 'parse-error');
-      scope.processNeuralWSParseQueue();
+      scope.activeGlbParseCount = Math.max(0, scope.activeGlbParseCount - 1);
+      if (item.pipelineSerial === scope.resourcePipelineSerial)
+      {
+        scope.pendingGlbParseBytes = Math.max(0, scope.pendingGlbParseBytes - Number(item.byteLength || 0));
+      }
+      if (item.pipelineSerial !== scope.resourcePipelineSerial)
+      {
+        scope.processGlbParseQueue();
+        return;
+      }
+      console.error('[LoadError][glb-parse]', item.modelDesc ? item.modelDesc.hash : null, err);
+      scope._clearInflightHash(item.modelDesc);
+      scope.processGlbParseQueue();
     });
   }
 
@@ -2083,6 +1927,8 @@ export class SLM2Loader
       }
       this.isMaterialConfigReady = true;
       this.lastMaterialRebindCount = this._rebindResidentMaterialsToCache();
+      this.staticSceneOptimizer.optimizeAllResidents();
+      this.requestRender('material-config-ready');
       startupLog('slm2:materialConfig:ready', {
         totalMs: performance.now() - materialConfigStartedAt,
         reboundMeshes: this.lastMaterialRebindCount,
@@ -2505,10 +2351,11 @@ export class SLM2Loader
         {
           this.isMaterialImageLoading = true;
 
-          sequentialPromiseMap(subTasks, loadImage).then(results => 
-            {
-              this.isMaterialImageLoading = false;
-            });
+          sequentialPromiseMap(subTasks, loadImage).then(results =>
+          {
+            this.isMaterialImageLoading = false;
+            setTimeout(() => this.requestRender('texture-task-complete'), minIntervalMs);
+          });
         }
         
       }
@@ -2524,9 +2371,12 @@ export class SLM2Loader
     }
 
     this.lastFrameDt = Number(dt || 0);
+    if (this.cameraUpdatePending)
+    {
+      this.syncCamera();
+    }
     this.updateLoading(dt);
     this.processPendingSceneInsertions();
-    this.syncCamera();
 
     this.modelCacheMgr.update(time);
 
@@ -2537,7 +2387,48 @@ export class SLM2Loader
       this.renderVisibilitySystem.update();
     }
 
+    this.staticSceneOptimizer.processPending(performance.now(), this._isResourcePipelineIdle());
+
     this.processImageTask(this.lastFrameDt);
+  }
+
+  hasImmediateFrameWork()
+  {
+    var pipelineIdle = this._isResourcePipelineIdle();
+    return this._getPendingSceneInsertionCount() > 0
+      || Boolean(this.renderVisibilitySystem && this.renderVisibilitySystem.dirtyHashes.size > 0)
+      || this.staticSceneOptimizer.hasReadyWork(performance.now(), pipelineIdle);
+  }
+
+  _isResourcePipelineIdle()
+  {
+    return this.modelToLoadList.length === 0
+      && this.pendingPrefetchList.length === 0
+      && this.activeDirectLoadCount === 0
+      && this._getPendingGlbParseCount() === 0
+      && this.activeGlbParseCount === 0
+      && this._getPendingSceneInsertionCount() === 0;
+  }
+
+  getMaintenanceDelayMs()
+  {
+    if (this.cameraUpdatePending)
+    {
+      return Math.max(0, 80 - Number(this.cullingUpdateDelta || 0));
+    }
+    if (this._getPendingSceneInsertionCount() > 0)
+    {
+      return 0;
+    }
+    if (this._getPendingGlbParseCount() > 0 && this.activeGlbParseCount < this.glbParseConcurrency)
+    {
+      return 0;
+    }
+    if (this.modelToLoadList.length > 0 && this.activeDirectLoadCount === 0)
+    {
+      return 0;
+    }
+    return this.staticSceneOptimizer.nextWakeDelay(performance.now(), this._isResourcePipelineIdle());
   }
 
   _recordVisibilityMetrics(metrics)
@@ -2566,6 +2457,7 @@ export class SLM2Loader
     };
     this.lastBenchmarkVisibilityIds.serial = this.visibilityMetricsSerial;
     this.lastBenchmarkVisibilityIds.mode = metrics.mode || null;
+    this.requestRender('visibility-result');
     if (this.neuralDebugLogs) console.log('[SLM2Loader] Visibility metrics', this.lastVisibilityMetrics);
   }
 
@@ -2578,6 +2470,21 @@ export class SLM2Loader
     {
       return Number.isFinite(value);
     }))).sort(function(a, b){ return a - b; });
+  }
+
+  _getComponentBitCount()
+  {
+    var runtimeCount = Number(this.runtimeVisibilityMeta && this.runtimeVisibilityMeta.instanceCount);
+    if (Number.isInteger(runtimeCount) && runtimeCount > 0) return runtimeCount;
+    return Math.max(0, this.componentVisibilityRecords.length);
+  }
+
+  _getGlbBitCount()
+  {
+    var runtimeCount = Number(this.runtimeVisibilityMeta && this.runtimeVisibilityMeta.globalGlbCount);
+    if (Number.isInteger(runtimeCount) && runtimeCount > 0) return runtimeCount;
+    if (this.glbIndex && Number.isInteger(Number(this.glbIndex.total))) return Number(this.glbIndex.total);
+    return Math.max(0, this.globalGlbEntries.length);
   }
 
   _buildInstancedVisibilityBindings()
@@ -2685,7 +2592,7 @@ export class SLM2Loader
       componentIds: [],
       disabled: true,
       bindingError: 'missing-runtime-binding',
-      activeIndices: [],
+      activeSourceIndices: [],
     };
     this.loadedInstancedVisibilityStatesByHash[hash] = state;
     item.instancedBindingInvalid = true;
@@ -2798,7 +2705,7 @@ export class SLM2Loader
         componentIds: componentIds,
         disabled: true,
         bindingError: reason,
-        activeIndices: [],
+        activeSourceIndices: [],
       };
       this.loadedInstancedVisibilityStatesByHash[hash] = state;
       item.instancedBindingInvalid = true;
@@ -2888,8 +2795,9 @@ export class SLM2Loader
       componentIds: componentIds,
       disabled: false,
       bindingError: null,
-      activeIndices: null,
+      activeSourceIndices: [],
     };
+    initializeDenseInstancedState(state);
     item.instancedBindingInvalid = false;
     this.loadedInstancedVisibilityStatesByHash[hash] = state;
     return state;
@@ -2929,69 +2837,7 @@ export class SLM2Loader
         mesh.instanceMatrix.needsUpdate = true;
       }
     }
-    state.activeIndices = [];
-  }
-
-  _applyInstancedVisibilityState(state, activeIndices)
-  {
-    if (!state)
-    {
-      return;
-    }
-    if (state.disabled)
-    {
-      this._hideInvalidInstancedVisibilityState(state);
-      return;
-    }
-
-    var previous = Array.isArray(state.activeIndices) ? state.activeIndices : [];
-    var firstChanged = 0;
-    while (firstChanged < previous.length && firstChanged < activeIndices.length &&
-           previous[firstChanged] === activeIndices[firstChanged])
-    {
-      firstChanged++;
-    }
-    if (Array.isArray(state.activeIndices) && firstChanged === previous.length &&
-        firstChanged === activeIndices.length)
-    {
-      return;
-    }
-
-    for (var meshStateIdx = 0; meshStateIdx < state.meshStates.length; ++meshStateIdx)
-    {
-      var meshState = state.meshStates[meshStateIdx];
-      var mesh = meshState.mesh;
-      var target = mesh && mesh.instanceMatrix ? mesh.instanceMatrix.array : null;
-      var source = meshState.originalMatrixArray;
-      if (!mesh || !target || !source || source.length < meshState.originalCount * 16)
-      {
-        continue;
-      }
-      for (var visibleIndex = firstChanged; visibleIndex < activeIndices.length; ++visibleIndex)
-      {
-        var sourceOffset = activeIndices[visibleIndex] * 16;
-        target.set(source.subarray(sourceOffset, sourceOffset + 16), visibleIndex * 16);
-      }
-      mesh.count = activeIndices.length;
-      mesh.visible = activeIndices.length > 0;
-      mesh.frustumCulled = false;
-      if (firstChanged < activeIndices.length)
-      {
-        if (typeof mesh.instanceMatrix.clearUpdateRanges === 'function')
-        {
-          mesh.instanceMatrix.clearUpdateRanges();
-        }
-        if (typeof mesh.instanceMatrix.addUpdateRange === 'function')
-        {
-          mesh.instanceMatrix.addUpdateRange(
-            firstChanged * 16,
-            (activeIndices.length - firstChanged) * 16
-          );
-        }
-        mesh.instanceMatrix.needsUpdate = true;
-      }
-    }
-    state.activeIndices = activeIndices.slice();
+    clearDenseInstancedState(state);
   }
 
   _syncInstancedVisibilityHash(hash)
@@ -3006,8 +2852,8 @@ export class SLM2Loader
     activeIndices = activeIndices.filter(function(index)
     {
       return Number.isInteger(index) && index >= 0 && index < state.originalCount;
-    }).sort(function(a, b){ return a - b; });
-    this._applyInstancedVisibilityState(state, activeIndices);
+    });
+    replaceDenseInstancedSlots(state, activeIndices);
   }
 
   _syncAllLoadedInstancedVisibilityStates()
@@ -3019,7 +2865,7 @@ export class SLM2Loader
     }
   }
 
-  _updateWantedInstancedComponent(componentId, add, dirtyHashes)
+  _updateWantedInstancedComponent(componentId, add, deltasByHash)
   {
     var binding = this.instancedVisibilityBindingByComponentId[componentId];
     if (!binding || !binding.hash)
@@ -3034,48 +2880,69 @@ export class SLM2Loader
     }
     if (add)
     {
+      if (wanted.has(Number(binding.instanceIndex))) return;
       wanted.add(Number(binding.instanceIndex));
     }
     else
     {
+      if (!wanted.has(Number(binding.instanceIndex))) return;
       wanted.delete(Number(binding.instanceIndex));
       if (wanted.size === 0)
       {
         this.instancedWantedIndicesByHash.delete(binding.hash);
       }
     }
-    dirtyHashes.add(binding.hash);
+    var delta = deltasByHash.get(binding.hash);
+    if (!delta)
+    {
+      delta = { added: [], removed: [] };
+      deltasByHash.set(binding.hash, delta);
+    }
+    (add ? delta.added : delta.removed).push(Number(binding.instanceIndex));
+  }
+
+  _applyInstancedDeltasByHash(deltasByHash)
+  {
+    deltasByHash.forEach((delta, hash) =>
+    {
+      var state = this._ensureLoadedInstancedVisibilityState(hash);
+      if (!state || state.disabled) return;
+      applyDenseInstancedDelta(state, delta.added, delta.removed);
+    });
   }
 
   _applyInstancedVisibility(componentIds)
   {
-    var previous = this.lastRenderableComponentIdsForInstancing || [];
-    var next = this._normalizeIdList(componentIds);
-    var dirtyHashes = new Set();
-    var previousIndex = 0;
-    var nextIndex = 0;
-    while (previousIndex < previous.length || nextIndex < next.length)
+    var delta = this.renderComponentState.replace(componentIds, this._getComponentBitCount());
+    var deltasByHash = new Map();
+    for (var removedIndex = 0; removedIndex < delta.removed.length; ++removedIndex)
     {
-      var previousId = previousIndex < previous.length ? previous[previousIndex] : Number.POSITIVE_INFINITY;
-      var nextId = nextIndex < next.length ? next[nextIndex] : Number.POSITIVE_INFINITY;
-      if (previousId === nextId)
-      {
-        previousIndex++;
-        nextIndex++;
-      }
-      else if (previousId < nextId)
-      {
-        this._updateWantedInstancedComponent(previousId, false, dirtyHashes);
-        previousIndex++;
-      }
-      else
-      {
-        this._updateWantedInstancedComponent(nextId, true, dirtyHashes);
-        nextIndex++;
-      }
+      this._updateWantedInstancedComponent(delta.removed[removedIndex], false, deltasByHash);
     }
-    this.lastRenderableComponentIdsForInstancing = next;
-    dirtyHashes.forEach((hash) => this._syncInstancedVisibilityHash(hash));
+    for (var addedIndex = 0; addedIndex < delta.added.length; ++addedIndex)
+    {
+      this._updateWantedInstancedComponent(delta.added[addedIndex], true, deltasByHash);
+    }
+    this._applyInstancedDeltasByHash(deltasByHash);
+    return delta.count;
+  }
+
+  _applyInstancedVisibilityDelta(addedComponentIds, removedComponentIds)
+  {
+    var added = this._normalizeIdList(addedComponentIds);
+    var removed = this._normalizeIdList(removedComponentIds);
+    var delta = this.renderComponentState.applyDelta(added, removed);
+    var deltasByHash = new Map();
+    for (var removedIndex = 0; removedIndex < delta.removed.length; ++removedIndex)
+    {
+      this._updateWantedInstancedComponent(delta.removed[removedIndex], false, deltasByHash);
+    }
+    for (var addedIndex = 0; addedIndex < delta.added.length; ++addedIndex)
+    {
+      this._updateWantedInstancedComponent(delta.added[addedIndex], true, deltasByHash);
+    }
+    this._applyInstancedDeltasByHash(deltasByHash);
+    return delta.count;
   }
 
   _componentIdsToGlbIds(componentIds)
@@ -3101,22 +2968,6 @@ export class SLM2Loader
     {
       var record = scope.componentVisibilityRecords[componentId];
       return record && glbSet.has(record.globalGlbId);
-    }));
-  }
-
-  _filterComponentIdsByCurrentFrustum(componentIds)
-  {
-    if (!this.runtimeFrustumFilterEnabled || this.runtimeVisibilityMeta == null)
-    {
-      return this._normalizeIdList(componentIds);
-    }
-
-    this._updateRuntimeVisibilityFrustum(this.activeCamera);
-    var scope = this;
-    return this._normalizeIdList((componentIds || []).filter(function(componentId)
-    {
-      var record = scope.componentVisibilityRecords[componentId];
-      return record && scope._intersectsFrustumWithCenterSize(record.bounds);
     }));
   }
 
@@ -3176,6 +3027,7 @@ export class SLM2Loader
       renderInfos,
       this._getRenderVisibilityOptions('global-glb')
     );
+    this.renderGlbState.replace(renderGlbIds, this._getGlbBitCount());
     this._applyInstancedVisibility(renderComponentIds);
     this._updateRuntimeVisibilityFrustum(this.activeCamera);
 
@@ -3263,8 +3115,6 @@ export class SLM2Loader
       rawGlbIds: this._normalizeIdList(payload.rawGlbIds),
       scheduledComponentIds: this._normalizeIdList(payload.scheduledComponentIds),
       scheduledGlbIds: this._normalizeIdList(payload.scheduledGlbIds),
-      renderComponentIds: this._normalizeIdList(payload.renderComponentIds),
-      renderGlbIds: this._normalizeIdList(payload.renderGlbIds),
       prefetchComponentIds: this._normalizeIdList(payload.prefetchComponentIds),
       prefetchGlbIds: this._normalizeIdList(payload.prefetchGlbIds),
       priorityItems: this._sanitizePriorityItems(payload.priorityItems),
@@ -3281,8 +3131,8 @@ export class SLM2Loader
       rawGlbIds: this.lastBenchmarkVisibilityIds.rawGlbIds.slice(),
       scheduledComponentIds: this.lastBenchmarkVisibilityIds.scheduledComponentIds.slice(),
       scheduledGlbIds: this.lastBenchmarkVisibilityIds.scheduledGlbIds.slice(),
-      renderComponentIds: this.lastBenchmarkVisibilityIds.renderComponentIds.slice(),
-      renderGlbIds: this.lastBenchmarkVisibilityIds.renderGlbIds.slice(),
+      renderComponentIds: this.renderComponentState.toIds(),
+      renderGlbIds: this.renderGlbState.toIds(),
       prefetchComponentIds: this.lastBenchmarkVisibilityIds.prefetchComponentIds.slice(),
       prefetchGlbIds: this.lastBenchmarkVisibilityIds.prefetchGlbIds.slice(),
       priorityItems: this.lastBenchmarkVisibilityIds.priorityItems.slice(),
@@ -3315,6 +3165,10 @@ export class SLM2Loader
         wantedHashCount: this.currentDownloadWantedHashes ? this.currentDownloadWantedHashes.size : 0,
         pendingSceneInsertions: this._getPendingSceneInsertionCount(),
         activeDirectLoadCount: this.activeDirectLoadCount,
+        pendingParseCount: this._getPendingGlbParseCount(),
+        pendingParseMB: this.pendingGlbParseBytes / 1048576,
+        activeParseCount: this.activeGlbParseCount,
+        parseConcurrency: this.glbParseConcurrency,
         prefetchQueueLength: this.pendingPrefetchList.length,
         prefetchPreview: this.pendingPrefetchList.slice(0, 8).map(function(item)
         {
@@ -3331,14 +3185,15 @@ export class SLM2Loader
         lastTextureTaskMs: this.lastTextureTaskMs,
         staleCachedCount: this.lastLoadMetrics.staleCachedCount,
         staleDroppedCount: this.lastLoadMetrics.staleDroppedCount,
+        promotedGlbCount: this.lastLoadMetrics.promotedGlbCount,
+        promotedParseCount: this.lastLoadMetrics.promotedParseCount,
+        promotedInsertionCount: this.lastLoadMetrics.promotedInsertionCount,
         httpAdaptive: Object.assign({}, this.httpAdaptiveState, {
           enabled: this.httpAdaptiveConcurrencyEnabled,
           minConcurrency: this.httpAdaptiveMinConcurrency,
           maxConcurrency: this.httpAdaptiveMaxConcurrency,
           prefetchMinConcurrency: this.httpAdaptivePrefetchMinConcurrency,
           prefetchMaxConcurrency: this.httpAdaptivePrefetchMaxConcurrency,
-          saturationMaxConcurrency: this.neuralBandwidthSaturationMaxConcurrency,
-          saturationPrefetchMaxConcurrency: this.neuralBandwidthSaturationPrefetchMaxConcurrency,
         }),
       },
       neural: {
@@ -3346,7 +3201,6 @@ export class SLM2Loader
         enabled: this.useNeuralPVS,
         neuralBackend: this.neuralBackend,
         debugNoCache: this.neuralDebugNoCache,
-        loadLimitsDisabled: Boolean(this.neuralDisableLoadLimits),
         backend: this.neuralPVS ? this.neuralPVS.backend : null,
         ready: this.neuralPVS ? this.neuralPVS.isReady : false,
         modelInfo: this.neuralPVS ? (this.neuralPVS.modelInfo || (this.neuralPVS.lastPredictTimings ? this.neuralPVS.lastPredictTimings.modelInfo : null)) : null,
@@ -3354,13 +3208,11 @@ export class SLM2Loader
         predictTimings: this.neuralPVS ? this.neuralPVS.lastPredictTimings : null,
         filterTimings: this.neuralPVS ? this.neuralPVS.lastFilterTimings : null,
         idMode: this.neuralPVSIdMode,
-        resourceTransport: this.neuralUseResourcesWS ? 'resourcesWS' : 'http',
-        resourcesWSConfigured: Boolean(this.resourcesWS),
-        resourcesWSConnected: Boolean(this.connectedAssets),
-        resourceWS: this._getNeuralWSStats(),
+        resourceTransport: 'http',
         cpuPerfMode: this.cpuPerfMode,
         renderVisibility: this.renderVisibilitySystem ? this.renderVisibilitySystem.lastStats : null,
         renderRefresh: this.lastRenderRefreshStats,
+        staticBatching: this.staticSceneOptimizer.getStats(),
         instancedBindings: this._getInstancedBindingStats(),
         actualRender: this._getActualRenderStats(),
         renderPolicy: this.getNeuralRenderPolicy(),
@@ -3649,35 +3501,21 @@ export class SLM2Loader
           filtered.idMode || this.neuralPVSIdMode
         );
         var previousIds = this.lastBenchmarkVisibilityIds || {};
-        this._updateBenchmarkVisibilityIds({
-          serial: previousIds.serial,
-          mode: 'neural',
-          rawComponentIds: previousIds.rawComponentIds || [],
-          rawGlbIds: previousIds.rawGlbIds || [],
-          scheduledComponentIds: previousIds.scheduledComponentIds || [],
-          scheduledGlbIds: previousIds.scheduledGlbIds || [],
-          renderComponentIds: applied.renderComponentModelList,
-          renderGlbIds: applied.renderModelList,
-          prefetchComponentIds: previousIds.prefetchComponentIds || [],
-          prefetchGlbIds: previousIds.prefetchGlbIds || [],
-          priorityItems: previousIds.priorityItems || [],
-          candidateSelection: previousIds.candidateSelection || null,
-        });
         this._recordVisibilityMetrics({
           mode: 'neural',
           idMode: filtered.idMode || this.neuralPVSIdMode,
           backend: filtered.backend,
           latencyMs: performance.now() - filterStartedAt,
           rawCount: previousIds.rawGlbIds ? previousIds.rawGlbIds.length : 0,
-          visibleCount: applied.renderModelList.length,
+          visibleCount: applied.renderGlbCount,
           rawGlbCount: previousIds.rawGlbIds ? previousIds.rawGlbIds.length : 0,
-          visibleGlbCount: applied.renderModelList.length,
+          visibleGlbCount: applied.renderGlbCount,
           rawInstanceCount: previousIds.rawComponentIds ? previousIds.rawComponentIds.length : 0,
-          visibleInstanceCount: applied.renderComponentModelList.length,
+          visibleInstanceCount: applied.renderComponentCount,
           cameraHash: cameraHash,
           notes: {
             cachedModelPrediction: true,
-            renderCandidateGlbCount: applied.renderModelList.length,
+            renderCandidateGlbCount: applied.renderGlbCount,
             renderResidentCount: this.renderVisibilitySystem.visibleHashes.size,
           },
         });
@@ -3698,19 +3536,12 @@ export class SLM2Loader
     {
       this.startupSceneCullingLogCount += 1;
       startupLog('slm2:sceneCulling:enter', {
-        connected: this.connected,
         useNeuralPVS: this.useNeuralPVS,
         fullLoadMode: this.fullLoadMode,
         sceneInitialized: this.isSceneInitialized,
         neuralReady: Boolean(this.neuralPVS && this.neuralPVS.isReady),
       });
     }
-    if(!this.connected && !this.useNeuralPVS && !this.fullLoadMode && this.cullingMode !== 'frustum')
-    {
-        if (logThisCulling) startupLog('slm2:sceneCulling:return:not-connected');
-        return;
-    }
-
     if (this.isSceneInitialized == false)
     {
       if (logThisCulling) startupLog('slm2:sceneCulling:return:not-initialized');
@@ -3762,13 +3593,6 @@ export class SLM2Loader
       this.modelCacheMgr.setSchedulingStrategy('auto');
     }
 
-    if (this.lastCameraPosHash == undefined)
-    {
-      this.lastCameraPosHash = null;
-      this.lastCameraRotHash = null;
-      this.lastScreenSizeHash = null;
-    }
-
     var posHashResolution = 1;
     var rotHashResolution = 5;
     var cameraPosHash = (this.activeCamera.position.x * posHashResolution).toFixed(0) + "-" + 
@@ -3780,58 +3604,18 @@ export class SLM2Loader
 
     var screenSizeHash = this.clientWidth + "-" + this.clientHeight;
 
-    if (this.disableCameraHash ||
-        this.useNeuralPVS ||
-        (cameraPosHash != this.lastCameraPosHash ||
+    if (this.useNeuralPVS ||
+        cameraPosHash != this.lastCameraPosHash ||
         cameraRotHash != this.lastCameraRotHash ||
-        screenSizeHash != this.lastScreenSizeHash) || 
-        this.requestId < 2 // 初始阶段强制刷新两次
-        )
+        screenSizeHash != this.lastScreenSizeHash)
     {
       
       this.lastCameraPosHash = cameraPosHash;
       this.lastCameraRotHash = cameraRotHash;
       this.lastScreenSizeHash = screenSizeHash;
 
-      const viewMatrix = this.backCamera.matrixWorldInverse;
-      const projectionMatrix = this.backCamera.projectionMatrix;
-      const mvpMatrix = new Matrix4();
-      mvpMatrix.multiplyMatrices(projectionMatrix, viewMatrix);
-
-      const rootMatrix = this.rootScene.matrixWorld;
-
-      mvpMatrix.multiply(rootMatrix);
-
-      // 创建一个 Matrix4 对象
-      let mvp = [];
-
-      // 遍历 elements 数组，将每个元素精度转换成两位小数
-      mvpMatrix.elements.map(value => {
-          mvp.push(value); // 保留两位小数，并将字符串转换回数字
-      });
-
-      // 放大视口，以便获得更为富裕的可见集合，在摄像机转动时减少构件缺失
-      var CameraFrameUpscale = 1.2;
-      var clientWidth = Math.round(this.clientWidth * CameraFrameUpscale);
-      var clientHeight = Math.round(this.clientHeight * CameraFrameUpscale);
-
       var newCameraHash = cameraPosHash + ':' + cameraRotHash;
-      let camera_data = {
-          "type": 0,
-          "id": this.requestId,
-          "mvp": mvp,
-          "width": clientWidth, 
-          "height": clientHeight,
-          "cull": 0, // 0: no cull, 1: front cull, 2: back cull
-          "hash": (this.rvCameraHash == null ? '0' : newCameraHash)
-      };
-
-      if (this.neuralDebugLogs) console.log(camera_data);
-
-      // Update with new hash
       this.rvCameraHash = newCameraHash;
-
-      let requestSentToServer = false;
 
       if (this.cullingMode === 'frustum')
       {
@@ -3854,7 +3638,7 @@ export class SLM2Loader
       }
 
       if (this.useNeuralPVS) {
-        // Use local Neural Network prediction instead of remote rcServer WebSocket
+        // Run one local prediction for the current view-cell anchor.
         if (this.neuralPVS && this.neuralPVS.isReady) {
           if (logThisCulling) startupLog('slm2:sceneCulling:neural-ready');
           this.neuralPVSInitWarningShown = false;
@@ -4015,288 +3799,15 @@ export class SLM2Loader
             const loadError = this.neuralPVS.initError && this.neuralPVS.initError.message
               ? this.neuralPVS.initError.message
               : this.neuralPVS.initError;
-            console.warn('[NeuralPVS] Model failed to initialize; culling=neural does not use rvcServer fallback.',
+            console.warn('[NeuralPVS] Model failed to initialize; neural culling is unavailable.',
               loadError ? `Last load error: ${loadError}` : '');
             this.neuralPVSInitFallbackWarningShown = true;
           }
           return;
         }
-      } else {
-        // Use rvcServer culling.
-        this.ws.send(JSON.stringify(camera_data));
-        requestSentToServer = true;
-      }
-
-      if (requestSentToServer) {
-        this.requestMap[camera_data.id] = {
-          "start": new Date().getTime(),
-          "foi_received": 0,
-          "foi_sent": 0,
-          "end": 0,
-          "mode": 'rcserver'
-        }
-
-        this.requestId++;
       }
     }
   }
-
-  fetchCameraVisibilityList(callback)
-  {
-    this.disableCameraHash = true;
-
-    this.sceneCulling();
-
-    this.cullingCallback = function(modelList, weightList, idMode)
-    {
-      if (callback)
-      {
-        var visibilityList = 
-        {
-          modelList: modelList,
-          weightList: weightList
-        };
-
-        var objCount = this._getMaxModelId(idMode || this.rcServerIdMode);
-        var idFlagList = [];
-        for (var i = 0; i <= objCount; ++i)
-        {
-          idFlagList.push(false);
-        }
-
-        var allIds = [];
-
-        for (var i = 0; i < modelList.length; ++i)
-        {
-          idFlagList[modelList[i]] = true;
-
-          allIds.push(modelList[i]);
-        }
-
-        // 依次添加不可见的对象
-        for (var i = 0; i < idFlagList.length; ++i)
-        {
-          if (idFlagList[i] == false)
-          {
-            allIds.push(i);
-          }
-        }
-
-        callback(allIds);
-      }
-    };
-
-    this.disableCameraHash = false;
-  }
-
-  startConnectAsset()
-  {
-    startupLog('slm2:assetsWS:connect-start', {
-      usePool: this._shouldUseNeuralResourceWSPool(),
-      resourcesWS: this.resourcesWS,
-    });
-    if (this._shouldUseNeuralResourceWSPool())
-    {
-      this._ensureNeuralResourceWSPool();
-      return;
-    }
-
-    if (this.resourcesWS != undefined && this.resourcesWS != null && this.resourcesWS !== '')
-    {
-      var scope = this;
-
-      this.wsAssets = new WebSocket(this.resourcesWS)
-      this.wsAssets.binaryType = 'arraybuffer';
-      this.wsAssets.onopen = (evt) => {
-        scope.connectedAssets = true
-          startupLog('slm2:assetsWS:connect-succeed');
-          console.log("assets server connect succeed")
-      }
-      this.wsAssets.onclose = (evt) => 
-      {
-        scope.connectedAssets = false;
-        console.log('assets onclose');
-      }
-
-      this.wsAssets.onmessage = function (event) 
-      {
-        var arrayBuffer = event.data;
-
-        var bufferOffset = 0;
-
-        const uint32View = new Uint32Array(arrayBuffer.slice(bufferOffset, 4));
-        bufferOffset += 4;
-
-        var descJsonLength = uint32View[0];
-
-        var jsonDescString =  new TextDecoder().decode(arrayBuffer.slice(bufferOffset, bufferOffset + descJsonLength));
-        bufferOffset += descJsonLength;
-
-        var jsonDesc = JSON.parse(jsonDescString);
-
-        var dataBuffers = [];
-
-        for (var i = 0; i < jsonDesc.bufLengths.length; ++i)
-        {
-          var gltfArrayBuffer = arrayBuffer.slice(bufferOffset, bufferOffset + jsonDesc.bufLengths[i]);
-          bufferOffset += jsonDesc.bufLengths[i];
-
-          dataBuffers.push(gltfArrayBuffer);
-        }
-
-        if (scope.wsAssetsCallbacks && scope.wsAssetsCallbacks[jsonDesc.type])
-        {
-          scope.wsAssetsCallbacks[jsonDesc.type](dataBuffers);
-
-          scope.wsAssetsCallbacks[jsonDesc.type] = null;
-        }
-      };
-    }
-  }
-
-  tryStaticLoading()
-  {
-    if (this.schedulingStrategy == 'static')
-    {
-      var scope = this;
-
-      var fileLoader = new FileLoader();
-      fileLoader.load(this.resourcesBaseUrl + "/initial.json", function(data) 
-      {
-        var initialJson = JSON.parse(data);
-
-        var modelList = initialJson.id;
-        var weightList  = initialJson.weight;
-
-        scope.refreshLoadingTask(modelList, weightList, scope.defaultVisibilityIdMode);
-      });
-    }
-  }
-
-  startConnect()
-  {
-    var scope = this;
-
-    this.loadingTimescale = 1;
-
-    this.requestId = 0;
-    this.requestMap = {};
-
-    this.server_ip = this.rcServerAddress;//'ws://127.0.0.1:5600';
-
-    if (this.server_ip == undefined)
-    {
-      this.tryStaticLoading();
-
-      return;
-    }
-
-    this.ws = new WebSocket(this.server_ip)
-    this.ws.binaryType = 'arraybuffer';
-    this.ws.onopen = (evt) => {
-      scope.connected = true
-      console.log("rc server connect succeed")
-    }
-    this.ws.onclose = (evt) => 
-    {
-      scope.connected = false;
-      console.log('onclose');
-    }
-
-    this.ws.onmessage = function (event) 
-    {
-      const arrayBuffer = event.data;
-      const dataView = new DataView(arrayBuffer);
-      const decoder = new TextDecoder('utf-8'); // 假设数据是以UTF-8编码的
-      const jsonString = decoder.decode(dataView);
-      const jsonObject = JSON.parse(jsonString);
-      const modelList = JSON.parse(jsonObject.list);
-      const weightList = JSON.parse(jsonObject.weight);
-      
-      if (scope.requestMap[jsonObject.id])
-      {
-        scope.requestMap[jsonObject.id].foi_received = jsonObject.start;
-        scope.requestMap[jsonObject.id].foi_sent = jsonObject.end;
-        scope.requestMap[jsonObject.id].end = new Date().getTime();
-      }
-
-      var requestMetrics = scope.requestMap[jsonObject.id];
-      if (scope.useNeuralPVS && scope.neuralPVS && scope.neuralPVS.isReady)
-      {
-        if (scope.neuralDebugLogs) console.log('[SLM2Loader] Ignoring rcServer response because neural mode is active and ready.', {
-          requestId: jsonObject.id,
-          requestMode: requestMetrics ? requestMetrics.mode : null,
-        });
-        delete scope.requestMap[jsonObject.id];
-        return;
-      }
-
-      if (scope.cullingCallback)
-      {
-        scope.cullingCallback(modelList, weightList, scope.rcServerIdMode);
-
-        scope.cullingCallback = null;
-      }
-      else
-      {
-        scope.refreshLoadingTask(modelList, weightList, scope.defaultVisibilityIdMode);
-      }
-
-      requestMetrics = scope.requestMap[jsonObject.id];
-      scope._recordVisibilityMetrics({
-        mode: 'rcserver',
-        idMode: scope.defaultVisibilityIdMode,
-        backend: 'websocket',
-        latencyMs: requestMetrics ? (requestMetrics.end - requestMetrics.start) : 0,
-        rawCount: Array.isArray(modelList) ? modelList.length : 0,
-        visibleCount: Array.isArray(modelList) ? modelList.length : 0,
-        rawGlbCount: Array.isArray(modelList) ? new Set(modelList.map(function(componentId)
-        {
-          var componentRecord = scope.componentVisibilityRecords[componentId];
-          return componentRecord ? componentRecord.globalGlbId : componentId;
-        })).size : 0,
-        visibleGlbCount: Array.isArray(modelList) ? new Set(modelList.map(function(componentId)
-        {
-          var componentRecord = scope.componentVisibilityRecords[componentId];
-          return componentRecord ? componentRecord.globalGlbId : componentId;
-        })).size : 0,
-        rawInstanceCount: Array.isArray(modelList) ? modelList.length : 0,
-        visibleInstanceCount: Array.isArray(modelList) ? modelList.length : 0,
-        requestId: jsonObject.id,
-        cameraHash: scope.rvCameraHash,
-        notes: requestMetrics ? {
-          foiReceived: requestMetrics.foi_received,
-          foiSent: requestMetrics.foi_sent,
-        } : null,
-      });
-      scope._updateBenchmarkVisibilityIds({
-        mode: 'rcserver',
-        rawComponentIds: modelList || [],
-        rawGlbIds: (modelList || []).map(function(componentId)
-        {
-          var componentRecord = scope.componentVisibilityRecords[componentId];
-          return componentRecord ? componentRecord.globalGlbId : null;
-        }),
-        scheduledComponentIds: modelList || [],
-        scheduledGlbIds: (modelList || []).map(function(componentId)
-        {
-          var componentRecord = scope.componentVisibilityRecords[componentId];
-          return componentRecord ? componentRecord.globalGlbId : null;
-        }),
-        renderComponentIds: modelList || [],
-        renderGlbIds: (modelList || []).map(function(componentId)
-        {
-          var componentRecord = scope.componentVisibilityRecords[componentId];
-          return componentRecord ? componentRecord.globalGlbId : null;
-        }),
-        prefetchComponentIds: [],
-        prefetchGlbIds: [],
-      });
-      delete scope.requestMap[jsonObject.id];
-
-      if (scope.DebugMode) console.time('loading');
-    };
-  };
 
   updateLoading(dt)
   {
@@ -4310,13 +3821,13 @@ export class SLM2Loader
       {
         this.cullingUpdateDelta = 1000;
       }
-      if (this.cullingUpdateDelta > 80)
+      this.cullingUpdateDelta += dt;
+      if (this.cameraUpdatePending && this.cullingUpdateDelta > 80)
       {
         this.sceneCulling();
+        this.cameraUpdatePending = false;
         this.cullingUpdateDelta = 0;
       }
-  
-      this.cullingUpdateDelta += dt;
 
       this.processLoadingList();
     }
@@ -4369,7 +3880,7 @@ export class SLM2Loader
     {
       renderOptions = {
         attachVisibleToScene: true,
-        detachHiddenFromScene: true,
+        detachHiddenFromScene: false,
         renderRoot: this.rootScene,
       };
     }
@@ -4378,7 +3889,7 @@ export class SLM2Loader
     return renderOptions;
   }
 
-  _startDirectModelLoad(modelInfo, targetDirectLoadConcurrency)
+  _startDirectModelDownload(modelInfo)
   {
     var scope = this;
     var modelDesc = modelInfo != undefined ? scope.getModelDesc(modelInfo) : null;
@@ -4387,189 +3898,110 @@ export class SLM2Loader
     {
       return false;
     }
-    if (modelDesc.hash && this.neuralWSHTTPFallbackHashes)
-    {
-      this.neuralWSHTTPFallbackHashes.delete(modelDesc.hash);
-    }
-
     var capturedModel = modelInfo;
-    var capturedLoaderIdx = this.directLoaderCursor % targetDirectLoadConcurrency;
-    this.directLoaderCursor++;
     var capturedModelDesc = modelDesc;
-    var directLoadStartedAt = performance.now();
-    var directLoadProgressBytes = 0;
+    var capturedPipelineSerial = this.resourcePipelineSerial;
+    var downloadStartedAt = performance.now();
+    var controller = new AbortController();
     if (capturedModelDesc && capturedModelDesc.hash)
     {
       scope.inflightModelHashes.add(capturedModelDesc.hash);
+      scope.directDownloadControllers.set(capturedModelDesc.hash, {
+        controller: controller,
+        modelDesc: capturedModelDesc,
+      });
     }
     this.activeDirectLoadCount++;
 
-    scope.gltfLoaders[capturedLoaderIdx].load(modelURL, (gltf) =>
+    fetch(modelURL, {
+      signal: controller.signal,
+      mode: 'cors',
+      credentials: 'same-origin',
+    }).then(function(response)
     {
-      var directLoadEndedAt = performance.now();
-      var sampleDesc = directLoadProgressBytes > 0
-        ? Object.assign({}, capturedModelDesc || {}, { sizeKB: directLoadProgressBytes / 1024 })
-        : capturedModelDesc;
-      scope._recordHttpDirectLoadSample(modelURL, directLoadStartedAt, directLoadEndedAt, sampleDesc, true);
-      scope.processLaodedGltf(gltf, capturedModelDesc);
-      scope.activeDirectLoadCount = Math.max(0, scope.activeDirectLoadCount - 1);
-    }, function(progressEvent)
-    {
-      if (progressEvent && Number(progressEvent.loaded) > 0)
+      if (!response.ok)
       {
-        directLoadProgressBytes = Math.max(directLoadProgressBytes, Number(progressEvent.loaded));
+        throw new Error('HTTP ' + response.status + ' for ' + modelURL);
       }
-    }, function(err)
-    {
-      var directLoadFailedAt = performance.now();
-      var sampleDesc = directLoadProgressBytes > 0
-        ? Object.assign({}, capturedModelDesc || {}, { sizeKB: directLoadProgressBytes / 1024 })
-        : capturedModelDesc;
-      scope._recordHttpDirectLoadSample(modelURL, directLoadStartedAt, directLoadFailedAt, sampleDesc, false);
-      console.error('[LoadError]', modelURL, err);
-      if (capturedModelDesc && capturedModelDesc.hash)
+      var contentType = String(response.headers.get('content-type') || '').toLowerCase();
+      if (contentType.indexOf('text/html') >= 0)
       {
-        scope.inflightModelHashes.delete(capturedModelDesc.hash);
+        throw new Error('Expected GLB but received HTML from ' + modelURL);
       }
+      return response.arrayBuffer();
+    }).then(function(buffer)
+    {
+      var downloadEndedAt = performance.now();
+      if (capturedPipelineSerial !== scope.resourcePipelineSerial)
+      {
+        return;
+      }
+      var byteLength = Number(buffer && buffer.byteLength || 0);
+      var sampleDesc = byteLength > 0
+        ? Object.assign({}, capturedModelDesc || {}, { sizeKB: byteLength / 1024 })
+        : capturedModelDesc;
+      scope._recordHttpDirectLoadSample(modelURL, downloadStartedAt, downloadEndedAt, sampleDesc, true);
 
-      if (scope.fullLoadMode && capturedModel) {
-        if (!scope._failedRetries) scope._failedRetries = {};
-        var modelKey = capturedModel.id !== undefined ? capturedModel.id : modelURL;
-        var retries = scope._failedRetries[modelKey] || 0;
-        if (retries < 3) {
-          scope._failedRetries[modelKey] = retries + 1;
-          scope.modelToLoadList.push(capturedModel);
-          console.warn('[FullLoadMode] Re-queued failed model (attempt ' + (retries + 1) + '/3): ' + modelURL);
-        } else {
-          console.error('[FullLoadMode] Gave up on model after 3 retries: ' + modelURL);
+      if (capturedModelDesc && capturedModelDesc.hash && !scope._isHashWantedForDownload(capturedModelDesc.hash) &&
+          !scope._shouldRetainStaleDownload(capturedModelDesc, 'http-raw'))
+      {
+        scope._clearInflightHash(capturedModelDesc);
+        scope._recordStaleDownloadDrop(capturedModelDesc, 'stale-http-response');
+        return;
+      }
+      scope.pendingGlbParseQueue.push({
+        buffer: buffer,
+        modelDesc: capturedModelDesc,
+        byteLength: byteLength,
+        basePath: LoaderUtils.extractUrlBase(modelURL),
+        source: 'http',
+        receivedAt: downloadEndedAt,
+        pipelineSerial: capturedPipelineSerial,
+      });
+      scope.pendingGlbParseBytes += byteLength;
+      scope.processGlbParseQueue();
+    }).catch(function(err)
+    {
+      var aborted = err && err.name === 'AbortError';
+      if (!aborted && capturedPipelineSerial === scope.resourcePipelineSerial)
+      {
+        scope._recordHttpDirectLoadSample(modelURL, downloadStartedAt, performance.now(), capturedModelDesc, false);
+        scope._clearInflightHash(capturedModelDesc);
+      }
+      if (!aborted && capturedPipelineSerial === scope.resourcePipelineSerial)
+      {
+        console.error('[LoadError]', modelURL, err);
+        if (capturedModel && capturedModelDesc && capturedModelDesc.hash
+            && scope._isHashWantedForDownload(capturedModelDesc.hash)) {
+          if (!scope._failedRetries) scope._failedRetries = {};
+          var modelKey = capturedModelDesc.hash;
+          var retries = scope._failedRetries[modelKey] || 0;
+          if (retries < 3) {
+            scope._failedRetries[modelKey] = retries + 1;
+            scope.modelToLoadList.push(capturedModel);
+          }
         }
       }
-
+    }).finally(function()
+    {
+      if (capturedModelDesc && capturedModelDesc.hash)
+      {
+        var activeEntry = scope.directDownloadControllers.get(capturedModelDesc.hash);
+        if (activeEntry && activeEntry.controller === controller)
+        {
+          scope.directDownloadControllers.delete(capturedModelDesc.hash);
+        }
+      }
       scope.activeDirectLoadCount = Math.max(0, scope.activeDirectLoadCount - 1);
+      scope.processLoadingList();
     });
 
     return true;
   }
 
-  _dispatchNeuralResourceWSBatches()
-  {
-    var pool = this._ensureNeuralResourceWSPool();
-    if (!pool || !pool.hasReadyConnection())
-    {
-      return 0;
-    }
-
-    var started = 0;
-    while (this.modelToLoadList.length > 0 &&
-      pool.hasReadyConnection() &&
-      pool.getInFlightModelCount() < this.neuralWSMaxInFlightModels &&
-      this.pendingWSParseBytes < this.neuralWSMaxPendingParseBytes &&
-      (this.neuralDisableLoadLimits || this._getPendingSceneInsertionCount() < this.maxPendingSceneInsertions))
-    {
-      var reqData = [];
-      var reqDescs = [];
-      while (this.modelToLoadList.length > 0 &&
-        reqData.length < this.neuralWSBatchSize &&
-        (pool.getInFlightModelCount() + reqData.length) < this.neuralWSMaxInFlightModels)
-      {
-        var nextModel = this.modelToLoadList.pop();
-        if (nextModel && nextModel.forceHttp)
-        {
-          this.neuralWSHTTPFallbackQueue.push(nextModel);
-          continue;
-        }
-
-        var modelDesc = nextModel != undefined ? this.getModelDesc(nextModel) : null;
-        if (!modelDesc || modelDesc.url == null)
-        {
-          continue;
-        }
-        modelDesc.sourceModelInfo = nextModel;
-
-        var reqItem = this._buildResourceWSRequestItem(modelDesc);
-        if (!reqItem)
-        {
-          this._queueNeuralWSHttpFallback(modelDesc, 'invalid-ws-request-item');
-          continue;
-        }
-
-        if (modelDesc.hash)
-        {
-          this.inflightModelHashes.add(modelDesc.hash);
-        }
-        reqData.push(reqItem);
-        reqDescs.push(modelDesc);
-      }
-
-      if (reqData.length === 0)
-      {
-        break;
-      }
-
-      var dispatched = pool.dispatchBatch(reqData, reqDescs);
-      if (!dispatched)
-      {
-        for (var i = 0; i < reqDescs.length; ++i)
-        {
-          this._retryOrFallbackNeuralWSModel(reqDescs[i], 'dispatch-failed');
-        }
-        break;
-      }
-      started++;
-    }
-    return started;
-  }
-
-  _moveNeuralModelsToHttpFallback(limit)
-  {
-    var moved = 0;
-    while (this.modelToLoadList.length > 0 && moved < limit)
-    {
-      var item = this.modelToLoadList.pop();
-      if (!item)
-      {
-        continue;
-      }
-      this.neuralWSHTTPFallbackQueue.push(Object.assign({}, item, { forceHttp: true }));
-      moved++;
-    }
-    return moved;
-  }
-
-  _processNeuralWSHttpFallbackLoads(targetDirectLoadConcurrency)
-  {
-    var started = 0;
-    while (this.neuralWSHTTPFallbackQueue.length > 0 &&
-      this.activeDirectLoadCount < targetDirectLoadConcurrency &&
-      (this.neuralDisableLoadLimits || this._getPendingSceneInsertionCount() < this.maxPendingSceneInsertions))
-    {
-      var modelInfo = this.neuralWSHTTPFallbackQueue.shift();
-      if (!modelInfo)
-      {
-        continue;
-      }
-
-      var decodedForFallback = this.decodeModelInfo(modelInfo);
-      var startedOne = this._startDirectModelLoad(modelInfo, targetDirectLoadConcurrency);
-      if (!startedOne && decodedForFallback && decodedForFallback.hash && this.neuralWSHTTPFallbackHashes)
-      {
-        this.neuralWSHTTPFallbackHashes.delete(decodedForFallback.hash);
-      }
-      if (startedOne)
-      {
-        started++;
-      }
-    }
-    return started;
-  }
-
   processLoadingList()
   {
     var scope = this;
-
-    var hasResourceWS = this.resourcesWS != undefined && this.resourcesWS != null && this.resourcesWS !== '';
-    var useNeuralResourceWSPool = this._shouldUseNeuralResourceWSPool();
-    var loadFromStreamingServer = hasResourceWS && !this.useNeuralPVS && !this.fullLoadMode;
 
     var targetDirectLoadConcurrency = this.fullLoadMode
       ? this.fullLoadDirectLoadConcurrency
@@ -4580,131 +4012,60 @@ export class SLM2Loader
       targetDirectLoadConcurrency = this.neuralPrefetchDirectLoadConcurrency;
       prefetchOnlyDirectLoads = true;
       while (this.pendingPrefetchList.length > 0 &&
-        (this.neuralDisableLoadLimits || this.modelToLoadList.length < this.neuralPrefetchDirectLoadConcurrency))
+        this.modelToLoadList.length < this.neuralPrefetchDirectLoadConcurrency)
       {
         this.modelToLoadList.push(this.pendingPrefetchList.shift());
       }
     }
     this.maxPendingSceneInsertions = this.useNeuralPVS
-      ? (this.neuralDisableLoadLimits ? Number.POSITIVE_INFINITY : this.neuralMaxPendingSceneInsertions)
+      ? this.neuralMaxPendingSceneInsertions
       : 24;
     this.loadIntegrationBudgetMs = this.useNeuralPVS
-      ? this.neuralV2LoadIntegrationBudgetMs
+      ? this.neuralLoadIntegrationBudgetMs
       : 6;
-    targetDirectLoadConcurrency = this.useNeuralPVS && this.neuralDisableLoadLimits
-      ? this._getUnlimitedNeuralDirectLoadTarget(prefetchOnlyDirectLoads)
-      : this._getHttpDirectLoadConcurrency(targetDirectLoadConcurrency, prefetchOnlyDirectLoads);
+    targetDirectLoadConcurrency = this._getHttpDirectLoadConcurrency(
+      targetDirectLoadConcurrency,
+      prefetchOnlyDirectLoads
+    );
 
     if (this.gltfLoaders == undefined)
     {
       this.gltfLoaders = [];
     }
 
-    while (this.gltfLoaders.length < targetDirectLoadConcurrency)
+    while (this.gltfLoaders.length < this.glbParseConcurrency)
     {
       this.gltfLoaders.push(new GLTFLoader()
-      .setCrossOrigin('anonymous')
-      .setDRACOLoader( DRACO_LOADER )
-      .setKTX2Loader( KTX2_LOADER.detectSupport( this.renderer ) )
-      .setMeshoptDecoder( MeshoptDecoder ));
+        .setCrossOrigin('anonymous')
+        .setDRACOLoader(DRACO_LOADER)
+        .setKTX2Loader(KTX2_LOADER.detectSupport(this.renderer))
+        .setMeshoptDecoder(MeshoptDecoder));
     }
 
-    while (this.gltfLoaders.length < this.neuralWSParseConcurrency)
-    {
-      this.gltfLoaders.push(new GLTFLoader()
-      .setCrossOrigin('anonymous')
-      .setDRACOLoader( DRACO_LOADER )
-      .setKTX2Loader( KTX2_LOADER.detectSupport( this.renderer ) )
-      .setMeshoptDecoder( MeshoptDecoder ));
-    }
+    this.processGlbParseQueue();
 
-    this.processNeuralWSParseQueue();
-
-    if (useNeuralResourceWSPool)
-    {
-      var pool = this._ensureNeuralResourceWSPool();
-      if (this.neuralDisableLoadLimits || this._getPendingSceneInsertionCount() < this.maxPendingSceneInsertions)
-      {
-        this._dispatchNeuralResourceWSBatches();
-      }
-
-      var wsStats = pool ? pool.getStats() : {};
-      var poolUnavailable = this.neuralWSFallbackHttp &&
-        this.modelToLoadList.length > 0 &&
-        Number(wsStats.readyConnections || 0) === 0 &&
-        Number(wsStats.inFlightBatches || 0) === 0 &&
-        this.neuralWSStartedAt > 0 &&
-        (performance.now() - this.neuralWSStartedAt) >= this.neuralWSFallbackDelayMs;
-      if (poolUnavailable)
-      {
-        this._moveNeuralModelsToHttpFallback(Math.max(1, targetDirectLoadConcurrency - this.activeDirectLoadCount));
-      }
-      this._processNeuralWSHttpFallbackLoads(targetDirectLoadConcurrency);
-      return;
-    }
-
-    if (this.modelToLoadList.length == 0 ||
-        (loadFromStreamingServer && this.modelIsLoading == true) ||
-        (!this.neuralDisableLoadLimits && this._getPendingSceneInsertionCount() >= this.maxPendingSceneInsertions))
+    if (this.modelToLoadList.length == 0
+        || this._getPendingSceneInsertionCount() >= this.maxPendingSceneInsertions
+        || this.pendingGlbParseBytes >= this.maxPendingGlbParseBytes)
     {
       return;
     }
 
-    if (scope.batchModels == undefined)
-    {
-      scope.batchModels = {};
-    }
-    scope.batchModels = {};
-    scope.batchModelDescs = {};
-
-    var directLoadsStarted = 0;
     while (this.modelToLoadList.length > 0)
     {
-      if (!loadFromStreamingServer && this.activeDirectLoadCount >= targetDirectLoadConcurrency)
+      if (this.activeDirectLoadCount >= targetDirectLoadConcurrency)
       {
         break;
       }
 
       var nextModel = this.modelToLoadList.pop();
-
       var modelDesc = nextModel != undefined ? scope.getModelDesc(nextModel) : null;
-
       var modelURL = modelDesc != null ? modelDesc.url : null;
 
-      if (modelURL != null)
+      if (modelURL != null && this._startDirectModelDownload(nextModel))
       {
-        if (loadFromStreamingServer == false)
-        {
-          if (this._startDirectModelLoad(nextModel, targetDirectLoadConcurrency))
-          {
-            directLoadsStarted++;
-          }
-        }
-        else
-        {
-          var succ = scope.addNewBatchModel(modelDesc);
-
-          if (succ)
-          {
-            directLoadsStarted++;
-            if (directLoadsStarted >= this.gltfLoaders.length)
-            {
-              break;
-            }
-          }
-        }
+        continue;
       }
-    }
-
-    if (loadFromStreamingServer && Object.keys(scope.batchModels).length > 0)
-    {
-      //console.log('loading from streaming server');
-      scope.modelIsLoading = true;
-
-      scope.loadBatchFromStreamingServer(function()
-      {
-        scope.modelIsLoading = false;
-      });
     }
 
     if (this.modelToLoadList.length == 0 && this.activeDirectLoadCount === 0)
@@ -4713,7 +4074,7 @@ export class SLM2Loader
     }
   }
 
-  processLaodedGltf(gltf, modelDesc = null)
+  processLoadedGltf(gltf, modelDesc = null)
   {
     var hash = modelDesc && modelDesc.hash
       ? modelDesc.hash
@@ -4743,16 +4104,9 @@ export class SLM2Loader
     {
       this.pendingSceneInsertionHashes.add(hash);
       this.inflightModelHashes.delete(hash);
-      if (this.neuralWSRetryCounts)
-      {
-        delete this.neuralWSRetryCounts[hash];
-      }
-      if (this.neuralWSHTTPFallbackHashes)
-      {
-        this.neuralWSHTTPFallbackHashes.delete(hash);
-      }
     }
     this.lastLoadMetrics.queueLength = this._getPendingSceneInsertionCount();
+    this.requestRender('glb-ready-to-mount');
   }
 
   _integrateLoadedGltf(gltf, modelDesc = null)
@@ -4804,11 +4158,13 @@ export class SLM2Loader
         isInScene: shouldRenderLoaded,
       });
 
-      scene.traverse((node) => 
+      scene.traverse((node) =>
       {
         if (!node.isMesh) return;
         node.material = scope.fetchCachedMaterial(node.material, extras);
       });
+
+      scope.staticSceneOptimizer.optimizeResident(extras.hashCode, gltf);
     }
 
     if (extras && extras.hashCode &&
@@ -4882,152 +4238,10 @@ export class SLM2Loader
         batchMs: this.lastLoadMetrics.lastBatchMs,
       });
     }
-  }
-
-  addNewBatchModel(modelDesc)
-  {
-    if (!modelDesc || modelDesc.group == null)
+    if (integratedCount > 0)
     {
-      return false;
+      this.requestRender('glb-mounted');
     }
-
-    var lodLevel = this.MeshLodLevel;
-    var baseId = modelDesc.baseId != null
-      ? Number(modelDesc.baseId)
-      : (modelDesc.hash ? Number.parseInt(String(modelDesc.hash).split('-')[1]) : NaN);
-
-    if (!Number.isFinite(baseId))
-    {
-      return false;
-    }
-
-    var newModel =
-    {
-      g: modelDesc.group,
-      l: lodLevel,
-      s: baseId
-    }
-
-    var modelKey = newModel.g + '-' + newModel.l + '-' + newModel.s;
-
-    if (this.batchModels[modelKey] == undefined)
-    {
-      this.batchModels[modelKey] = newModel;
-      this.batchModelDescs[modelKey] = modelDesc;
-      if (modelDesc.hash)
-      {
-        this.inflightModelHashes.add(modelDesc.hash);
-      }
-
-      return true;
-    }
-
-    return false;
-  }
-
-  loadBatchFromStreamingServer(callback)
-  {
-    var scope = this;
-    var reqData = [];
-    var reqDescs = [];
-
-    for (var key in this.batchModels)
-    {
-      var item = this.batchModels[key];
-      reqData.push(item);
-      reqDescs.push(this.batchModelDescs ? this.batchModelDescs[key] : null);
-    };
-    this.batchModelDescs = {};
-
-    if (reqData.length > 0)
-    {
-      var batchStartedAt = performance.now();
-      this.legacyResourcesWSBatchId = Number(this.legacyResourcesWSBatchId || 0) + 1;
-      var batchId = 'legacy-' + this.legacyResourcesWSBatchId;
-      let wsReq = {
-        "type": 'req',
-        "data": reqData
-      };
-  
-      this.fectchBatchedModels(wsReq, function(gltfBuffers)
-      {
-        var parseTasks = [];
-        var batchElapsedMs = performance.now() - batchStartedAt;
-
-        for (let i = 0; i < gltfBuffers.length; ++i)
-        {
-          var newTask = new Promise((resolve, reject) => 
-          {
-            var loader = scope.gltfLoaders[i % scope.gltfLoaders.length];
-            var modelDesc = reqDescs[i] || null;
-            var buffer = gltfBuffers[i];
-            var byteLength = buffer && buffer.byteLength ? buffer.byteLength : 0;
-            var parseStartedAt = performance.now();
-            loader.parse(buffer, '', (gltf) => 
-            {
-              scope.processLaodedGltf(gltf, modelDesc);
-              resolve();
-            }, reject);
-          }).catch(function(err)
-          {
-            var failedDesc = reqDescs[i] || null;
-            if (failedDesc && failedDesc.hash)
-            {
-              scope.inflightModelHashes.delete(failedDesc.hash);
-            }
-            console.error('[LoadError][resourcesWS-parse]', failedDesc ? failedDesc.hash : null, err);
-          });
-
-          parseTasks.push(newTask);
-        }
-
-        for (let missingIdx = gltfBuffers.length; missingIdx < reqDescs.length; ++missingIdx)
-        {
-          var missingDesc = reqDescs[missingIdx] || null;
-          if (missingDesc && missingDesc.hash)
-          {
-            scope.inflightModelHashes.delete(missingDesc.hash);
-          }
-        }
-
-        Promise.all(parseTasks).then((results) =>
-        {
-          if (callback)
-          {
-            callback();
-          }
-        });
-      });
-    }
-    else
-    {
-      if (callback)
-      {
-        callback();
-      }
-    }
-  }
-
-  fectchBatchedModels(req, callback)
-  {
-    if (!this.wsAssets || this.wsAssets.readyState !== WebSocket.OPEN)
-    {
-      console.warn('[SLM2Loader] resourcesWS is not connected; skipped streaming batch.');
-      if (callback)
-      {
-        callback([]);
-      }
-      return;
-    }
-
-    if (this.wsAssetsCallbacks == undefined)
-    {
-      this.wsAssetsCallbacks = {};
-    }
-
-    this.wsAssetsCallbacks[req.type] = callback;
-
-    this.wsAssets.send(JSON.stringify(req));
   }
 
   _makeGlobalGlbModelInfos(ids, weights, idMode, extra = {})
@@ -5054,6 +4268,11 @@ export class SLM2Loader
   _applyLightweightNeuralPlan(predictionPayload, idMode)
   {
     var appliedIdMode = idMode === 'global-glb-priority' ? 'global-glb' : (idMode || 'global-glb');
+    var predictedDownloadInfos = this._makeGlobalGlbModelInfos(
+      predictionPayload && predictionPayload.modelList,
+      predictionPayload && predictionPayload.weightList,
+      appliedIdMode
+    );
     var predictedImmediateInfos = this._makeGlobalGlbModelInfos(
       predictionPayload && predictionPayload.immediateGlbIds,
       predictionPayload && predictionPayload.immediateWeights,
@@ -5102,6 +4321,13 @@ export class SLM2Loader
     );
 
     var predictionEpoch = this._setCurrentNeuralWorkingSet(renderInfos, appliedIdMode);
+    this.neuralDownloadInfoByGlbId = new Map();
+    for (var downloadInfoIndex = 0; downloadInfoIndex < predictedDownloadInfos.length; ++downloadInfoIndex)
+    {
+      var downloadInfo = predictedDownloadInfos[downloadInfoIndex];
+      downloadInfo.predictionEpoch = predictionEpoch;
+      this.neuralDownloadInfoByGlbId.set(Number(downloadInfo.id), downloadInfo);
+    }
     for (var immediateTagIdx = 0; immediateTagIdx < immediateInfos.length; ++immediateTagIdx)
     {
       immediateInfos[immediateTagIdx].predictionEpoch = predictionEpoch;
@@ -5184,40 +4410,92 @@ export class SLM2Loader
   _applyLightweightNeuralRefilter(filterPayload, idMode)
   {
     var appliedIdMode = idMode === 'global-glb-priority' ? 'global-glb' : (idMode || 'global-glb');
-    var renderComponentIds = this._normalizeIdList(
-      filterPayload && filterPayload.renderComponentModelList
-        ? Array.from(filterPayload.renderComponentModelList)
+    var componentAddedIds = this._normalizeIdList(
+      filterPayload && filterPayload.renderComponentAddedIds
+        ? Array.from(filterPayload.renderComponentAddedIds)
         : []
     );
-    var renderGlbIds = this._normalizeIdList(
-      filterPayload && filterPayload.renderModelList
-        ? Array.from(filterPayload.renderModelList)
+    var componentRemovedIds = this._normalizeIdList(
+      filterPayload && filterPayload.renderComponentRemovedIds
+        ? Array.from(filterPayload.renderComponentRemovedIds)
         : []
     );
-    var renderInfos = this._makeGlobalGlbModelInfos(renderGlbIds, null, appliedIdMode);
+    var glbAddedIds = this._normalizeIdList(
+      filterPayload && filterPayload.renderGlbAddedIds
+        ? Array.from(filterPayload.renderGlbAddedIds)
+        : []
+    );
+    var glbRemovedIds = this._normalizeIdList(
+      filterPayload && filterPayload.renderGlbRemovedIds
+        ? Array.from(filterPayload.renderGlbRemovedIds)
+        : []
+    );
+    var glbDelta = this.renderGlbState.applyDelta(glbAddedIds, glbRemovedIds);
+    glbAddedIds = Array.from(glbDelta.added);
+    glbRemovedIds = Array.from(glbDelta.removed);
+    var renderComponentCount = this._applyInstancedVisibilityDelta(
+      componentAddedIds,
+      componentRemovedIds
+    );
+
+    if (filterPayload && Number.isFinite(Number(filterPayload.renderInstanceCount)) &&
+        renderComponentCount !== Number(filterPayload.renderInstanceCount))
+    {
+      this.forceNextNeuralPrediction = true;
+      this.neuralPendingVisibilityUpdate = true;
+      throw new Error('Cached neural refilter component delta is inconsistent with its result count.');
+    }
+    if (filterPayload && Number.isFinite(Number(filterPayload.renderGlbCount)) &&
+        glbDelta.count !== Number(filterPayload.renderGlbCount))
+    {
+      this.forceNextNeuralPrediction = true;
+      this.neuralPendingVisibilityUpdate = true;
+      throw new Error('Cached neural refilter GLB delta is inconsistent with its result count.');
+    }
+
+    var addedRenderInfos = glbAddedIds.map((globalGlbId) =>
+    {
+      return Object.assign({}, this.neuralDownloadInfoByGlbId.get(globalGlbId) || {
+        id: globalGlbId,
+        weight: 1,
+        idMode: appliedIdMode,
+      }, { prefetch: false, deferredVisible: false });
+    });
+    var removedRenderInfos = this._makeGlobalGlbModelInfos(glbRemovedIds, null, appliedIdMode);
     if (this._isResidentRenderPolicy())
     {
       this.lastRenderRefreshStats = this._showAllResidentObjects();
     }
     else
     {
-      this._updateCurrentNeuralRenderSet(renderInfos, appliedIdMode);
+      this.lastRenderRefreshStats = this.renderVisibilitySystem.applyDelta(
+        addedRenderInfos,
+        removedRenderInfos,
+        appliedIdMode,
+        this.currentNeuralPredictionEpoch
+      );
     }
-    this._applyInstancedVisibility(renderComponentIds);
+    var promotionStats = this._promoteCurrentRenderGlbs(glbAddedIds);
 
     var previousScheduler = this.lastLightweightPVSSchedulerStats || {};
     this.lastLightweightPVSSchedulerStats = Object.assign({}, previousScheduler, {
       scheduler: 'pvs-v4-worker-cached-render-filter',
       backend: filterPayload ? filterPayload.backend : null,
-      renderInstanceCount: renderComponentIds.length,
-      renderGlbCount: renderGlbIds.length,
+      renderInstanceCount: renderComponentCount,
+      renderGlbCount: glbDelta.count,
       filterTimings: filterPayload ? filterPayload.timings || null : null,
       reusedModelPrediction: true,
+      transferredIdCount: filterPayload && filterPayload.timings
+        ? Number(filterPayload.timings.transferredIdCount || 0)
+        : 0,
+      promotedGlbCount: promotionStats.promotedGlbCount,
+      promotedParseCount: promotionStats.parseCount,
+      promotedInsertionCount: promotionStats.insertionCount,
     });
     return {
-      renderModelList: renderGlbIds,
-      renderComponentModelList: renderComponentIds,
-      renderVisibleCount: renderGlbIds.length,
+      renderComponentCount: renderComponentCount,
+      renderGlbCount: glbDelta.count,
+      renderVisibleCount: glbDelta.count,
       schedulerStats: this.lastLightweightPVSSchedulerStats,
     };
   }
@@ -5334,6 +4612,7 @@ export class SLM2Loader
       }
       appliedVisibility.prefetchComponentModelList = [];
     }
+    this.renderGlbState.replace(appliedVisibility.renderModelList || [], this._getGlbBitCount());
     this._applyInstancedVisibility(appliedVisibility.renderComponentModelList || []);
     return appliedVisibility;
   }
@@ -5347,90 +4626,6 @@ export class SLM2Loader
     this.backCamera.updateProjectionMatrix();
 
     this.screenPixelReciprocal = 1.0 / (this.clientWidth * this.clientHeight);
-  }
-
-  getRVCServerUrl(sceneName, callback)
-  {
-    var scope = this;
-    if (this.rcServerAddress != undefined && this.rcServerAddress != null)
-    {
-      if (callback)
-      {
-        callback();
-      }
-      return;
-    }
-    if (this.lbServer != undefined && this.lbServer != null)
-    {
-      var requestOptions = {
-        method: 'GET',
-        redirect: 'follow'
-      };
-      
-      var lbsURL = this.lbServer + "/getRVC?scene=" + sceneName;
-      console.log(lbsURL);
-      fetch(lbsURL, requestOptions)
-        .then(response => {
-          if (response.status != 200)
-          {
-            throw new Error('LB Server no response!');
-          }
-          else
-          {
-            return response.text();
-          }
-        })
-        .then(result => {
-          if (result == undefined)
-          {
-            throw new Error('No avilable rvc candiate!');
-          }
-          var rtData = JSON.parse(result);
-          if (rtData.data != null && rtData.data.url != null)
-          {
-            scope.rcServerAddress = rtData.data.url;
-            console.log('new rc url: ' + scope.rcServerAddress);
-
-            if (callback)
-            {
-              callback();
-            }
-          }
-          else
-          {
-            throw new Error('No valid rvc url!');
-          }
-        })
-        .catch(error => {
-          console.log(error)
-          if (callback)
-          {
-            callback();
-          }
-        });
-    }
-    else
-    {
-      if (callback)
-      {
-        callback();
-      }
-    }
-  }
-
-  loadStatic(sceneConfigUrl, renderer, camera, options, callback)
-  {
-    var baseConfig = 
-    {
-      name: 'default',
-      lbServer: null,
-      loader: {
-        resourcesBaseUrl: sceneConfigUrl.replace('/sceneWeb.json', ''),
-        schedulingStrategy: "static"
-      }
-    };
-
-    return this.load(baseConfig, renderer, camera, options, callback);
   }
 
   load(baseConfig, renderer, camera, options, callback)
@@ -5449,23 +4644,19 @@ export class SLM2Loader
     this.glbIndexUrl = baseConfig.loader.glbIndexUrl || null;
     this.initialGlbLoadOrderUrl = baseConfig.loader.initialGlbLoadOrderUrl || null;
     var hasConfiguredGlbResourcesBaseUrl = Boolean(baseConfig.loader.glbResourcesBaseUrl || baseConfig.loader.modelResourcesBaseUrl);
-    this.resourcesWS = baseConfig.loader.resourcesWS;
-    this.remoteResourcesWS = baseConfig.loader.remoteResourcesWS || baseConfig.loader.resourcesWS || null;
-    this.rcServerAddress = baseConfig.loader.rcServerAddress;
-    this.schedulingStrategy = baseConfig.loader.schedulingStrategy;
-    this.lbServer = baseConfig.lbServer;
+    this.schedulingStrategy = baseConfig.loader.schedulingStrategy || 'auto';
     this.options = options || {};
     var params = this.options.paramJson || {};
     var cullingParam = params['culling'] == null ? 'neural' : String(params['culling']);
     var cullingParamLower = cullingParam.toLowerCase();
-    var cullingMode = cullingParamLower === 'rvcserver' ? 'rvcServer' : cullingParamLower;
+    var cullingMode = cullingParamLower;
     if (cullingMode === 'aabb')
     {
       cullingMode = 'frustum';
     }
-    if (cullingMode !== 'neural' && cullingMode !== 'frustum' && cullingMode !== 'rvcServer' && cullingMode !== 'false')
+    if (cullingMode !== 'neural' && cullingMode !== 'frustum' && cullingMode !== 'false')
     {
-      console.warn('[SLM2Loader] Unknown culling mode "' + cullingParam + '"; expected "neural", "frustum", "rvcServer", or "false". Falling back to neural.');
+      console.warn('[SLM2Loader] Unknown culling mode "' + cullingParam + '"; expected "neural", "frustum", or "false". Falling back to neural.');
       cullingMode = 'neural';
     }
     this.cullingMode = cullingMode;
@@ -5486,13 +4677,7 @@ export class SLM2Loader
       backend: this.neuralBackend,
       resourcesBaseUrl: this.resourcesBaseUrl,
       glbResourcesBaseUrl: this.glbResourcesBaseUrl,
-      resourcesWS: this.resourcesWS,
     });
-    if (params['resourcesWS'])
-    {
-      this.resourcesWS = params['resourcesWS'];
-      this.remoteResourcesWS = params['resourcesWS'];
-    }
     if (params['resourcesBaseUrl'])
     {
       this.resourcesBaseUrl = params['resourcesBaseUrl'];
@@ -5505,35 +4690,14 @@ export class SLM2Loader
     {
       this.glbResourcesBaseUrl = params['glbResourcesBaseUrl'] || params['modelResourcesBaseUrl'];
     }
-    if (params['rcServerAddress'] || params['rvcServerAddress'])
-    {
-      this.rcServerAddress = params['rcServerAddress'] || params['rvcServerAddress'];
-    }
-    var neuralResourceTransport = String(params['neuralResourceTransport'] || params['neuralTransport'] || '').toLowerCase();
-    this.neuralUseResourcesWS = neuralResourceTransport === 'ws' ||
-      neuralResourceTransport === 'websocket' ||
-      params['neuralUseResourcesWS'] === 'true' ||
-      params['neuralUseResourcesWS'] === '1' ||
-      params['neuralResourcesWS'] === 'true' ||
-      params['neuralResourcesWS'] === '1';
-    if (this.fullLoadMode)
-    {
-      this.neuralUseResourcesWS = false;
-      this.resourcesWS = null;
-    }
-    if (this.neuralUseResourcesWS && (this.resourcesWS == null || this.resourcesWS === '') && this.remoteResourcesWS)
-    {
-      this.resourcesWS = this.remoteResourcesWS;
-    }
     this.cpuPerfMode = params['cpuPerfMode'] === 'mobile' ? 'mobile' : 'balanced';
     this._configureHttpAdaptiveConcurrency();
-    this._configureNeuralResourceWSOptions(params);
+    this._configureGlbResourcePipelineOptions(params);
     this.setNeuralRenderPolicy(params['neuralRenderPolicy'] || params['neuralAlwaysRender']);
     this.renderVisibilitySystem.configure(this.cpuPerfMode === 'mobile'
       ? { mobileMinUpdateMs: 100, desktopMinUpdateMs: 100 }
       : { desktopMinUpdateMs: 50 });
     if (this.neuralDebugLogs) console.log('[SLM2Loader] CPU perf mode:', this.cpuPerfMode);
-    if (this.neuralDebugLogs) console.log('[SLM2Loader] Neural resource transport:', this.neuralUseResourcesWS ? 'resourcesWS' : 'http', this.resourcesWS || null);
     if (params['neuralLoadSkippedAsDeferred'] != null)
     {
       this.neuralLoadSkippedAsDeferred = !(params['neuralLoadSkippedAsDeferred'] === 'false' ||
@@ -5696,27 +4860,14 @@ export class SLM2Loader
           });
         }
 
-        if (scope.useNeuralPVS)
-        {
-          if (scope.neuralDebugLogs) console.log('[SLM2Loader] culling=neural; rvcServer connection disabled.');
-        }
-        else if (scope.cullingMode === 'frustum')
+        if (scope.cullingMode === 'frustum')
         {
           if (scope.neuralDebugLogs) console.log('[SLM2Loader] culling=frustum; using local runtime AABB filtering.');
         }
-        else if (!scope.fullLoadMode)
-        {
-          scope.getRVCServerUrl(baseConfig.name, function()
-          {
-            scope.startConnect();
-          });
-        }
         else if (scope.neuralDebugLogs)
         {
-          console.log('[SLM2Loader] culling=false; rvcServer/resourcesWS disabled, full-load uses HTTP.');
+          console.log('[SLM2Loader] GLB resources use the HTTP download/parse/mount pipeline.');
         }
-
-        scope.startConnectAsset();
 
         scope._scheduleMaterialConfigLoad(function()
         {
@@ -6140,14 +5291,17 @@ export class SLM2Loader
     this.neuralPendingVisibilityUpdate = false;
     this.lastNeuralPrediction = null;
     this.lastNeuralRefilter = null;
+    this.resourcePipelineSerial++;
     this.modelToLoadList = [];
     this.pendingPrefetchList = [];
+    this._cancelAllDirectDownloads();
+    this._clearPendingGlbParseQueue();
     this.pendingSceneInsertions = [];
     this.pendingSceneInsertionCursor = 0;
     this.pendingSceneInsertionHashes = new Set();
-    this.neuralWSHTTPFallbackQueue = [];
-    this.neuralWSHTTPFallbackHashes = new Set();
     this.currentDownloadWantedHashes = new Set();
+    this.neuralDownloadInfoByGlbId = new Map();
+    this.inflightModelHashes = new Set();
     if (this.renderVisibilitySystem && typeof this.renderVisibilitySystem.clear === 'function')
     {
       this.renderVisibilitySystem.clear();
@@ -6160,7 +5314,8 @@ export class SLM2Loader
       this.modelCacheMgr.clearAll();
     }
     this.loadedInstancedVisibilityStatesByHash = {};
-    this.lastRenderableComponentIdsForInstancing = [];
+    this.renderComponentState.reset(this._getComponentBitCount());
+    this.renderGlbState.reset(this._getGlbBitCount());
     this.instancedWantedIndicesByHash = new Map();
     try
     {
@@ -6294,47 +5449,6 @@ export class SLM2Loader
     }
 
     return false;
-  }
-
-  _buildNeuralRenderFallbackHashes(idMode)
-  {
-    var sourceIdMode = idMode || this.defaultVisibilityIdMode;
-    var fallbackHashes = new Set();
-
-    if (!this.useNeuralPVS || !(sourceIdMode === 'global-glb' || sourceIdMode === 'global-glb-priority'))
-    {
-      return fallbackHashes;
-    }
-
-    if (!this.runtimeFrustumFilterEnabled || this.runtimeVisibilityMeta == null)
-    {
-      return fallbackHashes;
-    }
-
-    this._updateRuntimeVisibilityFrustum(this.activeCamera);
-
-    var pool = this.modelCacheMgr && this.modelCacheMgr.objectsPool ? this.modelCacheMgr.objectsPool : {};
-    for (var hash in pool)
-    {
-      var item = pool[hash];
-      if (!item || !item.meshObject || !item.isInScene)
-      {
-        continue;
-      }
-
-      var globalGlbId = this.globalGlbHashToId[hash];
-      if (globalGlbId == null)
-      {
-        continue;
-      }
-
-      if (this._globalGlbIntersectsCurrentFrustum(globalGlbId))
-      {
-        fallbackHashes.add(hash);
-      }
-    }
-
-    return fallbackHashes;
   }
 
   _filterVisibilityByCameraFrustum(modelList, weightList, idMode)

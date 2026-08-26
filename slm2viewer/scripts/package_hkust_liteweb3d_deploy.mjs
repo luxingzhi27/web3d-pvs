@@ -132,8 +132,8 @@ function rewriteConfig(outputDir, assetBaseUrl) {
   const loader = hkustScene.loaderConfig;
   loader.resourcesBaseUrl = './assets/scenes/hkust-v3';
   loader.glbResourcesBaseUrl = assetBaseUrl;
-  loader.resourcesWS = '';
-  loader.rcServerAddress = '';
+  delete loader.resourcesWS;
+  delete loader.rcServerAddress;
   delete loader.remoteResourcesBaseUrl;
   delete loader.remoteResourcesWS;
   delete loader.remoteRvcServerAddress;
@@ -144,7 +144,7 @@ function rewriteConfig(outputDir, assetBaseUrl) {
     default_config: clone(hkustScene),
     'hkust-v3': hkustScene,
   };
-  config.lbs = null;
+  delete config.lbs;
   fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
 
   const raw = fs.readFileSync(configPath);

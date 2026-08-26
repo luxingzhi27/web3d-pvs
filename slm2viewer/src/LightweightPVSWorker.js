@@ -1,6 +1,7 @@
 import { PerspectiveCamera, Quaternion, Vector3 } from 'three';
 import { InstancePVS } from './InstancePVS.js';
 import { FRONTEND_RENDER_FOV_Y_DEG, MODEL_INPUT_FOV_Y_DEG } from './neuralPvsFovProtocol.js';
+import { bitsetFromIds, diffIdBitsets } from './sortedIdDelta.js';
 
 const RUNTIME_SCHEMA = 'pvs-bounded-relation-prior-instance-calibrated-moment-runtime-v4';
 const _quaternion = new Quaternion();
@@ -19,6 +20,9 @@ let state = {
   prefetchThreshold: 0.04,
   downloadPlanMode: 'viewcell-priority',
   diagnostics: false,
+  renderComponentBitset: new Uint32Array(),
+  renderGlbBitset: new Uint32Array(),
+  renderRevision: 0,
 };
 
 function nowMs() {
@@ -173,6 +177,8 @@ function postResult(payload) {
   for (const key of [
     'componentModelList', 'modelList', 'weightList', 'immediateGlbIds', 'immediateWeights',
     'prefetchGlbIds', 'prefetchWeights', 'renderComponentModelList', 'renderModelList',
+    'renderComponentAddedIds', 'renderComponentRemovedIds',
+    'renderGlbAddedIds', 'renderGlbRemovedIds',
     'candidateInstanceIds', 'candidateScores', 'candidateDiagnostics',
   ]) {
     if (payload[key]?.buffer) transfers.push(payload[key].buffer);
@@ -194,6 +200,9 @@ async function initWorker(message) {
       : 0.04,
     downloadPlanMode: message.downloadPlanMode === 'raw-visible' ? 'raw-visible' : 'viewcell-priority',
     diagnostics: Boolean(message.debugLogging),
+    renderComponentBitset: new Uint32Array(),
+    renderGlbBitset: new Uint32Array(),
+    renderRevision: 0,
   };
   state.meta = await fetchJson(versionedUrl(`${state.assetBaseUrl}/model_meta.json`));
   if (state.meta?.schema !== RUNTIME_SCHEMA) {
@@ -249,6 +258,9 @@ async function predictWorker(message) {
   const plan = splitDownloadPlan(visibleCandidates, prefetchCandidates, renderGlbIds);
   const modelList = idsFromCandidates(visibleCandidates);
   const weightList = weightsFromCandidates(visibleCandidates);
+  state.renderComponentBitset = bitsetFromIds(renderComponentIds, Number(state.meta.numInstances));
+  state.renderGlbBitset = bitsetFromIds(renderGlbIds, Number(state.meta.numGlbs));
+  state.renderRevision += 1;
   const finishedAt = nowMs();
   postResult({
     type: 'result',
@@ -264,6 +276,7 @@ async function predictWorker(message) {
     prefetchWeights: weightsFromCandidates(plan.prefetch),
     renderComponentModelList: renderComponentIds,
     renderModelList: Uint32Array.from(renderGlbIds),
+    renderRevision: state.renderRevision,
     candidateInstanceIds,
     candidateScores,
     candidateDiagnostics,
@@ -303,20 +316,40 @@ async function filterWorker(message) {
   const activeCamera = buildCamera(message.snapshot || {}, FRONTEND_RENDER_FOV_Y_DEG);
   const filtered = await state.pvs.refilter(activeCamera);
   if (!filtered) throw new Error('No cached model prediction is available for render refiltering.');
-  const renderComponentIds = filtered.renderComponentModelList || new Uint32Array();
-  const renderGlbIds = filtered.renderModelList || new Uint32Array();
+  const renderComponentBitset = filtered.renderComponentBitset || new Uint32Array();
+  const renderGlbBitset = filtered.renderGlbBitset || new Uint32Array();
+  const componentDelta = diffIdBitsets(
+    state.renderComponentBitset,
+    renderComponentBitset,
+    Number(state.meta.numInstances),
+  );
+  const glbDelta = diffIdBitsets(
+    state.renderGlbBitset,
+    renderGlbBitset,
+    Number(state.meta.numGlbs),
+  );
+  state.renderComponentBitset = renderComponentBitset;
+  state.renderGlbBitset = renderGlbBitset;
+  state.renderRevision += 1;
   const finishedAt = nowMs();
   postResult({
     type: 'filter-result',
     serial: message.serial,
     idMode: 'global-glb-priority',
     backend: filtered.backend || `${state.backend}-cached-render-filter`,
-    renderComponentModelList: renderComponentIds,
-    renderModelList: renderGlbIds,
+    renderComponentAddedIds: componentDelta.added,
+    renderComponentRemovedIds: componentDelta.removed,
+    renderGlbAddedIds: glbDelta.added,
+    renderGlbRemovedIds: glbDelta.removed,
+    renderInstanceCount: Number(filtered.renderInstanceCount || 0),
+    renderGlbCount: Number(filtered.renderGlbCount || 0),
+    renderRevision: state.renderRevision,
     executionTime: finishedAt - startedAt,
     timings: {
       ...(filtered.timings || {}),
       totalMs: finishedAt - startedAt,
+      transferredIdCount: componentDelta.added.length + componentDelta.removed.length
+        + glbDelta.added.length + glbDelta.removed.length,
       modelInfo: modelInfo(),
     },
   });

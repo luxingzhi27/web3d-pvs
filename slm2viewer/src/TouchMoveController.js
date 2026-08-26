@@ -56,15 +56,18 @@ export class TouchMoveController {
     this._bindStick(left.zone, left.thumb, (x, y) => {
       this.moveAxis.x = x;
       this.moveAxis.y = y;
+      this.viewer.requestRender('touch-move-input');
     });
     this._bindStick(right.zone, right.thumb, (x, y) => {
       this.lookAxis.x = x;
       this.lookAxis.y = y;
+      this.viewer.requestRender('touch-look-input');
     });
 
     this.viewer.el.appendChild(overlay);
     this.overlayEl = overlay;
     this._updateOverlayVisibility();
+    this.viewer.requestRender('touch-control-mode');
   }
 
   _bindStick(zone, thumb, onAxisChange) {
@@ -144,10 +147,12 @@ export class TouchMoveController {
   }
 
   update(dt) {
-    if (!this.enabled || !this.touchCapable) return;
+    if (!this.enabled || !this.touchCapable) return false;
 
     const dtMs = Number(dt || 0);
-    if (dtMs <= 0) return;
+    if (dtMs <= 0) return false;
+
+    let changed = false;
 
     if (this.lookAxis.x !== 0 || this.lookAxis.y !== 0) {
       this.euler.setFromQuaternion(this.camera.quaternion);
@@ -157,10 +162,11 @@ export class TouchMoveController {
       this.euler.x = Math.max(-piHalf, Math.min(piHalf, this.euler.x));
       this.camera.quaternion.setFromEuler(this.euler);
       this._syncOrbitTarget();
+      changed = true;
     }
 
     if (this.moveAxis.x === 0 && this.moveAxis.y === 0) {
-      return;
+      return changed;
     }
 
     _forward.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
@@ -179,7 +185,7 @@ export class TouchMoveController {
 
     _move.copy(_forward).multiplyScalar(-this.moveAxis.y).addScaledVector(_right, this.moveAxis.x);
     if (_move.lengthSq() < 1e-6) {
-      return;
+      return changed;
     }
 
     _move.normalize();
@@ -187,5 +193,13 @@ export class TouchMoveController {
     _move.multiplyScalar(dtMs * this.moveSpeed * this.viewer.keyboardMgr.speedMultiplier);
     this.camera.position.add(_move);
     this._syncOrbitTarget();
+    return true;
+  }
+
+  hasActiveInput() {
+    return Boolean(this.enabled && this.touchCapable && (
+      this.moveAxis.x !== 0 || this.moveAxis.y !== 0
+      || this.lookAxis.x !== 0 || this.lookAxis.y !== 0
+    ));
   }
 }

@@ -56,6 +56,13 @@ export class CacheMgr
     // the GLB root.  SLM2Loader marks this flag after validating the loaded
     // InstancedMesh against the runtime component metadata.
     var targetVisible = Boolean(item.isVisible && item.isInScene && !item.instancedBindingInvalid);
+    var sceneMgr = this.options ? this.options.sceneMgr : null;
+    if (item.staticBatchHash && sceneMgr && sceneMgr.staticSceneOptimizer)
+    {
+      sceneMgr.staticSceneOptimizer.setHashVisible(item.staticBatchHash, targetVisible);
+      item.meshObject.visible = false;
+      return;
+    }
     if (item.meshObject.visible !== targetVisible)
     {
       item.meshObject.visible = targetVisible;
@@ -109,6 +116,25 @@ export class CacheMgr
     });
   }
 
+  releaseItem(item, hashCode)
+  {
+    var sceneMgr = this.options ? this.options.sceneMgr : null;
+    if (item && sceneMgr && sceneMgr.staticSceneOptimizer
+        && sceneMgr.staticSceneOptimizer.releaseHash(hashCode || item.staticBatchHash))
+    {
+      sceneMgr.staticSceneOptimizer.releaseHash(hashCode || item.staticBatchHash);
+      if (item.meshObject && item.meshObject.parent)
+      {
+        item.meshObject.removeFromParent();
+      }
+      return;
+    }
+    if (item && item.meshObject)
+    {
+      this.releaseObject(item.meshObject);
+    }
+  }
+
   setSchedulingStrategy(ssMode)
   {
     this.schedulingStrategy = ssMode;
@@ -130,29 +156,17 @@ export class CacheMgr
       // console.table(this.statsDetail);
       
       var usedMemroy = this.statsDetail.memoryUsed;
-      var inSceneObjNums = this.statsDetail.inSceneNums;
       //console.log('Memory used: ' + (usedMemroy / 1024).toFixed(0) + '/' + (this.MaxMemoryUsageInKB / 1024).toFixed(0) + ' MB');
-
-      var MaxInSceneObjectNums = 2500; // 确保场景最多的无效渲染节点数
 
       //if (usedMemroy > this.MaxMemoryUsageInKB)
       {
         var scope = this;
 
-        var objsNotVisibleButInScene = [];
         var objsNotInScene = [];
 
         this.traverseObj(this.objectsPool, function(key, item)
         {
-          // 对于当前在场景中，但是不可见的对象，超过一定时间后就移出场景，不进行渲染
-          var UpdateTimeThreshold = 1000; // 10s
-
-          if (/*inSceneObjNums > MaxInSceneObjectNums &&  */
-              item.meshObject && item.isVisible == false && item.isInScene == true)
-          {
-            objsNotVisibleButInScene.push(key);
-          }
-          else if (item.isVisible)
+          if (item.isVisible)
           {
             item.lastUpdateTime = scope.timeSinceStartup;
           }
@@ -163,38 +177,6 @@ export class CacheMgr
             objsNotInScene.push(key);
           }
         });
-
-        // 如果渲染对象数量超出，则进行移出操作
-        if (inSceneObjNums > MaxInSceneObjectNums && (this.schedulingStrategy == 'auto'))
-        {
-          function compareWeight(keyA, keyB) 
-          {
-            return scope.objectsPool[keyA].weight - scope.objectsPool[keyB].weight;
-          }
-
-          // 基于权重进行排序
-          objsNotVisibleButInScene.sort(compareWeight);
-
-          for (var i = 0; i < objsNotVisibleButInScene.length; ++i)
-          {
-            var item = scope.objectsPool[objsNotVisibleButInScene[i]];
-
-            if (inSceneObjNums > MaxInSceneObjectNums)
-            {
-              item.isVisible = false;
-              item.isInScene = false;
-  
-              item.lastUpdateTime = scope.timeSinceStartup;
-  
-              item.meshObject.removeFromParent();
-              scope.notifyResidentChanged(objsNotVisibleButInScene[i]);
-  
-              //console.log('remove mesh from scene: ' + objsNotVisibleButInScene[i]);
-
-              inSceneObjNums--;
-            }
-          }
-        }
 
         // 如果内存超出限制，则进行释放
         if (usedMemroy > scope.MaxMemoryUsageInKB && (this.schedulingStrategy == 'auto'))
@@ -224,7 +206,7 @@ export class CacheMgr
                 item.meshObject.removeFromParent();
               }
 
-              scope.releaseObject(item.meshObject);
+              scope.releaseItem(item, objsNotInScene[i]);
 
               usedMemroy -= item.sizeKB;
 
@@ -279,6 +261,8 @@ export class CacheMgr
       lastVisibleAt: (options.isVisible !== undefined ? options.isVisible : true) ? this.getNowMs() : 0,
       missedUpdates: 0,
       instancedBindingInvalid: false,
+      staticBatchHash: null,
+      staticBatchState: null,
       frequency: 0, // 访问频率,实际上等同于漫游期间占用画面的帧数
       weight: 500, // 默认设置比较高的权重
       sizeKB: parseInt(objDesc.sizeKB), // file size in KB
@@ -449,7 +433,7 @@ export class CacheMgr
       {
         item.meshObject.removeFromParent();
       }
-      scope.releaseObject(item.meshObject);
+      scope.releaseItem(item, key);
       scope.notifyResidentChanged(key);
     });
     this.objectsPool = {};
@@ -478,7 +462,7 @@ export class CacheMgr
         item.meshObject.removeFromParent();
       }
 
-      scope.releaseObject(item.meshObject);
+      scope.releaseItem(item, key);
       scope.notifyResidentChanged(key);
       delete scope.objectsPool[key];
     });

@@ -34,9 +34,15 @@ if (!config.scenes || typeof config.scenes !== 'object') {
 }
 const checkedSceneResources = new Set();
 for (const [sceneName, sceneConfig] of Object.entries(config.scenes)) {
-  const resourcesBaseUrl = sceneConfig?.loaderConfig?.resourcesBaseUrl;
+  const loaderConfig = sceneConfig?.loaderConfig;
+  const resourcesBaseUrl = loaderConfig?.resourcesBaseUrl;
   if (!resourcesBaseUrl) {
     throw new Error(`Scene ${sceneName} is missing loaderConfig.resourcesBaseUrl.`);
+  }
+  for (const legacyField of ['resourcesWS', 'remoteResourcesWS', 'rcServerAddress']) {
+    if (Object.prototype.hasOwnProperty.call(loaderConfig, legacyField)) {
+      throw new Error(`Scene ${sceneName} still declares removed loader field ${legacyField}.`);
+    }
   }
   const match = /^\.\/assets\/scenes\/([^/]+)$/.exec(resourcesBaseUrl);
   if (!match) {
@@ -110,6 +116,11 @@ const dispatcherSource = fs.readFileSync(requireFile('src/LightweightPVSDispatch
 const loaderSource = fs.readFileSync(requireFile('slm2/SLM2Loader.js'), 'utf8');
 const viewerSource = fs.readFileSync(requireFile('src/viewer.js'), 'utf8');
 const renderVisibilitySource = fs.readFileSync(requireFile('src/RenderVisibilitySystem.js'), 'utf8');
+const sortedIdDeltaSource = fs.readFileSync(requireFile('src/sortedIdDelta.js'), 'utf8');
+const denseSlotsSource = fs.readFileSync(requireFile('src/DenseInstancedSlots.js'), 'utf8');
+const bitsetStateSource = fs.readFileSync(requireFile('src/IdBitsetState.js'), 'utf8');
+const staticSceneOptimizerSource = fs.readFileSync(requireFile('src/StaticSceneOptimizer.js'), 'utf8');
+const renderSurfaceSource = fs.readFileSync(requireFile('src/RenderSurfacePolicy.js'), 'utf8');
 const buildSource = fs.readFileSync(requireFile('scripts/build_parcel.mjs'), 'utf8');
 const hkustGlbBaseUrl = 'https://www.liteweb3d.com/data/hkust-v3/';
 if (config.scenes?.default_config?.loaderConfig?.glbResourcesBaseUrl !== hkustGlbBaseUrl
@@ -176,6 +187,19 @@ if (!runtimeSource.includes("source: 'gpu_v4_back_frustum_aabb'")
     || !runtimeSource.includes('cached-render-filter')) {
   throw new Error('The V4 runtime no longer performs candidate, render and GLB aggregation on the GPU.');
 }
+if (!runtimeSource.includes('layout.instanceBitWords = Math.ceil(numInstances / 32)')
+    || !runtimeSource.includes('layout.glbBitWords = Math.ceil(numGlbs / 32)')
+    || !runtimeSource.includes('renderComponentBitset')
+    || runtimeSource.includes('_buildRenderGlbCompactionShader()')
+    || runtimeSource.includes('filterReadbackLayout')) {
+  throw new Error('Cached 60-degree refiltering is not using the compact instance/GLB bitset readback.');
+}
+if (!workerSource.includes('diffIdBitsets(')
+    || !workerSource.includes('renderComponentAddedIds: componentDelta.added')
+    || !workerSource.includes('renderGlbRemovedIds: glbDelta.removed')
+    || !sortedIdDeltaSource.includes('export function diffIdBitsets(')) {
+  throw new Error('The worker no longer sends only the refilter ID delta.');
+}
 for (const forbidden of [
   'function intersectsComponent(',
   'function filterComponentsByFrustum(',
@@ -192,9 +216,99 @@ for (const forbidden of [
 if (!loaderSource.includes('predictionPayload.renderComponentModelList')
     || !loaderSource.includes('this._applyInstancedVisibility(renderComponentIds)')
     || !loaderSource.includes('_applyLightweightNeuralRefilter(')
-    || !loaderSource.includes('mesh.instanceMatrix.array')
-    || !loaderSource.includes('state.activeIndices = activeIndices.slice()')) {
+    || !loaderSource.includes('applyDenseInstancedDelta(state, delta.added, delta.removed)')
+    || !denseSlotsSource.includes('active[removedSlot] = lastSourceIndex')
+    || !denseSlotsSource.includes('mesh.instanceMatrix.addUpdateRange(slot * 16, 16)')) {
   throw new Error('The main thread no longer applies the worker result at instance granularity.');
+}
+if (!loaderSource.includes('this.renderVisibilitySystem.applyDelta(')
+    || !loaderSource.includes('this._applyInstancedVisibilityDelta(')
+    || !loaderSource.includes('this._promoteCurrentRenderGlbs(glbAddedIds)')
+    || !renderVisibilitySource.includes('applyDelta(addedModelInfos, removedModelInfos')
+    || !loaderSource.includes('this.renderComponentState.applyDelta(added, removed)')
+    || !loaderSource.includes('this.renderGlbState.applyDelta(glbAddedIds, glbRemovedIds)')
+    || !bitsetStateSource.includes('toIds()')) {
+  throw new Error('Cached refilter results are rebuilding full main-thread visibility sets.');
+}
+if (!staticSceneOptimizerSource.includes('new BatchedMesh(')
+    || !staticSceneOptimizerSource.includes('batch.setVisibleAt(')
+    || !staticSceneOptimizerSource.includes('mesh.matrixAutoUpdate = false')
+    || !staticSceneOptimizerSource.includes('mesh.matrixWorldAutoUpdate = false')
+    || !loaderSource.includes('this.staticSceneOptimizer = new StaticSceneOptimizer(this)')
+    || !loaderSource.includes('scope.staticSceneOptimizer.optimizeResident(extras.hashCode, gltf)')
+    || !loaderSource.includes('staticBatching: this.staticSceneOptimizer.getStats()')) {
+  throw new Error('Static scene flattening or material/task BatchedMesh rendering was removed.');
+}
+const animateSource = viewerSource.match(/animate\(time\)[\s\S]*?\n  createQueueDebugPanel\(\)/)?.[0] || '';
+if (!animateSource.includes('this.animationFrameId = null')
+    || !animateSource.includes('this.slm2Loader.hasImmediateFrameWork()')
+    || !animateSource.includes('const debugPanelExpanded = Boolean(this.gui && !this.gui.closed)')
+    || animateSource.includes('requestAnimationFrame( this.animate )')
+    || !loaderSource.includes('if (this.cameraUpdatePending && this.cullingUpdateDelta > 80)')) {
+  throw new Error('Demand-driven rendering or event-driven camera culling was removed.');
+}
+for (const removedFile of [
+  'src/AdaptiveRenderQuality.js',
+  'src/AdaptiveResolutionController.js',
+  'src/WebGLGpuFrameTimer.js',
+]) {
+  if (fs.existsSync(path.join(viewerDir, removedFile))) {
+    throw new Error(`Removed render-quality implementation returned: ${removedFile}`);
+  }
+}
+if (renderVisibilitySource.includes('item.meshObject.removeFromParent()')
+    || viewerSource.includes('adaptiveResolution')
+    || viewerSource.includes('gpuFrameTimer')
+    || viewerSource.includes('sceneFog')
+    || viewerSource.includes('distanceRendering')
+    || viewerSource.includes('applyDistanceRendering')
+    || viewerSource.includes('动态分辨率')
+    || viewerSource.includes('雾化')
+    || !viewerSource.includes('this.n8aopass.enabled = true')
+    || !viewerSource.includes('this.smaaPass.enabled = true')) {
+  throw new Error('Dynamic resolution or fog returned to the frontend runtime.');
+}
+if (!viewerSource.includes("window.addEventListener('resize', this.scheduleResize")
+    || !viewerSource.includes('this.renderer.setDrawingBufferSize(')
+    || !viewerSource.includes('sameRenderSurface(this.renderSurface, nextSurface)')
+    || renderSurfaceSource.includes('maxDrawingBufferPixels')
+    || renderSurfaceSource.includes('resolutionScale')
+    || !renderSurfaceSource.includes('finitePositive(options.devicePixelRatio, 1)')
+    || !viewerSource.includes('devicePixelRatio: window.devicePixelRatio')) {
+  throw new Error('Fixed native-DPR render-surface sizing was removed.');
+}
+if (Object.values(config.scenes).some((sceneConfig) => (
+  Object.prototype.hasOwnProperty.call(sceneConfig || {}, 'distanceRendering')
+))) {
+  throw new Error('Fog and distance-rendering configuration must stay removed.');
+}
+if (!loaderSource.includes('new AbortController()')
+    || !loaderSource.includes('fetch(modelURL, {')
+    || !loaderSource.includes('pendingGlbParseQueue.push({')
+    || !loaderSource.includes('loader.parse(item.buffer')
+    || !loaderSource.includes('pendingSceneInsertions.push({')) {
+  throw new Error('GLB download, parse and scene insertion are no longer separate bounded stages.');
+}
+for (const forbidden of [
+  '_startDirectModelLoad(',
+  'neuralDisableLoadLimits',
+  'processNeuralWSParseQueue',
+  'pendingWSParse',
+  'activeWSParse',
+  'gltfLoaders[capturedLoaderIdx].load(',
+  'startConnectAsset(',
+  'getRVCServerUrl(',
+  'fetchCameraVisibilityList(',
+  'loadStatic(',
+  'rvcServer',
+  'resourcesWS',
+  'lastRenderableComponentIdsForInstancing',
+  'lastBenchmarkVisibilityIds.renderComponentIds',
+  'applySortedIdDelta',
+]) {
+  if (loaderSource.includes(forbidden)) {
+    throw new Error(`Replaced GLB loading path remains in the frontend: ${forbidden}`);
+  }
 }
 const initialOrderLoadIndex = loaderSource.indexOf('scope._loadInitialGlbLoadOrder(function()');
 const initialPreloadIndex = loaderSource.indexOf('scope._startNeuralInitialGlbPreload();', initialOrderLoadIndex);

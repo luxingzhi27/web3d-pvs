@@ -380,15 +380,15 @@ function rewriteDeployConfig() {
     };
   }
 
-  // 场景清单完全由 assets/config.json 控制——打包脚本不写死场景名。
-  // 只做清理:删除 remote fallback 残留、清掉无用字段。
+  // 场景清单完全由 assets/config.json 控制，打包脚本不写死场景名。
   for (const [name, scene] of Object.entries(config.scenes)) {
     const lc = scene && scene.loaderConfig;
     if (!lc) continue;
-    // 删除 remote fallback 字段(防止走回 smart3d 等远程地址)
     delete lc.remoteResourcesBaseUrl;
     delete lc.remoteResourcesWS;
     delete lc.remoteRvcServerAddress;
+    delete lc.resourcesWS;
+    delete lc.rcServerAddress;
     lc.schedulingStrategy = lc.schedulingStrategy || 'auto';
   }
 
@@ -402,10 +402,8 @@ function rewriteDeployConfig() {
       dc.loaderConfig.resourcesBaseUrl = fallback.loaderConfig.resourcesBaseUrl;
       dc.loaderConfig.glbResourcesBaseUrl = fallback.loaderConfig.glbResourcesBaseUrl || fallback.loaderConfig.resourcesBaseUrl;
     }
-    dc.loaderConfig.resourcesWS = '';
-    dc.loaderConfig.rcServerAddress = '';
   }
-  config.lbs = null;
+  delete config.lbs;
 
   writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
 
@@ -415,9 +413,7 @@ function rewriteDeployConfig() {
   const loaderConfig = main ? main.loaderConfig : {};
   return {
     resourcesBaseUrl: loaderConfig.resourcesBaseUrl || '',
-    resourcesWS: loaderConfig.resourcesWS || '',
-    rcServerAddress: loaderConfig.rcServerAddress || '',
-    lbs: config.lbs,
+    glbResourcesBaseUrl: loaderConfig.glbResourcesBaseUrl || '',
   };
 }
 
@@ -596,7 +592,7 @@ function writeManifest(copied, skipped, compressed, indexAssetVersions, obfuscat
       compressionPolicy: 'JSON metadata receives .br/.gz sidecars; runtime model binaries and large binary assets do not.',
       note: assetMode === 'proxy'
         ? 'Legacy HKUST proxy template is generated; current scene metadata remains local and current GLB paths come from each scene loaderConfig.'
-        : 'Scene metadata, proxy geometry, neural assets and GLB paths are served from the local deployment configuration. resourcesWS and rcServerAddress are disabled.',
+        : 'Scene metadata, proxy geometry, neural assets and GLB paths are served from the local deployment configuration over HTTP.',
     },
     indexAssetVersions,
     obfuscation: {

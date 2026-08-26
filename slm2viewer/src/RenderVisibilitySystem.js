@@ -61,11 +61,6 @@ export class RenderVisibilitySystem {
       item.isVisible = false;
       item.weight = 0;
       this.visibleHashes.delete(hash);
-      if (item.isInScene) {
-        item.meshObject.removeFromParent();
-        item.isInScene = false;
-        if (stats) stats.detachedCount += 1;
-      }
       if (stats) stats.hiddenCount += 1;
     }
     this.loader.modelCacheMgr.applyRenderState(item);
@@ -127,6 +122,56 @@ export class RenderVisibilitySystem {
     stats.visibleCount = this.visibleHashes.size;
     stats.durationMs = nowMs() - startedAt;
     this.lastStats = stats;
+    this.loader.requestRender?.('render-working-set');
+    return stats;
+  }
+
+  applyDelta(addedModelInfos, removedModelInfos, idMode, epoch = this.currentEpoch) {
+    const startedAt = nowMs();
+    const added = [];
+    const removed = [];
+    for (const modelInfo of removedModelInfos || []) {
+      const decoded = this.loader.decodeModelInfo(modelInfo);
+      if (!decoded?.hash || !this.workingSetHashes.has(decoded.hash)) continue;
+      this.workingSetHashes.delete(decoded.hash);
+      this.workingSetWeights.delete(decoded.hash);
+      removed.push(decoded.hash);
+    }
+    for (const modelInfo of addedModelInfos || []) {
+      const decoded = this.loader.decodeModelInfo(modelInfo);
+      if (!decoded?.hash || this.workingSetHashes.has(decoded.hash)) continue;
+      this.workingSetHashes.add(decoded.hash);
+      this.workingSetWeights.set(decoded.hash, Number(modelInfo.weight || 0));
+      added.push(decoded.hash);
+    }
+
+    this.currentIdMode = idMode || this.currentIdMode;
+    this.currentEpoch = Number(epoch || this.currentEpoch || 0);
+    const stats = {
+      epoch: this.currentEpoch,
+      workingSetSize: this.workingSetHashes.size,
+      activeEvaluationSize: added.length + removed.length,
+      evaluatedCount: added.length + removed.length,
+      addedCount: added.length,
+      removedCount: removed.length,
+      weightChangedCount: 0,
+      shownCount: 0,
+      hiddenCount: 0,
+      attachedCount: 0,
+      detachedCount: 0,
+      missingResidentCount: 0,
+      visibleCount: 0,
+      skippedByGate: false,
+      duplicateCullRemoved: true,
+      deltaApplied: true,
+      durationMs: 0,
+    };
+    for (const hash of removed) this._applyHash(hash, false, 0, stats);
+    for (const hash of added) this._applyHash(hash, true, this.workingSetWeights.get(hash), stats);
+    stats.visibleCount = this.visibleHashes.size;
+    stats.durationMs = nowMs() - startedAt;
+    this.lastStats = stats;
+    this.loader.requestRender?.('render-working-set-delta');
     return stats;
   }
 
@@ -156,13 +201,14 @@ export class RenderVisibilitySystem {
     stats.visibleCount = this.visibleHashes.size;
     stats.durationMs = nowMs() - startedAt;
     this.lastStats = stats;
+    this.loader.requestRender?.('resident-render-state');
   }
 
   syncVisibleResidentsFromCache() {
     const pool = this.loader?.modelCacheMgr?.objectsPool || {};
     for (const hash in pool) {
       const item = pool[hash];
-      if (item?.meshObject && item.isVisible && item.isInScene) this.dirtyHashes.add(hash);
+      if (item?.meshObject && item.isInScene) this.dirtyHashes.add(hash);
     }
   }
 

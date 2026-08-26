@@ -4,6 +4,7 @@
 
 import { Frustum, Matrix4, Vector3 } from 'three';
 import { MODEL_INPUT_FOV_Y_DEG } from './neuralPvsFovProtocol.js';
+import { countBitsetIds } from './sortedIdDelta.js';
 
 const RUNTIME_SCHEMA = 'pvs-bounded-relation-prior-instance-calibrated-moment-runtime-v4';
 const MODEL_SCHEMA = 'pvs-bounded-relation-prior-instance-calibrated-moment-envelope-v4';
@@ -221,13 +222,10 @@ export class InstancePVS {
     this.glbPipeline = null;
     this.glbBindGroup = null;
     this.filterPipeline = null;
-    this.filterGlbPipeline = null;
     this.filterResultBuffer = null;
     this.filterReadbackBuffer = null;
     this.filterBindGroup = null;
-    this.filterGlbBindGroup = null;
     this.filterResultLayout = null;
-    this.filterReadbackLayout = null;
     this.hasCachedPrediction = false;
     this.resultLayout = null;
     this.readbackLayout = null;
@@ -475,21 +473,6 @@ export class InstancePVS {
     this.filterPipeline = this.device.createComputePipelineAsync
       ? await this.device.createComputePipelineAsync(filterDescriptor)
       : this.device.createComputePipeline(filterDescriptor);
-    const filterGlbShaderModule = this.device.createShaderModule({ code: this._buildRenderGlbCompactionShader() });
-    if (typeof filterGlbShaderModule.getCompilationInfo === 'function') {
-      const info = await filterGlbShaderModule.getCompilationInfo();
-      const errors = (info.messages || [])
-        .filter((message) => message.type === 'error')
-        .map((message) => `${message.lineNum || 0}:${message.linePos || 0} ${message.message}`);
-      if (errors.length) throw new Error(`V4 render GLB refilter WGSL compilation failed: ${errors.join('; ')}`);
-    }
-    const filterGlbDescriptor = {
-      layout: 'auto',
-      compute: { module: filterGlbShaderModule, entryPoint: 'main' },
-    };
-    this.filterGlbPipeline = this.device.createComputePipelineAsync
-      ? await this.device.createComputePipelineAsync(filterGlbDescriptor)
-      : this.device.createComputePipeline(filterGlbDescriptor);
     this._createRuntimeBuffers();
     this.instanceAabbs = null;
     this.instanceToGlobalGlbArray = null;
@@ -568,25 +551,12 @@ export class InstancePVS {
     const numGlbs = Number(this.meta.numGlbs);
     let offset = 2;
     const layout = { counters: 0 };
-    layout.renderVisibleIds = offset;
-    offset += numInstances;
-    layout.glbFlags = offset;
-    offset += numGlbs;
-    layout.glbIds = offset;
-    offset += numGlbs;
-    layout.totalWords = offset;
-    return layout;
-  }
-
-  _makeFilterReadbackLayout() {
-    const numInstances = Number(this.meta.numInstances);
-    const numGlbs = Number(this.meta.numGlbs);
-    let offset = 2;
-    const layout = { counters: 0 };
-    layout.renderVisibleIds = offset;
-    offset += numInstances;
-    layout.glbIds = offset;
-    offset += numGlbs;
+    layout.instanceBitWords = Math.ceil(numInstances / 32);
+    layout.glbBitWords = Math.ceil(numGlbs / 32);
+    layout.renderVisibleBits = offset;
+    offset += layout.instanceBitWords;
+    layout.glbVisibleBits = offset;
+    offset += layout.glbBitWords;
     layout.totalWords = offset;
     return layout;
   }
@@ -603,13 +573,12 @@ export class InstancePVS {
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     this.filterResultLayout = this._makeFilterResultLayout();
-    this.filterReadbackLayout = this._makeFilterReadbackLayout();
     this.filterResultBuffer = this.device.createBuffer({
       size: this.filterResultLayout.totalWords * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
     this.filterReadbackBuffer = this.device.createBuffer({
-      size: this.filterReadbackLayout.totalWords * 4,
+      size: this.filterResultLayout.totalWords * 4,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     this.bindGroup = this.device.createBindGroup({
@@ -640,12 +609,6 @@ export class InstancePVS {
         { binding: 2, resource: { buffer: this.instanceToGlbBuffer } },
         { binding: 3, resource: { buffer: this.resultBuffer } },
         { binding: 4, resource: { buffer: this.filterResultBuffer } },
-      ],
-    });
-    this.filterGlbBindGroup = this.device.createBindGroup({
-      layout: this.filterGlbPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: this.filterResultBuffer } },
       ],
     });
   }
@@ -750,8 +713,7 @@ export class InstancePVS {
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniform);
 
     const numInstances = Number(this.meta.numInstances);
-    const numGlbs = Number(this.meta.numGlbs);
-    const outputBytes = this.filterReadbackLayout.totalWords * 4;
+    const outputBytes = this.filterResultLayout.totalWords * 4;
     const encoder = this.device.createCommandEncoder();
     encoder.clearBuffer(this.filterResultBuffer);
     const pass = encoder.beginComputePass();
@@ -759,24 +721,12 @@ export class InstancePVS {
     pass.setBindGroup(0, this.filterBindGroup);
     pass.dispatchWorkgroups(Math.ceil(numInstances / WORKGROUP_SIZE));
     pass.end();
-    const glbPass = encoder.beginComputePass();
-    glbPass.setPipeline(this.filterGlbPipeline);
-    glbPass.setBindGroup(0, this.filterGlbBindGroup);
-    glbPass.dispatchWorkgroups(Math.ceil(numGlbs / WORKGROUP_SIZE));
-    glbPass.end();
     encoder.copyBufferToBuffer(
       this.filterResultBuffer,
       0,
       this.filterReadbackBuffer,
       0,
-      (2 + numInstances) * 4,
-    );
-    encoder.copyBufferToBuffer(
-      this.filterResultBuffer,
-      this.filterResultLayout.glbIds * 4,
-      this.filterReadbackBuffer,
-      this.filterReadbackLayout.glbIds * 4,
-      numGlbs * 4,
+      outputBytes,
     );
     this.device.queue.submit([encoder.finish()]);
     await this.filterReadbackBuffer.mapAsync(GPUMapMode.READ, 0, outputBytes);
@@ -802,31 +752,37 @@ export class InstancePVS {
     const startedAt = nowMs();
     const rawBuffer = await this._refilterWebGPU(renderCamera);
     const words = new Uint32Array(rawBuffer);
-    const renderCount = Math.min(words[0], Number(this.meta.numInstances));
-    const glbCount = Math.min(words[1], Number(this.meta.numGlbs));
-    const renderVisibleInstances = words.slice(
-      this.filterReadbackLayout.renderVisibleIds,
-      this.filterReadbackLayout.renderVisibleIds + renderCount,
+    const numInstances = Number(this.meta.numInstances);
+    const numGlbs = Number(this.meta.numGlbs);
+    const renderComponentBitset = words.slice(
+      this.filterResultLayout.renderVisibleBits,
+      this.filterResultLayout.renderVisibleBits + this.filterResultLayout.instanceBitWords,
     );
-    const renderModelList = words.slice(
-      this.filterReadbackLayout.glbIds,
-      this.filterReadbackLayout.glbIds + glbCount,
+    const renderGlbBitset = words.slice(
+      this.filterResultLayout.glbVisibleBits,
+      this.filterResultLayout.glbVisibleBits + this.filterResultLayout.glbBitWords,
     );
-    renderVisibleInstances.sort();
-    renderModelList.sort();
+    const counterInstanceCount = Math.min(words[0], numInstances);
+    const counterGlbCount = Math.min(words[1], numGlbs);
+    if (counterInstanceCount !== countBitsetIds(renderComponentBitset, numInstances)
+        || counterGlbCount !== countBitsetIds(renderGlbBitset, numGlbs)) {
+      throw new Error('V4 cached refilter bitset counters do not match decoded IDs.');
+    }
     const finishedAt = nowMs();
     return {
       idMode: 'global-glb-priority',
-      renderComponentModelList: renderVisibleInstances,
-      renderModelList,
+      renderComponentBitset,
+      renderGlbBitset,
+      renderInstanceCount: counterInstanceCount,
+      renderGlbCount: counterGlbCount,
       backend: `${this.backend}-cached-render-filter`,
       executionTime: finishedAt - startedAt,
       timings: {
         totalMs: finishedAt - startedAt,
         inferenceMs: 0,
         filterMs: finishedAt - startedAt,
-        renderInstanceCount: renderVisibleInstances.length,
-        renderGlbCount: renderModelList.length,
+        renderInstanceCount: counterInstanceCount,
+        renderGlbCount: counterGlbCount,
         cachedModelPrediction: true,
         readbackBytes: rawBuffer.byteLength,
       },
@@ -1497,26 +1453,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     &prediction_results[${sourceLayout.modelVisibleIds}u + prediction_index]
   );
   if (!intersects_render_frustum(instance_id)) { return; }
-  let render_index = atomicAdd(&filter_results[0], 1u);
-  atomicStore(&filter_results[${filterLayout.renderVisibleIds}u + render_index], instance_id);
+  atomicAdd(&filter_results[0], 1u);
+  let instance_word = instance_id >> 5u;
+  let instance_mask = 1u << (instance_id & 31u);
+  atomicOr(&filter_results[${filterLayout.renderVisibleBits}u + instance_word], instance_mask);
   let glb_id = instance_to_glb[instance_id];
-  atomicOr(&filter_results[${filterLayout.glbFlags}u + glb_id], 1u);
-}`;
+  let glb_word = glb_id >> 5u;
+  let glb_mask = 1u << (glb_id & 31u);
+  let previous_glb_bits = atomicOr(
+    &filter_results[${filterLayout.glbVisibleBits}u + glb_word],
+    glb_mask
+  );
+  if ((previous_glb_bits & glb_mask) == 0u) {
+    atomicAdd(&filter_results[1], 1u);
   }
-
-  _buildRenderGlbCompactionShader() {
-    const layout = this.filterResultLayout || this._makeFilterResultLayout();
-    const numGlbs = Number(this.meta.numGlbs);
-    return `
-@group(0) @binding(0) var<storage, read_write> filter_results: array<atomic<u32>>;
-
-@compute @workgroup_size(${WORKGROUP_SIZE})
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let glb_id = global_id.x;
-  if (glb_id >= ${numGlbs}u) { return; }
-  if (atomicLoad(&filter_results[${layout.glbFlags}u + glb_id]) == 0u) { return; }
-  let queue_index = atomicAdd(&filter_results[1], 1u);
-  atomicStore(&filter_results[${layout.glbIds}u + queue_index], glb_id);
 }`;
   }
 }

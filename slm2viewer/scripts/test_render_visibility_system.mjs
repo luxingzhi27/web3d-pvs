@@ -58,9 +58,26 @@ assert.equal(stats.addedCount, 1);
 assert.equal(stats.removedCount, 1);
 assert.equal(stats.evaluatedCount, 2);
 assert.equal(pool.a.meshObject.visible, false);
-assert.equal(pool.a.isInScene, false);
+assert.equal(pool.a.isInScene, true);
 assert.equal(pool.b.meshObject.visible, true);
 assert.equal(pool.c.meshObject.visible, true);
+
+stats = system.applyDelta(
+  [{ id: 'a', weight: 0.9 }],
+  [{ id: 'c', weight: 0 }],
+  'global-glb',
+  1,
+);
+assert.equal(stats.deltaApplied, true);
+assert.equal(stats.addedCount, 1);
+assert.equal(stats.removedCount, 1);
+assert.equal(stats.evaluatedCount, 2);
+assert.deepEqual(Array.from(system.workingSetHashes).sort(), ['a', 'b']);
+assert.equal(pool.a.meshObject.visible, true);
+assert.equal(pool.b.meshObject.visible, true);
+assert.equal(pool.c.meshObject.visible, false);
+assert.equal(pool.c.isInScene, true);
+assert.equal(stats.detachedCount, 0);
 
 pool.b.isVisible = false;
 pool.b.isInScene = false;

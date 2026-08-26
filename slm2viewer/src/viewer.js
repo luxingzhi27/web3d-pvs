@@ -50,6 +50,10 @@ import { TrajectoryCollector } from './TrajectoryCollector.js';
 import { TouchMoveController } from './TouchMoveController.js';
 import { startupLog } from './startupTimeline.js';
 import { FRONTEND_RENDER_FOV_Y_DEG } from './neuralPvsFovProtocol.js';
+import {
+  resolveRenderSurface,
+  sameRenderSurface,
+} from './RenderSurfacePolicy.js';
 
 //import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js';
@@ -80,7 +84,7 @@ const MAP_NAMES = [
 ];
 
 Cache.enabled = true;
-const VIEWER_CONFIG_CACHE_VERSION = 'pvs-v4-gpu-hkust-liteweb3d-20260825';
+const VIEWER_CONFIG_CACHE_VERSION = 'pvs-v4-hkust-native-dpr-20260826';
 const WHITE = new Color(0xffffff);
 const FRONTEND_RUNTIME_ASSET_ESTIMATE = {
   label: 'PVS V4 固定实例特征与查询网络，约 5.48 MB，不含按需 GLB',
@@ -152,6 +156,13 @@ export class Viewer
       return vars;
     }
     this.paramJson = parseUrlParams();
+    this.renderSurface = resolveRenderSurface({
+      width: el.clientWidth,
+      height: el.clientHeight,
+      devicePixelRatio: window.devicePixelRatio,
+    });
+    this.resizeDebounceMs = 150;
+    this.resizeTimer = null;
 
     this.materials = [];
 
@@ -175,13 +186,13 @@ export class Viewer
     this.renderer.physicallyCorrectLights = true;
     this.renderer.outputEncoding = sRGBEncoding;
     this.renderer.setClearColor( 0xdddddd );
-    this.renderer.setPixelRatio( window.devicePixelRatio );
+    this.renderer.setPixelRatio(this.renderSurface.pixelRatio);
     this.renderer.setSize( el.clientWidth, el.clientHeight );
     //this.renderer.autoClear = false;
     startupLog('viewer:renderer-ready', {
       width: el.clientWidth,
       height: el.clientHeight,
-      pixelRatio: window.devicePixelRatio,
+      pixelRatio: this.renderSurface.pixelRatio,
     });
 
     this.pmremGenerator = new PMREMGenerator( this.renderer );
@@ -227,8 +238,12 @@ export class Viewer
     }
 
     this.animate = this.animate.bind(this);
-    requestAnimationFrame( this.animate );
-    window.addEventListener('resize', this.resize.bind(this), false);
+    this.animationFrameId = null;
+    this.maintenanceTimer = null;
+    this.renderRequested = false;
+    this.orbitInteractionActive = false;
+    this.scheduleResize = this.scheduleResize.bind(this);
+    window.addEventListener('resize', this.scheduleResize, false);
 
     window.addEventListener('keydown', this.keydown.bind(this), false);
     window.addEventListener('keyup', this.keyup.bind(this), false);
@@ -237,6 +252,18 @@ export class Viewer
     this.keyboardMgr = new keyboardMgr(this);
     this.touchMoveController = new TouchMoveController(this);
     this.trajectoryCollector = new TrajectoryCollector(this);
+    this.controls.addEventListener('start', () => {
+      this.orbitInteractionActive = true;
+      this.requestRender('orbit-start');
+    });
+    this.controls.addEventListener('change', () => {
+      if (this.slm2Loader) this.slm2Loader.notifyCameraChanged();
+      this.requestRender('orbit-change');
+    });
+    this.controls.addEventListener('end', () => {
+      this.orbitInteractionActive = false;
+      this.requestRender('orbit-end');
+    });
     startupLog('viewer:runtime-helpers-ready');
     this.runtimeDebugState = {
       cullingMode: this.slm2Loader.getCullingMode(),
@@ -319,15 +346,21 @@ export class Viewer
       this.createQueueDebugPanel();
     }
 
+    this.requestRender('viewer-startup');
+
     this.usePostEffect = true;
 
     if (this.usePostEffect)
     {
       this.composer = new EffectComposer(this.renderer);
-      this.composer.addPass(new RenderPass(this.scene, this.activeCamera));
+      this.renderPass = new RenderPass(this.scene, this.activeCamera);
+      this.composer.addPass(this.renderPass);
       this.n8aopass = new N8AOPostPass (this.scene, this.activeCamera, el.clientWidth, el.clientHeight);
+      this.n8aopass.enabled = true;
       this.composer.addPass(this.n8aopass);
-      this.composer.addPass(new EffectPass(this.activeCamera, new SMAAEffect({preset: SMAAPreset.ULTRA})));
+      this.smaaPass = new EffectPass(this.activeCamera, new SMAAEffect({preset: SMAAPreset.ULTRA}));
+      this.smaaPass.enabled = true;
+      this.composer.addPass(this.smaaPass);
       startupLog('viewer:post-effects-ready');
   
       //const gammaCorrectionPass = new ShaderPass( GammaCorrectionShader )
@@ -412,40 +445,120 @@ export class Viewer
 
   }
 
-  animate(time) 
+  requestRender(reason = 'viewer')
   {
-    requestAnimationFrame( this.animate );
+    this.renderRequested = true;
+    if (this.maintenanceTimer != null)
+    {
+      clearTimeout(this.maintenanceTimer);
+      this.maintenanceTimer = null;
+    }
+    if (this.animationFrameId == null)
+    {
+      this.animationFrameId = requestAnimationFrame(this.animate);
+    }
+  }
 
-    const dt = (time - this.prevTime);
+  _scheduleMaintenance(delayMs)
+  {
+    if (!Number.isFinite(Number(delayMs)) || this.animationFrameId != null)
+    {
+      return;
+    }
+    const delay = Math.max(16, Math.min(1000, Number(delayMs)));
+    if (this.maintenanceTimer != null)
+    {
+      clearTimeout(this.maintenanceTimer);
+    }
+    this.maintenanceTimer = setTimeout(() =>
+    {
+      this.maintenanceTimer = null;
+      this.requestRender('maintenance');
+    }, delay);
+  }
+
+  _hasContinuousFrameActivity()
+  {
+    return Boolean(
+      this.orbitInteractionActive
+      || this.controls.autoRotate
+      || this.controls.enableDamping
+      || this.keyboardMgr?.hasActiveInput()
+      || this.touchMoveController?.hasActiveInput()
+      || this.trajectoryCollector?.isRecording
+      || this.tilesRuntime
+      || (this.gui && !this.gui.closed)
+    );
+  }
+
+  animate(time)
+  {
+    this.animationFrameId = null;
+    this.renderRequested = false;
+
+    const dt = this.prevTime > 0 ? Math.min(100, time - this.prevTime) : 16.67;
     this.prevTime = time;
 
-    this.controls.update();
-    this.stats.update();
+    let cameraChanged = false;
+    if (this.controls.autoRotate || this.controls.enableDamping)
+    {
+      cameraChanged = Boolean(this.controls.update()) || cameraChanged;
+    }
+    cameraChanged = Boolean(this.keyboardMgr.update(dt)) || cameraChanged;
+    if (this.touchMoveController)
+    {
+      cameraChanged = Boolean(this.touchMoveController.update(dt)) || cameraChanged;
+    }
+    if (cameraChanged && this.slm2Loader)
+    {
+      this.slm2Loader.notifyCameraChanged();
+    }
 
-    if (this.tilesRuntime) {
+    if (this.tilesRuntime)
+    {
       this.tilesRuntime.update(dt, this.activeCamera);
     }
 
-    this.updatePredictionDebugOverlay();
-
-    // Reconcile downloads, instance visibility, and render-scene membership
-    // before drawing this frame. Running it after render leaves the previous
-    // frame's resident objects in the GPU submission for one extra frame.
-    this.slm2Loader.update(dt, this.prevTime);
-
-    this.render();
-
-    this.keyboardMgr.update(dt);
-    if (this.touchMoveController) {
-      this.touchMoveController.update(dt);
-    }
-
-    if (this.trajectoryCollector) {
+    if (this.trajectoryCollector)
+    {
       this.trajectoryCollector.update(dt / 1000.0);
     }
 
-    this.updateQueueDebugPanel(time);
-    this.updateRuntimeDebugGui(time);
+    // Reconcile resource and visibility deltas before drawing the frame.
+    this.slm2Loader.update(dt, time);
+    if (this.predictionDebugEnabled)
+    {
+      this.updatePredictionDebugOverlay();
+    }
+    this.render();
+
+    const debugPanelExpanded = Boolean(this.gui && !this.gui.closed);
+    if (debugPanelExpanded)
+    {
+      this.stats.update();
+      this.updateRuntimeDebugGui(time);
+    }
+    if (this.queueDebugEnabled)
+    {
+      this.updateQueueDebugPanel(time);
+    }
+
+    const continueFrames = this._hasContinuousFrameActivity()
+      || this.slm2Loader.hasImmediateFrameWork();
+    if (continueFrames || this.renderRequested)
+    {
+      this.requestRender('frame-continuation');
+      return;
+    }
+
+    let maintenanceDelay = this.slm2Loader.getMaintenanceDelayMs();
+    if (this.queueDebugEnabled)
+    {
+      maintenanceDelay = maintenanceDelay == null
+        ? this.queueDebugIntervalMs
+        : Math.min(maintenanceDelay, this.queueDebugIntervalMs);
+    }
+    this._scheduleMaintenance(maintenanceDelay);
   }
 
   createQueueDebugPanel()
@@ -465,6 +578,7 @@ export class Viewer
       this.queueDebugEnabled = !this.queueDebugEnabled;
       panel.style.display = this.queueDebugEnabled ? 'block' : 'none';
       toggle.textContent = this.queueDebugEnabled ? 'hide' : 'show';
+      this.requestRender('queue-panel-toggle');
     });
     header.appendChild(toggle);
 
@@ -515,6 +629,7 @@ export class Viewer
       this.queueDebugEnabled = !this.queueDebugEnabled;
       panel.style.display = this.queueDebugEnabled ? 'block' : 'none';
       toggle.textContent = this.queueDebugEnabled ? 'hide' : 'show';
+      this.requestRender('queue-panel-toggle');
     });
     this.el.appendChild(miniButton);
   }
@@ -539,13 +654,20 @@ export class Viewer
     const cache = stats.cache || {};
     const neural = stats.neural || {};
     const render = neural.renderVisibility || {};
+    const staticBatching = neural.staticBatching || {};
     const actualRender = neural.actualRender || {};
     const scheduler = neural.priorityScheduler || {};
     const candidateSelection = neural.predictTimings?.candidateSelection || scheduler.candidateSelection || {};
-    const resourceWS = neural.resourceWS || {};
     const frozenInspect = neural.frozenInspect || {};
     const httpAdaptive = load.httpAdaptive || {};
     const initTimings = neural.initTimings || {};
+    const pvsInitTimings = initTimings.pvs || initTimings;
+    const webgpuAdapter = pvsInitTimings.webgpu?.adapter || {};
+    const webgpuAdapterLabel = [
+      webgpuAdapter.vendor,
+      webgpuAdapter.architecture,
+      webgpuAdapter.description,
+    ].filter(Boolean).join(' / ') || '-';
     const gate = neural.predictionGate || {};
     const modelInfo = neural.modelInfo || (neural.predictTimings ? neural.predictTimings.modelInfo : null) || {};
     const workpoint = modelInfo.calibrationWorkpoint || {};
@@ -563,23 +685,23 @@ export class Viewer
       `model=${modelInfo.runtimeModelDisplayName || modelInfo.runtimeModelName || '-'} schema=${modelInfo.runtimeSchema || '-'} threshold=${fmt(modelInfo.visibilityThreshold, 3)} selection=${modelInfo.thresholdSelection || '-'} priority=${modelInfo.outputsDownloadPriority === true}`,
       `calibration weighted=${fmt(workpoint.aggregateWeightedRecall, 4)} lower=${fmt(workpoint.aggregateWeightedRecallLowerConfidenceBound, 4)} poseWeighted=${fmt(workpoint.poseWeightedRecall, 4)} testReads=${workpoint.testEvaluationCount || 0}`,
       `culling=${neural.cullingMode || '-'} mode=${visibility.mode || '-'} idMode=${neural.idMode || visibility.idMode || '-'} backend=${neural.backend || '-'} ready=${neural.ready}`,
-      `neural=${neural.enabled} transport=${neural.resourceTransport || 'http'} ws=${neural.resourcesWSConfigured ? (neural.resourcesWSConnected ? 'connected' : 'pending') : 'none'} renderPolicy=${neural.renderPolicy} cpu=${neural.cpuPerfMode}`,
-      `wsPool ready=${resourceWS.readyConnections || 0}/${resourceWS.configuredConnections || 0} batch=${resourceWS.inFlightBatches || 0} models=${resourceWS.inFlightModels || 0} parse=${resourceWS.pendingParseCount || 0}/${resourceWS.activeParseCount || 0} parseMB=${fmt(resourceWS.pendingParseMB, 1)}`,
-      `wsPool avg=${fmt(resourceWS.avgBatchLatencyMs, 1)}ms last=${fmt(resourceWS.lastBatchLatencyMs, 1)}ms mbps=${fmt(resourceWS.throughputMBps, 2)} retry=${resourceWS.retryCount || 0} fallback=${resourceWS.fallbackHttpCount || 0} timeout=${resourceWS.timeoutCount || resourceWS.timedOutBatches || 0} stale=${resourceWS.staleDropCount || 0}`,
+      `neural=${neural.enabled} transport=http renderPolicy=${neural.renderPolicy} cpu=${neural.cpuPerfMode}`,
       `httpAdaptive enabled=${httpAdaptive.enabled !== false} now=${httpAdaptive.current || '-'} prefetch=${httpAdaptive.prefetchCurrent || '-'} mbps=${fmt(httpAdaptive.ewmaMbps, 1)} downlink=${fmt(httpAdaptive.downlinkMbps, 1)} load=${fmt(httpAdaptive.ewmaLoadMs, 0)}ms reason=${httpAdaptive.lastReason || '-'}`,
+      `renderSurface pixelRatio=${fmt(this.renderSurface?.pixelRatio, 2)} buffer=${this.renderSurface?.drawingBufferWidth || '-'}x${this.renderSurface?.drawingBufferHeight || '-'}`,
       `startup sceneWeb=${fmt(startup.sceneWebMs, 0)}ms glbIndex=${fmt(startup.glbIndexMs, 0)} runtimeMeta=${fmt(startup.runtimeVisibilityMetaMs, 0)} material=${fmt(startup.materialConfigMs, 0)}ms`,
-      `neuralInit total=${fmt(initTimings.totalMs, 0)}ms fetch=${fmt(initTimings.fetchMs, 0)} decode=${fmt(initTimings.decodeMs, 0)} parse=${fmt(initTimings.parseMs, 0)} gpu=${fmt(initTimings.gpuInitMs, 0)}ms`,
+      `neuralInit total=${fmt(initTimings.totalMs, 0)}ms pvs=${fmt(pvsInitTimings.totalMs, 0)}ms fetch=${fmt(pvsInitTimings.fetchMs, 0)} gpu=${fmt(pvsInitTimings.gpuInitMs, 0)}ms adapter=${webgpuAdapterLabel}`,
       `gate pos=${fmt(gate.positionDelta, 1)} angle=${fmt(gate.angleDeltaDeg, 1)}deg min=${fmt(gate.minIntervalMs, 0)}ms forceNext=${gate.forceNext}`,
       `prediction serial=${visibility.serial || '-'} age=${predictionAge == null ? '-' : fmt(predictionAge, 0) + 'ms'} latency=${fmt(visibility.latencyMs)}ms`,
       `candidate source=${candidateSelection.source || '-'} count=${candidateSelection.candidateCount ?? '-'} cells=${candidateSelection.queryCellCount ?? '-'} indexed=${candidateSelection.indexedInstanceCount ?? '-'} overflow=${candidateSelection.overflowInstanceCount ?? '-'}`,
       `modelBackGlb=${visibility.rawGlbCount || 0} loadNow=${notes.loadNowGlbCount != null ? notes.loadNowGlbCount : '-'} currentFrustumGlb=${notes.renderCandidateGlbCount != null ? notes.renderCandidateGlbCount : '-'} residentVisible=${notes.renderResidentCount != null ? notes.renderResidentCount : (visibility.visibleGlbCount != null ? visibility.visibleGlbCount : '-')} modelBackInst=${visibility.rawInstanceCount || 0}`,
       `download queue=${load.queueLength || 0} wanted=${load.wantedHashCount || 0} inflight=${load.inflightCount || 0} pendingParse=${load.pendingHashCount || 0} pendingIntegrate=${load.pendingSceneInsertions || 0}`,
-      `prefetch=${load.prefetchQueueLength || 0} activeLoads=${load.activeDirectLoadCount || 0} integrated+=${load.lastIntegratedCount || 0} batch=${fmt(load.lastBatchMs)}ms tex=${fmt(load.lastTextureTaskMs)}ms`,
+      `activeQueues immediate=${load.queueLength || 0} prefetch=${load.prefetchQueueLength || 0} http=${load.activeDirectLoadCount || 0} parse=${load.pendingParseCount || 0} mount=${load.pendingSceneInsertions || 0} integrated=${load.totalIntegrated || 0}`,
       `cache total=${cache.totalNums || 0} visible=${cache.visibleNums || 0} invisible=${cache.invisibleNums || 0} inSceneHidden=${cache.inSceneNums || 0} mem=${fmt((cache.memoryUsedKB || 0) / 1024, 0)}MB`,
       `render working=${render.workingSetSize || 0} activeEval=${render.activeEvaluationSize || 0} evaluated=${render.evaluatedCount || 0} visible=${render.visibleCount || 0} skipped=${render.skippedByGate}`,
       `actual visibleMesh=${actualRender.visibleMeshCount || 0}/${actualRender.meshCount || 0} instancedMesh=${actualRender.visibleInstancedMeshCount || 0}/${actualRender.instancedMeshCount || 0} drawnInst=${actualRender.drawnInstanceCount || 0} tri≈${fmt(actualRender.visibleTriangleEstimate, 0)}`,
+      `staticBatch glb=${staticBatching.batchedGlbs || 0} batches=${staticBatching.batchCount || 0} pending=${staticBatching.pendingGlbs || 0} drawSaved=${staticBatching.drawCallReduction || 0} flattened=${staticBatching.flattenedGlbs || 0}`,
       `render delta=+${render.addedCount || 0}/-${render.removedCount || 0} evaluated=${render.evaluatedCount || 0} attach=${render.attachedCount || 0} detach=${render.detachedCount || 0} renderMs=${fmt(render.durationMs, 3)}`,
-      `scheduler total=${scheduler.total || 0} now=${scheduler.visibleNow || 0} prefetch=${scheduler.prefetch || 0} skipped=${scheduler.skipped || 0} tested=${scheduler.testedComponents || 0}`,
+      `modelPlan total=${scheduler.total || 0} immediate=${scheduler.visibleNow || 0} prefetchTotal=${scheduler.prefetch || 0} skipped=${scheduler.skipped || 0} tested=${scheduler.testedComponents || 0}`,
       `predictRed enabled=${predictDebug.enabled || false} frozen=${predictDebug.frozen || false} predictedComp=${predictDebug.predicted || 0} loadedHash=${predictDebug.loaded || 0} markedInst=${predictDebug.marked || 0} missing=${predictDebug.missing || 0} attached=${predictDebug.attached || 0} restored=${predictDebug.restored || 0} shot=${predictDebug.snapshot || '-'}`,
       `freezeInspect active=${frozenInspect.active || false} queued=${frozenInspect.queued || false} glb=${frozenInspect.total || 0} inst=${frozenInspect.componentCount || 0}`,
       `nextLoad: ${ids(load.queuePreview) || '-'}`,
@@ -722,6 +844,13 @@ export class Viewer
       : predictTimings;
     const scheduler = neural.priorityScheduler || {};
     const initTimings = neural.initTimings || {};
+    const pvsInitTimings = initTimings.pvs || initTimings;
+    const webgpuAdapter = pvsInitTimings.webgpu?.adapter || {};
+    const webgpuAdapterLabel = [
+      webgpuAdapter.vendor,
+      webgpuAdapter.architecture,
+      webgpuAdapter.description,
+    ].filter(Boolean).join(' / ') || '-';
     const gate = neural.predictionGate || {};
     const modelInfo = neural.modelInfo || predictTimings.modelInfo || {};
     const workpoint = modelInfo.calibrationWorkpoint || {};
@@ -736,7 +865,7 @@ export class Viewer
     this.runtimeDebugState.pvsModelSchema = `${modelInfo.runtimeSchema || '-'} / threshold ${this._formatRuntimeDebugNumber(modelInfo.visibilityThreshold, 3)} / ${modelInfo.thresholdSelection || '-'}`;
     this.runtimeDebugState.pvsModelWorkpoint = `weighted ${this._formatRuntimeDebugNumber(workpoint.aggregateWeightedRecall, 4)}, lower ${this._formatRuntimeDebugNumber(workpoint.aggregateWeightedRecallLowerConfidenceBound, 4)}, poseWeighted ${this._formatRuntimeDebugNumber(workpoint.poseWeightedRecall, 4)}, testReads ${workpoint.testEvaluationCount || 0}`;
     this.runtimeDebugState.pvsCullingSource = this._describeRuntimeCullingSource(stats);
-    this.runtimeDebugState.pvsBackend = visibility.backend || neural.backend || neural.neuralBackend || '-';
+    this.runtimeDebugState.pvsBackend = `${visibility.backend || neural.backend || neural.neuralBackend || '-'} / adapter ${webgpuAdapterLabel}`;
     this.runtimeDebugState.pvsReady = neural.ready ? '是' : '否';
     this.runtimeDebugState.pvsFallbackReason = predictTimings.fallbackReason || initTimings.fallbackReason || '-';
     this.runtimeDebugState.pvsPredictMs = this._formatRuntimeDebugNumber(
@@ -817,6 +946,7 @@ export class Viewer
     {
       this.updatePredictionDebugOverlay(true);
     }
+    this.requestRender('prediction-debug-toggle');
   }
 
   _getPredictionDebugComponentIds()
@@ -861,13 +991,13 @@ export class Viewer
       ? this.slm2Loader.loadedInstancedVisibilityStatesByHash
       : {};
     const state = states[hash];
-    if (!state || state.disabled || !Array.isArray(state.activeIndices))
+    if (!state || state.disabled || !Array.isArray(state.activeSourceIndices))
     {
       return null;
     }
 
     const slotMap = new Map();
-    const activeIndices = state.activeIndices;
+    const activeIndices = state.activeSourceIndices;
     for (let slot = 0; slot < activeIndices.length; ++slot)
     {
       const originalIndex = Number(activeIndices[slot]);
@@ -978,6 +1108,15 @@ export class Viewer
         }
       }
 
+      this.predictionDebugTouched.delete(hash);
+      return true;
+    }
+
+    if (state.type === 'static-batch')
+    {
+      const optimizer = this.slm2Loader?.staticSceneOptimizer;
+      optimizer?.setHashHighlight(state.hash, null);
+      optimizer?.setHashVisible(state.hash, state.wasVisible && state.wasInScene);
       this.predictionDebugTouched.delete(hash);
       return true;
     }
@@ -1182,6 +1321,31 @@ export class Viewer
       loaded++;
       const touchKey = `hash:${hash}`;
       let state = this.predictionDebugTouched.get(touchKey);
+      if (item.staticBatchHash)
+      {
+        if (!state)
+        {
+          state = {
+            type: 'static-batch',
+            hash,
+            wasVisible: Boolean(item.isVisible),
+            wasInScene: Boolean(item.isInScene),
+          };
+          this.predictionDebugTouched.set(touchKey, state);
+        }
+        if (this.slm2Loader.staticSceneOptimizer.setHashHighlight(
+          hash,
+          this.predictionDebugMaterial.color,
+        ))
+        {
+          marked++;
+        }
+        if (this.predictionDebugForceShow)
+        {
+          this.slm2Loader.staticSceneOptimizer.setHashVisible(hash, true);
+        }
+        continue;
+      }
       if (!state)
       {
         state = {
@@ -1388,8 +1552,6 @@ export class Viewer
 
   render()
   {
-    
-
     if (this.usePostEffect)
     {
       this.composer.render();
@@ -1401,20 +1563,71 @@ export class Viewer
     }
   }
 
-  resize() 
+  _resizeRenderTargets()
   {
-    const {clientHeight, clientWidth} = this.el.parentElement;
+    const parent = this.el.parentElement || this.el;
+    const clientWidth = Math.max(1, Number(parent.clientWidth || this.el.clientWidth || 1));
+    const clientHeight = Math.max(1, Number(parent.clientHeight || this.el.clientHeight || 1));
+    const nextSurface = resolveRenderSurface({
+      width: clientWidth,
+      height: clientHeight,
+      devicePixelRatio: window.devicePixelRatio,
+    });
+    if (sameRenderSurface(this.renderSurface, nextSurface))
+    {
+      this.renderSurface = nextSurface;
+      return false;
+    }
+    this.renderSurface = nextSurface;
+    this.renderer.setDrawingBufferSize(
+      nextSurface.cssWidth,
+      nextSurface.cssHeight,
+      nextSurface.pixelRatio
+    );
+    this.renderer.domElement.style.width = nextSurface.cssWidth + 'px';
+    this.renderer.domElement.style.height = nextSurface.cssHeight + 'px';
+    if (this.composer)
+    {
+      this.composer.setSize(nextSurface.cssWidth, nextSurface.cssHeight);
+    }
+    return true;
+  }
 
-    this.activeCamera.aspect = clientWidth / clientHeight;
-    this.activeCamera.updateProjectionMatrix();
+  scheduleResize()
+  {
+    if (this.resizeTimer != null)
+    {
+      clearTimeout(this.resizeTimer);
+    }
+    this.resizeTimer = setTimeout(() =>
+    {
+      this.resizeTimer = null;
+      this.resize();
+    }, this.resizeDebounceMs);
+  }
 
-    this.renderer.setSize(clientWidth, clientHeight);
+  resize()
+  {
+    const parent = this.el.parentElement || this.el;
+    const clientWidth = Math.max(1, Number(parent.clientWidth || this.el.clientWidth || 1));
+    const clientHeight = Math.max(1, Number(parent.clientHeight || this.el.clientHeight || 1));
 
-    this.slm2Loader.setSize(clientWidth, clientHeight);
+    const nextAspect = clientWidth / clientHeight;
+    if (this.activeCamera.aspect !== nextAspect)
+    {
+      this.activeCamera.aspect = nextAspect;
+      this.activeCamera.updateProjectionMatrix();
+    }
 
-    this.composer.setSize(clientWidth, clientHeight);
+    this._resizeRenderTargets();
+
+    if (this.slm2Loader.clientWidth !== clientWidth || this.slm2Loader.clientHeight !== clientHeight)
+    {
+      this.slm2Loader.setSize(clientWidth, clientHeight);
+    }
 
     if (this.DebugMode) console.log(clientWidth, clientHeight);
+    this.requestRender('resize');
   }
 
   load() 
@@ -1452,31 +1665,17 @@ export class Viewer
 
       var _materialLoadedCallback = scope.updateEnvAndLightMap.bind(scope);
 
-      var sceneLoadMethod = null;
-      var sceneLoadConfig = null;
+      var sceneLoadConfig = {
+        name: activeSceneName,
+        loader: scope.activeScene.loaderConfig,
+      };
 
-      var staticMode = scope.paramJson['static'];
-
-      if (staticMode == 'true')
-      {
-        sceneLoadMethod = 'loadStatic';
-        sceneLoadConfig = "http://127.0.0.1:8080/sceneWeb.json";
-      }
-      else
-      {
-        sceneLoadMethod = 'load';
-        sceneLoadConfig = {
-          name: activeSceneName,
-          lbServer: config.lbs,
-          loader: scope.activeScene.loaderConfig,
-        };
-      }
-
-      startupLog('viewer:slm2Loader-load-call', { method: sceneLoadMethod });
-      var rootScene = scope.slm2Loader[sceneLoadMethod](sceneLoadConfig, scope.renderer, scope.activeCamera, 
+      startupLog('viewer:slm2Loader-load-call', { method: 'load' });
+      var rootScene = scope.slm2Loader.load(sceneLoadConfig, scope.renderer, scope.activeCamera,
       {
         materialLoadedCallback: _materialLoadedCallback,
         paramJson: scope.paramJson,
+        requestRender: scope.requestRender.bind(scope),
       }, function(config)
       {
         startupLog('viewer:slm2Loader-callback:start');
@@ -2010,6 +2209,7 @@ export class Viewer
   {
     if (this.n8aopass)
     {
+      this.n8aopass.enabled = true;
       this.n8aopass.configuration.aoRadius = this.state.effectController.aoRadius;
       this.n8aopass.configuration.distanceFalloff = this.state.effectController.distanceFalloff;
       this.n8aopass.configuration.intensity = this.state.effectController.intensity;
@@ -2022,42 +2222,6 @@ export class Viewer
       this.n8aopass.configuration.halfRes = this.state.effectController.halfRes;
       this.n8aopass.configuration.depthAwareUpsampling = this.state.effectController.depthAwareUpsampling;
       this.n8aopass.configuration.colorMultiply = this.state.effectController.colorMultiply;
-    }
-  }
-
-  generateLoadList()
-  {
-    if (this.slm2Loader)
-    {
-      if (this.slm2Loader.schedulingStrategy == 'static')
-      {
-        window.alert("静态模式下不能生成加载列表");
-
-        return;
-      }
-      
-      this.slm2Loader.fetchCameraVisibilityList(function(result)
-      {
-        var saveLoadList = function(txtString, fileName) 
-        {
-          var link = document.createElement('a');
-          link.style.display = 'none';
-          document.body.appendChild(link); // Firefox workaround, see #6594
-
-          function save(blob, filename){
-            link.href = URL.createObjectURL(blob);
-            link.download = filename;
-            link.click();
-          }
-
-          function saveString(text, filename){ save( new Blob([text], {type: 'text/plain'}), filename); }
-
-          saveString( txtString, fileName);
-        }
-
-        saveLoadList(JSON.stringify(result), "initial.json");
-      });
-      
     }
   }
 
@@ -2225,13 +2389,13 @@ export class Viewer
     addRuntimeStatus('pvsGate', '触发门槛');
     addRuntimeStatus('pvsRawInstances', '后退视锥模型构件');
     addRuntimeStatus('pvsRawGlbs', '后退视锥模型GLB');
-    addRuntimeStatus('pvsImmediateGlbs', '立即下载GLB');
-    addRuntimeStatus('pvsPrefetchGlbs', '预取GLB');
+    addRuntimeStatus('pvsImmediateGlbs', '计划立即下载GLB');
+    addRuntimeStatus('pvsPrefetchGlbs', '计划预取GLB总数');
     addRuntimeStatus('pvsRenderInstances', '当前视锥显示构件');
     addRuntimeStatus('pvsRenderGlbs', '当前视锥显示GLB');
     addRuntimeStatus('pvsActualRender', '实际可见Mesh/实例');
-    addRuntimeStatus('pvsDownloadQueue', '下载队列');
-    addRuntimeStatus('pvsPrefetchQueue', '预取队列');
+    addRuntimeStatus('pvsDownloadQueue', '剩余立即队列');
+    addRuntimeStatus('pvsPrefetchQueue', '剩余预取队列');
     addRuntimeStatus('pvsActiveLoads', '主动下载中');
     addRuntimeStatus('pvsInflightLoads', 'HTTP进行中');
     addRuntimeStatus('pvsPendingIntegrate', '待集成GLB');
@@ -2277,19 +2441,12 @@ export class Viewer
     perfLi.classList.add('gui-stats');
     perfFolder.__ul.appendChild( perfLi );
 
-    const opFolder = gui.addFolder('操作');
-    var scope = this;
-    var obj = { 生成加载列表 : function()
-      {
-        scope.generateLoadList();
-      }
-    };
-    opFolder.add(obj,'生成加载列表');
-
     const guiWrap = document.createElement('div');
     this.el.appendChild( guiWrap );
     guiWrap.classList.add('gui-wrap');
     guiWrap.appendChild(gui.domElement);
+    gui.domElement.addEventListener('input', () => this.requestRender('gui-input'));
+    gui.domElement.addEventListener('change', () => this.requestRender('gui-change'));
     gui.close();
   }
 
