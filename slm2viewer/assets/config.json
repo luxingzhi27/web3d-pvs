@@ -22,14 +22,14 @@
     },
     "hkust-v3": {
       "cameraPostion": [
-        -270.24,
-        34.15,
-        239.56
+        -250.22,
+        37.87,
+        279.38
       ],
       "cameraTarget": [
-        -267.18,
-        33.19,
-        235.52
+        -247.16,
+        36.91,
+        275.34
       ],
       "loaderConfig": {
         "resourcesBaseUrl": "./assets/scenes/hkust-v3",

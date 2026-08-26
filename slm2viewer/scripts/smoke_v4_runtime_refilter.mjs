@@ -140,6 +140,8 @@ try {
         device: String(adapterInfo.device || ''),
         description: String(adapterInfo.description || ''),
       },
+      initialGlbLoadOrderCount: loader.neuralInitialLoadOrder.length,
+      initialGlbPreloadCount: Number(loader.startupMetrics.initialGlbPreloadCount || 0),
       fullInstanceCount: fullInstances.length,
       fullGlbCount: fullGlbs.length,
       sameCameraInstanceParity: same(fullInstances, sorted(sameCamera.renderComponentModelList)),
@@ -155,6 +157,8 @@ try {
   });
 
   const passed = result.sameCameraInstanceParity
+    && result.initialGlbLoadOrderCount === 100
+    && result.initialGlbPreloadCount === 100
     && result.sameCameraGlbParity
     && result.movedCpuParity
     && result.loaderParity

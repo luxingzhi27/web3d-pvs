@@ -52,6 +52,7 @@ const THREE_PATH = `https://unpkg.com/three@0.${REVISION}.x`
 const DRACO_LOADER = new DRACOLoader( MANAGER ).setDecoderPath( `${THREE_PATH}/examples/js/libs/draco/gltf/` );
 const KTX2_LOADER = new KTX2Loader( MANAGER ).setTranscoderPath( `${THREE_PATH}/examples/js/libs/basis/` );
 const LOCAL_RUNTIME_ASSET_VERSION = 'pvs-mainline-v4-hkust-20260825';
+const INITIAL_GLB_PRELOAD_LIMIT = 100;
 
 function withLocalRuntimeVersion(url)
 {
@@ -116,6 +117,7 @@ export class SLM2Loader
     this.neuralAssetBaseUrl = null;
     this.neuralRuntimeMetaUrl = null;
     this.glbIndexUrl = null;
+    this.initialGlbLoadOrderUrl = null;
     this.neuralInitialLoadOrder = [];
     this.neuralInitialLoadPending = false;
     this.neuralPVSOptions = null;
@@ -5445,6 +5447,7 @@ export class SLM2Loader
     this.neuralAssetBaseUrl = baseConfig.loader.neuralAssetBaseUrl || baseConfig.loader.neuralAssetBase || null;
     this.neuralRuntimeMetaUrl = baseConfig.loader.neuralRuntimeMetaUrl || null;
     this.glbIndexUrl = baseConfig.loader.glbIndexUrl || null;
+    this.initialGlbLoadOrderUrl = baseConfig.loader.initialGlbLoadOrderUrl || null;
     var hasConfiguredGlbResourcesBaseUrl = Boolean(baseConfig.loader.glbResourcesBaseUrl || baseConfig.loader.modelResourcesBaseUrl);
     this.resourcesWS = baseConfig.loader.resourcesWS;
     this.remoteResourcesWS = baseConfig.loader.remoteResourcesWS || baseConfig.loader.resourcesWS || null;
@@ -5676,9 +5679,13 @@ export class SLM2Loader
         else if (scope.useNeuralPVS)
         {
           scope.forceNextNeuralPrediction = true;
-          scope._scheduleRuntimeVisibilityMetaLoad(function()
+          scope._loadInitialGlbLoadOrder(function()
           {
-            scope._scheduleNeuralPVSInit();
+            scope._startNeuralInitialGlbPreload();
+            scope._scheduleRuntimeVisibilityMetaLoad(function()
+            {
+              scope._scheduleNeuralPVSInit();
+            });
           });
         }
         else if (scope.cullingMode === 'frustum')
@@ -5742,10 +5749,6 @@ export class SLM2Loader
         var parseStart = performance.now();
         var parsedIndex = JSON.parse(data);
         scope._mergeGlbIndex(parsedIndex, scope.globalGlbEntries.length === 0);
-        scope.neuralInitialLoadOrder = Array.isArray(parsedIndex && parsedIndex.initialLoadIds)
-          ? parsedIndex.initialLoadIds.slice()
-          : [];
-        scope.neuralInitialLoadPending = scope.neuralInitialLoadOrder.length > 0;
         scope.startupMetrics.glbIndexParseMs = performance.now() - parseStart;
         var buildStart = performance.now();
         scope.startupMetrics.glbIndexBuildMs = performance.now() - buildStart;
@@ -5835,6 +5838,82 @@ export class SLM2Loader
       this.globalGlbEntries[globalId] = entry;
       if (entry.hash != null) this.globalGlbHashToId[entry.hash] = globalId;
     }
+  }
+
+  _loadInitialGlbLoadOrder(callback)
+  {
+    var scope = this;
+    var fileLoader = new FileLoader();
+    var startedAt = performance.now();
+    var requestUrl = this.initialGlbLoadOrderUrl ||
+      (this.resourcesBaseUrl + "/initialGlbLoadOrder.json");
+    startupLog('slm2:initialGlbOrder:request', { url: requestUrl });
+
+    var finish = function()
+    {
+      scope.startupMetrics.initialGlbLoadOrderMs = performance.now() - startedAt;
+      if (callback) callback();
+    };
+    fileLoader.load(requestUrl, function(data)
+    {
+      try
+      {
+        var parsed = JSON.parse(data);
+        var ids = Array.isArray(parsed && parsed.initialLoadIds)
+          ? parsed.initialLoadIds
+          : [];
+        var seen = new Set();
+        scope.neuralInitialLoadOrder = ids.map(Number).filter(function(globalId)
+        {
+          if (!Number.isInteger(globalId) || globalId < 0 || seen.has(globalId) ||
+              !scope.globalGlbEntries[globalId])
+          {
+            return false;
+          }
+          seen.add(globalId);
+          return true;
+        }).slice(0, INITIAL_GLB_PRELOAD_LIMIT);
+        scope.neuralInitialLoadPending = scope.neuralInitialLoadOrder.length > 0;
+        startupLog('slm2:initialGlbOrder:loaded', {
+          count: scope.neuralInitialLoadOrder.length,
+        });
+      }
+      catch (error)
+      {
+        scope.neuralInitialLoadOrder = [];
+        scope.neuralInitialLoadPending = false;
+        console.warn('[SLM2Loader] Failed to parse initialGlbLoadOrder.json.', error);
+      }
+      finish();
+    }, null, function()
+    {
+      scope.neuralInitialLoadOrder = [];
+      scope.neuralInitialLoadPending = false;
+      startupLog('slm2:initialGlbOrder:missing', { url: requestUrl });
+      finish();
+    });
+  }
+
+  _startNeuralInitialGlbPreload()
+  {
+    if (!this.useNeuralPVS)
+    {
+      return 0;
+    }
+    var infos = this._takeNeuralInitialLoadInfos('global-glb');
+    for (var index = infos.length - 1; index >= 0; --index)
+    {
+      this.modelToLoadList.push(infos[index]);
+    }
+    if (infos.length > 0)
+    {
+      // Start GLB requests first. The following runtime-meta callback starts
+      // the model runtime fetch in parallel without waiting for GLB completion.
+      this.processLoadingList();
+    }
+    this.startupMetrics.initialGlbPreloadCount = infos.length;
+    startupLog('slm2:initialGlbPreload:started', { count: infos.length });
+    return infos.length;
   }
 
   _setRuntimeVisibilityMeta(runtimeMeta)
@@ -5996,9 +6075,10 @@ export class SLM2Loader
     this.neuralInitialLoadPending = false;
     var seen = new Set();
     var infos = [];
-    for (var index = 0; index < this.neuralInitialLoadOrder.length; ++index)
+    var loadOrder = this.neuralInitialLoadOrder.slice(0, INITIAL_GLB_PRELOAD_LIMIT);
+    for (var index = 0; index < loadOrder.length; ++index)
     {
-      var globalId = Number(this.neuralInitialLoadOrder[index]);
+      var globalId = Number(loadOrder[index]);
       if (!Number.isFinite(globalId) || seen.has(globalId) || !this.globalGlbEntries[globalId])
       {
         continue;
@@ -6006,9 +6086,10 @@ export class SLM2Loader
       seen.add(globalId);
       infos.push({
         id: globalId,
-        weight: 1,
+        weight: Math.max(0.000001, 1 - index / Math.max(1, loadOrder.length)),
         idMode: idMode || 'global-glb',
         initialPreload: true,
+        prefetch: true,
       });
     }
     return infos;
@@ -6027,6 +6108,7 @@ export class SLM2Loader
     var assetBaseUrl = group.neuralAssetBaseUrl || group.assetBaseUrl || group.modelAssetBaseUrl;
     var runtimeMetaUrl = group.runtimeMetaUrl || group.neuralRuntimeMetaUrl;
     var glbIndexUrl = group.glbIndexUrl;
+    var initialGlbLoadOrderUrl = group.initialGlbLoadOrderUrl || null;
     if (!assetBaseUrl || !runtimeMetaUrl || !glbIndexUrl)
     {
       console.warn('[SLM2Loader] Incomplete grouped scene asset config.', group);
@@ -6042,6 +6124,7 @@ export class SLM2Loader
     this.neuralAssetBaseUrl = assetBaseUrl;
     this.neuralRuntimeMetaUrl = runtimeMetaUrl;
     this.glbIndexUrl = glbIndexUrl;
+    this.initialGlbLoadOrderUrl = initialGlbLoadOrderUrl;
     this.neuralInitialLoadOrder = [];
     this.neuralInitialLoadPending = false;
     this.neuralPVSInitScheduled = false;
@@ -6096,6 +6179,9 @@ export class SLM2Loader
     return Promise.all([
       this._fetchNeuralGroupJson(runtimeMetaUrl),
       this._fetchNeuralGroupJson(glbIndexUrl),
+      initialGlbLoadOrderUrl
+        ? this._fetchNeuralGroupJson(initialGlbLoadOrderUrl)
+        : Promise.resolve({ initialLoadIds: [] }),
     ]).then(function(payload)
     {
       if (switchSerial !== scope.neuralGroupSwitchSerial)
@@ -6106,10 +6192,11 @@ export class SLM2Loader
       // Group indexes are complete for the selected region.  Reset the
       // previous index so stale IDs and stale group paths cannot be scheduled.
       scope._mergeGlbIndex(payload[1], true);
-      scope.neuralInitialLoadOrder = Array.isArray(payload[1] && payload[1].initialLoadIds)
-        ? payload[1].initialLoadIds.slice()
+      scope.neuralInitialLoadOrder = Array.isArray(payload[2] && payload[2].initialLoadIds)
+        ? payload[2].initialLoadIds.slice()
         : [];
       scope.neuralInitialLoadPending = scope.neuralInitialLoadOrder.length > 0;
+      scope._startNeuralInitialGlbPreload();
       var options = Object.assign({}, scope.neuralPVSOptions || {}, {
         debugLogging: scope.neuralDebugLogs,
         assetVersion: LOCAL_RUNTIME_ASSET_VERSION,

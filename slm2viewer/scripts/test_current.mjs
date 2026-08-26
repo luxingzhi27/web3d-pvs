@@ -53,6 +53,7 @@ for (const file of requiredModelFiles) requireFile(`${modelRoot}/${file}`);
 const meta = readJson(`${modelRoot}/model_meta.json`);
 const runtimeMeta = readJson('assets/scenes/hkust-v3/runtimeVisibilityMeta.json');
 const glbIndex = readJson('assets/scenes/hkust-v3/glbIndex.json');
+const initialGlbOrder = readJson('assets/scenes/hkust-v3/initialGlbLoadOrder.json');
 if (meta.schema !== runtimeSchema || meta.modelConfig?.runtimeFeatureDim !== 124
     || meta.modelConfig?.runtimeHeadInputDim !== 130) {
   throw new Error('HKUST frontend asset is not the current V4 runtime.');
@@ -69,6 +70,29 @@ if (Number(meta.numInstances) !== Number(runtimeMeta.instanceCount)
     || Number(meta.numGlbs) !== Number(runtimeMeta.globalGlbCount)
     || Number(meta.numGlbs) !== Number(glbIndex.total)) {
   throw new Error('HKUST V4 model and scene metadata counts do not match.');
+}
+if (Object.prototype.hasOwnProperty.call(glbIndex, 'initialLoadIds')) {
+  throw new Error('glbIndex.json must remain a GLB mapping index, not an initial download queue.');
+}
+const initialLoadIds = Array.isArray(initialGlbOrder.initialLoadIds)
+  ? initialGlbOrder.initialLoadIds.map(Number)
+  : [];
+if (initialGlbOrder.schemaVersion !== 1
+    || initialGlbOrder.scene !== 'hkust-v3'
+    || initialLoadIds.length === 0
+    || Number(initialGlbOrder.visibleGlbCount) < initialLoadIds.length
+    || Number(initialGlbOrder.initialLoadLimit) !== 100
+    || Number(initialGlbOrder.initialLoadCount) !== 100
+    || initialLoadIds.length !== 100
+    || new Set(initialLoadIds).size !== initialLoadIds.length
+    || initialLoadIds.some((id) => !Number.isInteger(id) || id < 0 || !glbIndex.entries[id])) {
+  throw new Error('HKUST initial GLB download order is invalid.');
+}
+const hkustScene = config.scenes?.['hkust-v3'];
+if (JSON.stringify(initialGlbOrder.camera?.position) !== JSON.stringify(hkustScene?.cameraPostion)
+    || JSON.stringify(initialGlbOrder.camera?.target) !== JSON.stringify(hkustScene?.cameraTarget)
+    || Number(initialGlbOrder.camera?.fovYDeg) !== 60) {
+  throw new Error('HKUST initial GLB order was not captured at the configured 60-degree startup camera.');
 }
 for (const descriptor of Object.values(meta.files || {})) {
   if (!descriptor?.file || descriptor.file === 'model_meta.json') continue;
@@ -170,6 +194,18 @@ if (!loaderSource.includes('predictionPayload.renderComponentModelList')
     || !loaderSource.includes('mesh.instanceMatrix.array')
     || !loaderSource.includes('state.activeIndices = activeIndices.slice()')) {
   throw new Error('The main thread no longer applies the worker result at instance granularity.');
+}
+const initialOrderLoadIndex = loaderSource.indexOf('scope._loadInitialGlbLoadOrder(function()');
+const initialPreloadIndex = loaderSource.indexOf('scope._startNeuralInitialGlbPreload();', initialOrderLoadIndex);
+const runtimeMetaStartIndex = loaderSource.indexOf('scope._scheduleRuntimeVisibilityMetaLoad(function()', initialPreloadIndex);
+if (initialOrderLoadIndex < 0 || initialPreloadIndex < initialOrderLoadIndex
+    || runtimeMetaStartIndex < initialPreloadIndex
+    || !loaderSource.includes('const INITIAL_GLB_PRELOAD_LIMIT = 100;')
+    || !loaderSource.includes('.slice(0, INITIAL_GLB_PRELOAD_LIMIT)')
+    || !loaderSource.includes('this.processLoadingList();')
+    || loaderSource.includes('parsedIndex.initialLoadIds')
+    || loaderSource.includes('payload[1] && payload[1].initialLoadIds')) {
+  throw new Error('Initial GLB requests must start from the independent queue before model initialization.');
 }
 for (const forbidden of [
   '_projectedAreaForHash(',
