@@ -91,7 +91,8 @@ if (initialGlbOrder.schemaVersion !== 1
 const hkustScene = config.scenes?.['hkust-v3'];
 if (JSON.stringify(initialGlbOrder.camera?.position) !== JSON.stringify(hkustScene?.cameraPostion)
     || JSON.stringify(initialGlbOrder.camera?.target) !== JSON.stringify(hkustScene?.cameraTarget)
-    || Number(initialGlbOrder.camera?.fovYDeg) !== 60) {
+    || Number(initialGlbOrder.camera?.fovYDeg) !== 60
+    || Math.abs(Number(initialGlbOrder.camera?.aspect) - 694 / 552) > 1e-12) {
   throw new Error('HKUST initial GLB order was not captured at the configured 60-degree startup camera.');
 }
 for (const descriptor of Object.values(meta.files || {})) {

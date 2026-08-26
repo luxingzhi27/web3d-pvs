@@ -27,7 +27,7 @@
     "package:scene-glb": "node ./scripts/package_scene_glb.mjs",
     "test": "node ./scripts/test_current.mjs && node ./scripts/test_camera_prediction_gate.mjs && node ./scripts/test_render_visibility_system.mjs",
     "smoke:refilter": "node ./scripts/smoke_v4_runtime_refilter.mjs --allow-software-gpu",
-    "capture:initial-glb-order": "node ./scripts/capture_initial_glb_load_order.mjs --allow-software-gpu --limit=100",
+    "capture:initial-glb-order": "node ./scripts/capture_initial_glb_load_order.mjs --allow-software-gpu --limit=100 --viewport-width=694 --viewport-height=552",
     "caddy:script": "echo scripts/install_caddy_site.sh",
     "nginx:script": "echo scripts/install_nginx_site.sh",
     "verify:deploy-assets": "echo scripts/verify_deploy_assets.sh",

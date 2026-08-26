@@ -69,7 +69,7 @@ try {
       '--use-angle=vulkan',
     ],
   });
-  const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+  const page = await browser.newPage({ viewport: { width: 694, height: 552 } });
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(String(error)));
   const port = server.address().port;

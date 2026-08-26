@@ -18,6 +18,8 @@ if (!allowSoftware) {
 
 const pageUrl = argument('url', 'http://127.0.0.1:3001/?scene=hkust-v3');
 const initialLoadLimit = Math.max(1, Number.parseInt(argument('limit', '100'), 10) || 100);
+const viewportWidth = Math.max(1, Number.parseInt(argument('viewport-width', '1280'), 10) || 1280);
+const viewportHeight = Math.max(1, Number.parseInt(argument('viewport-height', '720'), 10) || 720);
 const outputPath = path.resolve(argument(
   'out',
   'assets/scenes/hkust-v3/initialGlbLoadOrder.json',
@@ -47,7 +49,9 @@ try {
       '--use-angle=vulkan',
     ],
   });
-  const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+  const page = await browser.newPage({
+    viewport: { width: viewportWidth, height: viewportHeight },
+  });
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(String(error)));
   await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 120000 });
