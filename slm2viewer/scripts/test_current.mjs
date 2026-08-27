@@ -122,6 +122,7 @@ const bitsetStateSource = fs.readFileSync(requireFile('src/IdBitsetState.js'), '
 const staticSceneOptimizerSource = fs.readFileSync(requireFile('src/StaticSceneOptimizer.js'), 'utf8');
 const renderSurfaceSource = fs.readFileSync(requireFile('src/RenderSurfacePolicy.js'), 'utf8');
 const buildSource = fs.readFileSync(requireFile('scripts/build_parcel.mjs'), 'utf8');
+const packageDeploySource = fs.readFileSync(requireFile('scripts/package_deploy.mjs'), 'utf8');
 const hkustGlbBaseUrl = 'https://www.liteweb3d.com/data/hkust-v3/';
 if (config.scenes?.default_config?.loaderConfig?.glbResourcesBaseUrl !== hkustGlbBaseUrl
     || config.scenes?.['hkust-v3']?.loaderConfig?.glbResourcesBaseUrl !== hkustGlbBaseUrl) {
@@ -342,8 +343,17 @@ if (!loaderSource.includes('var imageConfigUrl = joinUrlPath(')
   throw new Error('Material metadata or textures no longer use the configured scene resource origin.');
 }
 if (!buildSource.includes('cache: false')
-    || !buildSource.includes("source.includes('__parcel__error__overlay__')")) {
+    || !buildSource.includes("source.includes('__parcel__error__overlay__')")
+    || !buildSource.includes('draco/gltf/draco_decoder.wasm')
+    || !buildSource.includes('basis/basis_transcoder.wasm')
+    || !packageDeploySource.includes("rel.startsWith('assets/three/')")) {
   throw new Error('Production builds are no longer protected from Parcel HMR cache contamination.');
+}
+if (loaderSource.includes('unpkg.com/three')
+    || viewerSource.includes('unpkg.com/three')
+    || !loaderSource.includes("setDecoderPath( './assets/three/draco/gltf/' )")
+    || !loaderSource.includes("setTranscoderPath( './assets/three/basis/' )")) {
+  throw new Error('The active GLB runtime still depends on third-party decoder CDNs.');
 }
 if (!viewerSource.includes('ids.renderComponentIds')
     || !viewerSource.includes('ids.renderGlbIds')

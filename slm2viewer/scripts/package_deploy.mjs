@@ -37,6 +37,13 @@ const v4RuntimeFiles = Object.freeze([
   'frequency_cycles_fp32.bin',
   'chi_table_fp32.bin',
 ]);
+const runtimeDecoderFiles = new Set([
+  'assets/three/draco/gltf/draco_decoder.js',
+  'assets/three/draco/gltf/draco_decoder.wasm',
+  'assets/three/draco/gltf/draco_wasm_wrapper.js',
+  'assets/three/basis/basis_transcoder.js',
+  'assets/three/basis/basis_transcoder.wasm',
+]);
 const sceneEqualsArg = process.argv.find((arg) => arg.startsWith('--scene='));
 const sceneFlagIndex = process.argv.indexOf('--scene');
 const selectedSceneName = sceneEqualsArg
@@ -143,6 +150,10 @@ function hasExtension(path, extensions) {
 }
 
 function shouldInclude(rel) {
+  if (rel.startsWith('assets/three/')) {
+    return runtimeDecoderFiles.has(rel);
+  }
+
   if (rel.startsWith('assets/neural_culling/')) {
     return runtimeNeuralFiles.has(rel);
   }
@@ -611,6 +622,11 @@ if (!existsSync(sourceDir)) {
   console.error(`Build output not found: ${sourceDir}`);
   console.error('Run npm run build first.');
   process.exit(1);
+}
+const missingRuntimeDecoders = Array.from(runtimeDecoderFiles)
+  .filter((rel) => !existsSync(resolve(sourceDir, rel)));
+if (missingRuntimeDecoders.length > 0) {
+  throw new Error(`Runtime decoder assets are missing: ${missingRuntimeDecoders.join(', ')}`);
 }
 
 rmSync(deployDir, { recursive: true, force: true });

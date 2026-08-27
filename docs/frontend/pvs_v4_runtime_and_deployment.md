@@ -224,6 +224,11 @@ npm run smoke:refilter
 npm run package:deploy -- --scene hkust-v3
 ```
 
+部署包内置与当前 Three.js 版本匹配的 Draco 和 KTX2 Basis 解码运行文件，不依赖
+`unpkg` 等第三方 CDN。HKUST 独立包继续保留五个材质代理 `proxy.glb`、场景调度元数据
+和神经运行资产；体量较大的 `task-*/glb/LOD0/sub_*.glb`、纹理及材质图像配置由
+`glbResourcesBaseUrl` 指向的 liteweb3d 场景资源目录提供。
+
 `smoke:refilter` 显式使用 `--allow-software-gpu`，验证缓存重过滤、CPU AABB 参考、Loader 最终集合、“未重跑 MLP”语义、渲染 DPR 等于设备原生 DPR、场景无 Fog，以及桌面/移动视口下 AO、SMAA 和画布非空。该 smoke 不输出硬件性能结论。
 
 同位姿数值检查分为页面采集和 PyTorch 对照两步：

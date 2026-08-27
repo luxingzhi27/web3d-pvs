@@ -13,7 +13,6 @@ import {
   PMREMGenerator,
   PerspectiveCamera,
   OrthographicCamera,
-  REVISION,
   Scene,
   SkeletonHelper,
   Vector3,
@@ -66,9 +65,8 @@ import { Camera } from 'three';
 import { HDRJPGLoader } from '@monogrid/gainmap-js'
 
 const MANAGER = new LoadingManager();
-const THREE_PATH = `https://unpkg.com/three@0.${REVISION}.x`
-const DRACO_LOADER = new DRACOLoader( MANAGER ).setDecoderPath( `${THREE_PATH}/examples/js/libs/draco/gltf/` );
-const KTX2_LOADER = new KTX2Loader( MANAGER ).setTranscoderPath( `${THREE_PATH}/examples/js/libs/basis/` );
+const DRACO_LOADER = new DRACOLoader( MANAGER ).setDecoderPath( './assets/three/draco/gltf/' );
+const KTX2_LOADER = new KTX2Loader( MANAGER ).setTranscoderPath( './assets/three/basis/' );
 
 import { Loader3DTiles } from 'three-loader-3dtiles';
 

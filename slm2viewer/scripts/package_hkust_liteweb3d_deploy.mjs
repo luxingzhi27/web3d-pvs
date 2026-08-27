@@ -158,7 +158,8 @@ function rewriteConfig(outputDir, assetBaseUrl) {
 function writeDeploymentFiles(outputDir, assetBaseUrl) {
   const readme = `# Standalone HKUST deployment\n\n` +
     `This package uses the current obfuscated SLM2Viewer frontend and the\n` +
-    `HKUST neural visibility runtime assets. Scene GLB files are intentionally\n` +
+    `HKUST neural visibility runtime assets. Draco and KTX2 decoders are local.\n` +
+    `Scene component GLB files are intentionally\n` +
     `excluded from the package and are fetched from:\n\n` +
     `    ${assetBaseUrl}\n\n` +
     `## Deploy\n\n` +

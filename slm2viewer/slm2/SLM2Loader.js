@@ -13,7 +13,6 @@ import {
   LoadingManager,
   PMREMGenerator,
   PerspectiveCamera,
-  REVISION,
   Scene,
   SkeletonHelper,
   Vector3,
@@ -48,9 +47,8 @@ import { EXRLoader } from 'three/examples/jsm/loaders/EXRLoader.js';
 import { MODEL_INPUT_FOV_Y_DEG } from '../src/neuralPvsFovProtocol.js';
 
 const MANAGER = new LoadingManager();
-const THREE_PATH = `https://unpkg.com/three@0.${REVISION}.x`
-const DRACO_LOADER = new DRACOLoader( MANAGER ).setDecoderPath( `${THREE_PATH}/examples/js/libs/draco/gltf/` );
-const KTX2_LOADER = new KTX2Loader( MANAGER ).setTranscoderPath( `${THREE_PATH}/examples/js/libs/basis/` );
+const DRACO_LOADER = new DRACOLoader( MANAGER ).setDecoderPath( './assets/three/draco/gltf/' );
+const KTX2_LOADER = new KTX2Loader( MANAGER ).setTranscoderPath( './assets/three/basis/' );
 const LOCAL_RUNTIME_ASSET_VERSION = 'pvs-mainline-v4-hkust-20260825';
 const INITIAL_GLB_PRELOAD_LIMIT = 100;
 

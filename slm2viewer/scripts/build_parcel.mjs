@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 
@@ -19,6 +19,13 @@ const Bundler = require('parcel-bundler');
 const entry = resolve('index.html');
 const outDir = resolve('public');
 const buildCacheDir = resolve('.parcel-build-cache');
+const runtimeDecoderFiles = [
+  ['node_modules/three/examples/jsm/libs/draco/gltf/draco_decoder.js', 'assets/three/draco/gltf/draco_decoder.js'],
+  ['node_modules/three/examples/jsm/libs/draco/gltf/draco_decoder.wasm', 'assets/three/draco/gltf/draco_decoder.wasm'],
+  ['node_modules/three/examples/jsm/libs/draco/gltf/draco_wasm_wrapper.js', 'assets/three/draco/gltf/draco_wasm_wrapper.js'],
+  ['node_modules/three/examples/jsm/libs/basis/basis_transcoder.js', 'assets/three/basis/basis_transcoder.js'],
+  ['node_modules/three/examples/jsm/libs/basis/basis_transcoder.wasm', 'assets/three/basis/basis_transcoder.wasm'],
+];
 
 // Parcel v1 can leave same-named hashed assets behind when the output folder is
 // reused. Clean it so deploy packages never serve stale bundle contents.
@@ -50,6 +57,12 @@ try {
         source.includes('parcel-bundler/src/builtins/hmr-runtime.js')) {
       throw new Error(`Production bundle contains Parcel HMR runtime: ${name}`);
     }
+  }
+
+  for (const [source, destination] of runtimeDecoderFiles) {
+    const output = resolve(outDir, destination);
+    mkdirSync(resolve(output, '..'), { recursive: true });
+    copyFileSync(resolve(source), output);
   }
 } catch (error) {
   console.error(error);
