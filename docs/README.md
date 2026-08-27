@@ -1,6 +1,6 @@
 # NeuralStreamWeb3D 文档索引
 
-更新时间：2026-08-25
+更新时间：2026-08-27
 
 仓库文档只索引当前可运行系统、当前论文模型和仍需复现的正式基线。失败的旧整合网络、尾部分离探针、独立安全前沿 runner 及重复计划已删除；历史结论仍可从 Git 提交记录追溯，不再占用当前入口。
 
@@ -35,6 +35,7 @@ neural_instance_culling/benchmark/reaudit_pvs.py
 | [`current/neuralstreamweb3d_architecture_technical.md`](current/neuralstreamweb3d_architecture_technical.md) | 离线编码、实例可见性查询、渲染过滤和 GLB 调度架构 |
 | [`current/neuralstreamweb3d_dataset_protocol.md`](current/neuralstreamweb3d_dataset_protocol.md) | 66° view-cell、subpose、Color-ID、候选和 CSR 数据语义 |
 | [`current/hardware_gpu_execution_policy.md`](current/hardware_gpu_execution_policy.md) | Chrome NVIDIA Vulkan/ANGLE 硬件采样和 WebGPU 证据要求 |
+| [`current/browser_instance_visibility_streaming_patent_draft_2026-08-27.md`](current/browser_instance_visibility_streaming_patent_draft_2026-08-27.md) | 面向大规模三维场景的区域可见性计算、实例资源流式调度与增量加载专利技术交底初稿 |
 | [`evaluation/viewcell_image_per_evaluation.md`](evaluation/viewcell_image_per_evaluation.md) | Color-ID 图像漏检、错误实例和额外实例评价 |
 
 统一相机口径为真实渲染 `60°`，采样、后退候选和模型查询 `66°`。阈值只能由 checkpoint 自己的 calibration split 冻结；validation 用于配置与 checkpoint 比较，test 只能在模型和阈值冻结后读取。
