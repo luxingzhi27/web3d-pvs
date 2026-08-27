@@ -1,6 +1,6 @@
 # PVS V4 前端运行与部署
 
-更新时间：2026-08-26
+更新时间：2026-08-27
 
 本文是当前前端神经剔除的唯一运行说明。浏览器只接受 V4 运行包；旧方向代理、dynamic-pool、相机哈希、空间分页和二阶段后端升级接口已经从当前代码与部署包移除。
 
@@ -14,7 +14,7 @@ pvs-bounded-relation-prior-instance-calibrated-moment-runtime-v4
 
 校准阈值为 `0.6800000071525574`，由 checkpoint 自己的 calibration split 冻结。该工作点的 aggregate weighted recall 为 `0.9978366`，单侧置信下界为 `0.9963827`。当前导出对应 seed `20260802` 的无对比尾部分离消融成员，最佳安全 checkpoint 位于 epoch 36；前端不得自行重选阈值。
 
-运行时每个实例保存 `96` 维几何特征和 `28` 维已融合的逐实例生存场系数，共 `124` 维 FP16 固定特征。离线分层关系网络、逐实例校准、点云编码和遮挡证据生成均不在浏览器执行。
+运行时每个实例保存 `96` 维几何特征和 `28` 维已融合的逐实例生存场系数，共 `124` 维 FP16 固定特征。离线分层关系网络、逐实例校准、点云编码和遮挡证据生成均不在浏览器执行。默认计算后端为 `auto`：优先在 Worker 内运行 WebGPU；WebGPU 不存在、adapter/device 初始化失败或运行中设备失效时，自动在同一个 Worker 内切换到 CPU JavaScript 后端继续运行同一模型。
 
 ## 运行资产
 
@@ -52,7 +52,7 @@ slm2viewer/assets/scenes/hkust-v3/initialGlbLoadOrder.json
 
 队列在上述真实 `60°` 相机位置采集。模型输出先经过真实视锥实例过滤，再按每个 GLB 内实例的最高可见性概率排序；该位置共有 `3633` 个最终显示实例，涉及 `1602` 个 GLB。首屏文件只保存分数最高的前 `100` 个 GLB，Loader 的实际消费入口也固定限制为 `100`，不会在模型初始化前下载完整可见集合。
 
-启动时序为：先读取完整 GLB 映射和独立首屏队列，立即发起前 `100` 个 GLB 的隐藏预加载；随后启动运行元数据和神经模型资产请求，不等待这些 GLB 下载完成。模型完成首次预测后，常规 GPU 下载队列接管后续资源调度，首屏预加载不改变实例级显示集合，也不绕过真实 `60°` 视锥过滤。
+启动时序为：先读取完整 GLB 映射和独立首屏队列，立即发起前 `100` 个 GLB 的隐藏预加载；随后启动运行元数据和神经模型资产请求，不等待这些 GLB 下载完成。模型完成首次预测后，神经下载队列接管后续资源调度，首屏预加载不改变实例级显示集合，也不绕过真实 `60°` 视锥过滤。
 
 ## GLB 资源管线
 
@@ -89,6 +89,20 @@ npm run capture:initial-glb-order
 完整预测结束后，GPU `resultBuffer` 中的后退区域模型可见实例集合保持驻留。相机仍在已登记的水平 `2 m` view-cell 内且方向、垂直位置、FOV 和宽高比契约没有变化时，浏览器不再运行可见性 MLP，也不改变下载/预取队列。Worker 只启动独立的 WebGPU 重过滤管线：读取缓存实例编号，使用最新真实 `60°` 相机重新测试实例 AABB，在 GPU 上压缩最终实例编号并聚合最终 GLB 编号。到达 view-cell 边界或契约发生变化时才重新运行完整预测。
 
 重过滤请求与完整预测共用串行 GPU 队列。相机在请求期间继续移动时，主线程只登记一次待处理更新，并在当前请求结束后立即处理最新相机；不会并发改写统一缓冲，也不会使用固定低频定时器偷偷重跑模型。
+
+### WebGPU 不可用时的同模型兼容
+
+兼容路径不是纯 AABB 视锥剔除。CPU 后端仍按当前 V4 权重完整计算关系条件、视点区域频谱矩、生存场、边界摘要、可见性概率、冻结阈值、真实 `60°` 显示过滤和 GLB 最高分聚合。AABB 只负责与 WebGPU 路径完全相同的后退 `66°` 候选生成和最终真实视锥重过滤，不能直接决定神经可见集合。
+
+`src/InstancePVSRuntime.js` 统一管理后端。`auto` 先尝试 WebGPU；初始化失败时切换 CPU，运行期 WebGPU 预测失败时切换 CPU 并重做当前查询，缓存重过滤失败时先在 CPU 上重建最近一次完整神经预测再过滤。模型资产、冻结阈值、候选相机和输出 schema 不改变，也不会调用 `setCullingMode('frustum')`。强制测试入口为：
+
+```text
+?neuralRuntimeBackend=cpu
+?neuralRuntimeBackend=webgpu
+?neuralRuntimeBackend=auto
+```
+
+CPU 推理始终位于 `LightweightPVSWorker`，不会阻塞 Three.js 渲染主线程，但计算耗时明显高于硬件 WebGPU，仅作为兼容后端。当前服务器浏览器功能 smoke 中，初始视点得到 `9398` 个候选、`3728` 个神经可见实例和 `3633` 个真实视锥显示实例；强制 CPU 和模拟 WebGPU 获取失败后的自动 CPU 输出一致，单次完整推理分别约为 `420.1 ms` 和 `423.5 ms`。主线程 `10 ms` 定时器在推理期间持续触发，证明计算没有回到主线程。该结果不是移动端性能结论。
 
 未达到阈值但分数不低于预取阈值 `0.04` 的实例可以参与 GLB 预取。当前 checkpoint 没有独立下载头，GLB 优先级由所属实例的最高可见性概率聚合得到；这属于当前部署实现，不应描述成模型已经学习了独立资源效用。
 
@@ -156,8 +170,12 @@ HKUST 页面功能 smoke 中，冻结前的最终集合为 `3769` 个实例和 `
 
 | 模块 | 责任 |
 |---|---|
-| `src/InstancePVS.js` | V4 资产校验、GPU AABB 候选、WGSL 查询、GPU 压缩和 GLB 聚合 |
-| `src/LightweightPVSWorker.js` | 构造 66°/60° 相机、排序 GPU 下载队列并传递最终结果 |
+| `src/InstancePVS.js` | V4 资产校验、GPU 候选、WGSL 查询、GPU 压缩和 GLB 聚合 |
+| `src/InstancePVSCPU.js` | 同一 V4 模型的 Worker CPU 推理、阈值筛选、重过滤和 GLB 聚合 |
+| `src/InstancePVSCPUMath.js` | FP16 解码、ray/频谱/生存场和小型全连接层 CPU 数学 |
+| `src/InstancePVSRuntime.js` | `auto/webgpu/cpu` 后端选择及运行期故障切换 |
+| `src/InstancePVSBackendPolicy.js` | 后端参数规范化与 WebGPU 故障识别 |
+| `src/LightweightPVSWorker.js` | 构造 66°/60° 相机、运行统一后端、排序下载队列并传递最终结果 |
 | `src/LightweightPVSDispatcher.js` | 相机快照、完整预测/缓存重过滤消息和请求串行号 |
 | `src/CameraPredictionGate.js` | 判断是否越过 view-cell 需要完整预测，以及 cell 内是否需要重过滤 |
 | `src/neuralCullingBackendMode.js` | 只为有 V4 资产的场景启用神经模式 |
@@ -212,6 +230,8 @@ WGSL 必须与训练端依次对齐九维中心视角、`9×2` 视点区域轴�
 | 重过滤网络推理时间字段 | `0 ms` |
 | Loader 最终实例集合与 Worker 重过滤差异 | `0` |
 
+CPU 与 WebGPU 同位姿数值对照覆盖 `9541` 个候选。候选集合、阈值后可见实例集合和真实视锥实例集合完全一致；概率平均绝对误差为 `0.0000141`，最大绝对误差为 `0.0004595`。该次 WebGPU adapter 为 SwiftShader，只用于数值一致性验证，不作为硬件性能结果。
+
 该 smoke 的无头 Chrome WebGPU adapter 回报 `google/swiftshader`，仅证明功能和集合一致性。`totalMs` 不构成硬件或移动端性能结果；正式 WebGPU 延迟必须读取 adapter 信息并通过仓库 NVIDIA/Vulkan 硬件门，WebGL 硬件证据不能替代 WebGPU adapter 证据。
 
 ## 验证与打包
@@ -221,6 +241,7 @@ cd slm2viewer
 npm test
 npm run build
 npm run smoke:refilter
+npm run smoke:cpu-fallback
 npm run package:deploy -- --scene hkust-v3
 ```
 
@@ -230,6 +251,8 @@ npm run package:deploy -- --scene hkust-v3
 `glbResourcesBaseUrl` 指向的 liteweb3d 场景资源目录提供。
 
 `smoke:refilter` 显式使用 `--allow-software-gpu`，验证缓存重过滤、CPU AABB 参考、Loader 最终集合、“未重跑 MLP”语义、渲染 DPR 等于设备原生 DPR、场景无 Fog，以及桌面/移动视口下 AO、SMAA 和画布非空。该 smoke 不输出硬件性能结论。
+
+`smoke:cpu-fallback` 分别验证强制 CPU 和 `auto` 模式下 WebGPU 初始化失败后的自动 CPU 路径，要求两者都运行神经模型、产生比候选集合更小的预测集合、完成缓存重过滤，并确认主线程在推理期间保持响应。CPU/WebGPU 概率对照可在生成现有 parity capture 后运行 `scripts/verify_instance_pvs_cpu_webgpu_capture.mjs --capture=<capture.json>`。
 
 同位姿数值检查分为页面采集和 PyTorch 对照两步：
 

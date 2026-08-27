@@ -271,7 +271,7 @@ export class InstancePVS {
     this._validateBinaryShapes(runtimeWords, weightWords, frequencies, chi);
 
     const gpuStartedAt = nowMs();
-    await this._initWebGPU(runtimeWords, weightWords, frequencies, chi);
+    await this._initializeBackend(runtimeWords, weightWords, frequencies, chi);
     const finishedAt = nowMs();
     this.isReady = true;
     this.backend = 'webgpu-v4';
@@ -410,7 +410,7 @@ export class InstancePVS {
     return buffer;
   }
 
-  async _initWebGPU(runtimeWords, weightWords, frequencies, chi) {
+  async _initializeBackend(runtimeWords, weightWords, frequencies, chi) {
     if (typeof navigator === 'undefined' || !navigator.gpu) {
       throw new Error('V4 instance visibility requires WebGPU.');
     }

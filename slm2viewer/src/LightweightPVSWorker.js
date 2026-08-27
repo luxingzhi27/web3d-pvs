@@ -1,5 +1,5 @@
 import { PerspectiveCamera, Quaternion, Vector3 } from 'three';
-import { InstancePVS } from './InstancePVS.js';
+import { InstancePVSRuntime } from './InstancePVSRuntime.js';
 import { FRONTEND_RENDER_FOV_Y_DEG, MODEL_INPUT_FOV_Y_DEG } from './neuralPvsFovProtocol.js';
 import { bitsetFromIds, diffIdBitsets } from './sortedIdDelta.js';
 
@@ -20,6 +20,7 @@ let state = {
   prefetchThreshold: 0.04,
   downloadPlanMode: 'viewcell-priority',
   diagnostics: false,
+  backendPreference: 'auto',
   renderComponentBitset: new Uint32Array(),
   renderGlbBitset: new Uint32Array(),
   renderRevision: 0,
@@ -200,6 +201,7 @@ async function initWorker(message) {
       : 0.04,
     downloadPlanMode: message.downloadPlanMode === 'raw-visible' ? 'raw-visible' : 'viewcell-priority',
     diagnostics: Boolean(message.debugLogging),
+    backendPreference: message.backendPreference || 'auto',
     renderComponentBitset: new Uint32Array(),
     renderGlbBitset: new Uint32Array(),
     renderRevision: 0,
@@ -208,14 +210,15 @@ async function initWorker(message) {
   if (state.meta?.schema !== RUNTIME_SCHEMA) {
     throw new Error(`The worker only accepts the current V4 runtime, got ${state.meta?.schema || 'missing'}.`);
   }
-  const pvs = new InstancePVS(state.assetBaseUrl, {
+  const pvs = new InstancePVSRuntime(state.assetBaseUrl, {
     assetVersion: state.assetVersion,
     preloadedMeta: state.meta,
     debugLogging: Boolean(message.debugLogging),
+    backendPreference: state.backendPreference,
   });
   state.pvs = pvs;
   await pvs.init();
-  state.backend = 'worker-webgpu-v4-fused';
+  state.backend = `worker-${pvs.backend}`;
   state.ready = true;
   state.initTimings = {
     totalMs: nowMs() - startedAt,
@@ -225,6 +228,7 @@ async function initWorker(message) {
     type: 'ready',
     backend: state.backend,
     timings: state.initTimings,
+    fallbackReason: pvs.fallbackReason,
     modelInfo: modelInfo(),
   });
 }
@@ -241,6 +245,7 @@ async function predictWorker(message) {
     renderCamera: activeCamera,
     prefetchThreshold: state.prefetchThreshold,
   });
+  state.backend = `worker-${state.pvs.backend}`;
   const inferenceMs = nowMs() - inferenceStartedAt;
   const componentIds = prediction.componentModelList || new Uint32Array();
   const renderComponentIds = prediction.renderComponentModelList || new Uint32Array();
@@ -267,6 +272,7 @@ async function predictWorker(message) {
     serial: message.serial,
     idMode: 'global-glb-priority',
     backend: state.backend,
+    fallbackReason: state.pvs.fallbackReason,
     componentModelList: componentIds,
     modelList,
     weightList,
@@ -300,7 +306,8 @@ async function predictWorker(message) {
       viewcellPrefetchGlbCount: plan.viewcellPrefetchVisibleCount,
       renderInstanceCount: renderComponentIds.length,
       renderGlbCount: renderGlbIds.length,
-      gpuFusedCandidateAndFilter: true,
+      gpuFusedCandidateAndFilter: Boolean(prediction.timings?.gpuFusedCandidateAndFilter),
+      workerCpuNeuralInference: Boolean(prediction.timings?.workerCpuNeuralInference),
       readbackBytes: Number(prediction.timings?.readbackBytes || 0),
       downloadPlanMode: state.downloadPlanMode,
       hasModelDownloadPriority: false,
@@ -316,6 +323,7 @@ async function filterWorker(message) {
   const activeCamera = buildCamera(message.snapshot || {}, FRONTEND_RENDER_FOV_Y_DEG);
   const filtered = await state.pvs.refilter(activeCamera);
   if (!filtered) throw new Error('No cached model prediction is available for render refiltering.');
+  state.backend = `worker-${state.pvs.backend}`;
   const renderComponentBitset = filtered.renderComponentBitset || new Uint32Array();
   const renderGlbBitset = filtered.renderGlbBitset || new Uint32Array();
   const componentDelta = diffIdBitsets(
@@ -336,7 +344,8 @@ async function filterWorker(message) {
     type: 'filter-result',
     serial: message.serial,
     idMode: 'global-glb-priority',
-    backend: filtered.backend || `${state.backend}-cached-render-filter`,
+    backend: `${state.backend}-cached-render-filter`,
+    fallbackReason: state.pvs.fallbackReason,
     renderComponentAddedIds: componentDelta.added,
     renderComponentRemovedIds: componentDelta.removed,
     renderGlbAddedIds: glbDelta.added,

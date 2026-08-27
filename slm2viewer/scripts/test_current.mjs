@@ -111,6 +111,9 @@ for (const descriptor of Object.values(meta.files || {})) {
 
 const backendSource = fs.readFileSync(requireFile('src/neuralCullingBackendMode.js'), 'utf8');
 const runtimeSource = fs.readFileSync(requireFile('src/InstancePVS.js'), 'utf8');
+const cpuRuntimeSource = fs.readFileSync(requireFile('src/InstancePVSCPU.js'), 'utf8');
+const unifiedRuntimeSource = fs.readFileSync(requireFile('src/InstancePVSRuntime.js'), 'utf8');
+const backendPolicySource = fs.readFileSync(requireFile('src/InstancePVSBackendPolicy.js'), 'utf8');
 const workerSource = fs.readFileSync(requireFile('src/LightweightPVSWorker.js'), 'utf8');
 const dispatcherSource = fs.readFileSync(requireFile('src/LightweightPVSDispatcher.js'), 'utf8');
 const loaderSource = fs.readFileSync(requireFile('slm2/SLM2Loader.js'), 'utf8');
@@ -180,6 +183,17 @@ if (!workerSource.includes('buildCamera(snapshot, FRONTEND_RENDER_FOV_Y_DEG)')
     || !workerSource.includes("message.type === 'filter'")) {
   throw new Error('The worker no longer follows the 60-degree render / 66-degree candidate contract.');
 }
+if (!workerSource.includes("import { InstancePVSRuntime } from './InstancePVSRuntime.js'")
+    || workerSource.includes('new InstancePVS(')
+    || !unifiedRuntimeSource.includes("this.backendPreference === 'cpu'")
+    || !unifiedRuntimeSource.includes('await this._activateCPU(error)')
+    || !backendPolicySource.includes("normalized === 'cpu' || normalized === 'webgpu'")
+    || !cpuRuntimeSource.includes("this.backend = 'cpu-js-v4'")
+    || !cpuRuntimeSource.includes("this._linear('visibility_head'")
+    || !cpuRuntimeSource.includes('glbScores[glbId]')
+    || !loaderSource.includes("backendPreference: params['neuralRuntimeBackend'] || 'auto'")) {
+  throw new Error('The Worker no longer provides the same-model WebGPU-to-CPU compatibility path.');
+}
 if (!runtimeSource.includes("source: 'gpu_v4_back_frustum_aabb'")
     || !runtimeSource.includes('fn intersects_frustum(instance_id: u32, render_frustum: bool)')
     || !runtimeSource.includes('atomicMax(&results[')
@@ -211,7 +225,7 @@ for (const forbidden of [
   '_scheduleTrajectoryPrefetch',
 ]) {
   if (runtimeSource.includes(forbidden) || workerSource.includes(forbidden) || loaderSource.includes(forbidden)) {
-    throw new Error(`CPU neural-culling compatibility path returned: ${forbidden}`);
+    throw new Error(`Removed pure-AABB neural fallback returned: ${forbidden}`);
   }
 }
 if (!loaderSource.includes('predictionPayload.renderComponentModelList')

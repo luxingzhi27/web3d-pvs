@@ -4750,6 +4750,7 @@ export class SLM2Loader
     this.neuralPVSOptions = {
       debugLogging: this.neuralDebugLogs,
       assetVersion: LOCAL_RUNTIME_ASSET_VERSION,
+      backendPreference: params['neuralRuntimeBackend'] || 'auto',
       cpuPerfMode: this.cpuPerfMode,
       maxImmediate: this.cpuPerfMode === 'mobile' ? 160 : 384,
       maxPrefetch: this.cpuPerfMode === 'mobile' ? 768 : 2048,

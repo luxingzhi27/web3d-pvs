@@ -759,7 +759,14 @@ export class Viewer
       return '模型剔除（Worker WebGPU）';
     }
 
-    if (backend.indexOf('aabb') >= 0 || backend.indexOf('fallback') >= 0 || fallbackReason)
+    if (backend.indexOf('cpu-js') >= 0)
+    {
+      return fallbackReason
+        ? '模型剔除（Worker CPU 兼容后端）'
+        : '模型剔除（Worker CPU）';
+    }
+
+    if (backend.indexOf('aabb') >= 0)
     {
       return 'AABB 剔除（Worker 降级）';
     }

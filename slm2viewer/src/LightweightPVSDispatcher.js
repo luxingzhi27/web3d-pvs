@@ -1,4 +1,5 @@
 import { FRONTEND_RENDER_FOV_Y_DEG } from './neuralPvsFovProtocol.js';
+import { normalizeInstancePVSBackend } from './InstancePVSBackendPolicy.js';
 
 function nowMs() {
   return typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
@@ -45,6 +46,7 @@ export class LightweightPVSDispatcher {
       ? Number(options.prefetchThreshold)
       : null;
     this.downloadPlanMode = options.downloadPlanMode === 'raw-visible' ? 'raw-visible' : 'viewcell-priority';
+    this.backendPreference = normalizeInstancePVSBackend(options.backendPreference);
 
     this.worker = null;
     this.isReady = false;
@@ -111,6 +113,7 @@ export class LightweightPVSDispatcher {
         maxPrefetch: this.maxPrefetch,
         prefetchThreshold: this.prefetchThreshold,
         downloadPlanMode: this.downloadPlanMode,
+        backendPreference: this.backendPreference,
       });
     });
     this.isReady = true;
@@ -126,6 +129,9 @@ export class LightweightPVSDispatcher {
       this.backend = data.backend || 'worker';
       this.lastInitTimings = data.timings || null;
       this.modelInfo = data.modelInfo || this.modelInfo;
+      if (data.fallbackReason && this.lastInitTimings) {
+        this.lastInitTimings.fallbackReason = data.fallbackReason;
+      }
       this.isReady = true;
       this.initError = null;
       if (this.pendingInitResolve) {
