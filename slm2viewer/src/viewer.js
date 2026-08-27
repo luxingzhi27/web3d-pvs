@@ -759,11 +759,11 @@ export class Viewer
       return '模型剔除（Worker WebGPU）';
     }
 
-    if (backend.indexOf('cpu-js') >= 0)
+    if (backend.indexOf('wasm-simd') >= 0)
     {
       return fallbackReason
-        ? '模型剔除（Worker CPU 兼容后端）'
-        : '模型剔除（Worker CPU）';
+        ? '模型剔除（Worker WASM SIMD 兼容后端）'
+        : '模型剔除（Worker WASM SIMD）';
     }
 
     if (backend.indexOf('aabb') >= 0)

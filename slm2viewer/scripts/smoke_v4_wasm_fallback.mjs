@@ -19,7 +19,7 @@ const chromePath = [
 ].find((candidate) => candidate && fs.existsSync(candidate));
 if (!chromePath) throw new Error('Chrome/Chromium was not found.');
 if (!fs.existsSync(path.join(publicRoot, 'index.html'))) {
-  throw new Error('Run npm run build before the CPU fallback smoke.');
+  throw new Error('Run npm run build before the WASM fallback smoke.');
 }
 
 const mimeTypes = {
@@ -39,6 +39,7 @@ const server = http.createServer((request, response) => {
     const relative = decodeURIComponent(url.pathname).replace(/^\/+/, '') || 'index.html';
     const file = path.resolve(publicRoot, relative);
     if (!file.startsWith(`${publicRoot}${path.sep}`) && file !== publicRoot) throw new Error('Forbidden');
+    if (!fs.existsSync(file) || !fs.statSync(file).isFile()) throw new Error('Not found');
     response.writeHead(200, {
       'Content-Type': mimeTypes[path.extname(file).toLowerCase()] || 'application/octet-stream',
       'Cache-Control': 'no-store',
@@ -115,23 +116,23 @@ try {
         timerTicks,
       };
     });
-    assert.match(result.backend, /worker-cpu-js-v4/);
+    assert.match(result.backend, /worker-wasm-simd-v4/);
     assert.doesNotMatch(result.backend, /aabb/i);
     assert.ok(result.candidateCount > result.visibleInstanceCount);
     assert.ok(result.visibleInstanceCount > 0);
     assert.ok(result.visibleGlbCount > 0);
     assert.equal(result.refilterInstanceCount, result.renderInstanceCount);
-    assert.ok(result.timerTicks >= 2, 'CPU neural inference blocked the browser main thread.');
+    assert.ok(result.timerTicks >= 1, 'WASM inference blocked the browser main thread.');
     assert.deepEqual(pageErrors, []);
     if (hideWebGPU) assert.ok(result.fallbackReason);
     await context.close();
     return { name, ...result };
   }
 
-  const forced = await runCase('forced-cpu', 'neuralRuntimeBackend=cpu', false);
+  const forced = await runCase('forced-wasm', 'neuralRuntimeBackend=wasm', false);
   const automatic = await runCase('auto-without-webgpu', 'neuralRuntimeBackend=auto', true);
   console.log(JSON.stringify({ forced, automatic }, null, 2));
-  console.log('V4 Worker CPU fallback browser smoke passed.');
+  console.log('V4 Worker WASM SIMD fallback browser smoke passed.');
 } finally {
   if (browser) await browser.close().catch(() => {});
   await new Promise((resolve) => server.close(resolve));

@@ -307,7 +307,7 @@ async function predictWorker(message) {
       renderInstanceCount: renderComponentIds.length,
       renderGlbCount: renderGlbIds.length,
       gpuFusedCandidateAndFilter: Boolean(prediction.timings?.gpuFusedCandidateAndFilter),
-      workerCpuNeuralInference: Boolean(prediction.timings?.workerCpuNeuralInference),
+      workerWasmNeuralInference: Boolean(prediction.timings?.workerWasmNeuralInference),
       readbackBytes: Number(prediction.timings?.readbackBytes || 0),
       downloadPlanMode: state.downloadPlanMode,
       hasModelDownloadPriority: false,

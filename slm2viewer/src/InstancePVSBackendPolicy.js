@@ -15,7 +15,7 @@ const WEBGPU_ERROR_TOKENS = Object.freeze([
 
 export function normalizeInstancePVSBackend(value) {
   const normalized = String(value || 'auto').trim().toLowerCase();
-  if (normalized === 'cpu' || normalized === 'webgpu') return normalized;
+  if (normalized === 'wasm' || normalized === 'webgpu') return normalized;
   return 'auto';
 }
 

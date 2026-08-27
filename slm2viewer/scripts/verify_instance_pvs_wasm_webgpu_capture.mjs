@@ -5,7 +5,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PerspectiveCamera, Quaternion, Vector3 } from 'three';
-import { InstancePVSCPU } from '../src/InstancePVSCPU.js';
+import { InstancePVSWasm } from '../src/InstancePVSWasm.js';
 
 const captureArg = process.argv.find((value) => value.startsWith('--capture='));
 const capturePath = captureArg ? captureArg.slice('--capture='.length) : null;
@@ -18,19 +18,21 @@ if (!String(capture.backend || '').includes('webgpu-v4')) {
 }
 
 const viewerRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const assetRoot = path.join(
-  viewerRoot,
-  'public/assets/neural_instance_culling/pvs_mainline_v4',
-);
+const modelRoot = path.join(viewerRoot, 'assets/neural_instance_culling/pvs_mainline_v4');
+const wasmPath = path.join(viewerRoot, 'assets/wasm/instance_pvs_v4.wasm');
 const server = http.createServer((request, response) => {
   try {
-    const relative = decodeURIComponent(new URL(request.url, 'http://127.0.0.1').pathname)
-      .replace(/^\/+/, '');
-    const file = path.resolve(assetRoot, relative);
-    if (!file.startsWith(`${assetRoot}${path.sep}`)) throw new Error('Forbidden');
+    const pathname = decodeURIComponent(new URL(request.url, 'http://127.0.0.1').pathname);
+    const relative = pathname.startsWith('/model/') ? pathname.slice('/model/'.length) : '';
+    const file = pathname === '/assets/wasm/instance_pvs_v4.wasm'
+      ? wasmPath
+      : path.resolve(modelRoot, relative);
+    if (file !== wasmPath && !file.startsWith(`${modelRoot}${path.sep}`)) throw new Error('Forbidden');
     const data = fs.readFileSync(file);
     response.writeHead(200, {
-      'Content-Type': relative.endsWith('.json') ? 'application/json' : 'application/octet-stream',
+      'Content-Type': file.endsWith('.json')
+        ? 'application/json'
+        : (file.endsWith('.wasm') ? 'application/wasm' : 'application/octet-stream'),
       'Content-Length': data.byteLength,
     });
     response.end(data);
@@ -46,7 +48,10 @@ await new Promise((resolve, reject) => {
 let runtime;
 try {
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
-  runtime = new InstancePVSCPU(baseUrl, { debugLogging: true });
+  runtime = new InstancePVSWasm(`${baseUrl}/model`, {
+    debugLogging: true,
+    wasmUrl: `${baseUrl}/assets/wasm/instance_pvs_v4.wasm`,
+  });
   await runtime.init();
   const source = capture.camera;
   const camera = new PerspectiveCamera(source.fov, source.aspect, source.near, source.far);
@@ -63,7 +68,7 @@ try {
   candidateCamera.quaternion.copy(camera.quaternion);
   candidateCamera.updateProjectionMatrix();
   candidateCamera.updateMatrixWorld(true);
-  const cpu = await runtime.predict(camera, {
+  const wasm = await runtime.predict(camera, {
     candidateCamera,
     renderCamera: camera,
     prefetchThreshold: 0.04,
@@ -71,33 +76,34 @@ try {
 
   const gpuCandidateIds = capture.candidateInstanceIds.map(Number);
   const gpuScores = capture.candidateScores.map(Number);
-  const cpuCandidateIds = Array.from(cpu.rawCandidateIds);
-  const cpuScores = Array.from(cpu.scores);
+  const wasmCandidateIds = Array.from(wasm.rawCandidateIds);
+  const wasmScores = Array.from(wasm.scores);
   const gpuScoreById = new Map(gpuCandidateIds.map((id, index) => [id, gpuScores[index]]));
-  assert.deepEqual(cpuCandidateIds, gpuCandidateIds.slice().sort((a, b) => a - b));
-  assert.deepEqual(Array.from(cpu.componentModelList), capture.visibleInstanceIds.map(Number));
+  assert.deepEqual(wasmCandidateIds, gpuCandidateIds.slice().sort((a, b) => a - b));
+  assert.deepEqual(Array.from(wasm.componentModelList), capture.visibleInstanceIds.map(Number));
   assert.deepEqual(
-    Array.from(cpu.renderComponentModelList),
+    Array.from(wasm.renderComponentModelList),
     capture.renderVisibleInstanceIds.map(Number),
   );
-  assert.equal(cpuScores.length, gpuScores.length);
+  assert.equal(wasmScores.length, gpuScores.length);
   let maximumAbsoluteError = 0;
   let meanAbsoluteError = 0;
-  for (let index = 0; index < cpuScores.length; index += 1) {
-    const difference = Math.abs(cpuScores[index] - gpuScoreById.get(cpuCandidateIds[index]));
+  for (let index = 0; index < wasmScores.length; index += 1) {
+    const difference = Math.abs(wasmScores[index] - gpuScoreById.get(wasmCandidateIds[index]));
     maximumAbsoluteError = Math.max(maximumAbsoluteError, difference);
     meanAbsoluteError += difference;
   }
-  meanAbsoluteError /= Math.max(1, cpuScores.length);
-  assert.ok(maximumAbsoluteError < 0.001, `CPU/WebGPU max score error is ${maximumAbsoluteError}.`);
+  meanAbsoluteError /= Math.max(1, wasmScores.length);
+  assert.ok(maximumAbsoluteError < 0.001, `WASM/WebGPU max score error is ${maximumAbsoluteError}.`);
   console.log(JSON.stringify({
-    candidateCount: cpuCandidateIds.length,
-    visibleInstanceCount: cpu.componentModelList.length,
-    renderVisibleInstanceCount: cpu.renderComponentModelList.length,
+    candidateCount: wasmCandidateIds.length,
+    visibleInstanceCount: wasm.componentModelList.length,
+    renderVisibleInstanceCount: wasm.renderComponentModelList.length,
     meanAbsoluteError,
     maximumAbsoluteError,
+    inferenceMs: wasm.timings.inferenceMs,
   }, null, 2));
-  console.log('V4 CPU/WebGPU capture parity passed.');
+  console.log('V4 WASM SIMD/WebGPU capture parity passed.');
 } finally {
   runtime?.dispose();
   await new Promise((resolve) => server.close(resolve));

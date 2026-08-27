@@ -1,5 +1,5 @@
 import { InstancePVS } from './InstancePVS.js';
-import { InstancePVSCPU } from './InstancePVSCPU.js';
+import { InstancePVSWasm } from './InstancePVSWasm.js';
 import {
   canAttemptWebGPU,
   describeBackendFallback,
@@ -30,8 +30,8 @@ export class InstancePVSRuntime {
   async init() {
     if (this.isReady) return this;
     try {
-      if (this.backendPreference === 'cpu') {
-        await this._activateCPU();
+      if (this.backendPreference === 'wasm') {
+        await this._activateWasm();
       } else if (this.backendPreference === 'webgpu') {
         await this._activateWebGPU();
       } else if (canAttemptWebGPU()) {
@@ -39,10 +39,10 @@ export class InstancePVSRuntime {
           await this._activateWebGPU();
         } catch (error) {
           if (!isWebGPUBackendFailure(error)) throw error;
-          await this._activateCPU(error);
+          await this._activateWasm(error);
         }
       } else {
-        await this._activateCPU(new Error('WebGPU is unavailable in this browser.'));
+        await this._activateWasm(new Error('WebGPU is unavailable in this browser.'));
       }
       this.isReady = true;
       this.initError = null;
@@ -67,8 +67,8 @@ export class InstancePVSRuntime {
     this.lastInitTimings = runtime.lastInitTimings;
   }
 
-  async _activateCPU(reason = null) {
-    const runtime = new InstancePVSCPU(this.assetBaseUrl, this.options);
+  async _activateWasm(reason = null) {
+    const runtime = new InstancePVSWasm(this.assetBaseUrl, this.options);
     try {
       await runtime.init();
     } catch (error) {
@@ -88,7 +88,7 @@ export class InstancePVSRuntime {
   async _fallbackAfterRuntimeFailure(error) {
     if (this.backendPreference !== 'auto' || !this.backend.includes('webgpu')) throw error;
     if (!isWebGPUBackendFailure(error, { runtimeFailure: true })) throw error;
-    await this._activateCPU(error);
+    await this._activateWasm(error);
     this.isReady = true;
   }
 

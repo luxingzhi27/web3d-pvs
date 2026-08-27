@@ -108,10 +108,12 @@ for (const descriptor of Object.values(meta.files || {})) {
     throw new Error(`V4 asset byte length mismatch: ${descriptor.file}`);
   }
 }
+const wasmRuntimePath = requireFile('assets/wasm/instance_pvs_v4.wasm');
+if (fs.statSync(wasmRuntimePath).size <= 0) throw new Error('The V4 WASM SIMD runtime is empty.');
 
 const backendSource = fs.readFileSync(requireFile('src/neuralCullingBackendMode.js'), 'utf8');
 const runtimeSource = fs.readFileSync(requireFile('src/InstancePVS.js'), 'utf8');
-const cpuRuntimeSource = fs.readFileSync(requireFile('src/InstancePVSCPU.js'), 'utf8');
+const wasmRuntimeSource = fs.readFileSync(requireFile('src/InstancePVSWasm.js'), 'utf8');
 const unifiedRuntimeSource = fs.readFileSync(requireFile('src/InstancePVSRuntime.js'), 'utf8');
 const backendPolicySource = fs.readFileSync(requireFile('src/InstancePVSBackendPolicy.js'), 'utf8');
 const workerSource = fs.readFileSync(requireFile('src/LightweightPVSWorker.js'), 'utf8');
@@ -125,6 +127,7 @@ const bitsetStateSource = fs.readFileSync(requireFile('src/IdBitsetState.js'), '
 const staticSceneOptimizerSource = fs.readFileSync(requireFile('src/StaticSceneOptimizer.js'), 'utf8');
 const renderSurfaceSource = fs.readFileSync(requireFile('src/RenderSurfacePolicy.js'), 'utf8');
 const buildSource = fs.readFileSync(requireFile('scripts/build_parcel.mjs'), 'utf8');
+const wasmBuildSource = fs.readFileSync(requireFile('scripts/build_instance_pvs_wasm.mjs'), 'utf8');
 const packageDeploySource = fs.readFileSync(requireFile('scripts/package_deploy.mjs'), 'utf8');
 const hkustGlbBaseUrl = 'https://www.liteweb3d.com/data/hkust-v3/';
 if (config.scenes?.default_config?.loaderConfig?.glbResourcesBaseUrl !== hkustGlbBaseUrl
@@ -185,14 +188,19 @@ if (!workerSource.includes('buildCamera(snapshot, FRONTEND_RENDER_FOV_Y_DEG)')
 }
 if (!workerSource.includes("import { InstancePVSRuntime } from './InstancePVSRuntime.js'")
     || workerSource.includes('new InstancePVS(')
-    || !unifiedRuntimeSource.includes("this.backendPreference === 'cpu'")
-    || !unifiedRuntimeSource.includes('await this._activateCPU(error)')
-    || !backendPolicySource.includes("normalized === 'cpu' || normalized === 'webgpu'")
-    || !cpuRuntimeSource.includes("this.backend = 'cpu-js-v4'")
-    || !cpuRuntimeSource.includes("this._linear('visibility_head'")
-    || !cpuRuntimeSource.includes('glbScores[glbId]')
+    || !unifiedRuntimeSource.includes("this.backendPreference === 'wasm'")
+    || !unifiedRuntimeSource.includes('await this._activateWasm(error)')
+    || !backendPolicySource.includes("normalized === 'wasm' || normalized === 'webgpu'")
+    || !wasmRuntimeSource.includes("this.backend = 'wasm-simd-v4'")
+    || !wasmRuntimeSource.includes('this.wasm.predict_v4(')
+    || !wasmRuntimeSource.includes("prioritySource: 'wasm-max-visibility-probability'")
     || !loaderSource.includes("backendPreference: params['neuralRuntimeBackend'] || 'auto'")) {
-  throw new Error('The Worker no longer provides the same-model WebGPU-to-CPU compatibility path.');
+  throw new Error('The Worker no longer provides the same-model WebGPU-to-WASM SIMD path.');
+}
+if (fs.existsSync(path.join(viewerDir, 'src/InstancePVSCPU.js'))
+    || fs.existsSync(path.join(viewerDir, 'src/InstancePVSCPUMath.js'))
+    || [unifiedRuntimeSource, workerSource, viewerSource].some((source) => source.includes('cpu-js-v4'))) {
+  throw new Error('The removed JavaScript CPU neural backend returned.');
 }
 if (!runtimeSource.includes("source: 'gpu_v4_back_frustum_aabb'")
     || !runtimeSource.includes('fn intersects_frustum(instance_id: u32, render_frustum: bool)')
@@ -360,7 +368,9 @@ if (!buildSource.includes('cache: false')
     || !buildSource.includes("source.includes('__parcel__error__overlay__')")
     || !buildSource.includes('draco/gltf/draco_decoder.wasm')
     || !buildSource.includes('basis/basis_transcoder.wasm')
-    || !packageDeploySource.includes("rel.startsWith('assets/three/')")) {
+    || !packageDeploySource.includes("rel.startsWith('assets/three/')")
+    || !packageDeploySource.includes("'assets/wasm/instance_pvs_v4.wasm'")
+    || !wasmBuildSource.includes('target-feature=+simd128')) {
   throw new Error('Production builds are no longer protected from Parcel HMR cache contamination.');
 }
 if (loaderSource.includes('unpkg.com/three')

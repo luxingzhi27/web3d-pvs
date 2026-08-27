@@ -44,6 +44,9 @@ const runtimeDecoderFiles = new Set([
   'assets/three/basis/basis_transcoder.js',
   'assets/three/basis/basis_transcoder.wasm',
 ]);
+const runtimeWasmFiles = new Set([
+  'assets/wasm/instance_pvs_v4.wasm',
+]);
 const sceneEqualsArg = process.argv.find((arg) => arg.startsWith('--scene='));
 const sceneFlagIndex = process.argv.indexOf('--scene');
 const selectedSceneName = sceneEqualsArg
@@ -150,6 +153,10 @@ function hasExtension(path, extensions) {
 }
 
 function shouldInclude(rel) {
+  if (rel.startsWith('assets/wasm/')) {
+    return runtimeWasmFiles.has(rel);
+  }
+
   if (rel.startsWith('assets/three/')) {
     return runtimeDecoderFiles.has(rel);
   }

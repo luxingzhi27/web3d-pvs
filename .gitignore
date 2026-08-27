@@ -159,6 +159,8 @@ pip-wheel-metadata/
 *.dylib
 *.pdb
 *.wasm
+!slm2viewer/assets/wasm/instance_pvs_v4.wasm
+**/target/
 *.dSYM/
 
 # Other generated native / interchange assets

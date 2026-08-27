@@ -9,7 +9,8 @@ import {
 
 assert.equal(normalizeInstancePVSBackend(), 'auto');
 assert.equal(normalizeInstancePVSBackend('WEBGPU'), 'webgpu');
-assert.equal(normalizeInstancePVSBackend('cpu'), 'cpu');
+assert.equal(normalizeInstancePVSBackend('WASM'), 'wasm');
+assert.equal(normalizeInstancePVSBackend('cpu'), 'auto');
 assert.equal(normalizeInstancePVSBackend('unknown'), 'auto');
 assert.equal(canAttemptWebGPU({ navigator: { gpu: {} } }), true);
 assert.equal(canAttemptWebGPU({ navigator: {} }), false);

@@ -1,6 +1,6 @@
 # PVS V4 前端运行与部署
 
-更新时间：2026-08-27
+更新时间：2026-08-28
 
 本文是当前前端神经剔除的唯一运行说明。浏览器只接受 V4 运行包；旧方向代理、dynamic-pool、相机哈希、空间分页和二阶段后端升级接口已经从当前代码与部署包移除。
 
@@ -14,7 +14,7 @@ pvs-bounded-relation-prior-instance-calibrated-moment-runtime-v4
 
 校准阈值为 `0.6800000071525574`，由 checkpoint 自己的 calibration split 冻结。该工作点的 aggregate weighted recall 为 `0.9978366`，单侧置信下界为 `0.9963827`。当前导出对应 seed `20260802` 的无对比尾部分离消融成员，最佳安全 checkpoint 位于 epoch 36；前端不得自行重选阈值。
 
-运行时每个实例保存 `96` 维几何特征和 `28` 维已融合的逐实例生存场系数，共 `124` 维 FP16 固定特征。离线分层关系网络、逐实例校准、点云编码和遮挡证据生成均不在浏览器执行。默认计算后端为 `auto`：优先在 Worker 内运行 WebGPU；WebGPU 不存在、adapter/device 初始化失败或运行中设备失效时，自动在同一个 Worker 内切换到 CPU JavaScript 后端继续运行同一模型。
+运行时每个实例保存 `96` 维几何特征和 `28` 维已融合的逐实例生存场系数，共 `124` 维 FP16 固定特征。离线分层关系网络、逐实例校准、点云编码和遮挡证据生成均不在浏览器执行。默认计算后端为 `auto`：优先在 Worker 内运行 WebGPU；WebGPU 不存在、adapter/device 初始化失败或运行中设备失效时，自动在同一个 Worker 内切换到 WASM SIMD 后端继续运行同一模型。纯 JavaScript CPU 神经计算已经删除。
 
 ## 运行资产
 
@@ -35,6 +35,7 @@ slm2viewer/assets/neural_instance_culling/pvs_mainline_v4
 | `query_weights_fp16.bin` | V4 轻量查询网络权重 |
 | `frequency_cycles_fp32.bin` | 16 组视点区域频率 |
 | `chi_table_fp32.bin` | 视点区域矩的固定查表数据 |
+| `assets/wasm/instance_pvs_v4.wasm` | WebGPU 不可用时的 V4 SIMD 查询内核 |
 
 六个二进制文件合计约 `5.03 MiB`，加元数据约 `5.48 MB`。运行包不包含 checkpoint、训练点云、关系边、子视点、邻居表或场景 GLB。
 
@@ -92,17 +93,19 @@ npm run capture:initial-glb-order
 
 ### WebGPU 不可用时的同模型兼容
 
-兼容路径不是纯 AABB 视锥剔除。CPU 后端仍按当前 V4 权重完整计算关系条件、视点区域频谱矩、生存场、边界摘要、可见性概率、冻结阈值、真实 `60°` 显示过滤和 GLB 最高分聚合。AABB 只负责与 WebGPU 路径完全相同的后退 `66°` 候选生成和最终真实视锥重过滤，不能直接决定神经可见集合。
+兼容路径不是纯 AABB 视锥剔除。WASM SIMD 后端仍按当前 V4 权重完整计算关系条件、视点区域频谱矩、生存场、边界摘要、可见性概率、冻结阈值、真实 `60°` 显示过滤和 GLB 最高分聚合。AABB 只负责与 WebGPU 路径完全相同的后退 `66°` 候选生成和最终真实视锥重过滤，不能直接决定神经可见集合。
 
-`src/InstancePVSRuntime.js` 统一管理后端。`auto` 先尝试 WebGPU；初始化失败时切换 CPU，运行期 WebGPU 预测失败时切换 CPU 并重做当前查询，缓存重过滤失败时先在 CPU 上重建最近一次完整神经预测再过滤。模型资产、冻结阈值、候选相机和输出 schema 不改变，也不会调用 `setCullingMode('frustum')`。强制测试入口为：
+`src/InstancePVSRuntime.js` 统一管理后端。`auto` 先尝试 WebGPU；初始化失败时切换 WASM，运行期 WebGPU 预测失败时切换 WASM 并重做当前查询，缓存重过滤失败时先在 WASM 上重建最近一次完整神经预测再过滤。模型资产、冻结阈值、候选相机和输出 schema 不改变，也不会调用 `setCullingMode('frustum')`。强制测试入口为：
 
 ```text
-?neuralRuntimeBackend=cpu
+?neuralRuntimeBackend=wasm
 ?neuralRuntimeBackend=webgpu
 ?neuralRuntimeBackend=auto
 ```
 
-CPU 推理始终位于 `LightweightPVSWorker`，不会阻塞 Three.js 渲染主线程，但计算耗时明显高于硬件 WebGPU，仅作为兼容后端。当前服务器浏览器功能 smoke 中，初始视点得到 `9398` 个候选、`3728` 个神经可见实例和 `3633` 个真实视锥显示实例；强制 CPU 和模拟 WebGPU 获取失败后的自动 CPU 输出一致，单次完整推理分别约为 `420.1 ms` 和 `423.5 ms`。主线程 `10 ms` 定时器在推理期间持续触发，证明计算没有回到主线程。该结果不是移动端性能结论。
+WASM 推理始终位于 `LightweightPVSWorker`，不会阻塞 Three.js 渲染主线程。FP16 特征与权重只在初始化时解码一次，八维关系条件也只预计算一次；这些数据随后常驻 WASM 线性内存。每个 pose 只跨 JS/WASM 边界调用一次，内核内完成候选过滤、频谱矩、生存场、MLP、阈值判断、真实视锥过滤和 GLB 聚合。正式兼容实现使用单线程 SIMD，不要求 COOP/COEP，也不启用 WASM threads。
+
+当前浏览器功能 smoke 中，初始视点得到 `9398` 个候选、`3728` 个神经可见实例和 `3633` 个真实视锥显示实例；强制 WASM 和模拟 WebGPU 获取失败后的自动 WASM 输出一致，单次完整推理分别约为 `65.2 ms` 和 `67.2 ms`。原 JavaScript Worker 路径约为 `420 ms`，WASM SIMD 在该服务器上约快 `6.3` 倍。主线程 `10 ms` 定时器在推理期间持续触发。该结果是服务器无头 Chrome 功能数据，不是移动端性能结论。
 
 未达到阈值但分数不低于预取阈值 `0.04` 的实例可以参与 GLB 预取。当前 checkpoint 没有独立下载头，GLB 优先级由所属实例的最高可见性概率聚合得到；这属于当前部署实现，不应描述成模型已经学习了独立资源效用。
 
@@ -112,11 +115,11 @@ HKUST 普通模式的固定回读布局为 `4 + 2×18831 + 3×3273` 个 32 位�
 
 ## 增量显示更新
 
-WebGPU 输出的真实 `60°` 最终实例集合是神经模式下唯一的显示依据。旧 `RenderVisibilitySystem` 中的 CPU GLB AABB、八角点投影、屏幕面积阈值、迟滞阈值和隐藏延时已经删除；屏幕面积以后只能用于 LOD 或下载排序，不能再次删除 GPU 判定为显示的实例。
+当前神经后端输出的真实 `60°` 最终实例集合是神经模式下唯一的显示依据。旧 `RenderVisibilitySystem` 中的 CPU GLB AABB、八角点投影、屏幕面积阈值、迟滞阈值和隐藏延时已经删除；屏幕面积以后只能用于 LOD 或下载排序，不能再次删除神经后端判定为显示的实例。
 
 GLB 工作集直接消费 Worker 的新增/移除差量，只处理变化项和刚完成下载的 GLB。普通相机更新不再遍历全部驻留资源。主线程长期保存实例和 GLB 位图，不再长期维护完整实例编号数组；只有冻结、调试或 benchmark 明确读取时才临时展开编号。
 
-每个实例化原型维护一个无序稠密槽位表：新增实例追加到尾部；删除实例时把尾部实例交换到空槽，因此 `InstancedMesh.count` 范围内始终没有空洞。每次差量只复制新增槽位和交换槽位的 16 个矩阵分量，并通过 `instanceMatrix` update range 标记实际变化区间；离散变化过多时才合并上传范围。该实现不再移动整个有序后缀，不构造逗号字符串、不逐实例调用 `setMatrixAt()`，也不反复计算实例化包围球。由于实例已经通过显式 GPU 真实视锥过滤，这些 `InstancedMesh` 设置为 `frustumCulled=false`，避免 Three.js 使用过期动态包围体再次提前剔除。
+每个实例化原型维护一个无序稠密槽位表：新增实例追加到尾部；删除实例时把尾部实例交换到空槽，因此 `InstancedMesh.count` 范围内始终没有空洞。每次差量只复制新增槽位和交换槽位的 16 个矩阵分量，并通过 `instanceMatrix` update range 标记实际变化区间；离散变化过多时才合并上传范围。该实现不再移动整个有序后缀，不构造逗号字符串、不逐实例调用 `setMatrixAt()`，也不反复计算实例化包围球。由于实例已经通过神经后端的显式真实视锥过滤，这些 `InstancedMesh` 设置为 `frustumCulled=false`，避免 Three.js 使用过期动态包围体再次提前剔除。
 
 已加载 GLB 的 Three.js 根节点在当前场景内保持稳定驻留。可见性变化只切换根节点 `visible` 和实例槽位，不频繁执行 `scene.add()` / `removeFromParent()`；只有场景切换、显式清空或缓存回收时才真正移除节点和释放资源。这避免了场景树遍历、父子关系修改和挂载队列在相机移动期间反复抖动。
 
@@ -152,7 +155,7 @@ GLB 编号仍只负责资源下载、驻留和根节点挂载；最终显示始�
 
 ## 冻结结果检查
 
-2026-08-25 修正了调试面板的冻结语义。冻结按钮保存当前一次 GPU 查询经过真实 `60°` 相机视锥过滤后的最终实例编号和最终 GLB 编号。实例编号决定实际显示，GLB 编号只决定需要下载哪些资源；冻结期间不再请求全场 GLB，也不再显示全部已驻留对象。
+2026-08-25 修正了调试面板的冻结语义。冻结按钮保存当前一次神经查询经过真实 `60°` 相机视锥过滤后的最终实例编号和最终 GLB 编号。实例编号决定实际显示，GLB 编号只决定需要下载哪些资源；冻结期间不再请求全场 GLB，也不再显示全部已驻留对象。
 
 冻结后即使移动检查相机，Loader 仍保持这份实例级快照。冻结前已经开始但尚未返回的预测会被丢弃，后续才下载完成的实例化 GLB 也会立即按照同一份冻结实例编号压缩实例矩阵。解除冻结后恢复自动缓存调度并强制发起一次新预测。冻结路径与普通路径共用精确工作集和增量实例更新，不再依赖额外 CPU 视锥或面积判断。
 
@@ -171,15 +174,15 @@ HKUST 页面功能 smoke 中，冻结前的最终集合为 `3769` 个实例和 `
 | 模块 | 责任 |
 |---|---|
 | `src/InstancePVS.js` | V4 资产校验、GPU 候选、WGSL 查询、GPU 压缩和 GLB 聚合 |
-| `src/InstancePVSCPU.js` | 同一 V4 模型的 Worker CPU 推理、阈值筛选、重过滤和 GLB 聚合 |
-| `src/InstancePVSCPUMath.js` | FP16 解码、ray/频谱/生存场和小型全连接层 CPU 数学 |
-| `src/InstancePVSRuntime.js` | `auto/webgpu/cpu` 后端选择及运行期故障切换 |
+| `src/InstancePVSWasm.js` | WASM 资产装载、常驻线性内存、单次批量调用和最终结果解码 |
+| `wasm/instance_pvs_v4/src/lib.rs` | SIMD 候选筛选、ray/频谱/生存场、V4 MLP、重过滤和 GLB 聚合 |
+| `src/InstancePVSRuntime.js` | `auto/webgpu/wasm` 后端选择及运行期故障切换 |
 | `src/InstancePVSBackendPolicy.js` | 后端参数规范化与 WebGPU 故障识别 |
 | `src/LightweightPVSWorker.js` | 构造 66°/60° 相机、运行统一后端、排序下载队列并传递最终结果 |
 | `src/LightweightPVSDispatcher.js` | 相机快照、完整预测/缓存重过滤消息和请求串行号 |
 | `src/CameraPredictionGate.js` | 判断是否越过 view-cell 需要完整预测，以及 cell 内是否需要重过滤 |
 | `src/neuralCullingBackendMode.js` | 只为有 V4 资产的场景启用神经模式 |
-| `src/RenderVisibilitySystem.js` | 按 GPU 最终 GLB 集合增量挂载和移除驻留资源 |
+| `src/RenderVisibilitySystem.js` | 按神经后端最终 GLB 集合增量挂载和移除驻留资源 |
 | `src/IdBitsetState.js` | 保存主线程实例/GLB 可见位图并按需展开编号 |
 | `src/DenseInstancedSlots.js` | 稠密实例槽位、交换删除和矩阵变化区间上传 |
 | `src/StaticSceneOptimizer.js` | 单 Mesh 场景压平、材质/task 渐进合批和实例到 batch 对象映射 |
@@ -230,18 +233,20 @@ WGSL 必须与训练端依次对齐九维中心视角、`9×2` 视点区域轴�
 | 重过滤网络推理时间字段 | `0 ms` |
 | Loader 最终实例集合与 Worker 重过滤差异 | `0` |
 
-CPU 与 WebGPU 同位姿数值对照覆盖 `9541` 个候选。候选集合、阈值后可见实例集合和真实视锥实例集合完全一致；概率平均绝对误差为 `0.0000141`，最大绝对误差为 `0.0004595`。该次 WebGPU adapter 为 SwiftShader，只用于数值一致性验证，不作为硬件性能结果。
+WASM SIMD 与 WebGPU 同位姿数值对照覆盖 `5959` 个候选。候选集合、阈值后可见实例集合和真实视锥实例集合完全一致；概率平均绝对误差为 `0.00000340`，最大绝对误差为 `0.0002782`。该 capture 的 WebGPU adapter 为 SwiftShader，只用于数值一致性验证，不作为硬件性能结果。
 
 该 smoke 的无头 Chrome WebGPU adapter 回报 `google/swiftshader`，仅证明功能和集合一致性。`totalMs` 不构成硬件或移动端性能结果；正式 WebGPU 延迟必须读取 adapter 信息并通过仓库 NVIDIA/Vulkan 硬件门，WebGL 硬件证据不能替代 WebGPU adapter 证据。
 
 ## 验证与打包
+
+WASM 源码使用用户级 Rust 工具链构建，不需要 root。构建机必须安装 `wasm32-unknown-unknown` target；`npm run build` 会先执行 `build:wasm`，以 `-C target-feature=+simd128` 编译当前内核并复制到 `assets/wasm/instance_pvs_v4.wasm`，随后才构建 Parcel 页面。发布包不能只复制 JavaScript 而遗漏该文件。
 
 ```bash
 cd slm2viewer
 npm test
 npm run build
 npm run smoke:refilter
-npm run smoke:cpu-fallback
+npm run smoke:wasm-fallback
 npm run package:deploy -- --scene hkust-v3
 ```
 
@@ -252,7 +257,7 @@ npm run package:deploy -- --scene hkust-v3
 
 `smoke:refilter` 显式使用 `--allow-software-gpu`，验证缓存重过滤、CPU AABB 参考、Loader 最终集合、“未重跑 MLP”语义、渲染 DPR 等于设备原生 DPR、场景无 Fog，以及桌面/移动视口下 AO、SMAA 和画布非空。该 smoke 不输出硬件性能结论。
 
-`smoke:cpu-fallback` 分别验证强制 CPU 和 `auto` 模式下 WebGPU 初始化失败后的自动 CPU 路径，要求两者都运行神经模型、产生比候选集合更小的预测集合、完成缓存重过滤，并确认主线程在推理期间保持响应。CPU/WebGPU 概率对照可在生成现有 parity capture 后运行 `scripts/verify_instance_pvs_cpu_webgpu_capture.mjs --capture=<capture.json>`。
+`smoke:wasm-fallback` 分别验证强制 WASM 和 `auto` 模式下 WebGPU 初始化失败后的自动 WASM 路径，要求两者都运行完整神经模型、产生比候选集合更小的预测集合、完成缓存重过滤，并确认主线程在推理期间保持响应。WASM/WebGPU 概率对照可在生成现有 parity capture 后运行 `scripts/verify_instance_pvs_wasm_webgpu_capture.mjs --capture=<capture.json>`。
 
 同位姿数值检查分为页面采集和 PyTorch 对照两步：
 
@@ -275,6 +280,6 @@ conda run -n slm_pvs python slm2viewer/scripts/verify_v4_frontend_parity.py \
 
 ## 渲染位图边界
 
-当前场景渲染使用 Three.js `WebGLRenderer`，神经查询使用 WebGPU。浏览器没有让 WebGL 着色器直接读取 WebGPU storage buffer 的零拷贝互操作接口。把可见性位图从 WebGPU 回读后再上传为 WebGL 纹理不会减少跨设备传输，而且隐藏实例仍会进入顶点阶段；因此本版继续把 GPU 压缩后的最终实例编号交给现有实例矩阵压缩逻辑，它会实际降低 `InstancedMesh.count` 和绘制实例数。
+当前场景渲染使用 Three.js `WebGLRenderer`，神经查询主后端使用 WebGPU，兼容后端使用 Worker WASM SIMD。浏览器没有让 WebGL 着色器直接读取 WebGPU storage buffer 的零拷贝互操作接口。把可见性位图从 WebGPU 回读后再上传为 WebGL 纹理不会减少跨设备传输，而且隐藏实例仍会进入顶点阶段；因此本版继续把神经后端压缩后的最终实例编号交给现有实例矩阵压缩逻辑，它会实际降低 `InstancedMesh.count` 和绘制实例数。
 
 只有把场景渲染整体迁移到 Three.js `WebGPURenderer` 后，渲染着色器才能与可见性计算共享 GPU 位图。该迁移会同时影响材质、后处理、加载器和浏览器兼容性，必须作为独立前端项目验证，不能在当前 WebGL 主线中加入一次 GPU 回读再上传的伪共享路径。

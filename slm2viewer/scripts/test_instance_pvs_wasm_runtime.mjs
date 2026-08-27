@@ -5,20 +5,22 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PerspectiveCamera, Vector3 } from 'three';
-import { InstancePVSCPU } from '../src/InstancePVSCPU.js';
+import { InstancePVSWasm } from '../src/InstancePVSWasm.js';
 
 const viewerDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const assetRoot = path.join(
-  viewerDir,
-  'public/assets/neural_instance_culling/pvs_mainline_v4',
-);
+const modelRoot = path.join(viewerDir, 'assets/neural_instance_culling/pvs_mainline_v4');
+const wasmPath = path.join(viewerDir, 'assets/wasm/instance_pvs_v4.wasm');
 const config = JSON.parse(fs.readFileSync(path.join(viewerDir, 'assets/config.json'), 'utf8'));
 const scene = config.scenes['hkust-v3'];
 
 const server = http.createServer((request, response) => {
-  const relative = decodeURIComponent(new URL(request.url, 'http://127.0.0.1').pathname).replace(/^\/+/, '');
-  const absolute = path.resolve(assetRoot, relative);
-  if (!absolute.startsWith(`${assetRoot}${path.sep}`)) {
+  const url = new URL(request.url, 'http://127.0.0.1');
+  const pathname = decodeURIComponent(url.pathname);
+  const relative = pathname.startsWith('/model/') ? pathname.slice('/model/'.length) : '';
+  const absolute = pathname === '/assets/wasm/instance_pvs_v4.wasm'
+    ? wasmPath
+    : path.resolve(modelRoot, relative);
+  if (absolute !== wasmPath && !absolute.startsWith(`${modelRoot}${path.sep}`)) {
     response.writeHead(403).end();
     return;
   }
@@ -28,7 +30,9 @@ const server = http.createServer((request, response) => {
       return;
     }
     response.writeHead(200, {
-      'Content-Type': relative.endsWith('.json') ? 'application/json' : 'application/octet-stream',
+      'Content-Type': absolute.endsWith('.json')
+        ? 'application/json'
+        : (absolute.endsWith('.wasm') ? 'application/wasm' : 'application/octet-stream'),
       'Content-Length': data.byteLength,
     });
     response.end(data);
@@ -36,14 +40,15 @@ const server = http.createServer((request, response) => {
 });
 
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-const address = server.address();
-const baseUrl = `http://127.0.0.1:${address.port}`;
+const baseUrl = `http://127.0.0.1:${server.address().port}`;
 let runtime;
 try {
-  runtime = new InstancePVSCPU(baseUrl);
+  runtime = new InstancePVSWasm(`${baseUrl}/model`, {
+    wasmUrl: `${baseUrl}/assets/wasm/instance_pvs_v4.wasm`,
+  });
   await runtime.init();
-  assert.equal(runtime.backend, 'cpu-js-v4');
-  const meta = runtime.meta;
+  assert.equal(runtime.backend, 'wasm-simd-v4');
+  assert.equal(runtime.wasm.wasm_simd_enabled(), 1);
   const camera = new PerspectiveCamera(60, 694 / 552, 0.1, 20000);
   camera.position.fromArray(scene.cameraPostion);
   camera.lookAt(new Vector3().fromArray(scene.cameraTarget));
@@ -53,7 +58,7 @@ try {
   const candidateCamera = new PerspectiveCamera(66, camera.aspect, camera.near, camera.far);
   candidateCamera.position.copy(camera.position).addScaledVector(
     forward,
-    -Number(meta.query.candidateCameraBackOffsetM),
+    -Number(runtime.meta.query.candidateCameraBackOffsetM),
   );
   candidateCamera.quaternion.copy(camera.quaternion);
   candidateCamera.updateProjectionMatrix();
@@ -69,8 +74,8 @@ try {
   assert.ok(prediction.componentModelList.length < prediction.candidateCount);
   assert.ok(prediction.modelList.length > 0);
   assert.ok(prediction.glbQueue.length >= prediction.modelList.length);
-  assert.equal(prediction.backend, 'cpu-js-v4');
-  assert.equal(prediction.timings.workerCpuNeuralInference, true);
+  assert.equal(prediction.backend, 'wasm-simd-v4');
+  assert.equal(prediction.timings.workerWasmNeuralInference, true);
 
   const filtered = await runtime.refilter(camera);
   assert.equal(filtered.renderInstanceCount, prediction.renderComponentModelList.length);
@@ -82,7 +87,7 @@ try {
     visibleGlbCount: prediction.modelList.length,
     inferenceMs: prediction.timings.inferenceMs,
   }));
-  console.log('Instance PVS full CPU runtime test passed.');
+  console.log('Instance PVS full WASM SIMD runtime test passed.');
 } finally {
   runtime?.dispose();
   await new Promise((resolve) => server.close(resolve));
