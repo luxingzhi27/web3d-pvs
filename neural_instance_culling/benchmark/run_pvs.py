@@ -273,6 +273,7 @@ def build_train_command(
     smoke: bool = False,
     steps_per_epoch: int = STEPS_PER_EPOCH,
     eval_every: int = 4,
+    survival_rank: int | None = None,
 ) -> list[str]:
     paths = _paths(data_root)
     spec = _variant_spec(variant_name)
@@ -342,6 +343,8 @@ def build_train_command(
         "--frontier-positive-importance-floor", "0.5",
         "--frontier-positive-importance-power", "0.5",
     ]
+    if survival_rank is not None:
+        command.extend(["--survival-rank", str(int(survival_rank))])
     if "--initial-checkpoint" in command:
         raise RuntimeError("mainline command unexpectedly contains an initial checkpoint")
     return command

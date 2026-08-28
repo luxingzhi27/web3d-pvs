@@ -21,6 +21,7 @@ from pvs_model import (  # noqa: E402
     VIEWCELL_REGION_CONDITIONED_VISIBILITY_PROJECTION_DIM,
     VIEWCELL_REGION_CONDITIONED_VISIBILITY_REGION_DIM,
     VIEW_RESIDUAL_DYNAMIC_INPUT_DIM,
+    SUPPORTED_SURVIVAL_RANKS,
 )
 
 
@@ -44,10 +45,12 @@ class BoundedRelationSurvivalMomentModelContractTest(unittest.TestCase):
         viewcell_region_conditioned_visibility_centering: str = "none",
         query_tail_separator_family: str = "disabled",
         query_tail_separator_hidden_dim: int = 8,
+        survival_rank: int = 4,
     ) -> BoundedRelationSurvivalMomentModel:
         model = BoundedRelationSurvivalMomentModel(
             4,
             2,
+            survival_rank=survival_rank,
             relation_source=(
                 "geometry_only"
                 if occlusion_representation == "survival"
@@ -123,6 +126,75 @@ class BoundedRelationSurvivalMomentModelContractTest(unittest.TestCase):
             sum(int(row["dim"]) for row in schema["fixedTable"]["layout"]),
             124,
         )
+
+    def test_survival_rank_changes_only_directional_capacity(self) -> None:
+        for rank in SUPPORTED_SURVIVAL_RANKS:
+            with self.subTest(rank=rank):
+                model = self._model(survival_rank=rank)
+                expected_survival_dim = rank * 7
+                expected_runtime_dim = 96 + expected_survival_dim
+                self.assertEqual(model.survival_rank, rank)
+                self.assertEqual(model.survival_parameter_dim, 7)
+                self.assertEqual(model.survival_dim, expected_survival_dim)
+                self.assertEqual(model.runtime_feature_dim, expected_runtime_dim)
+                self.assertEqual(
+                    model.config["survivalCoefficientShape"], [rank, 7]
+                )
+                self.assertEqual(
+                    model.export_schema()["fixedTable"]["shape"],
+                    ["N", expected_runtime_dim],
+                )
+                self.assertEqual(
+                    tuple(model.instance_calibration_residual_raw.shape),
+                    (4, rank, 7),
+                )
+
+                geometry = torch.randn((4, 96), dtype=torch.float32)
+                model.set_instance_calibration_blend(1.0)
+                diagnostics = model.offline_encode_survival(
+                    geometry,
+                    {},
+                    torch.zeros(4, dtype=torch.long),
+                    torch.zeros(4, dtype=torch.long),
+                    return_diagnostics=True,
+                )
+                coefficients = diagnostics["survival_coefficients"]
+                self.assertEqual(tuple(coefficients.shape), (4, rank, 7))
+                runtime = torch.cat([geometry, coefficients.flatten(1)], dim=-1)
+                inputs = self._inputs()
+                logits, auxiliary = model.compute_logits_with_aux(
+                    inputs["camera"],
+                    inputs["camera_view"],
+                    inputs["candidate_camera"],
+                    inputs["instance_ids"],
+                    runtime_features=runtime,
+                    query_center_world=inputs["query_center"],
+                    viewcell_radius_m=inputs["radius"],
+                )
+                self.assertEqual(tuple(logits.shape), (4, 1))
+                self.assertEqual(
+                    tuple(auxiliary["survival_direction_basis"].shape),
+                    (4, rank),
+                )
+                self.assertEqual(
+                    tuple(auxiliary["survival_semantic"].shape), (4, 8)
+                )
+                logits.square().mean().backward()
+                self.assertIsNotNone(model.direction_basis_head[-2].weight.grad)
+
+                reloaded = self._model(survival_rank=rank)
+                reloaded.load_state_dict(model.state_dict(), strict=True)
+
+    def test_explicit_rank_four_is_identical_to_the_default_contract(self) -> None:
+        torch.manual_seed(20260828)
+        default = self._model()
+        torch.manual_seed(20260828)
+        explicit = self._model(survival_rank=4)
+        self.assertEqual(default.config, explicit.config)
+        for name, value in default.state_dict().items():
+            torch.testing.assert_close(
+                value, explicit.state_dict()[name], rtol=0.0, atol=0.0
+            )
 
     def test_saved_model_config_declares_runtime_and_offline_widths(self) -> None:
         config = self._model().config

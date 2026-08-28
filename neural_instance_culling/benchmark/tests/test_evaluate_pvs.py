@@ -80,6 +80,13 @@ class BoundedRelationSurvivalMomentV3EvaluatorTests(unittest.TestCase):
             "numInstances": 2,
             "numGlbs": 1,
             "runtimeFeatureDim": 124,
+            "occlusionRepresentation": {
+                "mode": "survival",
+                "featureDim": 28,
+                "directionRank": 4,
+                "parameterDim": 7,
+            },
+            "survivalCoefficientShape": [4, 7],
             "relationHiddenDim": 11,
             "hiddenDim": 13,
             "relationSource": "bounded_hierarchical",
@@ -142,6 +149,7 @@ class BoundedRelationSurvivalMomentV3EvaluatorTests(unittest.TestCase):
 
         self.assertEqual(captured["relation_hidden_dim"], 11)
         self.assertEqual(captured["hidden_dim"], 13)
+        self.assertEqual(captured["survival_rank"], 4)
         self.assertTrue(captured["viewcell_region_conditioned_visibility_enabled"])
         self.assertEqual(
             captured["viewcell_region_conditioned_visibility_centering"],

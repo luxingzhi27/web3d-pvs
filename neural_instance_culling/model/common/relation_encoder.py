@@ -534,8 +534,10 @@ class BoundedHierarchicalRelationSurvivalEncoder(nn.Module):
         super().__init__()
         if min(int(geo_dim), int(hidden_dim), int(direction_bins), int(depth_shells)) <= 0:
             raise ValueError("encoder dimensions must be positive")
-        if int(survival_rank) != 4 or int(survival_parameter_dim) != 7:
-            raise ValueError("v3 survival coefficients are fixed at [4, 7]")
+        if int(survival_rank) <= 0 or int(survival_parameter_dim) != 7:
+            raise ValueError(
+                "survival coefficients require a positive direction rank and seven parameters"
+            )
         if int(local_max_group_size) <= 0 or int(structural_max_group_size) <= 0:
             raise ValueError("hierarchy group caps must be positive")
         self.geo_dim = int(geo_dim)

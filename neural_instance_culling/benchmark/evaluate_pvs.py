@@ -33,7 +33,8 @@ from pvs_model import (  # noqa: E402
     BoundedRelationSurvivalMomentModel,
     GEO_DIM,
     MODEL_SCHEMA,
-    RUNTIME_FEATURE_DIM,
+    SURVIVAL_PARAMETER_DIM,
+    SURVIVAL_RANK,
     VIEWCELL_EXTREME_VISIBILITY_INPUT_DIM,
     VIEWCELL_EXTREME_VISIBILITY_PROJECTION_DIM,
     VIEWCELL_REGION_CONDITIONED_VISIBILITY_FUSION_DIM,
@@ -832,7 +833,28 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         if isinstance(representation_config, Mapping)
         else str(checkpoint.get("occlusionRepresentation", "survival"))
     )
-    expected_runtime_dim = 96 if representation_mode == "none" else RUNTIME_FEATURE_DIM
+    survival_shape = config.get("survivalCoefficientShape")
+    if representation_mode == "survival":
+        if not (
+            isinstance(survival_shape, list)
+            and len(survival_shape) == 2
+            and int(survival_shape[1]) == SURVIVAL_PARAMETER_DIM
+        ):
+            raise ValueError("v4 checkpoint has an invalid survival coefficient shape")
+        survival_rank = int(survival_shape[0])
+    elif representation_mode == "generic28":
+        survival_rank = int(
+            representation_config.get("directionRank", SURVIVAL_RANK)
+            if isinstance(representation_config, Mapping)
+            else SURVIVAL_RANK
+        )
+    else:
+        survival_rank = SURVIVAL_RANK
+    expected_runtime_dim = (
+        GEO_DIM
+        if representation_mode == "none"
+        else GEO_DIM + survival_rank * SURVIVAL_PARAMETER_DIM
+    )
     if int(config.get("numInstances", -1)) != num_instances or int(
         config.get("runtimeFeatureDim", -1)
     ) != expected_runtime_dim:
@@ -895,6 +917,7 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         num_glbs=int(config.get("numGlbs", int(instance_to_glb.max()) + 1 if instance_to_glb.size else 0)),
         relation_hidden_dim=int(config.get("relationHiddenDim", 64)),
         hidden_dim=int(config.get("hiddenDim", 64)),
+        survival_rank=survival_rank,
         relation_source=str(config.get("relationSource")),
         occlusion_representation=representation_mode,
         spectral_mode=str(config.get("spectralMode")),
@@ -989,7 +1012,11 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
             dtype=torch.float32,
             device=device,
         )
-        if tuple(features.shape) != (num_instances, 4, 7) or not bool(
+        if tuple(features.shape) != (
+            num_instances,
+            survival_rank,
+            SURVIVAL_PARAMETER_DIM,
+        ) or not bool(
             torch.isfinite(features).all()
         ):
             raise ValueError(
@@ -1029,7 +1056,11 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
             dtype=torch.float32,
             device=device,
         )
-        if tuple(features.shape) != (num_instances, 4, 7) or not bool(
+        if tuple(features.shape) != (
+            num_instances,
+            survival_rank,
+            SURVIVAL_PARAMETER_DIM,
+        ) or not bool(
             torch.isfinite(features).all()
         ):
             raise ValueError(

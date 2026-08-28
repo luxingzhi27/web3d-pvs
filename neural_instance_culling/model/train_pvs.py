@@ -37,7 +37,7 @@ from pvs_model import (  # noqa: E402
     MODEL_SCHEMA,
     OCCLUSION_REPRESENTATION_MODES,
     QUERY_TAIL_SEPARATOR_FAMILIES,
-    RUNTIME_FEATURE_DIM,
+    SUPPORTED_SURVIVAL_RANKS,
     VIEWCELL_REGION_CONDITIONED_VISIBILITY_FUSION_DIM,
     VIEWCELL_REGION_CONDITIONED_VISIBILITY_HEAD_DIM,
     VIEWCELL_REGION_CONDITIONED_VISIBILITY_PROJECTION_DIM,
@@ -107,7 +107,6 @@ from pose_csr_dataset import PoseCSRDataset  # noqa: E402
 
 EXPERIMENT_PREFIX = "pvs_bounded_relation_prior_instance_calibrated_moment_safety_reserve_v4"
 CALIBRATION_FLOOR = 0.99
-SURVIVAL_SHAPE = (4, 7)
 DUAL_PROBE_RESCUE_INIT_SCHEMA = "pvs-dual-probe-rescue-init-v1"
 
 
@@ -1441,7 +1440,11 @@ def _runtime_features(
     expected_feature_shape = (
         (geometry.shape[0], 0)
         if model.occlusion_representation == "none"
-        else (geometry.shape[0], *SURVIVAL_SHAPE)
+        else (
+            geometry.shape[0],
+            model.survival_rank,
+            model.survival_parameter_dim,
+        )
     )
     if tuple(features.shape) != expected_feature_shape:
         raise ValueError(
@@ -2363,6 +2366,13 @@ def parse_args() -> argparse.Namespace:
         "--occlusion-representation",
         choices=OCCLUSION_REPRESENTATION_MODES,
         default="survival",
+    )
+    parser.add_argument(
+        "--survival-rank",
+        type=int,
+        choices=SUPPORTED_SURVIVAL_RANKS,
+        default=4,
+        help="number of directional basis channels; each channel keeps seven survival parameters",
     )
     parser.add_argument(
         "--spectral-mode",
@@ -3474,6 +3484,7 @@ def main() -> None:
     model = BoundedRelationSurvivalMomentModel(
         num_instances,
         num_glbs,
+        survival_rank=args.survival_rank,
         relation_source=args.relation_source,
         occlusion_representation=args.occlusion_representation,
         spectral_mode=args.spectral_mode,
@@ -4364,6 +4375,8 @@ def main() -> None:
         "sampler": sampler.manifest(),
         "occlusionRepresentation": {
             "mode": args.occlusion_representation,
+            "directionRank": model.survival_rank,
+            "parameterDim": model.survival_parameter_dim,
             "runtimeFeatureDim": model.runtime_feature_dim,
             "relationGraphRead": args.occlusion_representation == "survival",
             "survivalObservationsRead": args.occlusion_representation == "survival",

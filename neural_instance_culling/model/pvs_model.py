@@ -45,6 +45,7 @@ GEO_DIM = 96
 SURVIVAL_RANK = 4
 SURVIVAL_PARAMETER_DIM = 7
 SURVIVAL_DIM = SURVIVAL_RANK * SURVIVAL_PARAMETER_DIM
+SUPPORTED_SURVIVAL_RANKS = (2, 4, 8, 12)
 RUNTIME_FEATURE_DIM = GEO_DIM + SURVIVAL_DIM
 VIEW_DIM = 9
 DISK_AXIS_DIM = 2
@@ -334,13 +335,16 @@ BOUNDARY_TAIL_RESIDUAL_SHORTCUT_MODES = ("none", "region_linear")
 BOUNDARY_TAIL_RESIDUAL_FUSION_MODES = ("product", "affine_region")
 
 
-def _capacity_matched_widths(target_parameters: int) -> tuple[int, int]:
+def _capacity_matched_widths(
+    target_parameters: int,
+    survival_dim: int = SURVIVAL_DIM,
+) -> tuple[int, int]:
     """Find a two-hidden-layer geometry MLP close to the relation encoder."""
     target = int(target_parameters)
     best: tuple[float, int, int] | None = None
     for first in range(32, 513):
-        constant = GEO_DIM * first + first + SURVIVAL_DIM
-        coefficient = first + SURVIVAL_DIM + 1
+        constant = GEO_DIM * first + first + int(survival_dim)
+        coefficient = first + int(survival_dim) + 1
         second = max(1, round((target - constant) / coefficient))
         count = constant + coefficient * second
         relative = abs(count - target) / max(target, 1)
@@ -411,6 +415,7 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         *,
         relation_hidden_dim: int = 64,
         hidden_dim: int = 64,
+        survival_rank: int = SURVIVAL_RANK,
         relation_source: str = "bounded_hierarchical",
         occlusion_representation: str = "survival",
         spectral_mode: str = "moment_envelope",
@@ -453,10 +458,16 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         )
         if int(num_instances) <= 0 or int(num_glbs) < 0:
             raise ValueError("num_instances must be positive and num_glbs non-negative")
+        if int(survival_rank) not in SUPPORTED_SURVIVAL_RANKS:
+            raise ValueError(
+                f"survival_rank must be one of {SUPPORTED_SURVIVAL_RANKS}"
+            )
         if occlusion_representation not in OCCLUSION_REPRESENTATION_MODES:
             raise ValueError(
                 f"occlusion_representation must be one of {OCCLUSION_REPRESENTATION_MODES}"
             )
+        if occlusion_representation == "generic28" and int(survival_rank) != 4:
+            raise ValueError("generic28 requires the registered four-by-seven layout")
         if occlusion_representation == "survival":
             if relation_source not in {"bounded_hierarchical", "geometry_only"}:
                 raise ValueError(
@@ -575,6 +586,9 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         self.spectral_mode = str(spectral_mode)
         self.hidden_dim = int(hidden_dim)
         self.relation_hidden_dim = int(relation_hidden_dim)
+        self.survival_rank = int(survival_rank)
+        self.survival_parameter_dim = SURVIVAL_PARAMETER_DIM
+        self.survival_dim = self.survival_rank * self.survival_parameter_dim
         self.depth_q01 = float(depth_q01)
         self.depth_q99 = float(depth_q99)
         self.depth_epsilon = float(depth_epsilon)
@@ -640,12 +654,27 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         self.query_tail_separator_max_abs = float(query_tail_separator_max_abs)
         self.query_tail_separator_centering = str(query_tail_separator_centering)
         self.runtime_feature_dim = GEO_DIM + (
-            SURVIVAL_DIM if self.occlusion_representation != "none" else 0
+            self.survival_dim if self.occlusion_representation != "none" else 0
         )
         self.runtime_head_input_dim = (
-            RUNTIME_HEAD_INPUT_DIM
+            GEO_DIM
+            + self.survival_rank
+            + SURVIVAL_SEMANTIC_DIM
+            + BOUNDARY_SUMMARY_DIM
+            + VIEW_DIM
+            + LOW_RANK_SUMMARY_DIM
+            + 1
             if self.occlusion_representation != "none"
             else RUNTIME_HEAD_INPUT_DIM_WITHOUT_OCCLUSION
+        )
+        self.view_residual_dynamic_input_dim = (
+            self.survival_rank
+            + SURVIVAL_SEMANTIC_DIM
+            + BOUNDARY_SUMMARY_DIM
+            + VIEW_DIM
+            + LOW_RANK_SUMMARY_DIM
+            + 1
+            + 1
         )
         self.dual_probe_rescue_enabled = normalized_dual_probe_rescue is not None
         self._dual_probe_rescue_spec = normalized_dual_probe_rescue
@@ -662,8 +691,8 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             relation_encoder = BoundedHierarchicalOcclusionSurvivalEncoder(
                 geo_dim=GEO_DIM,
                 hidden_dim=self.relation_hidden_dim,
-                survival_rank=SURVIVAL_RANK,
-                survival_parameter_dim=SURVIVAL_PARAMETER_DIM,
+                survival_rank=self.survival_rank,
+                survival_parameter_dim=self.survival_parameter_dim,
             )
             if self.relation_source == "bounded_hierarchical":
                 self.offline_survival_encoder = relation_encoder
@@ -671,14 +700,14 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
                 self.geometry_only_widths = None
             else:
                 target = _parameter_count(relation_encoder)
-                first, second = _capacity_matched_widths(target)
+                first, second = _capacity_matched_widths(target, self.survival_dim)
                 self.geometry_only_widths = (first, second)
                 self.geometry_only_survival_encoder = nn.Sequential(
                     nn.Linear(GEO_DIM, first),
                     nn.SiLU(),
                     nn.Linear(first, second),
                     nn.SiLU(),
-                    nn.Linear(second, SURVIVAL_DIM),
+                    nn.Linear(second, self.survival_dim),
                 )
                 self.offline_survival_encoder = None
         else:
@@ -689,7 +718,11 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         if self.occlusion_representation == "generic28":
             self.generic_occlusion_features = nn.Parameter(
                 torch.empty(
-                    (self.num_instances, SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM),
+                    (
+                        self.num_instances,
+                        self.survival_rank,
+                        self.survival_parameter_dim,
+                    ),
                     dtype=torch.float32,
                 )
             )
@@ -703,7 +736,11 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         ):
             self.instance_calibration_residual_raw = nn.Parameter(
                 torch.zeros(
-                    (self.num_instances, SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM),
+                    (
+                        self.num_instances,
+                        self.survival_rank,
+                        self.survival_parameter_dim,
+                    ),
                     dtype=torch.float32,
                 )
             )
@@ -730,7 +767,7 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             raise RuntimeError("the registered v4 model requires sixteen joint frequencies")
         if self.occlusion_representation != "none":
             self.relation_condition_head: nn.Module | None = nn.Sequential(
-                nn.Linear(SURVIVAL_DIM, 16),
+                nn.Linear(self.survival_dim, 16),
                 nn.SiLU(),
                 nn.Linear(16, RELATION_CONDITION_DIM),
             )
@@ -766,7 +803,7 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             self.direction_basis_head: nn.Module | None = nn.Sequential(
                 nn.Linear(BOUNDARY_SUMMARY_DIM + RELATION_CONDITION_DIM + 3, 24),
                 nn.SiLU(),
-                nn.Linear(24, SURVIVAL_RANK),
+                nn.Linear(24, self.survival_rank),
                 nn.Tanh(),
             )
         else:
@@ -783,7 +820,8 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
                 GEO_DIM, self.view_residual_projection_dim
             )
             self.view_residual_dynamic_projection: nn.Module | None = nn.Linear(
-                VIEW_RESIDUAL_DYNAMIC_INPUT_DIM, self.view_residual_projection_dim
+                self.view_residual_dynamic_input_dim,
+                self.view_residual_projection_dim,
             )
             view_residual_output = nn.Linear(self.view_residual_hidden_dim, 1)
             nn.init.zeros_(view_residual_output.weight)
@@ -1097,7 +1135,19 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             "occlusionRepresentation": {
                 "mode": self.occlusion_representation,
                 "featureDim": (
-                    SURVIVAL_DIM if self.occlusion_representation != "none" else 0
+                    self.survival_dim
+                    if self.occlusion_representation != "none"
+                    else 0
+                ),
+                "directionRank": (
+                    self.survival_rank
+                    if self.occlusion_representation != "none"
+                    else 0
+                ),
+                "parameterDim": (
+                    self.survival_parameter_dim
+                    if self.occlusion_representation != "none"
+                    else 0
                 ),
                 "querySemantics": (
                     "monotone_logistic_survival"
@@ -1120,7 +1170,7 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             "instanceCalibration": {
                 "mode": self.instance_calibration_mode,
                 "shape": (
-                    [SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM]
+                    [self.survival_rank, self.survival_parameter_dim]
                     if self.occlusion_representation == "survival"
                     else []
                 ),
@@ -1140,7 +1190,7 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             },
             "geometryDim": GEO_DIM,
             "survivalCoefficientShape": (
-                [SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM]
+                [self.survival_rank, self.survival_parameter_dim]
                 if self.occlusion_representation == "survival"
                 else []
             ),
@@ -1229,7 +1279,7 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
                 "maximumAbsoluteResidual": self.view_residual_max_abs,
                 "hiddenDim": self.view_residual_hidden_dim,
                 "projectionDim": self.view_residual_projection_dim,
-                "dynamicInputDim": VIEW_RESIDUAL_DYNAMIC_INPUT_DIM,
+                "dynamicInputDim": self.view_residual_dynamic_input_dim,
                 "runtimeInputs": [
                     "geometry",
                     "survival_direction_basis",
@@ -1494,7 +1544,7 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
                         else "genericOcclusionFeatures"
                     ),
                     "offset": GEO_DIM,
-                    "dim": SURVIVAL_DIM,
+                    "dim": self.survival_dim,
                 }
             )
         result = {
@@ -1532,7 +1582,7 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
                 "maximumAbsoluteResidual": self.view_residual_max_abs,
                 "hiddenDim": self.view_residual_hidden_dim,
                 "projectionDim": self.view_residual_projection_dim,
-                "dynamicInputDim": VIEW_RESIDUAL_DYNAMIC_INPUT_DIM,
+                "dynamicInputDim": self.view_residual_dynamic_input_dim,
                 "runtimeInputs": [
                     "geometry",
                     "survival_direction_basis",
@@ -1646,7 +1696,11 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
     def _bounded_instance_calibration_residual(self) -> torch.Tensor:
         if self.instance_calibration_residual_raw is None:
             return self.instance_calibration_reliability.new_zeros(
-                (self.num_instances, SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM)
+                (
+                    self.num_instances,
+                    self.survival_rank,
+                    self.survival_parameter_dim,
+                )
             )
         scale = self.instance_calibration_max_abs
         return scale * torch.tanh(self.instance_calibration_residual_raw / scale)
@@ -1722,7 +1776,9 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         if self.relation_source == "geometry_only":
             assert self.geometry_only_survival_encoder is not None
             prior = self.geometry_only_survival_encoder(geo).reshape(
-                self.num_instances, SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM
+                self.num_instances,
+                self.survival_rank,
+                self.survival_parameter_dim,
             )
             diagnostics: dict[str, Any] = {
                 "survival_prior_coefficients": prior,
@@ -1916,7 +1972,9 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             boundary_inputs.append(support.features)
         boundary = self.boundary_summary_head(torch.cat(boundary_inputs, dim=-1))
         if self.occlusion_representation == "none":
-            basis = center_view.new_zeros((center_view.shape[0], SURVIVAL_RANK))
+            basis = center_view.new_zeros(
+                (center_view.shape[0], self.survival_rank)
+            )
             semantic = center_view.new_zeros(
                 (center_view.shape[0], SURVIVAL_SEMANTIC_DIM)
             )
@@ -1984,7 +2042,9 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             if self.occlusion_representation == "none":
                 return rows[:, :GEO_DIM], rows.new_empty((rows.shape[0], 0))
             return rows[:, :GEO_DIM], rows[:, GEO_DIM:].reshape(
-                -1, SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM
+                -1,
+                self.survival_rank,
+                self.survival_parameter_dim,
             )
         if "geometry" not in runtime_tables:
             raise ValueError("runtime tables require geometry")
@@ -2013,7 +2073,9 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         geometry = geometry_table[ids] if geometry_table.shape[0] == self.num_instances else geometry_table
         coefficients = coefficient_table[ids] if coefficient_table.shape[0] == self.num_instances else coefficient_table
         if geometry.shape != (ids.numel(), GEO_DIM) or coefficients.shape != (
-            ids.numel(), SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM
+            ids.numel(),
+            self.survival_rank,
+            self.survival_parameter_dim,
         ):
             raise ValueError("runtime geometry or coefficient table has an invalid shape")
         return geometry, coefficients
@@ -2193,7 +2255,7 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             ],
             dim=-1,
         )
-        if dynamic_input.shape[1] != VIEW_RESIDUAL_DYNAMIC_INPUT_DIM:
+        if dynamic_input.shape[1] != self.view_residual_dynamic_input_dim:
             raise RuntimeError("view residual dynamic input layout drifted from its schema")
         geometry_projection = self.view_residual_geometry_projection(geometry)
         dynamic_projection = self.view_residual_dynamic_projection(dynamic_input)
@@ -2766,9 +2828,13 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             )
         coefficient_tensor = _float_tensor(coefficients, "coefficients")
         if coefficient_tensor.ndim != 3 or coefficient_tensor.shape[1:] != (
-            SURVIVAL_RANK, SURVIVAL_PARAMETER_DIM
+            self.survival_rank,
+            self.survival_parameter_dim,
         ):
-            raise ValueError("coefficients must have shape [B, 4, 7]")
+            raise ValueError(
+                "coefficients must have shape "
+                f"[B, {self.survival_rank}, {self.survival_parameter_dim}]"
+            )
         batch = int(coefficient_tensor.shape[0])
         direction_tensor = _broadcast_rows(
             direction, batch, 3, "direction", device=coefficient_tensor.device
@@ -2810,6 +2876,9 @@ __all__ = [
     "OCCLUSION_REPRESENTATION_MODES",
     "RUNTIME_FEATURE_DIM",
     "RUNTIME_HEAD_INPUT_DIM_WITHOUT_OCCLUSION",
+    "SUPPORTED_SURVIVAL_RANKS",
+    "SURVIVAL_PARAMETER_DIM",
+    "SURVIVAL_RANK",
     "VIEWCELL_EXTREME_VISIBILITY_INPUT_DIM",
     "VIEWCELL_EXTREME_VISIBILITY_PROJECTION_DIM",
     "VIEWCELL_REGION_CONDITIONED_VISIBILITY_FUSION_DIM",
