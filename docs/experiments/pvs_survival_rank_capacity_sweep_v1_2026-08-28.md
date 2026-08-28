@@ -36,6 +36,16 @@
 
 四张 GPU 并行运行四种 rank；每种 rank 的三个 seed 均完整训练，任何成员未通过安全门也不能提前取消。正式比较使用相同 validation pose、候选集合、GT 和可见权重。
 
+正式运行命令：
+
+```bash
+conda run -n slm_pvs python \
+  neural_instance_culling/benchmark/run_survival_rank_capacity.py run \
+  --gpu-ids 0 1 2 3
+```
+
+runner 同时运行四个成员，每张 GPU 保持一个训练进程；一个成员完成后自动领取下一 seed。训练结束后自动使用各 checkpoint 自己的 calibration 阈值评价 validation，并生成 `capacity_summary.json`。
+
 必须报告 pose-level 与 aggregate 的 precision、recall、F1、accuracy、balanced accuracy 和 specificity，并同时报告 weighted recall、置信下界、useful cull、bad cull、平均预测实例数、预测/候选比例、固定特征表大小、模型参数量和 CUDA 前向延迟。
 
 容量结论按以下顺序判断：先检查 weighted recall 安全门，再比较 balanced accuracy、precision、accuracy、useful cull 和平均预测数量；最后结合每增加 7 维的边际收益、固定资产增量和 CUDA 延迟选择容量。低 rank 若性能接近，应优先保留更小资产；高 rank 只有产生稳定分类或剔除收益时才值得进入前端验证。
