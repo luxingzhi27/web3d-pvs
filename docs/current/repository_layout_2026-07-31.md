@@ -51,8 +51,8 @@ neural_instance_culling/benchmark/out/pvs_ray_context_survival_owrb_v1_subpose5_
 | 模型训练 | `neural_instance_culling/model/train_pvs.py` |
 | 前端导出 | `neural_instance_culling/model/export_pvs.py` |
 | benchmark runner | `neural_instance_culling/benchmark/run_pvs.py` |
-| 前端 Worker | `slm2viewer/src/LightweightPVSWorker.js` |
-| 前端调度与实例渲染 | `slm2viewer/src/LightweightPVSDispatcher.js`、`InstancePVS.js`、`RenderVisibilitySystem.js` |
+| 前端查询与 Worker | `slm2viewer/src/PVSQuerySession.js`、`PVSDispatcher.js`、`PVSWorker.js` |
+| 前端渲染 | `slm2viewer/src/RendererRuntime.js`、`RendererEffects.js`、`InstancePVS.js`、`RenderVisibilitySystem.js` |
 | 按场景打包 | `slm2viewer/scripts/package_deploy.mjs`、`package_scene_glb.mjs` |
 
 ## 前端资产边界

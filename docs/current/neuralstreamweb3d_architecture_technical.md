@@ -59,8 +59,9 @@ Worker 只构造两个相机并提交一次 WebGPU 查询。GPU 直接遍历实�
 | 导出 | `neural_instance_culling/model/export_pvs.py` |
 | 评价 | `neural_instance_culling/benchmark/evaluate_pvs.py`、`summarize_pvs.py`、`reaudit_pvs.py` |
 | 前端查询 | `slm2viewer/src/InstancePVS.js` |
-| Worker | `slm2viewer/src/LightweightPVSWorker.js` |
-| 主线程接入 | `slm2viewer/src/LightweightPVSDispatcher.js`、`slm2viewer/slm2/SLM2Loader.js` |
+| 查询语义 | `slm2viewer/src/PVSQuerySession.js` |
+| 后端调度 | `slm2viewer/src/PVSDispatcher.js`、`slm2viewer/src/PVSWorker.js` |
+| 渲染接入 | `slm2viewer/src/RendererRuntime.js`、`slm2viewer/slm2/SLM2Loader.js` |
 | 打包 | `slm2viewer/scripts/package_deploy.mjs` |
 
 ## 评价边界
@@ -73,7 +74,7 @@ Worker 只构造两个相机并提交一次 WebGPU 查询。GPU 直接遍历实�
 
 - 当前只有 HKUST 有 V4 运行资产；Metropolis 仅保留 AABB 视锥展示。
 - 当前下载优先级复用可见性概率，尚未形成独立的预算感知 GLB 效用头。
-- Three.js 场景仍由 WebGLRenderer 渲染，无法零拷贝读取 WebGPU 可见性位图；当前使用 GPU 压缩编号驱动实例矩阵压缩。共享位图需要整体迁移 WebGPURenderer。
+- Three.js 场景由 WebGPURenderer 渲染；硬件 WebGPU 可用时与 PVS 共享 GPUDevice，否则同一 Viewer 使用 WebGL2 backend 和 Worker WASM SIMD。当前仍回读压缩实例编号驱动资源调度与实例矩阵压缩，尚未让材质直接读取 GPU 可见性位图。
 - 移动设备硬件 WebGPU 性能尚未实测，必须按既有移动端方案补齐。
 
 前端细节和部署命令见 [`../frontend/pvs_v4_runtime_and_deployment.md`](../frontend/pvs_v4_runtime_and_deployment.md)。

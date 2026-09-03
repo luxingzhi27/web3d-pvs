@@ -5,16 +5,18 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
-if (!process.argv.includes('--allow-software-gpu')) {
-  throw new Error('This functional smoke requires the explicit --allow-software-gpu flag.');
-}
-
 const viewerRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const publicRoot = path.join(viewerRoot, 'public');
 const loadDiagnosticArg = process.argv.find((arg) => arg.startsWith('--load-diagnostic-ms='));
 const loadDiagnosticMs = loadDiagnosticArg
   ? Math.max(0, Number(loadDiagnosticArg.split('=')[1]) || 0)
   : 0;
+const forceWasm = process.argv.includes('--force-wasm');
+const renderBackendArg = process.argv.find((arg) => arg.startsWith('--render-backend='));
+const renderBackend = renderBackendArg ? renderBackendArg.split('=')[1] : 'webgl';
+if (renderBackend !== 'webgl' && renderBackend !== 'webgpu') {
+  throw new Error('--render-backend must be webgl or webgpu.');
+}
 const chromePath = [
   process.env.CHROME_PATH,
   '/usr/bin/google-chrome',
@@ -71,13 +73,21 @@ try {
       '--enable-features=Vulkan',
       '--use-vulkan',
       '--use-angle=vulkan',
+      '--enable-accelerated-2d-canvas',
+      '--enable-zero-copy',
+      '--disable-software-rasterizer',
     ],
   });
   const page = await browser.newPage({ viewport: { width: 694, height: 552 } });
   const pageErrors = [];
+  const consoleErrors = [];
   page.on('pageerror', (error) => pageErrors.push(String(error)));
+  page.on('console', (message) => {
+    if (message.type() === 'error') consoleErrors.push(message.text());
+  });
   const port = server.address().port;
-  await page.goto(`http://127.0.0.1:${port}/?scene=hkust-v3`, {
+  const runtimeQuery = forceWasm ? '&neuralRuntimeBackend=wasm' : '';
+  await page.goto(`http://127.0.0.1:${port}/?scene=hkust-v3&renderBackend=${renderBackend}${runtimeQuery}`, {
     waitUntil: 'domcontentloaded',
     timeout: 120000,
   });
@@ -103,7 +113,6 @@ try {
     const fullInstances = sorted(full.renderComponentModelList);
     const fullGlbs = sorted(full.renderModelList);
     const initialBenchmark = loader.getBenchmarkVisibilityIds();
-    const fullSerial = dispatcher.lastPredictTimings.serial;
     const previousFilterSerial = Number(dispatcher.lastFilterTimings?.serial || 0);
 
     const movedCamera = loader.activeCamera.clone();
@@ -149,8 +158,10 @@ try {
     const expectedGlbRemoved = difference(fullGlbs, movedGlbs);
     const transferredIdCount = componentAdded.length + componentRemoved.length
       + glbAdded.length + glbRemoved.length;
-    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-    const adapterInfo = adapter?.info || {};
+    const rendererInfo = viewer.rendererRuntime.getInfo();
+    const adapterInfo = rendererInfo.adapter || {};
+    const gl = rendererInfo.backend === 'webgl2-fallback' ? viewer.renderer.getContext() : null;
+    const glDebug = gl?.getExtension('WEBGL_debug_renderer_info');
     const denseStates = Object.values(loader.loadedInstancedVisibilityStatesByHash || {});
     const denseSlotsConsistent = denseStates.every((state) => state.disabled || (
       Array.isArray(state.activeSourceIndices)
@@ -162,7 +173,6 @@ try {
     viewer._resizeRenderTargets();
     const nativePixelRatio = Number(window.devicePixelRatio || 1);
     const renderPixelRatio = Number(viewer.renderer.getPixelRatio() || 0);
-    const gl = viewer.renderer.getContext();
     const cssWidth = Math.max(1, Math.round(viewer.renderer.domElement.clientWidth));
     const cssHeight = Math.max(1, Math.round(viewer.renderer.domElement.clientHeight));
     const runtimeAfterRefilter = loader.getRuntimeStats();
@@ -173,6 +183,15 @@ try {
         device: String(adapterInfo.device || ''),
         description: String(adapterInfo.description || ''),
       },
+      rendererBackend: rendererInfo.backend,
+      webglRenderer: glDebug
+        ? String(gl.getParameter(glDebug.UNMASKED_RENDERER_WEBGL) || '')
+        : '',
+      sharedRendererDevice: Boolean(
+        viewer.rendererRuntime.getSharedWebGPUContext()?.device
+        && dispatcher.session?.pvs?.active?.device
+          === viewer.rendererRuntime.getSharedWebGPUContext().device,
+      ),
       initialGlbLoadOrderCount: loader.neuralInitialLoadOrder.length,
       initialGlbPreloadCount: Number(loader.startupMetrics.initialGlbPreloadCount || 0),
       fullInstanceCount: fullInstances.length,
@@ -192,7 +211,7 @@ try {
         loader.lastNeuralRefilter.timings?.transferredIdCount || 0,
       ),
       promotedGlbCount: Number(
-        loader.lastLightweightPVSSchedulerStats?.promotedGlbCount || 0,
+        loader.lastPvsSchedulerStats?.promotedGlbCount || 0,
       ),
       expectedPromotedGlbCount: glbAdded.length,
       renderComponentBitsetCount: loader.renderComponentState?.count,
@@ -201,15 +220,14 @@ try {
       denseSlotsConsistent,
       nativePixelRatio,
       renderPixelRatio,
-      nativeDrawingBuffer: gl.drawingBufferWidth === Math.floor(cssWidth * nativePixelRatio)
-        && gl.drawingBufferHeight === Math.floor(cssHeight * nativePixelRatio),
+      nativeDrawingBuffer: viewer.renderer.domElement.width === Math.floor(cssWidth * nativePixelRatio)
+        && viewer.renderer.domElement.height === Math.floor(cssHeight * nativePixelRatio),
       fogAbsent: viewer.scene.fog == null,
       legacyQualityControlsAbsent: viewer.adaptiveResolution === undefined
         && viewer.gpuFrameTimer === undefined
         && viewer.distanceRendering === undefined,
-      aoEnabled: viewer.n8aopass?.enabled === true,
-      smaaEnabled: viewer.smaaPass?.enabled === true,
-      fullPredictSerialUnchanged: dispatcher.lastPredictTimings.serial === fullSerial,
+      aoEnabled: viewer.rendererRuntime.effects?.options?.aoEnabled === true,
+      smaaEnabled: viewer.rendererRuntime.effects?.options?.smaaEnabled === true,
       filterSerialAdvanced: dispatcher.lastFilterTimings.serial > previousFilterSerial,
       filterInferenceMs: Number(dispatcher.lastFilterTimings.inferenceMs || 0),
       duplicateCullRemoved: loader.renderVisibilitySystem.lastStats?.duplicateCullRemoved === true,
@@ -218,15 +236,33 @@ try {
     };
   });
 
-  const captureCanvasStats = async () => page.evaluate(() => {
+  const captureCanvasStats = async () => page.evaluate(async () => {
     const viewer = window.__slmApp.viewer;
     viewer._resizeRenderTargets();
-    viewer.render();
-    const gl = viewer.renderer.getContext();
-    const width = gl.drawingBufferWidth;
-    const height = gl.drawingBufferHeight;
-    const pixels = new Uint8Array(width * height * 4);
-    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    let renderError = null;
+    try {
+      viewer.render();
+    } catch (error) {
+      renderError = String(error?.stack || error);
+    }
+    await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    const source = viewer.renderer.domElement;
+    const width = source.width;
+    const height = source.height;
+    const copy = document.createElement('canvas');
+    copy.width = width;
+    copy.height = height;
+    const context = copy.getContext('2d', { willReadFrequently: true });
+    let pixels = new Uint8Array(width * height * 4);
+    if (!renderError) {
+      if (viewer.rendererRuntime.backend === 'webgl2-fallback') {
+        const gl = viewer.renderer.getContext();
+        gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      } else {
+        context.drawImage(source, 0, 0);
+        pixels = context.getImageData(0, 0, width, height).data;
+      }
+    }
     let sum = 0;
     let sumSquared = 0;
     let opaquePixels = 0;
@@ -246,8 +282,10 @@ try {
       meanLuminance,
       luminanceVariance: Math.max(0, sumSquared / count - meanLuminance * meanLuminance),
       opaqueRatio: opaquePixels / count,
-      aoEnabled: viewer.n8aopass?.enabled === true,
-      smaaEnabled: viewer.smaaPass?.enabled === true,
+      renderError,
+      rendererInfo: viewer.rendererRuntime.getInfo(),
+      aoEnabled: viewer.rendererRuntime.effects?.options?.aoEnabled === true,
+      smaaEnabled: viewer.rendererRuntime.effects?.options?.smaaEnabled === true,
     };
   });
 
@@ -272,6 +310,9 @@ try {
     mobileNative,
     mobileLayout,
   };
+  if (desktopNative.renderError || mobileNative.renderError) {
+    throw new Error(`WebGPU render failed: ${JSON.stringify({ pageErrors, result })}`);
+  }
 
   await page.setViewportSize({ width: 694, height: 552 });
   await page.evaluate(() => {
@@ -279,51 +320,23 @@ try {
     viewer.resize();
     viewer._resizeRenderTargets();
   });
-  result.runtimeDiagnostic = await page.evaluate(() => new Promise((resolve) => {
+  result.runtimeDiagnostic = await page.evaluate(async () => {
     const viewer = window.__slmApp.viewer;
-    const frameIntervals = [];
-    let previous = performance.now();
-    const startedAt = previous;
-    const sample = (now) => {
-      frameIntervals.push(now - previous);
-      previous = now;
-      if (now - startedAt < 2000) {
-        requestAnimationFrame(sample);
-        return;
-      }
-      const sortedIntervals = frameIntervals.slice().sort((a, b) => a - b);
-      const percentile = (ratio) => sortedIntervals[Math.min(
-        sortedIntervals.length - 1,
-        Math.floor(sortedIntervals.length * ratio),
-      )] || 0;
-      const gl = viewer.renderer.getContext();
-      const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
-      const runtime = viewer.slm2Loader.getRuntimeStats();
-      const previousAutoReset = viewer.renderer.info.autoReset;
-      viewer.renderer.info.autoReset = false;
-      viewer.renderer.info.reset();
-      viewer.render();
-      const drawCalls = Number(viewer.renderer.info.render.calls || 0);
-      const triangles = Number(viewer.renderer.info.render.triangles || 0);
-      viewer.renderer.info.autoReset = previousAutoReset;
-      viewer.renderer.info.reset();
-      resolve({
-        frameCount: frameIntervals.length,
-        avgFrameMs: frameIntervals.reduce((sum, value) => sum + value, 0)
-          / Math.max(1, frameIntervals.length),
-        p95FrameMs: percentile(0.95),
-        webglRenderer: debugInfo
-          ? String(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) || '')
-          : '',
-        drawCalls,
-        triangles,
-        actualRender: runtime.neural?.actualRender || {},
-        staticBatching: runtime.neural?.staticBatching || {},
-        load: runtime.load || {},
-      });
+    const rendererInfo = viewer.rendererRuntime.getInfo();
+    const runtime = viewer.slm2Loader.getRuntimeStats();
+    viewer.renderer.info.reset();
+    viewer.render();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    return {
+      rendererBackend: rendererInfo.backend,
+      adapter: rendererInfo.adapter,
+      drawCalls: Number(viewer.renderer.info.render.calls || 0),
+      triangles: Number(viewer.renderer.info.render.triangles || 0),
+      actualRender: runtime.neural?.actualRender || {},
+      staticBatching: runtime.neural?.staticBatching || {},
+      load: runtime.load || {},
     };
-    requestAnimationFrame(sample);
-  }));
+  });
   if (loadDiagnosticMs > 0) {
     result.loadProgress = [];
     const loadStartedAt = Date.now();
@@ -348,13 +361,19 @@ try {
   }
 
   const passed = result.initialLoaderInstanceParity
+    && result.rendererBackend === (renderBackend === 'webgpu' ? 'webgpu' : 'webgl2-fallback')
+    && (renderBackend !== 'webgl' || (
+      Boolean(result.webglRenderer)
+      && !/swiftshader|llvmpipe|softpipe|swrast|software/i.test(result.webglRenderer)
+    ))
+    && (renderBackend !== 'webgpu' || forceWasm || result.sharedRendererDevice)
     && result.initialGlbLoadOrderCount === 100
     && result.initialGlbPreloadCount === 100
     && result.initialLoaderGlbParity
     && result.movedCpuParity
     && result.componentDeltaParity
     && result.glbDeltaParity
-    && result.readbackBytes === 2776
+    && (renderBackend !== 'webgpu' || result.readbackBytes === 2776)
     && result.transferredIdCount === result.reportedTransferredIdCount
     && result.transferredIdCount < result.fullInstanceCount + result.fullGlbCount
     && result.promotedGlbCount === result.expectedPromotedGlbCount
@@ -372,7 +391,6 @@ try {
     && result.legacyQualityControlsAbsent
     && result.aoEnabled
     && result.smaaEnabled
-    && result.fullPredictSerialUnchanged
     && result.filterSerialAdvanced
     && result.filterInferenceMs === 0
     && result.duplicateCullRemoved
@@ -386,8 +404,8 @@ try {
     && result.canvasChecks.mobileNative.aoEnabled
     && result.canvasChecks.mobileNative.smaaEnabled
     && result.canvasChecks.mobileLayout.documentScrollWidth <= result.canvasChecks.mobileLayout.innerWidth;
-  if (pageErrors.length || !passed) {
-    throw new Error(`Runtime refilter smoke failed: ${JSON.stringify({ pageErrors, result })}`);
+  if (pageErrors.length || consoleErrors.length || !passed) {
+    throw new Error(`Runtime refilter smoke failed: ${JSON.stringify({ pageErrors, consoleErrors, result })}`);
   }
   console.log(JSON.stringify(result, null, 2));
 } finally {

@@ -1,37 +1,17 @@
 import {
-  AmbientLight,
-  AnimationMixer,
-  AxesHelper,
   Box3,
-  Cache,
-  DirectionalLight,
   Frustum,
-  GridHelper,
-  HemisphereLight,
-  LinearEncoding,
   LoaderUtils,
   LoadingManager,
-  PMREMGenerator,
   PerspectiveCamera,
-  Scene,
-  SkeletonHelper,
+  Vector2,
   Vector3,
-  WebGLRenderer,
-  sRGBEncoding,
-  MeshStandardMaterial,
   DoubleSide,
-  Color,
-  FrontSide,
-  ClampToEdgeWrapping,
   Object3D,
   Matrix4,
   FileLoader,
   TextureLoader,
   FloatType,
-  MeshBasicMaterial,
-  ConstantColorFactor,
-  SRGBColorSpace,
-  LinearSRGBColorSpace,
   LinearFilter,
   RepeatWrapping,
   ImageBitmapLoader,
@@ -66,9 +46,8 @@ function joinUrlPath(baseUrl, pathPart)
 }
 
 import { CacheMgr } from './CacheMgr.js';
-import { Vector2 } from 'three';
 import { getInstancePVSAssetBaseUrl } from '../src/neuralCullingBackendMode.js';
-import { LightweightPVSDispatcher } from '../src/LightweightPVSDispatcher.js';
+import { PVSDispatcher } from '../src/PVSDispatcher.js';
 import { CameraPredictionGate } from '../src/CameraPredictionGate.js';
 import { RenderVisibilitySystem } from '../src/RenderVisibilitySystem.js';
 import { IdBitsetState } from '../src/IdBitsetState.js';
@@ -84,8 +63,6 @@ import {
   replaceDenseInstancedSlots,
 } from '../src/DenseInstancedSlots.js';
 import { startupLog, stopStartupLog } from '../src/startupTimeline.js';
-
-import { HDRJPGLoader } from '@monogrid/gainmap-js'
 
 const sequentialPromiseMap = require('sequential-promise-map');
 
@@ -201,7 +178,6 @@ export class SLM2Loader
     this.textureLoader = new ImageBitmapLoader();//TextureLoader();
     this.hdrLoader = new HDRLoader().setDataType(FloatType);
     this.exrLoader = new EXRLoader().setDataType(FloatType);
-    this.hdrjpgLoader = null;
 
     this.loadedTextures = {};
     this.isMaterialConfigReady = false;
@@ -215,7 +191,7 @@ export class SLM2Loader
     this.defaultVisibilityIdMode = 'component';
     this.neuralPVSIdMode = 'global-glb-priority';
     this.lastNeuralPrediction = null;
-    this.lastLightweightPVSSchedulerStats = null;
+    this.lastPvsSchedulerStats = null;
     this.renderVisibilitySystem = new RenderVisibilitySystem(this);
     this.neuralPredictionGate = new CameraPredictionGate({
       mode: 'viewcell',
@@ -296,7 +272,7 @@ export class SLM2Loader
     // NeuralPVS parameters
     this.cullingMode = 'neural';
     this.neuralBackend = 'instance-pvs';
-    this.neuralDispatcherMode = 'lightweight-worker';
+    this.neuralDispatcherMode = 'shared-device-or-worker';
     this.useNeuralPVS = false;
     this.neuralPVS = null;
     this.neuralDebugLogs = false;
@@ -354,7 +330,7 @@ export class SLM2Loader
     this.neuralDownloadInfoByGlbId = new Map();
     this.lastNeuralPrediction = null;
     this.lastRenderRefreshStats = null;
-    this.lastLightweightPVSSchedulerStats = null;
+    this.lastPvsSchedulerStats = null;
     if (this.renderVisibilitySystem && typeof this.renderVisibilitySystem.clear === 'function')
     {
       this.renderVisibilitySystem.clear();
@@ -378,7 +354,7 @@ export class SLM2Loader
       debugLogging: this.neuralDebugLogs,
       assetVersion: LOCAL_RUNTIME_ASSET_VERSION,
     });
-    this.neuralPVS = new LightweightPVSDispatcher(this.neuralAssetBaseUrl, options);
+    this.neuralPVS = new PVSDispatcher(this.neuralAssetBaseUrl, options);
     return this.neuralPVS;
   }
 
@@ -2211,27 +2187,13 @@ export class SLM2Loader
               imageMeta.type = 'exr';
             }
 
-            if (scope.sceneConfig.materials.useHdrJpg)
+            if (taskData.imageUrl.endsWith('.hdr'))
             {
-              if (scope.hdrjpgLoader == null)
-              {
-                scope.hdrjpgLoader = new HDRJPGLoader(scope.renderer);
-              }
-              
-              loader = scope.hdrjpgLoader;
-
-              imageMeta.type = 'jpgr';
+              loader = scope.hdrLoader;
             }
             else
             {
-              if (taskData.imageUrl.endsWith('.hdr'))
-              {
-                loader = scope.hdrLoader;
-              }
-              else if (taskData.imageUrl.endsWith('.exr'))
-              {
-                loader = scope.exrLoader;
-              }
+              loader = scope.exrLoader;
             }
           }
           
@@ -2241,10 +2203,6 @@ export class SLM2Loader
             if (imageMeta.type == 'png')
             {
               textureData = new CanvasTexture( _textureData );
-            }
-            else if (imageMeta.type == 'jpgr')
-            {
-              textureData = _textureData.renderTarget.texture;
             }
             else
             {
@@ -2452,6 +2410,8 @@ export class SLM2Loader
   {
     var runtimeCount = Number(this.runtimeVisibilityMeta && this.runtimeVisibilityMeta.instanceCount);
     if (Number.isInteger(runtimeCount) && runtimeCount > 0) return runtimeCount;
+    var modelCount = Number(this.neuralPVS && this.neuralPVS.modelInfo && this.neuralPVS.modelInfo.numInstances);
+    if (Number.isInteger(modelCount) && modelCount > 0) return modelCount;
     return Math.max(0, this.componentVisibilityRecords.length);
   }
 
@@ -2459,6 +2419,8 @@ export class SLM2Loader
   {
     var runtimeCount = Number(this.runtimeVisibilityMeta && this.runtimeVisibilityMeta.globalGlbCount);
     if (Number.isInteger(runtimeCount) && runtimeCount > 0) return runtimeCount;
+    var modelCount = Number(this.neuralPVS && this.neuralPVS.modelInfo && this.neuralPVS.modelInfo.numGlbs);
+    if (Number.isInteger(modelCount) && modelCount > 0) return modelCount;
     if (this.glbIndex && Number.isInteger(Number(this.glbIndex.total))) return Number(this.glbIndex.total);
     return Math.max(0, this.globalGlbEntries.length);
   }
@@ -3017,7 +2979,7 @@ export class SLM2Loader
       downloadCamera: 'back-camera',
       renderCamera: 'active-camera',
     };
-    this.lastLightweightPVSSchedulerStats = schedulerStats;
+    this.lastPvsSchedulerStats = schedulerStats;
     this._updateBenchmarkVisibilityIds({
       mode: 'frustum',
       rawComponentIds: candidateComponentIds,
@@ -3120,7 +3082,7 @@ export class SLM2Loader
 
   getRuntimeStats()
   {
-    var schedulerStats = this.lastLightweightPVSSchedulerStats || null;
+    var schedulerStats = this.lastPvsSchedulerStats || null;
     var resourceSchedule = this.glbResourceScheduler.getSnapshot();
     return {
       startup: Object.assign({}, this.startupMetrics),
@@ -3465,7 +3427,7 @@ export class SLM2Loader
         }
         this.neuralPredictionGate.commitRender(camera);
         this.lastNeuralRefilter = filtered;
-        var applied = this._applyLightweightNeuralRefilter(
+        var applied = this._applyNeuralRefilter(
           filtered,
           filtered.idMode || this.neuralPVSIdMode
         );
@@ -3678,7 +3640,7 @@ export class SLM2Loader
                   rawGlbPreview: Array.from(pred.modelList || []).slice(0, 16),
                 });
                 var applyStart = performance.now();
-                var appliedVisibility = this._applyLightweightNeuralPlan(pred, predIdMode);
+                var appliedVisibility = this._applyNeuralPlan(pred, predIdMode);
                 var applyMs = performance.now() - applyStart;
                 startupLog('slm2:neural:apply-done', {
                   ms: applyMs,
@@ -4296,7 +4258,7 @@ export class SLM2Loader
     return entries;
   }
 
-  _applyLightweightNeuralPlan(predictionPayload, idMode)
+  _applyNeuralPlan(predictionPayload, idMode)
   {
     var appliedIdMode = idMode === 'global-glb-priority' ? 'global-glb' : (idMode || 'global-glb');
     var predictedDownloadInfos = this._makeGlobalGlbModelInfos(
@@ -4376,7 +4338,7 @@ export class SLM2Loader
     );
 
     var schedulerStats = {
-      scheduler: 'pvs-v4-worker',
+      scheduler: 'pvs-v4',
       backend: predictionPayload ? predictionPayload.backend : null,
       fallbackReason: predictionPayload ? predictionPayload.fallbackReason : null,
       candidateCount: predictionPayload ? Number(predictionPayload.candidateCount || 0) : 0,
@@ -4395,9 +4357,9 @@ export class SLM2Loader
       candidateSelection: predictionPayload
         ? (predictionPayload.candidateSelection || (predictionPayload.timings && predictionPayload.timings.candidateSelection) || null)
         : null,
-      workerTimings: predictionPayload ? predictionPayload.timings || null : null,
+      queryTimings: predictionPayload ? predictionPayload.timings || null : null,
     };
-    this.lastLightweightPVSSchedulerStats = schedulerStats;
+    this.lastPvsSchedulerStats = schedulerStats;
 
     return {
       modelList: immediateInfos.map(function(item){ return item.id; }),
@@ -4416,7 +4378,7 @@ export class SLM2Loader
     };
   }
 
-  _applyLightweightNeuralRefilter(filterPayload, idMode)
+  _applyNeuralRefilter(filterPayload, idMode)
   {
     var appliedIdMode = idMode === 'global-glb-priority' ? 'global-glb' : (idMode || 'global-glb');
     var componentAddedIds = this._normalizeIdList(
@@ -4498,9 +4460,9 @@ export class SLM2Loader
       'warm'
     );
 
-    var previousScheduler = this.lastLightweightPVSSchedulerStats || {};
-    this.lastLightweightPVSSchedulerStats = Object.assign({}, previousScheduler, {
-      scheduler: 'pvs-v4-worker-cached-render-filter',
+    var previousScheduler = this.lastPvsSchedulerStats || {};
+    this.lastPvsSchedulerStats = Object.assign({}, previousScheduler, {
+      scheduler: 'pvs-v4-cached-render-filter',
       backend: filterPayload ? filterPayload.backend : null,
       renderInstanceCount: renderComponentCount,
       renderGlbCount: glbDelta.count,
@@ -4518,7 +4480,7 @@ export class SLM2Loader
       renderComponentCount: renderComponentCount,
       renderGlbCount: glbDelta.count,
       renderVisibleCount: glbDelta.count,
-      schedulerStats: this.lastLightweightPVSSchedulerStats,
+      schedulerStats: this.lastPvsSchedulerStats,
     };
   }
 
@@ -4753,8 +4715,8 @@ export class SLM2Loader
       aspectDelta: this._parseFloatParam(params, 'neuralPredictionAspectDelta', 0.08, 0.005, 1),
       minIntervalMs: this._parseIntParam(params, 'neuralPredictionMinIntervalMs', defaultMinIntervalMs, 50, 5000),
     });
-    this.neuralBackend = 'lightweight-worker-pvs';
-    this.neuralDispatcherMode = 'lightweight-worker';
+    this.neuralBackend = 'shared-device-pvs';
+    this.neuralDispatcherMode = 'shared-device-or-worker';
     var configuredNeuralScene = baseConfig.loader.neuralScene || baseConfig.loader.neuralSceneName || null;
     var configuredNeuralAssetBase = this.neuralAssetBaseUrl || baseConfig.loader.neuralAssetBaseUrl || baseConfig.loader.neuralAssetBase || null;
     var neuralSceneName = String(params['neuralScene'] || params['scene'] || configuredNeuralScene || baseConfig.name || 'hkust-v3');
@@ -4782,12 +4744,13 @@ export class SLM2Loader
         ? Number(params['neuralPrefetchThreshold'])
         : undefined,
       downloadPlanMode: this.getNeuralDownloadPlanMode(),
+      externalWebGPUContext: this.options.pvsWebGPUContext || null,
     };
     this.neuralPVSIdMode = this.useNeuralPVS
       ? 'global-glb-priority'
       : (this.cullingMode === 'frustum' ? 'global-glb' : 'component');
     this.neuralPVS = this.useNeuralPVS
-      ? new LightweightPVSDispatcher(neuralAssetBase, this.neuralPVSOptions)
+      ? new PVSDispatcher(neuralAssetBase, this.neuralPVSOptions)
       : null;
     startupLog('slm2:neural-object-created', {
       hasNeuralPVS: Boolean(this.neuralPVS),
@@ -5379,7 +5342,7 @@ export class SLM2Loader
         assetVersion: LOCAL_RUNTIME_ASSET_VERSION,
       });
       scope.neuralPVS = scope.useNeuralPVS
-        ? new LightweightPVSDispatcher(assetBaseUrl, options)
+        ? new PVSDispatcher(assetBaseUrl, options)
         : null;
       scope.forceNextNeuralPrediction = true;
       if (scope.isSceneInitialized && scope.useNeuralPVS)

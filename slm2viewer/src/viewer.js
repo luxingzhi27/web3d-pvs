@@ -1,30 +1,20 @@
 import {
   AmbientLight,
-  AnimationMixer,
-  AxesHelper,
   Box3,
   Cache,
   DirectionalLight,
   GridHelper,
-  HemisphereLight,
-  LinearEncoding,
-  LoaderUtils,
-  LoadingManager,
+  LinearSRGBColorSpace,
   PMREMGenerator,
   PerspectiveCamera,
   OrthographicCamera,
   Scene,
-  SkeletonHelper,
   Vector3,
-  WebGLRenderer,
-  sRGBEncoding,
-  MeshStandardMaterial,
+  SRGBColorSpace,
   DoubleSide,
   Color,
   FrontSide,
-  ClampToEdgeWrapping,
   Object3D,
-  Matrix4,
   FileLoader,
   Mesh,
   MeshBasicMaterial,
@@ -34,15 +24,11 @@ import {
   RepeatWrapping
 } from 'three';
 import Stats from 'three/examples/jsm/libs/stats.module.js';
-import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
-import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
-import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { GUI } from 'dat.gui';
 import { environments } from '../assets/environment/index.js';
-import { createBackground } from '../lib/three-vignette.js';
 import { SLM2Loader } from '../slm2/SLM2Loader';
 import { keyboardMgr } from './keyboardMgr.js';
 import { TrajectoryCollector } from './TrajectoryCollector.js';
@@ -53,20 +39,7 @@ import {
   resolveRenderSurface,
   sameRenderSurface,
 } from './RenderSurfacePolicy.js';
-
-//import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
-import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js';
-import { N8AOPostPass  } from 'n8ao';
-import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
-
-import { EffectComposer, RenderPass, EffectPass, SMAAEffect, SMAAPreset } from "postprocessing";
-import { Camera } from 'three';
-
-import { HDRJPGLoader } from '@monogrid/gainmap-js'
-
-const MANAGER = new LoadingManager();
-const DRACO_LOADER = new DRACOLoader( MANAGER ).setDecoderPath( './assets/three/draco/gltf/' );
-const KTX2_LOADER = new KTX2Loader( MANAGER ).setTranscoderPath( './assets/three/basis/' );
+import { SceneBackground } from './SceneBackground.js';
 
 import { Loader3DTiles } from 'three-loader-3dtiles';
 
@@ -90,11 +63,15 @@ const FRONTEND_RUNTIME_ASSET_ESTIMATE = {
 
 export class Viewer 
 {
-  constructor (el, options) 
+  constructor (el, options, rendererRuntime)
   {
     startupLog('viewer:constructor:start');
     this.el = el;
     this.options = options;
+    this.rendererRuntime = rendererRuntime;
+    if (!this.rendererRuntime?.renderer) {
+      throw new Error('Viewer requires an initialized RendererRuntime.');
+    }
 
     this.lights = [];
     this.content = null;
@@ -125,21 +102,15 @@ export class Viewer
       lightMapIntensity: 1.0,
       vertexColor: false,
 
-      effectController: 
-      {
-        aoSamples: 16.0,
-        denoiseSamples: 8.0,
-        denoiseRadius: 12.0,
-        aoRadius: 5.0,
-        distanceFalloff: 7.0,
-        screenSpaceRadius: false,
-        halfRes: false,
-        depthAwareUpsampling: true,
-        intensity: 5.0,
-        renderMode: "Combined",
-        color: [0, 0, 0],
-        colorMultiply: true
-      }
+      effectController: {
+        enabled: true,
+        aoEnabled: true,
+        aoSamples: 8,
+        aoRadius: 5,
+        aoDistanceFallOff: 0.2,
+        aoIntensity: 1,
+        smaaEnabled: true,
+      },
     };
 
     var parseUrlParams = function()
@@ -180,35 +151,26 @@ export class Viewer
 
     this.debugLoadingMode = false;
 
-    this.renderer = window.renderer = new WebGLRenderer();//{antialias: (this.DebugMode ? false: true)});
-    this.renderer.physicallyCorrectLights = true;
-    this.renderer.outputEncoding = sRGBEncoding;
-    this.renderer.setClearColor( 0xdddddd );
-    this.renderer.setPixelRatio(this.renderSurface.pixelRatio);
-    this.renderer.setSize( el.clientWidth, el.clientHeight );
-    //this.renderer.autoClear = false;
+    this.renderer = window.renderer = this.rendererRuntime.renderer;
+    this.rendererRuntime.configureSurface(this.renderSurface);
     startupLog('viewer:renderer-ready', {
       width: el.clientWidth,
       height: el.clientHeight,
       pixelRatio: this.renderSurface.pixelRatio,
+      ...this.rendererRuntime.getInfo(),
     });
 
     this.pmremGenerator = new PMREMGenerator( this.renderer );
-    this.pmremGenerator.compileEquirectangularShader();
-    startupLog('viewer:pmrem-compiled');
+    startupLog('viewer:pmrem-ready');
 
     this.controls = new OrbitControls( this.activeCamera, this.renderer.domElement );
     this.controls.autoRotate = false;
     this.controls.autoRotateSpeed = -10;
     this.controls.screenSpacePanning = true;
 
-    this.vignette = createBackground({
-      aspect: this.activeCamera.aspect,
-      grainScale: 0.001,
-      colors: [this.state.bgColor1, this.state.bgColor2]
-    });
-    this.vignette.name = 'Vignette';
-    this.vignette.renderOrder = -1;
+    this.sceneBackground = new SceneBackground(this.state.bgColor1, this.state.bgColor2);
+    this.rendererRuntime.configureScene(this.scene, this.activeCamera, this.state.effectController);
+    window.__slmRendererInfo = this.rendererRuntime.getInfo();
 
     this.el.appendChild(this.renderer.domElement);
     startupLog('viewer:canvas-attached');
@@ -232,7 +194,7 @@ export class Viewer
     {
       this.state.addLights = false;
       this.state.effectController.aoRadius = 2.0;
-      this.state.effectController.intensity = 1.0;
+      this.state.effectController.aoIntensity = 1.0;
     }
 
     this.animate = this.animate.bind(this);
@@ -346,24 +308,7 @@ export class Viewer
 
     this.requestRender('viewer-startup');
 
-    this.usePostEffect = true;
-
-    if (this.usePostEffect)
-    {
-      this.composer = new EffectComposer(this.renderer);
-      this.renderPass = new RenderPass(this.scene, this.activeCamera);
-      this.composer.addPass(this.renderPass);
-      this.n8aopass = new N8AOPostPass (this.scene, this.activeCamera, el.clientWidth, el.clientHeight);
-      this.n8aopass.enabled = true;
-      this.composer.addPass(this.n8aopass);
-      this.smaaPass = new EffectPass(this.activeCamera, new SMAAEffect({preset: SMAAPreset.ULTRA}));
-      this.smaaPass.enabled = true;
-      this.composer.addPass(this.smaaPass);
-      startupLog('viewer:post-effects-ready');
-  
-      //const gammaCorrectionPass = new ShaderPass( GammaCorrectionShader )
-      //this.composer.addPass(gammaCorrectionPass);
-    }
+    startupLog('viewer:post-effects-ready', this.state.effectController);
 
     startupLog('viewer:constructor:end');
     //this.setup3DTiles();
@@ -756,7 +701,9 @@ export class Viewer
 
     if (backend.indexOf('webgpu') >= 0)
     {
-      return '模型剔除（Worker WebGPU）';
+      return backend.indexOf('renderer-shared') >= 0
+        ? '模型剔除（与渲染共享 WebGPU 设备）'
+        : '模型剔除（WebGPU）';
     }
 
     if (backend.indexOf('wasm-simd') >= 0)
@@ -771,7 +718,7 @@ export class Viewer
       return 'AABB 剔除（Worker 降级）';
     }
 
-    return backend ? `Worker 剔除（${backend}）` : '等待首次预测';
+    return backend ? `模型剔除（${backend}）` : '等待首次预测';
   }
 
   _describeRuntimeBandwidth(load, neural)
@@ -1559,15 +1506,7 @@ export class Viewer
 
   render()
   {
-    if (this.usePostEffect)
-    {
-      this.composer.render();
-    }
-    else
-    {
-      this.renderer.clear();
-      this.renderer.render( this.scene, this.activeCamera );
-    }
+    this.rendererRuntime.render(this.scene, this.activeCamera);
   }
 
   _resizeRenderTargets()
@@ -1586,17 +1525,7 @@ export class Viewer
       return false;
     }
     this.renderSurface = nextSurface;
-    this.renderer.setDrawingBufferSize(
-      nextSurface.cssWidth,
-      nextSurface.cssHeight,
-      nextSurface.pixelRatio
-    );
-    this.renderer.domElement.style.width = nextSurface.cssWidth + 'px';
-    this.renderer.domElement.style.height = nextSurface.cssHeight + 'px';
-    if (this.composer)
-    {
-      this.composer.setSize(nextSurface.cssWidth, nextSurface.cssHeight);
-    }
+    this.rendererRuntime.configureSurface(nextSurface);
     return true;
   }
 
@@ -1683,6 +1612,7 @@ export class Viewer
         materialLoadedCallback: _materialLoadedCallback,
         paramJson: scope.paramJson,
         requestRender: scope.requestRender.bind(scope),
+        pvsWebGPUContext: scope.rendererRuntime.getSharedWebGPUContext(),
       }, function(config)
       {
         startupLog('viewer:slm2Loader-callback:start');
@@ -1695,7 +1625,7 @@ export class Viewer
         {
           scope.state.addLights = false;
           scope.state.effectController.aoRadius = 2.0;
-          scope.state.effectController.intensity = 1.0;
+          scope.state.effectController.aoIntensity = 1.0;
 
           scope.updateLights();
           scope.updateSSAO();
@@ -2012,14 +1942,14 @@ export class Viewer
     return applied;
   }
 
-  updateTextureEncoding () 
+  updateTextureEncoding ()
   {
-    const encoding = this.state.textureEncoding === 'sRGB'
-      ? sRGBEncoding
-      : LinearEncoding;
+    const colorSpace = this.state.textureEncoding === 'sRGB'
+      ? SRGBColorSpace
+      : LinearSRGBColorSpace;
     traverseMaterials(this.content, (material) => {
-      if (material.map) material.map.encoding = encoding;
-      if (material.emissiveMap) material.emissiveMap.encoding = encoding;
+      if (material.map) material.map.colorSpace = colorSpace;
+      if (material.emissiveMap) material.emissiveMap.colorSpace = colorSpace;
       if (material.map || material.emissiveMap) material.needsUpdate = true;
     });
   }
@@ -2145,42 +2075,26 @@ export class Viewer
     this.getCubeMapTexture( environment ).then(( { envMap } ) => {
       this.scene.environment = envMap;
       this.scene.background = this.state.background ? envMap : null;
+      this.scene.backgroundNode = this.state.background ? null : this.sceneBackground.node;
+      this.requestRender('environment-ready');
     });
   }
 
-  getCubeMapTexture ( environment ) 
+  getCubeMapTexture ( environment )
   {
-    var scope = this;
-    const { path } = environment;
+    let { path } = environment;
 
     // no envmap
     if ( ! path ) return Promise.resolve( { envMap: null } );
 
     return new Promise( ( resolve, reject ) => {
 
-      if (path.endsWith('.hdr'))
-      {
-        new HDRLoader().load( path, ( texture ) => {
-
-          const envMap = this.pmremGenerator.fromEquirectangular( texture ).texture;
-          this.pmremGenerator.dispose();
-
-          resolve( { envMap } );
-
-        }, undefined, reject );
-      }
-      else
-      {
-        // HDR encode to JPG
-        //https://github.com/MONOGRID/gainmap-js
-        new HDRJPGLoader(scope.renderer).load(path, (result) =>
-        {
-          const envMap = this.pmremGenerator.fromEquirectangular(result.renderTarget.texture).texture;
-          this.pmremGenerator.dispose();
-
-          resolve( { envMap } );
-        } )
-      }
+      if (path.endsWith('.jpg')) path = path.replace(/\.jpg$/i, '.hdr');
+      new HDRLoader().load(path, (texture) => {
+        const envMap = this.pmremGenerator.fromEquirectangular(texture).texture;
+        texture.dispose();
+        resolve({ envMap });
+      }, undefined, reject);
     });
   }
 
@@ -2207,29 +2121,16 @@ export class Viewer
     }
   }
 
-  updateBackground () 
+  updateBackground ()
   {
-    this.vignette.style({colors: [this.state.bgColor1, this.state.bgColor2]});
+    this.sceneBackground.setColors(this.state.bgColor1, this.state.bgColor2);
+    this.requestRender('background-colors');
   }
 
   updateSSAO()
   {
-    if (this.n8aopass)
-    {
-      this.n8aopass.enabled = true;
-      this.n8aopass.configuration.aoRadius = this.state.effectController.aoRadius;
-      this.n8aopass.configuration.distanceFalloff = this.state.effectController.distanceFalloff;
-      this.n8aopass.configuration.intensity = this.state.effectController.intensity;
-      this.n8aopass.configuration.aoSamples = this.state.effectController.aoSamples;
-      this.n8aopass.configuration.denoiseRadius = this.state.effectController.denoiseRadius;
-      this.n8aopass.configuration.denoiseSamples = this.state.effectController.denoiseSamples;
-      this.n8aopass.configuration.renderMode = ["Combined", "AO", "No AO", "Split", "Split AO"].indexOf(this.state.effectController.renderMode);
-      this.n8aopass.configuration.color = new Color(this.state.effectController.color[0], this.state.effectController.color[1], this.state.effectController.color[2]);
-      this.n8aopass.configuration.screenSpaceRadius = this.state.effectController.screenSpaceRadius;
-      this.n8aopass.configuration.halfRes = this.state.effectController.halfRes;
-      this.n8aopass.configuration.depthAwareUpsampling = this.state.effectController.depthAwareUpsampling;
-      this.n8aopass.configuration.colorMultiply = this.state.effectController.colorMultiply;
-    }
+    this.rendererRuntime.configureEffects(this.state.effectController);
+    this.requestRender('post-effects');
   }
 
   addGUI () 
@@ -2289,49 +2190,13 @@ export class Viewer
     lightFolder.add(this.state, 'vertexColor').listen()
     ].forEach((ctrl) => ctrl.onChange(() => this.updateMaterials()));
 
-    // SSAO
-    const effectFolder = gui.addFolder('AO');
-
-    var simpleAOCtrl = !(this.paramJson['ssao'] != undefined && this.paramJson['ssao'] == 'true');
-
-    if (simpleAOCtrl == false)
-    {
-      effectFolder.add(this.state.effectController, "aoSamples", 1.0, 64.0, 1.0).onChange(()=>this.updateSSAO());
-      effectFolder.add(this.state.effectController, "denoiseSamples", 1.0, 64.0, 1.0).onChange(()=>this.updateSSAO());
-      effectFolder.add(this.state.effectController, "denoiseRadius", 0.0, 24.0, 0.01).onChange(()=>this.updateSSAO());
-      const aor = effectFolder.add(this.state.effectController, "aoRadius", 1.0, 10.0, 0.01).onChange(()=>this.updateSSAO());
-      const df = effectFolder.add(this.state.effectController, "distanceFalloff", 0.0, 10.0, 0.01).onChange(()=>this.updateSSAO());
-      effectFolder.add(this.state.effectController, "screenSpaceRadius").onChange((value) => {
-          if (value) {
-            this.state.effectController.aoRadius = 48.0;
-            this.state.effectController.distanceFalloff = 0.2;
-              aor._min = 0;
-              aor._max = 64;
-              df._min = 0;
-              df._max = 1;
-          } else {
-            this.state.effectController.aoRadius = 5.0;
-            this.state.effectController.distanceFalloff = 1.0;
-              aor._min = 1;
-              aor._max = 10;
-              df._min = 0;
-              df._max = 10;
-          }
-          aor.updateDisplay();
-          df.updateDisplay();
-  
-          this.updateSSAO();
-      });
-      effectFolder.add(this.state.effectController, "halfRes").onChange(()=>this.updateSSAO());
-      effectFolder.add(this.state.effectController, "depthAwareUpsampling").onChange(()=>this.updateSSAO());
-      effectFolder.add(this.state.effectController, "intensity", 0.0, 10.0, 0.01).onChange(()=>this.updateSSAO());
-      effectFolder.addColor(this.state.effectController, "color").onChange(()=>this.updateSSAO());
-      effectFolder.add(this.state.effectController, "colorMultiply").onChange(()=>this.updateSSAO());
-    }
-    
-    effectFolder.add(this.state.effectController, "renderMode", ["Combined", "AO", "No AO", "Split", "Split AO"]).onChange(()=>this.updateSSAO());
-
-    this.updateSSAO();
+    const effectFolder = gui.addFolder('后处理');
+    effectFolder.add(this.state.effectController, 'enabled').name('启用').onChange(() => this.updateSSAO());
+    effectFolder.add(this.state.effectController, 'aoEnabled').name('环境光遮蔽').onChange(() => this.updateSSAO());
+    effectFolder.add(this.state.effectController, 'aoSamples', 4, 16, 1).name('AO采样').onChange(() => this.updateSSAO());
+    effectFolder.add(this.state.effectController, 'aoRadius', 0.1, 20, 0.1).name('AO半径').onChange(() => this.updateSSAO());
+    effectFolder.add(this.state.effectController, 'aoIntensity', 0, 1, 0.05).name('AO强度').onChange(() => this.updateSSAO());
+    effectFolder.add(this.state.effectController, 'smaaEnabled').name('边缘抗锯齿').onChange(() => this.updateSSAO());
 
     // Stats.
     const perfFolder = gui.addFolder('性能');
@@ -2385,7 +2250,7 @@ export class Viewer
     addRuntimeStatus('pvsModelSchema', '模型Schema/阈值');
     addRuntimeStatus('pvsModelWorkpoint', 'Calibration安全工作点');
     addRuntimeStatus('pvsCullingSource', '当前剔除来源');
-    addRuntimeStatus('pvsBackend', 'Worker后端');
+    addRuntimeStatus('pvsBackend', '渲染/推理后端');
     addRuntimeStatus('pvsReady', '模型就绪');
     addRuntimeStatus('pvsFallbackReason', '降级原因');
     addRuntimeStatus('pvsPredictMs', '预测总耗时');

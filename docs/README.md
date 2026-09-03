@@ -45,6 +45,7 @@ neural_instance_culling/benchmark/reaudit_pvs.py
 | 文档 | 内容 |
 |---|---|
 | [`frontend/pvs_v4_runtime_and_deployment.md`](frontend/pvs_v4_runtime_and_deployment.md) | V4 运行资产、Worker/WebGPU 查询、实例级显示、数值 parity 和部署 |
+| [`frontend/webgpu_renderer_refactor_2026-09-04.md`](frontend/webgpu_renderer_refactor_2026-09-04.md) | WebGPURenderer、TSL 后处理、共享 GPUDevice 和 WebGL2/WASM 回退重构 |
 | [`../slm2viewer/README_DEPLOY.md`](../slm2viewer/README_DEPLOY.md) | 发布包上传和远端验证命令 |
 
 当前 HKUST 前端只加载 `pvs_mainline_v4`，阈值为 `0.6800000071525574`。没有匹配 V4 资产的场景使用实例 AABB 视锥模式，不复用 HKUST 权重或旧神经模型。

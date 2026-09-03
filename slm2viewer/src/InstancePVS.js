@@ -2,7 +2,9 @@
 // 浏览器只读取离线实例表，以当前 view-cell 中心和方向做一次 WebGPU 批量查询。
 // 离线关系图、子视点、点云编码和邻居查询均不进入本文件。
 
-import { Frustum, Matrix4, Vector3 } from 'three';
+import { Frustum } from 'three/src/math/Frustum.js';
+import { Matrix4 } from 'three/src/math/Matrix4.js';
+import { Vector3 } from 'three/src/math/Vector3.js';
 import { MODEL_INPUT_FOV_Y_DEG } from './neuralPvsFovProtocol.js';
 import { countBitsetIds } from './sortedIdDelta.js';
 
@@ -191,6 +193,7 @@ export class InstancePVS {
     this.assetVersion = options.assetVersion || null;
     this.preloadedMeta = options.preloadedMeta || null;
     this.debugLogging = Boolean(options.debugLogging);
+    this.externalWebGPUContext = options.externalWebGPUContext || null;
     this.outputFloats = this.debugLogging ? DIAGNOSTIC_OUTPUT_FLOATS : 1;
     this.meta = null;
     this.weightLayout = new Map();
@@ -415,13 +418,15 @@ export class InstancePVS {
       throw new Error('V4 instance visibility requires WebGPU.');
     }
     const shared = getSharedWebGPUState();
-    const adapterCached = Boolean(shared.adapter);
+    const adapterCached = Boolean(this.externalWebGPUContext?.adapter || shared.adapter);
     const adapterStartedAt = nowMs();
-    this.adapter = await getSharedWebGPUAdapter();
-    if (!this.adapter) throw new Error('WebGPU requestAdapter returned null.');
+    this.adapter = this.externalWebGPUContext?.adapter || await getSharedWebGPUAdapter();
+    if (!this.adapter && !this.externalWebGPUContext?.device) {
+      throw new Error('WebGPU requestAdapter returned null.');
+    }
     const deviceStartedAt = nowMs();
-    const deviceCached = Boolean(shared.device);
-    this.device = await getSharedWebGPUDevice(this.adapter);
+    const deviceCached = Boolean(this.externalWebGPUContext?.device || shared.device);
+    this.device = this.externalWebGPUContext?.device || await getSharedWebGPUDevice(this.adapter);
 
     this.uniformBuffer = this.device.createBuffer({
       size: 256,
@@ -476,12 +481,13 @@ export class InstancePVS {
     this._createRuntimeBuffers();
     this.instanceAabbs = null;
     this.instanceToGlobalGlbArray = null;
-    const adapterInfo = this.adapter.info || {};
+    const adapterInfo = this.externalWebGPUContext?.adapterInfo || this.adapter?.info || {};
     this.webgpuInfo = {
       requestAdapterMs: deviceStartedAt - adapterStartedAt,
       pipelineMs: nowMs() - pipelineStartedAt,
       adapterCached,
       deviceCached,
+      sharedRendererDevice: Boolean(this.externalWebGPUContext?.device),
       adapter: {
         vendor: adapterInfo.vendor || '',
         architecture: adapterInfo.architecture || '',

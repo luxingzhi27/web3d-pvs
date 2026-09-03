@@ -18,19 +18,13 @@ function parseArgs(argv) {
     chromeExe: process.env.CHROME_PATH || process.env.CHROMIUM_PATH || null,
     port: 0,
     timeoutMs: 180000,
-    requireHardwareGpu: true,
   };
   const valueOptions = new Set([
     'viewer-dir', 'out', 'scene', 'chrome-exe', 'port', 'timeout-ms',
   ]);
   for (let index = 2; index < argv.length; index += 1) {
     const token = argv[index];
-    if (token === '--allow-software-gpu') {
-      options.requireHardwareGpu = false;
-      continue;
-    }
     if (token === '--require-hardware-gpu') {
-      options.requireHardwareGpu = true;
       continue;
     }
     const equal = token.indexOf('=');
@@ -197,10 +191,13 @@ function startStaticServer(root, requestedPort) {
 
 async function capturePage(page, timeoutMs) {
   await page.waitForFunction(
-    () => window.__slmApp?.viewer?.slm2Loader?.neuralPVS?.isReady === true,
+    () => window.__slmApp?.viewer?.slm2Loader?.neuralPVS?.isReady === true
+      || Boolean(window.__slmApp?.error),
     null,
     { timeout: timeoutMs },
   );
+  const initializationError = await page.evaluate(() => window.__slmApp?.error || null);
+  if (initializationError) throw new Error(initializationError);
   await page.evaluate(() => {
     const loader = window.__slmApp.viewer.slm2Loader;
     loader.lastNeuralPrediction = null;
@@ -224,17 +221,17 @@ async function capturePage(page, timeoutMs) {
     camera.updateMatrixWorld(true);
     const world = camera.matrixWorld.elements;
     const forward = [-world[8], -world[9], -world[10]];
-    const singleton = globalThis.__SLM_INSTANCE_PVS_WEBGPU_SINGLETON__ || {};
-    const adapter = singleton.adapter
-      || await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-    const adapterInfo = adapter?.info || {};
-    const canvas = document.querySelector('canvas');
-    const gl = canvas?.getContext('webgl2') || canvas?.getContext('webgl');
-    const rendererInfo = gl?.getExtension('WEBGL_debug_renderer_info');
+    const rendererInfo = viewer.rendererRuntime.getInfo();
+    const adapterInfo = rendererInfo.adapter || {};
+    const sharedDevice = viewer.rendererRuntime.getSharedWebGPUContext()?.device;
 
     return {
       schema: 'pvs-v4-frontend-parity-capture-v1',
       backend: prediction.backend,
+      rendererBackend: rendererInfo.backend,
+      sharedRendererDevice: Boolean(
+        sharedDevice && loader.neuralPVS?.session?.pvs?.active?.device === sharedDevice,
+      ),
       camera: {
         position: camera.position.toArray(),
         quaternion: camera.quaternion.toArray(),
@@ -255,11 +252,6 @@ async function capturePage(page, timeoutMs) {
         architecture: String(adapterInfo.architecture || ''),
         device: String(adapterInfo.device || ''),
         description: String(adapterInfo.description || ''),
-      },
-      webglInfo: {
-        vendor: String(gl && rendererInfo ? gl.getParameter(rendererInfo.UNMASKED_VENDOR_WEBGL) : ''),
-        description: String(gl && rendererInfo ? gl.getParameter(rendererInfo.UNMASKED_RENDERER_WEBGL) : ''),
-        version: String(gl ? gl.getParameter(gl.VERSION) : ''),
       },
       modelInfo: loader.neuralPVS?.modelInfo || null,
       predictTimings: loader.neuralPVS?.lastPredictTimings || null,
@@ -292,7 +284,7 @@ async function main() {
     '--enable-zero-copy',
     '--ignore-gpu-blocklist',
     '--disable-gpu-sandbox',
-    ...(options.requireHardwareGpu ? ['--disable-software-rasterizer'] : []),
+    '--disable-software-rasterizer',
   ];
   const hostGpuBefore = hostGpuEvidence();
   const pmon = startPmonSampler();
@@ -314,7 +306,7 @@ async function main() {
     const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     page.on('pageerror', (error) => console.error('[v4-parity-pageerror]', error));
     await page.goto(
-      `http://127.0.0.1:${port}/?scene=${encodeURIComponent(options.scene)}&neuralDebugLogs=true&showGUI=false`,
+      `http://127.0.0.1:${port}/?scene=${encodeURIComponent(options.scene)}&renderBackend=webgpu&neuralDebugLogs=true&showGUI=false`,
       { waitUntil: 'domcontentloaded', timeout: options.timeoutMs },
     );
     result = await capturePage(page, options.timeoutMs);
@@ -330,21 +322,16 @@ async function main() {
     await new Promise((resolve) => server.close(resolve));
 
     const adapterGate = classifyBackend(result?.adapterInfo || {});
-    const webglGate = classifyBackend({
-      vendor: result?.webglInfo?.vendor || '',
-      architecture: '',
-      device: '',
-      description: result?.webglInfo?.description || '',
-    });
     const gpuGate = {
-      required: options.requireHardwareGpu,
-      hardware: adapterGate.hardware && webglGate.hardware,
+      required: true,
+      hardware: adapterGate.hardware
+        && result?.rendererBackend === 'webgpu'
+        && result?.sharedRendererDevice === true,
       adapter: adapterGate,
-      webgl: webglGate,
     };
     const formalReady = Boolean(
       !failure
-      && result?.backend === 'worker-webgpu-v4'
+      && result?.backend === 'renderer-shared-webgpu-v4'
       && gpuGate.hardware
       && hostGpuBefore.nvidiaSmi.available
       && hostGpuBefore.nvidiaSmiPmon.available
@@ -374,7 +361,7 @@ async function main() {
       error: failure,
     };
     fs.writeFileSync(options.out, `${JSON.stringify(capture, null, 2)}\n`);
-    if (!failure && options.requireHardwareGpu && !formalReady) {
+    if (!failure && !formalReady) {
       failure = 'WebGPU hardware gate failed';
     }
   }

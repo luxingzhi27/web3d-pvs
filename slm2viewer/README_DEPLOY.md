@@ -11,7 +11,7 @@
 public_deploy/
 ├── index.html                         # 入口页面
 ├── app.a6a4d504.js                    # 混淆后的前端代码
-├── LightweightPVSWorker.*.js          # PVS 推理 Worker(Web Worker)
+├── PVSWorker.*.js                     # WASM SIMD 兼容推理 Worker
 ├── style.*.css                        # 样式
 ├── favicon.df682a99.ico
 ├── assets/

@@ -295,7 +295,7 @@ function precompressFiles(files) {
 }
 
 function shouldObfuscate(rel) {
-  return /^app\.[^/]+\.js$/.test(rel) || /^LightweightPVSWorker\.[^/]+\.js$/.test(rel);
+  return /^app\.[^/]+\.js$/.test(rel) || /^PVSWorker\.[^/]+\.js$/.test(rel);
 }
 
 function obfuscateJavaScript(files) {
@@ -616,7 +616,7 @@ function writeManifest(copied, skipped, compressed, indexAssetVersions, obfuscat
     obfuscation: {
       enabled: obfuscateJs,
       note: obfuscateJs
-        ? 'Deploy app.*.js and LightweightPVSWorker.*.js are obfuscated. This is not DRM; it increases reverse-engineering cost but cannot fully hide browser code.'
+        ? 'Deploy app.*.js and PVSWorker.*.js are obfuscated. This is not DRM; it increases reverse-engineering cost but cannot fully hide browser code.'
         : 'Disabled by --obfuscate-js=false or SLM_DEPLOY_OBFUSCATE_JS=false.',
       files: obfuscated,
     },

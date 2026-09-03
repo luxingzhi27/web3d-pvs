@@ -230,8 +230,8 @@ conda run -n slm_pvs python slm2viewer/scripts/verify_v4_frontend_parity.py \
 - 如果新增 runtime schema，必须保证旧 schema 要么明确兼容，要么明确移除并更新文档。
 - 上下文化实例点云路线的前端首版必须保持“固定上下文化实例特征表 + 轻量视角查询头”；不能把 camera hash 作为唯一或主要可见性记忆来源。
 - 完整 AABB 8 角点 MVP 投影默认不进入前端首版运行时。如果后续确实上线，必须只在 Worker/WebGPU 中对候选实例低频计算，禁止主线程逐帧或全量实例计算，并必须报告额外耗时。
-- 当前 V4 神经运行时后端顺序固定为 `Worker WebGPU -> Worker WASM SIMD`。两条路径都必须完整执行后退 `66°` 视锥 AABB 候选、V4 模型、冻结阈值、真实 `60°` 视锥过滤、实例编号压缩和按 GLB 的最高分聚合；AABB 不能直接决定神经可见集合。WebGPU 普通运行只回读最终实例编号和压缩后的 GLB 队列；WASM 的特征表、权重和关系结果必须初始化一次后常驻线性内存，每个 pose 只允许一次批量模型调用并复制最终编号与队列。不得恢复纯 JavaScript CPU 神经计算、主线程全实例扫描或 WebGPU 失败后的隐式 AABB fallback；无神经权重场景使用独立的显式 AABB 视锥模式。逐候选编号和概率只允许在显式 parity 调试模式输出。
-- 当前 Three.js 主渲染器是 WebGLRenderer，不能零拷贝读取 WebGPU storage buffer。禁止为了宣称“渲染着色器读取可见性位图”而把 WebGPU 位图回读 CPU 后再上传 WebGL；真正共享位图必须先完成 WebGPURenderer 全链路迁移与材质、后处理、移动端验证。
+- 当前 V4 神经运行时后端顺序固定为 `WebGPURenderer 共享 GPUDevice 的页面异步 WebGPU 查询 -> WebGL2 backend + Worker WASM SIMD`。两条路径都必须完整执行后退 `66°` 视锥 AABB 候选、V4 模型、冻结阈值、真实 `60°` 视锥过滤、实例编号压缩和按 GLB 的最高分聚合；AABB 不能直接决定神经可见集合。WebGPU 普通运行只回读最终实例编号和压缩后的 GLB 队列；WASM 的特征表、权重和关系结果必须初始化一次后常驻线性内存，每个 pose 只允许一次批量模型调用并复制最终编号与队列。不得恢复纯 JavaScript CPU 神经计算、主线程全实例扫描或 WebGPU 失败后的隐式 AABB fallback；无神经权重场景使用独立的显式 AABB 视锥模式。逐候选编号和概率只允许在显式 parity 调试模式输出。
+- Three.js 主渲染器统一使用 `WebGPURenderer`。有硬件 WebGPU adapter 时，渲染和 PVS 查询共享同一个 `GPUDevice`；没有硬件 adapter、adapter 为 SwiftShader/llvmpipe 等软件实现或初始化失败时，同一 Viewer 使用 Three.js WebGL2 backend，并把神经查询放入 Worker WASM SIMD。背景、GTAO 和 SMAA 使用 TSL/NodeMaterial 定义，由 WebGPU 和 WebGL2 backend 分别编译；不得恢复 WebGL 专用 `EffectComposer`、N8AO 或 RawShaderMaterial 背景。当前仍需把最终实例 ID 回读给资源调度和稠密实例槽位，不能宣称已经实现渲染着色器零回读可见性位图。
 - GLB 资源调度只能由 `GlbResourceScheduler` 的单一状态机负责。Worker 只输出后退 66° 模型可见集合、真实 60° 最终集合和低分预取集合；真实 60° 集合必须全部进入 `urgent`，不得因队列长度上限降级为预取。其余模型可见项进入 `warm`，仅高于预取阈值的低分项进入 `speculative`。每个 GLB 只能处于 queued/fetching/parsing/mounting/resident/failed 之一；进入和离开真实视锥必须对称升降级，下载、解析、挂载和重试完成事件必须直接推进管线，不得依赖连续 RAF 或重新维护并行的立即/预取数组。
 
 ## 9. 采样与数据集准则

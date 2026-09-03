@@ -103,7 +103,7 @@ npm run capture:initial-glb-order
 ?neuralRuntimeBackend=auto
 ```
 
-WASM 推理始终位于 `LightweightPVSWorker`，不会阻塞 Three.js 渲染主线程。FP16 特征与权重只在初始化时解码一次，八维关系条件也只预计算一次；这些数据随后常驻 WASM 线性内存。每个 pose 只跨 JS/WASM 边界调用一次，内核内完成候选过滤、频谱矩、生存场、MLP、阈值判断、真实视锥过滤和 GLB 聚合。正式兼容实现使用单线程 SIMD，不要求 COOP/COEP，也不启用 WASM threads。
+WASM 推理始终位于 `PVSWorker`，不会阻塞 Three.js 渲染主线程。FP16 特征与权重只在初始化时解码一次，八维关系条件也只预计算一次；这些数据随后常驻 WASM 线性内存。每个 pose 只跨 JS/WASM 边界调用一次，内核内完成候选过滤、频谱矩、生存场、MLP、阈值判断、真实视锥过滤和 GLB 聚合。正式兼容实现使用单线程 SIMD，不要求 COOP/COEP，也不启用 WASM threads。
 
 当前浏览器功能 smoke 中，初始视点得到 `9398` 个候选、`3728` 个神经可见实例和 `3633` 个真实视锥显示实例；强制 WASM 和模拟 WebGPU 获取失败后的自动 WASM 输出一致，单次完整推理分别约为 `65.2 ms` 和 `67.2 ms`。原 JavaScript Worker 路径约为 `420 ms`，WASM SIMD 在该服务器上约快 `6.3` 倍。主线程 `10 ms` 定时器在推理期间持续触发。该结果是服务器无头 Chrome 功能数据，不是移动端性能结论。
 
@@ -117,7 +117,7 @@ WASM 推理始终位于 `LightweightPVSWorker`，不会阻塞 Three.js 渲染主
 
 资源管线由事件推进：新计划、下载完成、解析完成、挂载完成和退避重试到期都会直接唤醒调度器。它不依赖连续 RAF，也不存在“立即数组已经排空、预取数组仍有内容但没有下一帧继续处理”的停转状态。下载失败最多退避重试四次；当前真实视锥内仍失败的数量通过 `urgentFailed` 单独暴露，不能被算成预取或已完成。调试面板中的 `urgentMissing` 表示当前视锥目标减去已驻留数量，可能处于下载、解析、挂载或重试阶段；仅看 `immediate=0` 不再用于判断画面资源是否齐全。
 
-主要修改文件为 `src/GlbResourceScheduler.js`、`src/LightweightPVSWorker.js`、`slm2/SLM2Loader.js` 和 `slm2/CacheMgr.js`。验证命令为：
+主要修改文件为 `src/GlbResourceScheduler.js`、`src/PVSQuerySession.js`、`src/PVSWorker.js`、`slm2/SLM2Loader.js` 和 `slm2/CacheMgr.js`。验证命令为：
 
 ```bash
 cd slm2viewer
@@ -203,8 +203,9 @@ HKUST 页面功能 smoke 中，冻结前的最终集合为 `3769` 个实例和 `
 | `wasm/instance_pvs_v4/src/lib.rs` | SIMD 候选筛选、ray/频谱/生存场、V4 MLP、重过滤和 GLB 聚合 |
 | `src/InstancePVSRuntime.js` | `auto/webgpu/wasm` 后端选择及运行期故障切换 |
 | `src/InstancePVSBackendPolicy.js` | 后端参数规范化与 WebGPU 故障识别 |
-| `src/LightweightPVSWorker.js` | 构造 66°/60° 相机、运行统一后端并传递模型可见性事实 |
-| `src/LightweightPVSDispatcher.js` | 相机快照、完整预测/缓存重过滤消息和请求串行号 |
+| `src/PVSQuerySession.js` | 构造 66°/60° 相机、运行统一模型并整理完整预测与缓存重过滤结果 |
+| `src/PVSDispatcher.js` | 在共享 GPUDevice 的页面查询与 Worker WASM 之间选择后端 |
+| `src/PVSWorker.js` | 无硬件 WebGPU 时承载 WASM SIMD 查询，不包含模型业务逻辑 |
 | `src/GlbResourceScheduler.js` | GLB 紧急/预热/推测分层、单一资源状态机、优先队列和失败退避 |
 | `src/CameraPredictionGate.js` | 判断是否越过 view-cell 需要完整预测，以及 cell 内是否需要重过滤 |
 | `src/neuralCullingBackendMode.js` | 只为有 V4 资产的场景启用神经模式 |
@@ -283,7 +284,7 @@ npm run package:deploy -- --scene hkust-v3
 
 `smoke:refilter` 显式使用 `--allow-software-gpu`，验证缓存重过滤、CPU AABB 参考、Loader 最终集合、“未重跑 MLP”语义、渲染 DPR 等于设备原生 DPR、场景无 Fog，以及桌面/移动视口下 AO、SMAA 和画布非空。该 smoke 不输出硬件性能结论。
 
-`smoke:wasm-fallback` 分别验证强制 WASM 和 `auto` 模式下 WebGPU 初始化失败后的自动 WASM 路径，要求两者都运行完整神经模型、产生比候选集合更小的预测集合、完成缓存重过滤，并确认主线程在推理期间保持响应。WASM/WebGPU 概率对照可在生成现有 parity capture 后运行 `scripts/verify_instance_pvs_wasm_webgpu_capture.mjs --capture=<capture.json>`。
+`smoke:wasm-fallback` 分别验证强制 WASM 和 `auto` 模式下没有硬件 WebGPU device 时的 WASM 路径，要求两者都运行完整神经模型、产生比候选集合更小的预测集合、完成缓存重过滤，并确认主线程在推理期间保持响应。WASM/WebGPU 概率对照可在生成现有 parity capture 后运行 `scripts/verify_instance_pvs_wasm_webgpu_capture.mjs --capture=<capture.json>`。
 
 同位姿数值检查分为页面采集和 PyTorch 对照两步：
 
@@ -291,7 +292,7 @@ npm run package:deploy -- --scene hkust-v3
 node slm2viewer/scripts/capture_v4_frontend_parity.mjs \
   --viewer-dir slm2viewer/public \
   --out /tmp/pvs_v4_capture.json \
-  --allow-software-gpu
+  --require-hardware-gpu
 
 conda run -n slm_pvs python slm2viewer/scripts/verify_v4_frontend_parity.py \
   --checkpoint <best_safe.pt> \
@@ -299,13 +300,12 @@ conda run -n slm_pvs python slm2viewer/scripts/verify_v4_frontend_parity.py \
   --capture /tmp/pvs_v4_capture.json
 ```
 
-正式硬件性能采集必须把 `--allow-software-gpu` 换成 `--require-hardware-gpu`，且只有 capture
-中的 WebGPU adapter、WebGL renderer 和同窗口 NVIDIA 证据共同通过时才可报告硬件耗时。
+只有 capture 中的 WebGPU adapter、`renderer-shared-webgpu-v4` 后端、共享 device 检查和同窗口 NVIDIA 证据共同通过时，才可报告硬件耗时。
 
 生产构建必须只携带 `pvs_mainline_v4`。部署脚本会检查运行 schema、文件集合、实例数和场景元数据；不再打包旧模型目录。
 
 ## 渲染位图边界
 
-当前场景渲染使用 Three.js `WebGLRenderer`，神经查询主后端使用 WebGPU，兼容后端使用 Worker WASM SIMD。浏览器没有让 WebGL 着色器直接读取 WebGPU storage buffer 的零拷贝互操作接口。把可见性位图从 WebGPU 回读后再上传为 WebGL 纹理不会减少跨设备传输，而且隐藏实例仍会进入顶点阶段；因此本版继续把神经后端压缩后的最终实例编号交给现有实例矩阵压缩逻辑，它会实际降低 `InstancedMesh.count` 和绘制实例数。
+当前场景统一使用 Three.js `WebGPURenderer`。硬件 WebGPU 可用时，渲染和神经查询共享页面中的一个 `GPUDevice`；不可用时，同一渲染器切换到 WebGL2 backend，查询切换到 Worker WASM SIMD。TSL 背景、GTAO、SMAA、环境 PMREM 和标准 PBR 材质在两个 backend 之间共享定义。
 
-只有把场景渲染整体迁移到 Three.js `WebGPURenderer` 后，渲染着色器才能与可见性计算共享 GPU 位图。该迁移会同时影响材质、后处理、加载器和浏览器兼容性，必须作为独立前端项目验证，不能在当前 WebGL 主线中加入一次 GPU 回读再上传的伪共享路径。
+当前仍把压缩后的最终实例编号回读给 GLB 调度器和稠密实例槽位，因为资源下载、挂载和缓存状态位于 CPU。后续只有在渲染材质直接消费 GPU 可见性位图、且资源调度另有紧凑反馈协议后，才能进一步减少这次回读；不能把 GPU 位图回读后再上传纹理描述成零拷贝。

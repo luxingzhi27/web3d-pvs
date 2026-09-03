@@ -96,15 +96,19 @@ try {
     );
     const result = await page.evaluate(async () => {
       const loader = window.__slmApp.viewer.slm2Loader;
+      const rendererInfo = window.__slmApp.viewer.rendererRuntime.getInfo();
       const dispatcher = loader.neuralPVS;
       const camera = loader.activeCamera;
       let timerTicks = 0;
       const timer = setInterval(() => { timerTicks += 1; }, 10);
       const prediction = await dispatcher.predict(camera);
+      const predictSerial = dispatcher.lastPredictTimings?.serial;
       clearInterval(timer);
       const filtered = await dispatcher.refilter(camera);
       return {
         backend: prediction.backend,
+        rendererBackend: rendererInfo.backend,
+        rendererFallbackReason: rendererInfo.fallbackReason,
         dispatcherBackend: dispatcher.backend,
         fallbackReason: prediction.fallbackReason || dispatcher.lastInitTimings?.fallbackReason || null,
         candidateCount: prediction.candidateCount,
@@ -112,16 +116,19 @@ try {
         visibleGlbCount: prediction.modelList.length,
         renderInstanceCount: prediction.renderComponentModelList.length,
         refilterInstanceCount: filtered.renderInstanceCount,
+        cachedRefilterKeptPrediction: dispatcher.lastPredictTimings?.serial === predictSerial,
         inferenceMs: Number(prediction.timings?.inferenceMs || 0),
         timerTicks,
       };
     });
     assert.match(result.backend, /worker-wasm-simd-v4/);
+    assert.equal(result.rendererBackend, 'webgl2-fallback');
     assert.doesNotMatch(result.backend, /aabb/i);
     assert.ok(result.candidateCount > result.visibleInstanceCount);
     assert.ok(result.visibleInstanceCount > 0);
     assert.ok(result.visibleGlbCount > 0);
     assert.equal(result.refilterInstanceCount, result.renderInstanceCount);
+    assert.equal(result.cachedRefilterKeptPrediction, true);
     assert.ok(result.timerTicks >= 1, 'WASM inference blocked the browser main thread.');
     assert.deepEqual(pageErrors, []);
     if (hideWebGPU) assert.ok(result.fallbackReason);

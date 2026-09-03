@@ -597,10 +597,10 @@ priority(g) = max { s_i | m(i)=g 且 i 属于参与调度的实例集合 }
 | 技术内容 | 当前实现位置 |
 |---|---|
 | 固定实例特征和 WebGPU 查询 | `slm2viewer/src/InstancePVS.js` |
-| 66° 候选视锥和 60° 当前显示视锥 | `slm2viewer/src/LightweightPVSWorker.js` |
-| 完整区域查询与缓存重新筛选消息 | `slm2viewer/src/LightweightPVSDispatcher.js` |
+| 66° 候选视锥和 60° 当前显示视锥 | `slm2viewer/src/PVSQuerySession.js` |
+| 完整区域查询与缓存重新筛选消息 | `slm2viewer/src/PVSDispatcher.js` |
 | 视点区域复用门 | `slm2viewer/src/CameraPredictionGate.js` |
-| 实例/GLB 位图和差量 | `slm2viewer/src/IdBitsetState.js`、`LightweightPVSWorker.js` |
+| 实例/GLB 位图和差量 | `slm2viewer/src/IdBitsetState.js`、`PVSQuerySession.js` |
 | 实例显示与 GLB 工作集 | `slm2viewer/src/RenderVisibilitySystem.js` |
 | 下载、解析、挂载流水线 | `slm2viewer/slm2/SLM2Loader.js` |
 | 稠密实例槽位 | `slm2viewer/src/DenseInstancedSlots.js` |

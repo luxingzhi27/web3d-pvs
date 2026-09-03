@@ -1,5 +1,5 @@
-import WebGL from 'three/examples/jsm/capabilities/WebGL.js';
 import { Viewer } from './viewer.js';
+import { RendererRuntime } from './RendererRuntime.js';
 import queryString from 'query-string';
 import { startupLog } from './startupTimeline.js';
 
@@ -8,10 +8,6 @@ startupLog('app:module-evaluated');
 if (!(window.File && window.FileReader && window.FileList && window.Blob)) 
 {
   console.error('The File APIs are not fully supported in this browser.');
-}
-else if (!WebGL.isWebGL2Available()) 
-{
-  console.error('WebGL is not supported in this browser.');
 }
 
 class App 
@@ -23,37 +19,44 @@ class App
       kiosk: Boolean(hash.kiosk),
       model: hash.model || '',
       preset: hash.preset || '',
-      cameraPosition: hash.cameraPosition ? hash.cameraPosition.split(',').map(Number) : null
+      cameraPosition: hash.cameraPosition ? hash.cameraPosition.split(',').map(Number) : null,
+      renderBackend: new URLSearchParams(location.search).get('renderBackend') || 'auto',
     };
 
     this.el = el;
     this.viewer = null;
+    this.error = null;
     this.viewerEl = null;
     this.root = el.querySelector('.wrap');
 
-    this.view();
+    this.ready = this.view().catch((error) => this.onError(error));
   }
 
-  createViewer() 
+  async createViewer()
   {
     this.viewerEl = document.createElement('div');
     this.viewerEl.classList.add('viewer');
     this.root.appendChild(this.viewerEl);
-    this.viewer = new Viewer(this.viewerEl, this.options);
+    const rendererRuntime = await RendererRuntime.create({
+      backendPreference: this.options.renderBackend,
+    });
+    this.viewer = new Viewer(this.viewerEl, this.options, rendererRuntime);
     return this.viewer;
   }
 
-  view() 
+  async view()
   {
     if (this.viewer) this.viewer.clear();
 
-    const viewer = this.viewer || this.createViewer();
+    const viewer = this.viewer || await this.createViewer();
 
     viewer.load();
+    return viewer;
   }
 
   onError (error) 
   {
+    this.error = String(error?.stack || error);
     console.error(error);
   }
 
