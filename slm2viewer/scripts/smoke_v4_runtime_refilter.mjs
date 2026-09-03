@@ -184,6 +184,7 @@ try {
         description: String(adapterInfo.description || ''),
       },
       rendererBackend: rendererInfo.backend,
+      rendererFallbackReason: rendererInfo.fallbackReason,
       webglRenderer: glDebug
         ? String(gl.getParameter(glDebug.UNMASKED_RENDERER_WEBGL) || '')
         : '',
@@ -227,7 +228,6 @@ try {
         && viewer.gpuFrameTimer === undefined
         && viewer.distanceRendering === undefined,
       aoEnabled: viewer.rendererRuntime.effects?.options?.aoEnabled === true,
-      smaaEnabled: viewer.rendererRuntime.effects?.options?.smaaEnabled === true,
       filterSerialAdvanced: dispatcher.lastFilterTimings.serial > previousFilterSerial,
       filterInferenceMs: Number(dispatcher.lastFilterTimings.inferenceMs || 0),
       duplicateCullRemoved: loader.renderVisibilitySystem.lastStats?.duplicateCullRemoved === true,
@@ -285,7 +285,6 @@ try {
       renderError,
       rendererInfo: viewer.rendererRuntime.getInfo(),
       aoEnabled: viewer.rendererRuntime.effects?.options?.aoEnabled === true,
-      smaaEnabled: viewer.rendererRuntime.effects?.options?.smaaEnabled === true,
     };
   });
 
@@ -360,9 +359,13 @@ try {
     }
   }
 
+  const validWebGPUFallback = renderBackend === 'webgpu'
+    && result.rendererBackend === 'webgl2-fallback'
+    && /WebGPU|adapter|swiftshader/i.test(String(result.rendererFallbackReason || ''));
   const passed = result.initialLoaderInstanceParity
-    && result.rendererBackend === (renderBackend === 'webgpu' ? 'webgpu' : 'webgl2-fallback')
-    && (renderBackend !== 'webgl' || (
+    && (result.rendererBackend === (renderBackend === 'webgpu' ? 'webgpu' : 'webgl2-fallback')
+      || validWebGPUFallback)
+    && (result.rendererBackend !== 'webgl2-fallback' || (
       Boolean(result.webglRenderer)
       && !/swiftshader|llvmpipe|softpipe|swrast|software/i.test(result.webglRenderer)
     ))
@@ -390,7 +393,6 @@ try {
     && result.fogAbsent
     && result.legacyQualityControlsAbsent
     && result.aoEnabled
-    && result.smaaEnabled
     && result.filterSerialAdvanced
     && result.filterInferenceMs === 0
     && result.duplicateCullRemoved
@@ -400,9 +402,7 @@ try {
     && result.canvasChecks.desktopNative.opaqueRatio > 0.99
     && result.canvasChecks.mobileNative.opaqueRatio > 0.99
     && result.canvasChecks.desktopNative.aoEnabled
-    && result.canvasChecks.desktopNative.smaaEnabled
     && result.canvasChecks.mobileNative.aoEnabled
-    && result.canvasChecks.mobileNative.smaaEnabled
     && result.canvasChecks.mobileLayout.documentScrollWidth <= result.canvasChecks.mobileLayout.innerWidth;
   if (pageErrors.length || consoleErrors.length || !passed) {
     throw new Error(`Runtime refilter smoke failed: ${JSON.stringify({ pageErrors, consoleErrors, result })}`);

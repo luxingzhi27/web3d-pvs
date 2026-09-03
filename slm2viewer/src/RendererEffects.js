@@ -1,7 +1,6 @@
 import { RenderPipeline } from 'three/webgpu';
-import { float, mix, pass, uniform } from 'three/tsl';
+import { pass, pow, uniform } from 'three/tsl';
 import { ao } from 'three/examples/jsm/tsl/display/GTAONode.js';
-import { smaa } from 'three/examples/jsm/tsl/display/SMAANode.js';
 
 const DEFAULTS = Object.freeze({
   enabled: true,
@@ -11,8 +10,7 @@ const DEFAULTS = Object.freeze({
   aoThickness: 1,
   aoDistanceFallOff: 0.2,
   aoSamples: 8,
-  aoIntensity: 1,
-  smaaEnabled: true,
+  aoStrength: 2,
 });
 
 export class RendererEffects {
@@ -24,8 +22,7 @@ export class RendererEffects {
     this.pipeline = null;
     this.scenePass = null;
     this.aoNode = null;
-    this.smaaNode = null;
-    this.aoIntensity = uniform(this.options.aoIntensity);
+    this.aoStrength = uniform(this.options.aoStrength);
     this._rebuild();
   }
 
@@ -33,11 +30,9 @@ export class RendererEffects {
     this.pipeline?.dispose();
     this.scenePass?.dispose();
     this.aoNode?.dispose();
-    this.smaaNode?.dispose();
     this.pipeline = null;
     this.scenePass = null;
     this.aoNode = null;
-    this.smaaNode = null;
   }
 
   _rebuild() {
@@ -49,12 +44,8 @@ export class RendererEffects {
     if (this.options.aoEnabled) {
       this.aoNode = ao(this.scenePass.getTextureNode('depth'), null, this.camera);
       this._updateAo();
-      const aoFactor = mix(float(1), this.aoNode.getTextureNode().r, this.aoIntensity);
+      const aoFactor = pow(this.aoNode.getTextureNode().r.clamp(0, 1), this.aoStrength);
       outputNode = outputNode.mul(aoFactor);
-    }
-    if (this.options.smaaEnabled) {
-      this.smaaNode = smaa(outputNode);
-      outputNode = this.smaaNode;
     }
 
     this.pipeline = new RenderPipeline(this.renderer);
@@ -69,11 +60,11 @@ export class RendererEffects {
     this.aoNode.thickness.value = this.options.aoThickness;
     this.aoNode.distanceFallOff.value = this.options.aoDistanceFallOff;
     this.aoNode.samples.value = this.options.aoSamples;
-    this.aoIntensity.value = this.options.aoIntensity;
+    this.aoStrength.value = this.options.aoStrength;
   }
 
   configure(options = {}) {
-    const rebuild = ['enabled', 'aoEnabled', 'smaaEnabled']
+    const rebuild = ['enabled', 'aoEnabled']
       .some((key) => options[key] != null && Boolean(options[key]) !== Boolean(this.options[key]));
     this.options = { ...this.options, ...options };
     if (rebuild) this._rebuild();

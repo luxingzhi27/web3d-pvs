@@ -116,7 +116,7 @@ requireText(renderer, [
 requireText(effects, [
   'new RenderPipeline(',
   'ao(this.scenePass.getTextureNode',
-  'smaa(outputNode)',
+  'pow(this.aoNode.getTextureNode().r.clamp(0, 1), this.aoStrength)',
 ], 'TSL post-processing');
 requireText(background, ['viewportUV.y', 'smoothstep(', 'mix('], 'TSL background');
 requireText(dispatcher, [

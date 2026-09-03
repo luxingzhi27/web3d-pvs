@@ -39,6 +39,7 @@ class App
     this.root.appendChild(this.viewerEl);
     const rendererRuntime = await RendererRuntime.create({
       backendPreference: this.options.renderBackend,
+      allowSoftwareAdapter: globalThis.__SLM_ALLOW_SOFTWARE_WEBGPU__ === true,
     });
     this.viewer = new Viewer(this.viewerEl, this.options, rendererRuntime);
     return this.viewer;

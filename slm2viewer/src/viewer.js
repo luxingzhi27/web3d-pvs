@@ -94,11 +94,11 @@ export class Viewer
       textureEncoding: 'sRGB',
       directIntensity: 2.3,
       directColor: 0xffffff,
-      ambientIntensity: 2.3,
+      ambientIntensity: 0.7,
       ambientColor: 0xffffff,
       bgColor1: '#ffffff',
       bgColor2: '#353588',
-      envMapIntensity: 1.1,
+      envMapIntensity: 0.35,
       lightMapIntensity: 1.0,
       vertexColor: false,
 
@@ -108,8 +108,7 @@ export class Viewer
         aoSamples: 8,
         aoRadius: 5,
         aoDistanceFallOff: 0.2,
-        aoIntensity: 1,
-        smaaEnabled: true,
+        aoStrength: 2,
       },
     };
 
@@ -194,7 +193,7 @@ export class Viewer
     {
       this.state.addLights = false;
       this.state.effectController.aoRadius = 2.0;
-      this.state.effectController.aoIntensity = 1.0;
+      this.state.effectController.aoStrength = 2.0;
     }
 
     this.animate = this.animate.bind(this);
@@ -1625,7 +1624,7 @@ export class Viewer
         {
           scope.state.addLights = false;
           scope.state.effectController.aoRadius = 2.0;
-          scope.state.effectController.aoIntensity = 1.0;
+          scope.state.effectController.aoStrength = 2.0;
 
           scope.updateLights();
           scope.updateSSAO();
@@ -2195,8 +2194,7 @@ export class Viewer
     effectFolder.add(this.state.effectController, 'aoEnabled').name('环境光遮蔽').onChange(() => this.updateSSAO());
     effectFolder.add(this.state.effectController, 'aoSamples', 4, 16, 1).name('AO采样').onChange(() => this.updateSSAO());
     effectFolder.add(this.state.effectController, 'aoRadius', 0.1, 20, 0.1).name('AO半径').onChange(() => this.updateSSAO());
-    effectFolder.add(this.state.effectController, 'aoIntensity', 0, 1, 0.05).name('AO强度').onChange(() => this.updateSSAO());
-    effectFolder.add(this.state.effectController, 'smaaEnabled').name('边缘抗锯齿').onChange(() => this.updateSSAO());
+    effectFolder.add(this.state.effectController, 'aoStrength', 0, 8, 0.25).name('AO强度').onChange(() => this.updateSSAO());
 
     // Stats.
     const perfFolder = gui.addFolder('性能');

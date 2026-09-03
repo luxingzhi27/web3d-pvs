@@ -18,9 +18,9 @@ WebGPU 主路径由页面先创建一个高性能 adapter 和 device，再把同
 
 ## 简化边界
 
-旧 `EffectComposer + N8AO + SMAAEffect` 和 RawShaderMaterial 背景已经删除。背景改为 TSL 节点，后处理改为 Three.js `RenderPipeline`、半分辨率 GTAO 和 TSL SMAA；同一份节点图由 WebGPU backend 编译为 WGSL，由 WebGL2 backend 编译为 GLSL。环境贴图使用 WebGPU 版 PMREM，PBR 材质、灯光、实例化、BatchedMesh 和资源调度保持。
+旧 `EffectComposer + N8AO + SMAAEffect` 和 RawShaderMaterial 背景已经删除。背景改为 TSL 节点，环境光遮蔽改为 Three.js `RenderPipeline` 中的半分辨率 GTAO；同一份节点图由 WebGPU backend 编译为 WGSL，由 WebGL2 backend 编译为 GLSL。由于渲染器已启用原生 4×MSAA，重复的 TSL SMAA 已删除，避免多一次全屏采样和 WebGPU 管线编译。环境贴图使用 WebGPU 版 PMREM，PBR 材质、灯光、实例化、BatchedMesh 和资源调度保持。
 
-软件 WebGPU adapter 不进入主路径。检测到 SwiftShader、llvmpipe、softpipe、swrast 或 software 标记时，按“没有硬件 WebGPU device”处理，自动使用 WebGL2 渲染和 Worker WASM SIMD。显式要求 `renderBackend=webgpu` 时则直接报错，不伪装成硬件 WebGPU。
+软件 WebGPU adapter 不进入主路径。检测到 SwiftShader、llvmpipe、softpipe、swrast 或 software 标记时，按“没有硬件 WebGPU device”处理，自动使用 WebGL2 渲染和 Worker WASM SIMD。`renderBackend=webgpu` 只表示优先尝试 WebGPU，硬件 adapter 不可用时仍必须回退，不能留下空白页。测试可通过页面初始化前设置 `__SLM_ALLOW_SOFTWARE_WEBGPU__=true` 进行 SwiftShader 语义 smoke，该结果不能作为硬件或性能证据。
 
 ## 验证
 
@@ -28,6 +28,8 @@ WebGPU 主路径由页面先创建一个高性能 adapter 和 device，再把同
 
 截至 2026-09-04，生产构建、前端单元测试、WebGL2 + Worker WASM 浏览器 smoke、桌面/移动尺寸非空画布和缓存重过滤均已通过。本服务器 Chrome 146 的 WebGPU adapter 返回 `google / swiftshader`，即使指定 `/etc/vulkan/icd.d/nvidia_icd.json` 仍不是 NVIDIA adapter，因此硬件 WebGPU 渲染、共享设备延迟和画面 parity 尚不能在本机形成正式结论；这不影响无 WebGPU device 的兼容路径运行。
 
-验证过程中修正了两项启动时序问题。第一，TSL GTAO 的单通道纹理必须读取 `r` 标量后再调制场景 RGB，直接按 RGBA 相乘会让画面偏红。第二，首个模型结果可能早于较大的 `runtimeVisibilityMeta.json` 到达；实例和 GLB 位图现在优先使用 `model_meta.json` 中的固定总数初始化，避免缓存重过滤差量落到零长度位图。连续三次真实场景 smoke 的实例差量、GLB 差量和 NVIDIA WebGL/Vulkan 后端检查均通过。
+验证过程中修正了三类问题。第一，TSL GTAO 的单通道纹理必须读取 `r` 标量，并在调制场景 RGB 前限制到 `[0,1]`；直接按 RGBA 相乘会使画面偏红，不限幅的强度调制会放大亮斑。第二，新 GTAO 不能直接沿用旧 N8AO 的灯光结果；同相机 Playwright 对照后，默认环境光和环境贴图强度调整为 `0.7` 和 `0.35`，GTAO 使用限幅后的指数强度 `2`，以恢复原版对比度，而不是用任意曝光修补。第三，首个模型结果可能早于较大的 `runtimeVisibilityMeta.json` 到达；实例和 GLB 位图现在优先使用 `model_meta.json` 中的固定总数初始化，避免缓存重过滤差量落到零长度位图。真实场景 smoke 的实例差量、GLB 差量和 NVIDIA WebGL/Vulkan 后端检查均通过。
+
+Playwright 还对控制变量做了分层对照：旧 WebGL、新 WebGL2 backend 关闭后处理、新 WebGL2 backend 开启 GTAO，以及 SwiftShader WebGPU 语义 smoke。关闭后处理时新旧颜色基本一致，说明 sRGB/PMREM 不是此次发白的根因。SwiftShader 在加载大量 GLB 时会出现自身 buffer 限制，只用于检查 API 语义；本机没有可用的 NVIDIA WebGPU adapter，因此仍不宣称完成硬件 WebGPU 画面与性能验收。
 
 生产构建中主应用未压缩 JavaScript 约 5.46 MB。WASM 兼容 Worker 改为只引入所需的 Three.js 数学与相机模块，从约 3.54 MB 降至约 414 KB；部署脚本已识别新的 `PVSWorker.*.js` 并通过独立目录打包检查。

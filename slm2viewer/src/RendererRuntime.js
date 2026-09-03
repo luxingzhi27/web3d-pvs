@@ -9,7 +9,7 @@ function normalizeBackend(value) {
   return backend === 'webgpu' || backend === 'webgl' ? backend : 'auto';
 }
 
-async function createWebGPUContext() {
+async function createWebGPUContext(allowSoftwareAdapter = false) {
   if (!navigator.gpu) return null;
   const adapter = await navigator.gpu.requestAdapter({
     powerPreference: 'high-performance',
@@ -23,7 +23,7 @@ async function createWebGPUContext() {
     description: adapter.info?.description || '',
   };
   const softwareAdapter = SOFTWARE_ADAPTER.test(Object.values(adapterInfo).join(' '));
-  if (softwareAdapter) {
+  if (softwareAdapter && !allowSoftwareAdapter) {
     throw new Error(`Hardware WebGPU is unavailable (${adapterInfo.architecture || adapterInfo.vendor}).`);
   }
   const device = await adapter.requestDevice({
@@ -63,15 +63,14 @@ export class RendererRuntime {
 
     if (this.backendPreference !== 'webgl') {
       try {
-        this.webgpuContext = await createWebGPUContext();
+        this.webgpuContext = await createWebGPUContext(Boolean(this.options.allowSoftwareAdapter));
       } catch (error) {
-        if (this.backendPreference === 'webgpu') throw error;
         this.fallbackReason = String(error?.message || error);
       }
     }
 
     if (this.backendPreference === 'webgpu' && !this.webgpuContext) {
-      throw new Error('WebGPU rendering was requested but no high-performance adapter is available.');
+      this.fallbackReason ||= 'WebGPU rendering was requested but no high-performance adapter is available.';
     }
 
     this.renderer = new WebGPURenderer({
