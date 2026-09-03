@@ -15,7 +15,6 @@ let state = {
   ready: false,
   backend: 'uninitialized',
   initTimings: null,
-  maxImmediate: 384,
   maxPrefetch: 2048,
   prefetchThreshold: 0.04,
   downloadPlanMode: 'viewcell-priority',
@@ -90,56 +89,15 @@ function buildCandidateCamera(snapshot) {
   return buildCamera(snapshot, MODEL_INPUT_FOV_Y_DEG, position);
 }
 
-function priority(item) {
-  const value = Number(item?.downloadPriority ?? item?.visibilityScore ?? item?.confidence ?? 0);
-  return Number.isFinite(value) ? value : 0;
-}
-
-function sortByPriority(a, b) {
-  return priority(b) - priority(a) || Number(a.globalGlbId) - Number(b.globalGlbId);
-}
-
-function splitDownloadPlan(visibleCandidates, prefetchCandidates, activeGlbIds) {
-  const immediate = [];
-  const prefetch = [];
-  const seen = new Set();
-  const active = new Set(activeGlbIds || []);
-  const sortedVisible = (visibleCandidates || []).slice().sort(sortByPriority);
-  if (state.downloadPlanMode === 'raw-visible') {
-    return {
-      immediate: sortedVisible,
-      prefetch: [],
-      activeVisibleCount: sortedVisible.filter((item) => active.has(item.globalGlbId)).length,
-      viewcellPrefetchVisibleCount: sortedVisible.filter((item) => !active.has(item.globalGlbId)).length,
-    };
-  }
-  const activeVisible = sortedVisible.filter((item) => active.has(item.globalGlbId));
-  const viewcellVisible = sortedVisible.filter((item) => !active.has(item.globalGlbId));
-  for (const item of activeVisible) {
-    if (seen.has(item.globalGlbId)) continue;
-    seen.add(item.globalGlbId);
-    if (immediate.length < state.maxImmediate) immediate.push(item);
-    else if (prefetch.length < state.maxPrefetch) prefetch.push(item);
-  }
-  for (const item of [...viewcellVisible, ...(prefetchCandidates || []).slice().sort(sortByPriority)]) {
-    if (seen.has(item.globalGlbId) || prefetch.length >= state.maxPrefetch) continue;
-    seen.add(item.globalGlbId);
-    prefetch.push(item);
-  }
-  return {
-    immediate,
-    prefetch,
-    activeVisibleCount: activeVisible.length,
-    viewcellPrefetchVisibleCount: viewcellVisible.length,
-  };
-}
-
 function idsFromCandidates(items) {
   return Uint32Array.from((items || []).map((item) => Number(item.globalGlbId) >>> 0));
 }
 
 function weightsFromCandidates(items) {
-  return Float32Array.from((items || []).map((item) => Math.max(0.000001, priority(item))));
+  return Float32Array.from((items || []).map((item) => {
+    const value = Number(item?.downloadPriority ?? item?.visibilityScore ?? item?.confidence ?? 0);
+    return Math.max(0.000001, Number.isFinite(value) ? value : 0);
+  }));
 }
 
 function modelInfo() {
@@ -176,7 +134,7 @@ function modelInfo() {
 function postResult(payload) {
   const transfers = [];
   for (const key of [
-    'componentModelList', 'modelList', 'weightList', 'immediateGlbIds', 'immediateWeights',
+    'componentModelList', 'modelList', 'weightList',
     'prefetchGlbIds', 'prefetchWeights', 'renderComponentModelList', 'renderModelList',
     'renderComponentAddedIds', 'renderComponentRemovedIds',
     'renderGlbAddedIds', 'renderGlbRemovedIds',
@@ -193,7 +151,6 @@ async function initWorker(message) {
     ...state,
     assetBaseUrl: String(message.assetBaseUrl || '').replace(/\/$/, ''),
     assetVersion: message.assetVersion || null,
-    maxImmediate: Math.max(1, Number(message.maxImmediate || 384)),
     maxPrefetch: Math.max(0, Number(message.maxPrefetch || 2048)),
     prefetchThreshold: message.prefetchThreshold != null
       && Number.isFinite(Number(message.prefetchThreshold))
@@ -260,7 +217,13 @@ async function predictWorker(message) {
   const diagnosticOutputFloats = state.diagnostics
     ? Number(prediction.diagnosticOutputFloats || 0)
     : 0;
-  const plan = splitDownloadPlan(visibleCandidates, prefetchCandidates, renderGlbIds);
+  const renderGlbSet = new Set(Array.from(renderGlbIds, Number));
+  const warmCandidates = visibleCandidates.filter(
+    (item) => !renderGlbSet.has(Number(item.globalGlbId)),
+  );
+  const limitedPrefetchCandidates = state.downloadPlanMode === 'raw-visible'
+    ? []
+    : prefetchCandidates.slice(0, state.maxPrefetch);
   const modelList = idsFromCandidates(visibleCandidates);
   const weightList = weightsFromCandidates(visibleCandidates);
   state.renderComponentBitset = bitsetFromIds(renderComponentIds, Number(state.meta.numInstances));
@@ -276,10 +239,8 @@ async function predictWorker(message) {
     componentModelList: componentIds,
     modelList,
     weightList,
-    immediateGlbIds: idsFromCandidates(plan.immediate),
-    immediateWeights: weightsFromCandidates(plan.immediate),
-    prefetchGlbIds: idsFromCandidates(plan.prefetch),
-    prefetchWeights: weightsFromCandidates(plan.prefetch),
+    prefetchGlbIds: idsFromCandidates(limitedPrefetchCandidates),
+    prefetchWeights: weightsFromCandidates(limitedPrefetchCandidates),
     renderComponentModelList: renderComponentIds,
     renderModelList: Uint32Array.from(renderGlbIds),
     renderRevision: state.renderRevision,
@@ -300,10 +261,9 @@ async function predictWorker(message) {
       candidateSelection,
       rawInstanceCount: componentIds.length,
       rawGlbCount: modelList.length,
-      immediateGlbCount: plan.immediate.length,
-      prefetchGlbCount: plan.prefetch.length,
-      activeVisibleGlbCount: plan.activeVisibleCount,
-      viewcellPrefetchGlbCount: plan.viewcellPrefetchVisibleCount,
+      urgentGlbCount: renderGlbIds.length,
+      warmGlbCount: warmCandidates.length,
+      prefetchGlbCount: limitedPrefetchCandidates.length,
       renderInstanceCount: renderComponentIds.length,
       renderGlbCount: renderGlbIds.length,
       gpuFusedCandidateAndFilter: Boolean(prediction.timings?.gpuFusedCandidateAndFilter),

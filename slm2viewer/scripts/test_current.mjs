@@ -125,6 +125,7 @@ const sortedIdDeltaSource = fs.readFileSync(requireFile('src/sortedIdDelta.js'),
 const denseSlotsSource = fs.readFileSync(requireFile('src/DenseInstancedSlots.js'), 'utf8');
 const bitsetStateSource = fs.readFileSync(requireFile('src/IdBitsetState.js'), 'utf8');
 const staticSceneOptimizerSource = fs.readFileSync(requireFile('src/StaticSceneOptimizer.js'), 'utf8');
+const glbResourceSchedulerSource = fs.readFileSync(requireFile('src/GlbResourceScheduler.js'), 'utf8');
 const renderSurfaceSource = fs.readFileSync(requireFile('src/RenderSurfacePolicy.js'), 'utf8');
 const buildSource = fs.readFileSync(requireFile('scripts/build_parcel.mjs'), 'utf8');
 const wasmBuildSource = fs.readFileSync(requireFile('scripts/build_instance_pvs_wasm.mjs'), 'utf8');
@@ -222,6 +223,17 @@ if (!workerSource.includes('diffIdBitsets(')
     || !workerSource.includes('renderGlbRemovedIds: glbDelta.removed')
     || !sortedIdDeltaSource.includes('export function diffIdBitsets(')) {
   throw new Error('The worker no longer sends only the refilter ID delta.');
+}
+if (!glbResourceSchedulerSource.includes('export function classifyGlbSchedule(')
+    || !glbResourceSchedulerSource.includes('export class GlbResourceScheduler')
+    || !glbResourceSchedulerSource.includes("urgent: 0")
+    || !loaderSource.includes('this.glbResourceScheduler.setPlan({')
+    || !loaderSource.includes("urgent: this._makeGlbScheduleEntries(immediateInfos, 'urgent')")
+    || !loaderSource.includes('this.glbResourceScheduler.takeNext()')
+    || workerSource.includes('immediateGlbIds')
+    || loaderSource.includes('pendingPrefetchList')
+    || loaderSource.includes('currentDownloadWantedHashes')) {
+  throw new Error('The single-state GLB resource scheduler contract was removed.');
 }
 for (const forbidden of [
   'function intersectsComponent(',

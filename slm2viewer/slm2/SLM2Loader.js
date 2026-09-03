@@ -74,6 +74,10 @@ import { RenderVisibilitySystem } from '../src/RenderVisibilitySystem.js';
 import { IdBitsetState } from '../src/IdBitsetState.js';
 import { StaticSceneOptimizer } from '../src/StaticSceneOptimizer.js';
 import {
+  classifyGlbSchedule,
+  GlbResourceScheduler,
+} from '../src/GlbResourceScheduler.js';
+import {
   applyDenseInstancedDelta,
   clearDenseInstancedState,
   initializeDenseInstancedState,
@@ -131,6 +135,13 @@ export class SLM2Loader
     this.schedulingStrategy = 'auto';
 
     this.modelToLoadList = [];
+    this.glbResourceScheduler = new GlbResourceScheduler({
+      onWorkAvailable: () => {
+        if (!this.useNeuralPVS) return;
+        this.processLoadingList();
+        this.requestRender('glb-scheduler-work');
+      },
+    });
     this.pendingSceneInsertions = [];
     this.pendingSceneInsertionCursor = 0;
     this.pendingSceneInsertionHashes = new Set();
@@ -140,6 +151,7 @@ export class SLM2Loader
     this.integratedSceneCount = 0;
     this.activeDirectLoadCount = 0;
     this.directDownloadControllers = new Map();
+    this.directLoadRetries = new Map();
     this.parseLoaderCursor = 0;
     this.baseDirectLoadConcurrency = 5;
     this.fullLoadDirectLoadConcurrency = 16;
@@ -204,7 +216,6 @@ export class SLM2Loader
     this.neuralPVSIdMode = 'global-glb-priority';
     this.lastNeuralPrediction = null;
     this.lastLightweightPVSSchedulerStats = null;
-    this.pendingPrefetchList = [];
     this.renderVisibilitySystem = new RenderVisibilitySystem(this);
     this.neuralPredictionGate = new CameraPredictionGate({
       mode: 'viewcell',
@@ -223,7 +234,6 @@ export class SLM2Loader
     this.actualRenderStatsCache = null;
     this.actualRenderStatsAt = 0;
     this.currentNeuralPredictionEpoch = 0;
-    this.currentDownloadWantedHashes = new Set();
     this.neuralDownloadInfoByGlbId = new Map();
     this.resourcePipelineSerial = 0;
     this.frozenPredictionInspectActive = false;
@@ -338,9 +348,9 @@ export class SLM2Loader
     this._cancelAllDirectDownloads();
     this._clearPendingGlbParseQueue();
     this.inflightModelHashes = new Set();
+    this.directLoadRetries.clear();
     this.modelToLoadList = [];
-    this.pendingPrefetchList = [];
-    this.currentDownloadWantedHashes = new Set();
+    this.glbResourceScheduler.reset();
     this.neuralDownloadInfoByGlbId = new Map();
     this.lastNeuralPrediction = null;
     this.lastRenderRefreshStats = null;
@@ -620,16 +630,11 @@ export class SLM2Loader
     if (!this.frozenPredictionInspectQueued)
     {
       var predictionEpoch = this._setCurrentNeuralWorkingSet(renderInfos, 'global-glb');
-      this._setCurrentDownloadWantedHashes(renderInfos);
+      this.glbResourceScheduler.setPlan({
+        urgent: this._makeGlbScheduleEntries(renderInfos, 'urgent'),
+      }, predictionEpoch);
       this._pruneStalePendingInsertions();
-
-      this.modelToLoadList = [];
-      this.pendingPrefetchList = [];
-      for (var i = renderInfos.length - 1; i >= 0; --i)
-      {
-        renderInfos[i].predictionEpoch = predictionEpoch;
-        this.modelToLoadList.push(renderInfos[i]);
-      }
+      this.processLoadingList();
 
       this.frozenPredictionInspectQueued = true;
       this.frozenPredictionInspectTotal = renderInfos.length;
@@ -1082,21 +1087,6 @@ export class SLM2Loader
     this.maxPendingGlbParseBytes = maxPendingParseMB * 1024 * 1024;
   }
 
-  _setCurrentDownloadWantedHashes(modelInfos)
-  {
-    this.currentDownloadWantedHashes = new Set();
-
-    for (var i = 0; i < (modelInfos || []).length; ++i)
-    {
-      var decoded = this.decodeModelInfo(modelInfos[i]);
-      if (decoded && decoded.hash)
-      {
-        this.currentDownloadWantedHashes.add(decoded.hash);
-      }
-    }
-    this._cancelStaleDirectDownloads();
-  }
-
   _promoteCurrentRenderGlbs(glbIds)
   {
     var promotedIds = this._normalizeIdList(glbIds);
@@ -1128,7 +1118,6 @@ export class SLM2Loader
       }
       promotedInfos.push(modelInfo);
       promotedHashes.add(decoded.hash);
-      this.currentDownloadWantedHashes.add(decoded.hash);
       this.neuralDownloadInfoByGlbId.set(globalGlbId, modelInfo);
     }
 
@@ -1137,13 +1126,9 @@ export class SLM2Loader
       return { promotedGlbCount: 0, parseCount: 0, insertionCount: 0 };
     }
 
-    var isPromotedInfo = (item) =>
-    {
-      var decoded = item ? this.decodeModelInfo(item) : null;
-      return Boolean(decoded && promotedHashes.has(decoded.hash));
-    };
-    this.pendingPrefetchList = this.pendingPrefetchList.filter((item) => !isPromotedInfo(item));
-    this.modelToLoadList = this.modelToLoadList.filter((item) => !isPromotedInfo(item));
+    var promotedCount = this.glbResourceScheduler.promote(
+      this._makeGlbScheduleEntries(promotedInfos, 'urgent')
+    );
 
     var parsePrefix = this.pendingGlbParseQueue.slice(0, this.pendingGlbParseCursor);
     var parseUrgent = [];
@@ -1183,53 +1168,21 @@ export class SLM2Loader
     }
     this.pendingSceneInsertions = insertionPrefix.concat(insertionUrgent, insertionRest);
 
-    var queuedInfos = promotedInfos.filter((item) =>
-    {
-      var decoded = this.decodeModelInfo(item);
-      if (!decoded || !decoded.hash) return false;
-      if (this.modelCacheMgr.objectsPool[decoded.hash]) return false;
-      if (this.inflightModelHashes.has(decoded.hash)) return false;
-      return !this.pendingSceneInsertionHashes.has(decoded.hash);
-    });
-    queuedInfos.sort(function(a, b){ return Number(a.weight || 0) - Number(b.weight || 0); });
-    for (var queueIndex = 0; queueIndex < queuedInfos.length; ++queueIndex)
-    {
-      this.modelToLoadList.push(queuedInfos[queueIndex]);
-    }
-
     this.lastLoadMetrics.promotedGlbCount = Number(this.lastLoadMetrics.promotedGlbCount || 0)
-      + promotedInfos.length;
+      + promotedCount;
     this.lastLoadMetrics.promotedParseCount = Number(this.lastLoadMetrics.promotedParseCount || 0)
       + parseUrgent.length;
     this.lastLoadMetrics.promotedInsertionCount = Number(this.lastLoadMetrics.promotedInsertionCount || 0)
       + insertionUrgent.length;
     this.processGlbParseQueue();
     this.processLoadingList();
+    var scheduleSnapshot = this.glbResourceScheduler.getSnapshot();
     return {
-      promotedGlbCount: promotedInfos.length,
-      queuedCount: queuedInfos.length,
+      promotedGlbCount: promotedCount,
+      queuedCount: scheduleSnapshot.queuedImmediate,
       parseCount: parseUrgent.length,
       insertionCount: insertionUrgent.length,
     };
-  }
-
-  _cancelStaleDirectDownloads()
-  {
-    if (!this.useNeuralPVS || !this.directDownloadControllers)
-    {
-      return 0;
-    }
-    var cancelled = 0;
-    this.directDownloadControllers.forEach((entry, hash) =>
-    {
-      if (this.currentDownloadWantedHashes.has(hash))
-      {
-        return;
-      }
-      entry.controller.abort();
-      cancelled++;
-    });
-    return cancelled;
   }
 
   _cancelAllDirectDownloads()
@@ -1309,12 +1262,12 @@ export class SLM2Loader
   {
     var currentIdMode = this.renderVisibilitySystem ? this.renderVisibilitySystem.currentIdMode : null;
     var gatingEnabled = currentIdMode === 'global-glb' || currentIdMode === 'global-glb-priority';
-    if (!this.useNeuralPVS || !gatingEnabled || this.currentDownloadWantedHashes == null)
+    if (!this.useNeuralPVS || !gatingEnabled)
     {
       return true;
     }
 
-    return this.currentDownloadWantedHashes.has(hash);
+    return this.glbResourceScheduler.isWanted(hash);
   }
 
   _disposeUnintegratedScene(scene)
@@ -1553,6 +1506,7 @@ export class SLM2Loader
       this.pendingSceneInsertionHashes.delete(item.hash);
       if (!this._cacheStaleLoadedGltf(item.gltf, item.modelDesc || null, 'stale-pending-integration'))
       {
+        this.glbResourceScheduler.markDiscarded(item.hash);
         this._recordStaleDownloadDrop(item.modelDesc || { hash: item.hash }, 'stale-pending-integration');
         this._disposeUnintegratedScene(item.gltf && (item.gltf.scene || (item.gltf.scenes && item.gltf.scenes[0])));
       }
@@ -1589,6 +1543,7 @@ export class SLM2Loader
 
       this.pendingGlbParseBytes = Math.max(0, this.pendingGlbParseBytes - Number(item.byteLength || 0));
       this._clearInflightHash(item.modelDesc);
+      this.glbResourceScheduler.markDiscarded(item.modelDesc.hash);
       this._recordStaleDownloadDrop(item.modelDesc, 'stale-glb-parse-queue');
     }
 
@@ -1653,6 +1608,7 @@ export class SLM2Loader
         {
           this.pendingGlbParseBytes = Math.max(0, this.pendingGlbParseBytes - Number(item.byteLength || 0));
           this._clearInflightHash(item.modelDesc);
+          this.glbResourceScheduler.markDiscarded(item.modelDesc.hash);
           this._recordStaleDownloadDrop(item.modelDesc, 'stale-glb-before-parse');
           continue;
         }
@@ -1683,6 +1639,7 @@ export class SLM2Loader
       {
         scope._disposeUnintegratedScene(gltf && (gltf.scene || (gltf.scenes && gltf.scenes[0])));
         scope.processGlbParseQueue();
+        scope.processLoadingList();
         return;
       }
 
@@ -1691,15 +1648,18 @@ export class SLM2Loader
         if (!scope._cacheStaleLoadedGltf(gltf, item.modelDesc, 'stale-glb-after-parse'))
         {
           scope._clearInflightHash(item.modelDesc);
+          scope.glbResourceScheduler.markDiscarded(item.modelDesc.hash);
           scope._recordStaleDownloadDrop(item.modelDesc, 'stale-glb-after-parse');
           scope._disposeUnintegratedScene(gltf && (gltf.scene || (gltf.scenes && gltf.scenes[0])));
         }
         scope.processGlbParseQueue();
+        scope.processLoadingList();
         return;
       }
 
       scope.processLoadedGltf(gltf, item.modelDesc);
       scope.processGlbParseQueue();
+      scope.processLoadingList();
     }, function(err)
     {
       scope.activeGlbParseCount = Math.max(0, scope.activeGlbParseCount - 1);
@@ -1710,11 +1670,17 @@ export class SLM2Loader
       if (item.pipelineSerial !== scope.resourcePipelineSerial)
       {
         scope.processGlbParseQueue();
+        scope.processLoadingList();
         return;
       }
       console.error('[LoadError][glb-parse]', item.modelDesc ? item.modelDesc.hash : null, err);
       scope._clearInflightHash(item.modelDesc);
+      if (item.modelDesc && item.modelDesc.hash)
+      {
+        scope.glbResourceScheduler.markFailed(item.modelDesc.hash, err);
+      }
       scope.processGlbParseQueue();
+      scope.processLoadingList();
     });
   }
 
@@ -2400,8 +2366,10 @@ export class SLM2Loader
 
   _isResourcePipelineIdle()
   {
-    return this.modelToLoadList.length === 0
-      && this.pendingPrefetchList.length === 0
+    var scheduledWork = this.useNeuralPVS
+      ? this.glbResourceScheduler.hasPendingWork()
+      : this.modelToLoadList.length > 0;
+    return !scheduledWork
       && this.activeDirectLoadCount === 0
       && this._getPendingGlbParseCount() === 0
       && this.activeGlbParseCount === 0
@@ -2422,9 +2390,17 @@ export class SLM2Loader
     {
       return 0;
     }
-    if (this.modelToLoadList.length > 0 && this.activeDirectLoadCount === 0)
+    if (!this.useNeuralPVS && this.modelToLoadList.length > 0 && this.activeDirectLoadCount === 0)
     {
       return 0;
+    }
+    if (this.useNeuralPVS && this.activeDirectLoadCount === 0)
+    {
+      var schedulerDelay = this.glbResourceScheduler.nextWakeDelay();
+      if (schedulerDelay != null)
+      {
+        return schedulerDelay;
+      }
     }
     return this.staticSceneOptimizer.nextWakeDelay(performance.now(), this._isResourcePipelineIdle());
   }
@@ -2450,7 +2426,9 @@ export class SLM2Loader
       notes: metrics.notes || null,
       renderPolicy: this.getNeuralRenderPolicy(),
       cache: this.modelCacheMgr.getSnapshot(),
-      loadQueueLength: this.modelToLoadList.length,
+      loadQueueLength: this.useNeuralPVS
+        ? this.glbResourceScheduler.getSnapshot().queuedImmediate
+        : this.modelToLoadList.length,
       pendingSceneInsertions: this._getPendingSceneInsertionCount(),
     };
     this.lastBenchmarkVisibilityIds.serial = this.visibilityMetricsSerial;
@@ -3143,39 +3121,32 @@ export class SLM2Loader
   getRuntimeStats()
   {
     var schedulerStats = this.lastLightweightPVSSchedulerStats || null;
+    var resourceSchedule = this.glbResourceScheduler.getSnapshot();
     return {
       startup: Object.assign({}, this.startupMetrics),
       visibility: this.lastVisibilityMetrics,
       cache: this.modelCacheMgr.getSnapshot(),
       load: {
-        queueLength: this.modelToLoadList.length,
-        queuePreview: this.modelToLoadList.slice(Math.max(0, this.modelToLoadList.length - 8)).map(function(item)
-        {
-          return {
-            id: item.id,
-            weight: Number(item.weight || 0),
-            prefetch: Boolean(item.prefetch),
-            epoch: item.predictionEpoch,
-          };
-        }),
+        queueLength: this.useNeuralPVS ? resourceSchedule.queuedImmediate : this.modelToLoadList.length,
+        queuePreview: this.useNeuralPVS
+          ? resourceSchedule.immediatePreview
+          : this.modelToLoadList.slice(Math.max(0, this.modelToLoadList.length - 8)),
         inflightCount: this.inflightModelHashes ? this.inflightModelHashes.size : 0,
         pendingHashCount: this.pendingSceneInsertionHashes ? this.pendingSceneInsertionHashes.size : 0,
-        wantedHashCount: this.currentDownloadWantedHashes ? this.currentDownloadWantedHashes.size : 0,
+        wantedHashCount: this.useNeuralPVS ? resourceSchedule.wanted : 0,
+        urgentWantedCount: this.useNeuralPVS ? resourceSchedule.urgentWanted : 0,
+        urgentResidentCount: this.useNeuralPVS ? resourceSchedule.urgentResident : 0,
+        urgentMissingCount: this.useNeuralPVS ? resourceSchedule.urgentMissing : 0,
+        urgentFailedCount: this.useNeuralPVS ? resourceSchedule.urgentFailed : 0,
         pendingSceneInsertions: this._getPendingSceneInsertionCount(),
         activeDirectLoadCount: this.activeDirectLoadCount,
         pendingParseCount: this._getPendingGlbParseCount(),
         pendingParseMB: this.pendingGlbParseBytes / 1048576,
         activeParseCount: this.activeGlbParseCount,
         parseConcurrency: this.glbParseConcurrency,
-        prefetchQueueLength: this.pendingPrefetchList.length,
-        prefetchPreview: this.pendingPrefetchList.slice(0, 8).map(function(item)
-        {
-          return {
-            id: item.id,
-            weight: Number(item.weight || 0),
-            epoch: item.predictionEpoch,
-          };
-        }),
+        prefetchQueueLength: this.useNeuralPVS ? resourceSchedule.queuedPrefetch : 0,
+        prefetchPreview: this.useNeuralPVS ? resourceSchedule.prefetchPreview : [],
+        resourceSchedule: resourceSchedule,
         totalIntegrated: this.integratedSceneCount,
         lastIntegratedCount: this.lastLoadMetrics.lastIntegratedCount,
         lastBatchMs: this.lastLoadMetrics.lastBatchMs,
@@ -3563,7 +3534,6 @@ export class SLM2Loader
          }
          this.refreshLoadingTask(allModels, allWeights, fullLoadIdMode);
          this.hasFullLoaded = true;
-         this._failedRetries = {}; // Initialize retry tracker
          console.log("[FullLoadMode] Queued all " + (objCount + 1) + " objects for loading in mode: " + fullLoadIdMode + ".");
       }
 
@@ -3890,10 +3860,29 @@ export class SLM2Loader
   _startDirectModelDownload(modelInfo)
   {
     var scope = this;
+    var decodedInfo = modelInfo != undefined ? scope.decodeModelInfo(modelInfo) : null;
     var modelDesc = modelInfo != undefined ? scope.getModelDesc(modelInfo) : null;
     var modelURL = modelDesc != null ? modelDesc.url : null;
     if (modelURL == null)
     {
+      if (scope.useNeuralPVS && decodedInfo && decodedInfo.hash)
+      {
+        if (scope.modelCacheMgr.objectsPool[decodedInfo.hash])
+        {
+          scope.glbResourceScheduler.markResident(decodedInfo.hash);
+        }
+        else if (scope.pendingSceneInsertionHashes.has(decodedInfo.hash))
+        {
+          scope.glbResourceScheduler.markMounting(decodedInfo.hash);
+        }
+        else if (!scope.inflightModelHashes.has(decodedInfo.hash))
+        {
+          scope.glbResourceScheduler.markFailed(
+            decodedInfo.hash,
+            new Error('GLB descriptor is unavailable for a scheduled resource.')
+          );
+        }
+      }
       return false;
     }
     var capturedModel = modelInfo;
@@ -3935,6 +3924,10 @@ export class SLM2Loader
         return;
       }
       var byteLength = Number(buffer && buffer.byteLength || 0);
+      if (capturedModelDesc && capturedModelDesc.hash)
+      {
+        scope.directLoadRetries.delete(capturedModelDesc.hash);
+      }
       var sampleDesc = byteLength > 0
         ? Object.assign({}, capturedModelDesc || {}, { sizeKB: byteLength / 1024 })
         : capturedModelDesc;
@@ -3944,8 +3937,13 @@ export class SLM2Loader
           !scope._shouldRetainStaleDownload(capturedModelDesc, 'http-raw'))
       {
         scope._clearInflightHash(capturedModelDesc);
+        scope.glbResourceScheduler.markDiscarded(capturedModelDesc.hash);
         scope._recordStaleDownloadDrop(capturedModelDesc, 'stale-http-response');
         return;
+      }
+      if (capturedModelDesc && capturedModelDesc.hash)
+      {
+        scope.glbResourceScheduler.markParsing(capturedModelDesc.hash);
       }
       scope.pendingGlbParseQueue.push({
         buffer: buffer,
@@ -3965,20 +3963,28 @@ export class SLM2Loader
       {
         scope._recordHttpDirectLoadSample(modelURL, downloadStartedAt, performance.now(), capturedModelDesc, false);
         scope._clearInflightHash(capturedModelDesc);
+        if (scope.useNeuralPVS && capturedModelDesc && capturedModelDesc.hash)
+        {
+          scope.glbResourceScheduler.markFailed(capturedModelDesc.hash, err);
+        }
+        else if (capturedModelDesc && capturedModelDesc.hash)
+        {
+          var retries = Number(scope.directLoadRetries.get(capturedModelDesc.hash) || 0);
+          if (retries < 4)
+          {
+            scope.directLoadRetries.set(capturedModelDesc.hash, retries + 1);
+            scope.modelToLoadList.push(capturedModel);
+            scope.requestRender('glb-download-retry');
+          }
+        }
+      }
+      if (aborted && capturedModelDesc && capturedModelDesc.hash)
+      {
+        scope.glbResourceScheduler.markDiscarded(capturedModelDesc.hash);
       }
       if (!aborted && capturedPipelineSerial === scope.resourcePipelineSerial)
       {
         console.error('[LoadError]', modelURL, err);
-        if (capturedModel && capturedModelDesc && capturedModelDesc.hash
-            && scope._isHashWantedForDownload(capturedModelDesc.hash)) {
-          if (!scope._failedRetries) scope._failedRetries = {};
-          var modelKey = capturedModelDesc.hash;
-          var retries = scope._failedRetries[modelKey] || 0;
-          if (retries < 3) {
-            scope._failedRetries[modelKey] = retries + 1;
-            scope.modelToLoadList.push(capturedModel);
-          }
-        }
       }
     }).finally(function()
     {
@@ -4000,21 +4006,15 @@ export class SLM2Loader
   processLoadingList()
   {
     var scope = this;
-
+    var prefetchOnlyDirectLoads = this.useNeuralPVS &&
+      !this.glbResourceScheduler.hasForegroundWork();
     var targetDirectLoadConcurrency = this.fullLoadMode
       ? this.fullLoadDirectLoadConcurrency
-      : (this.useNeuralPVS ? this.neuralDirectLoadConcurrency : this.baseDirectLoadConcurrency);
-    var prefetchOnlyDirectLoads = false;
-    if (this.useNeuralPVS && this.modelToLoadList.length === 0 && this.pendingPrefetchList.length > 0)
-    {
-      targetDirectLoadConcurrency = this.neuralPrefetchDirectLoadConcurrency;
-      prefetchOnlyDirectLoads = true;
-      while (this.pendingPrefetchList.length > 0 &&
-        this.modelToLoadList.length < this.neuralPrefetchDirectLoadConcurrency)
-      {
-        this.modelToLoadList.push(this.pendingPrefetchList.shift());
-      }
-    }
+      : (this.useNeuralPVS
+        ? (prefetchOnlyDirectLoads
+          ? this.neuralPrefetchDirectLoadConcurrency
+          : this.neuralDirectLoadConcurrency)
+        : this.baseDirectLoadConcurrency);
     this.maxPendingSceneInsertions = this.useNeuralPVS
       ? this.neuralMaxPendingSceneInsertions
       : 24;
@@ -4042,33 +4042,31 @@ export class SLM2Loader
 
     this.processGlbParseQueue();
 
-    if (this.modelToLoadList.length == 0
-        || this._getPendingSceneInsertionCount() >= this.maxPendingSceneInsertions
+    if (this._getPendingSceneInsertionCount() >= this.maxPendingSceneInsertions
         || this.pendingGlbParseBytes >= this.maxPendingGlbParseBytes)
     {
       return;
     }
 
-    while (this.modelToLoadList.length > 0)
+    if (this.useNeuralPVS)
     {
-      if (this.activeDirectLoadCount >= targetDirectLoadConcurrency)
+      while (this.activeDirectLoadCount < targetDirectLoadConcurrency)
       {
-        break;
+        var scheduledEntry = this.glbResourceScheduler.takeNext();
+        if (!scheduledEntry)
+        {
+          break;
+        }
+        this._startDirectModelDownload(scheduledEntry.modelInfo);
       }
-
-      var nextModel = this.modelToLoadList.pop();
-      var modelDesc = nextModel != undefined ? scope.getModelDesc(nextModel) : null;
-      var modelURL = modelDesc != null ? modelDesc.url : null;
-
-      if (modelURL != null && this._startDirectModelDownload(nextModel))
-      {
-        continue;
-      }
+      return;
     }
 
-    if (this.modelToLoadList.length == 0 && this.activeDirectLoadCount === 0)
+    while (this.modelToLoadList.length > 0 &&
+      this.activeDirectLoadCount < targetDirectLoadConcurrency)
     {
-      if (scope.DebugMode) console.timeEnd('loading');
+      var nextModel = this.modelToLoadList.pop();
+      this._startDirectModelDownload(nextModel);
     }
   }
 
@@ -4086,6 +4084,7 @@ export class SLM2Loader
         return;
       }
       this.inflightModelHashes.delete(hash);
+      this.glbResourceScheduler.markDiscarded(hash);
       this._recordStaleDownloadDrop(modelDesc || { hash: hash }, 'stale-after-load');
       this._disposeUnintegratedScene(gltf && (gltf.scene || (gltf.scenes && gltf.scenes[0])));
       return;
@@ -4100,6 +4099,7 @@ export class SLM2Loader
     });
     if (hash != null)
     {
+      this.glbResourceScheduler.markMounting(hash);
       this.pendingSceneInsertionHashes.add(hash);
       this.inflightModelHashes.delete(hash);
     }
@@ -4139,6 +4139,7 @@ export class SLM2Loader
       {
         return null;
       }
+      this.glbResourceScheduler.markDiscarded(modelDesc.hash);
       this._recordStaleDownloadDrop(modelDesc, 'stale-before-integration');
       this._disposeUnintegratedScene(scene);
       return null;
@@ -4182,6 +4183,13 @@ export class SLM2Loader
       // actual scene state without waiting for another visibility result.
       this.renderVisibilitySystem.markResidentChanged(extras.hashCode);
       this.lastRenderRefreshStats = this.renderVisibilitySystem.lastStats;
+    }
+    if (loadedHash && (!extras || !extras.hashCode))
+    {
+      this.glbResourceScheduler.markFailed(
+        loadedHash,
+        new Error('Loaded GLB has no cacheable hash metadata.')
+      );
     }
     return scene;
   }
@@ -4240,6 +4248,8 @@ export class SLM2Loader
     {
       this.requestRender('glb-mounted');
     }
+    this.processGlbParseQueue();
+    this.processLoadingList();
   }
 
   _makeGlobalGlbModelInfos(ids, weights, idMode, extra = {})
@@ -4263,6 +4273,29 @@ export class SLM2Loader
     return out;
   }
 
+  _makeGlbScheduleEntries(modelInfos, tier)
+  {
+    var entries = [];
+    for (var index = 0; index < (modelInfos || []).length; ++index)
+    {
+      var modelInfo = Object.assign({}, modelInfos[index], {
+        prefetch: tier !== 'urgent',
+      });
+      var decoded = this.decodeModelInfo(modelInfo);
+      if (!decoded || !decoded.hash)
+      {
+        continue;
+      }
+      entries.push({
+        hash: decoded.hash,
+        glbId: Number(modelInfo.id),
+        score: Number(modelInfo.weight || 0),
+        modelInfo: modelInfo,
+      });
+    }
+    return entries;
+  }
+
   _applyLightweightNeuralPlan(predictionPayload, idMode)
   {
     var appliedIdMode = idMode === 'global-glb-priority' ? 'global-glb' : (idMode || 'global-glb');
@@ -4271,37 +4304,12 @@ export class SLM2Loader
       predictionPayload && predictionPayload.weightList,
       appliedIdMode
     );
-    var predictedImmediateInfos = this._makeGlobalGlbModelInfos(
-      predictionPayload && predictionPayload.immediateGlbIds,
-      predictionPayload && predictionPayload.immediateWeights,
-      appliedIdMode
-    );
-    var initialInfos = this._takeNeuralInitialLoadInfos(appliedIdMode);
-    var immediateIds = new Set();
-    var immediateInfos = [];
-    for (var initialIndex = 0; initialIndex < initialInfos.length; ++initialIndex)
-    {
-      immediateInfos.push(initialInfos[initialIndex]);
-      immediateIds.add(initialInfos[initialIndex].id);
-    }
-    for (var predictedIndex = 0; predictedIndex < predictedImmediateInfos.length; ++predictedIndex)
-    {
-      var predictedInfo = predictedImmediateInfos[predictedIndex];
-      if (!immediateIds.has(predictedInfo.id))
-      {
-        immediateInfos.push(predictedInfo);
-        immediateIds.add(predictedInfo.id);
-      }
-    }
     var predictedPrefetchInfos = this._makeGlobalGlbModelInfos(
       predictionPayload && predictionPayload.prefetchGlbIds,
       predictionPayload && predictionPayload.prefetchWeights,
       appliedIdMode,
-      { prefetch: true, deferredVisible: true }
+      { prefetch: true, speculative: true }
     );
-    var prefetchInfos = predictedPrefetchInfos.filter(function(item){
-      return !immediateIds.has(item.id);
-    });
     var renderComponentIds = this._normalizeIdList(
       predictionPayload && predictionPayload.renderComponentModelList
         ? Array.from(predictionPayload.renderComponentModelList)
@@ -4312,38 +4320,40 @@ export class SLM2Loader
         ? Array.from(predictionPayload.renderModelList)
         : []
     );
-    var renderInfos = this._makeGlobalGlbModelInfos(
+    var rawVisibleMode = this.getNeuralDownloadPlanMode() === 'raw-visible';
+    var scheduleGroups = classifyGlbSchedule(
+      predictedDownloadInfos,
+      predictedPrefetchInfos,
       renderGlbIds,
-      null,
-      appliedIdMode
+      rawVisibleMode ? 'raw-visible' : 'viewcell-priority'
     );
+    var renderInfos = classifyGlbSchedule(
+      predictedDownloadInfos,
+      [],
+      renderGlbIds,
+      'viewcell-priority'
+    ).urgent;
+    var immediateInfos = scheduleGroups.urgent;
+    var warmInfos = scheduleGroups.warm;
+    var speculativeInfos = scheduleGroups.speculative;
+    var prefetchInfos = warmInfos.concat(speculativeInfos);
 
     var predictionEpoch = this._setCurrentNeuralWorkingSet(renderInfos, appliedIdMode);
     this.neuralDownloadInfoByGlbId = new Map();
-    for (var downloadInfoIndex = 0; downloadInfoIndex < predictedDownloadInfos.length; ++downloadInfoIndex)
+    var allDownloadInfos = immediateInfos.concat(prefetchInfos);
+    for (var downloadInfoIndex = 0; downloadInfoIndex < allDownloadInfos.length; ++downloadInfoIndex)
     {
-      var downloadInfo = predictedDownloadInfos[downloadInfoIndex];
+      var downloadInfo = allDownloadInfos[downloadInfoIndex];
       downloadInfo.predictionEpoch = predictionEpoch;
       this.neuralDownloadInfoByGlbId.set(Number(downloadInfo.id), downloadInfo);
     }
-    for (var immediateTagIdx = 0; immediateTagIdx < immediateInfos.length; ++immediateTagIdx)
-    {
-      immediateInfos[immediateTagIdx].predictionEpoch = predictionEpoch;
-    }
-    for (var prefetchTagIdx = 0; prefetchTagIdx < prefetchInfos.length; ++prefetchTagIdx)
-    {
-      prefetchInfos[prefetchTagIdx].predictionEpoch = predictionEpoch;
-    }
-
-    this._setCurrentDownloadWantedHashes(immediateInfos.concat(prefetchInfos));
+    var resourceSchedule = this.glbResourceScheduler.setPlan({
+      urgent: this._makeGlbScheduleEntries(immediateInfos, 'urgent'),
+      warm: this._makeGlbScheduleEntries(warmInfos, 'warm'),
+      speculative: this._makeGlbScheduleEntries(speculativeInfos, 'speculative'),
+    }, predictionEpoch);
     this._pruneStalePendingInsertions();
-
-    this.modelToLoadList = [];
-    for (var immediateIndex = immediateInfos.length - 1; immediateIndex >= 0; --immediateIndex)
-    {
-      this.modelToLoadList.push(immediateInfos[immediateIndex]);
-    }
-    this.pendingPrefetchList = prefetchInfos.slice();
+    this.processLoadingList();
 
     if (this._isResidentRenderPolicy())
     {
@@ -4374,8 +4384,9 @@ export class SLM2Loader
       rawGlbCount: predictionPayload && predictionPayload.modelList ? predictionPayload.modelList.length : 0,
       immediate: immediateInfos.length,
       prefetch: prefetchInfos.length,
-      activeVisibleGlbCount: predictionPayload && predictionPayload.timings ? predictionPayload.timings.activeVisibleGlbCount : null,
-      viewcellPrefetchGlbCount: predictionPayload && predictionPayload.timings ? predictionPayload.timings.viewcellPrefetchGlbCount : null,
+      activeVisibleGlbCount: renderInfos.length,
+      viewcellPrefetchGlbCount: warmInfos.length,
+      resourceSchedule: resourceSchedule,
       downloadPlanMode: predictionPayload && predictionPayload.timings ? predictionPayload.timings.downloadPlanMode : this.getNeuralDownloadPlanMode(),
       renderInstanceCount: renderComponentIds.length,
       renderGlbCount: renderInfos.length,
@@ -4460,6 +4471,14 @@ export class SLM2Loader
       }, { prefetch: false, deferredVisible: false });
     });
     var removedRenderInfos = this._makeGlobalGlbModelInfos(glbRemovedIds, null, appliedIdMode);
+    var demotedRenderInfos = glbRemovedIds.map((globalGlbId) =>
+    {
+      return Object.assign({}, this.neuralDownloadInfoByGlbId.get(globalGlbId) || {
+        id: globalGlbId,
+        weight: 1,
+        idMode: appliedIdMode,
+      }, { prefetch: true, deferredVisible: true });
+    });
     if (this._isResidentRenderPolicy())
     {
       this.lastRenderRefreshStats = this._showAllResidentObjects();
@@ -4474,6 +4493,10 @@ export class SLM2Loader
       );
     }
     var promotionStats = this._promoteCurrentRenderGlbs(glbAddedIds);
+    var demotedGlbCount = this.glbResourceScheduler.reclassify(
+      this._makeGlbScheduleEntries(demotedRenderInfos, 'warm'),
+      'warm'
+    );
 
     var previousScheduler = this.lastLightweightPVSSchedulerStats || {};
     this.lastLightweightPVSSchedulerStats = Object.assign({}, previousScheduler, {
@@ -4489,6 +4512,7 @@ export class SLM2Loader
       promotedGlbCount: promotionStats.promotedGlbCount,
       promotedParseCount: promotionStats.parseCount,
       promotedInsertionCount: promotionStats.insertionCount,
+      demotedGlbCount: demotedGlbCount,
     });
     return {
       renderComponentCount: renderComponentCount,
@@ -4558,19 +4582,21 @@ export class SLM2Loader
         weight: appliedVisibility.weightList[tIdx],
         idMode: idMode || this.defaultVisibilityIdMode
       };
-      this.modelToLoadList.push(modelInfo);
+      if (!neuralGlobalMode)
+      {
+        this.modelToLoadList.push(modelInfo);
+      }
       neuralWorkingInfos.push(modelInfo);
     }
 
     if (neuralGlobalMode)
     {
       var neuralPredictionEpoch = this._setCurrentNeuralWorkingSet(neuralWorkingInfos, idMode || this.defaultVisibilityIdMode);
-      for (var infoIdx = 0; infoIdx < this.modelToLoadList.length; ++infoIdx)
-      {
-        this.modelToLoadList[infoIdx].predictionEpoch = neuralPredictionEpoch;
-      }
-      this._setCurrentDownloadWantedHashes(this.modelToLoadList);
+      this.glbResourceScheduler.setPlan({
+        urgent: this._makeGlbScheduleEntries(neuralWorkingInfos, 'urgent'),
+      }, neuralPredictionEpoch);
       this._pruneStalePendingInsertions();
+      this.processLoadingList();
       var renderStatsV1 = this._isResidentRenderPolicy()
         ? this._showAllResidentObjects()
         : this.renderVisibilitySystem.lastStats;
@@ -4588,7 +4614,6 @@ export class SLM2Loader
     }
     else
     {
-      this.currentDownloadWantedHashes = new Set();
       this.renderVisibilitySystem.clear();
       this.lastRenderRefreshStats = this.modelCacheMgr.refreshVisible(
         this.modelToLoadList,
@@ -4752,7 +4777,6 @@ export class SLM2Loader
       assetVersion: LOCAL_RUNTIME_ASSET_VERSION,
       backendPreference: params['neuralRuntimeBackend'] || 'auto',
       cpuPerfMode: this.cpuPerfMode,
-      maxImmediate: this.cpuPerfMode === 'mobile' ? 160 : 384,
       maxPrefetch: this.cpuPerfMode === 'mobile' ? 768 : 2048,
       prefetchThreshold: params['neuralPrefetchThreshold'] != null
         ? Number(params['neuralPrefetchThreshold'])
@@ -5051,10 +5075,9 @@ export class SLM2Loader
       return 0;
     }
     var infos = this._takeNeuralInitialLoadInfos('global-glb');
-    for (var index = infos.length - 1; index >= 0; --index)
-    {
-      this.modelToLoadList.push(infos[index]);
-    }
+    this.glbResourceScheduler.enqueueStartup(
+      this._makeGlbScheduleEntries(infos, 'startup')
+    );
     if (infos.length > 0)
     {
       // Start GLB requests first. The following runtime-meta callback starts
@@ -5292,15 +5315,15 @@ export class SLM2Loader
     this.lastNeuralRefilter = null;
     this.resourcePipelineSerial++;
     this.modelToLoadList = [];
-    this.pendingPrefetchList = [];
+    this.glbResourceScheduler.reset();
     this._cancelAllDirectDownloads();
     this._clearPendingGlbParseQueue();
     this.pendingSceneInsertions = [];
     this.pendingSceneInsertionCursor = 0;
     this.pendingSceneInsertionHashes = new Set();
-    this.currentDownloadWantedHashes = new Set();
     this.neuralDownloadInfoByGlbId = new Map();
     this.inflightModelHashes = new Set();
+    this.directLoadRetries.clear();
     if (this.renderVisibilitySystem && typeof this.renderVisibilitySystem.clear === 'function')
     {
       this.renderVisibilitySystem.clear();

@@ -693,7 +693,7 @@ export class Viewer
       `candidate source=${candidateSelection.source || '-'} count=${candidateSelection.candidateCount ?? '-'} cells=${candidateSelection.queryCellCount ?? '-'} indexed=${candidateSelection.indexedInstanceCount ?? '-'} overflow=${candidateSelection.overflowInstanceCount ?? '-'}`,
       `modelBackGlb=${visibility.rawGlbCount || 0} loadNow=${notes.loadNowGlbCount != null ? notes.loadNowGlbCount : '-'} currentFrustumGlb=${notes.renderCandidateGlbCount != null ? notes.renderCandidateGlbCount : '-'} residentVisible=${notes.renderResidentCount != null ? notes.renderResidentCount : (visibility.visibleGlbCount != null ? visibility.visibleGlbCount : '-')} modelBackInst=${visibility.rawInstanceCount || 0}`,
       `download queue=${load.queueLength || 0} wanted=${load.wantedHashCount || 0} inflight=${load.inflightCount || 0} pendingParse=${load.pendingHashCount || 0} pendingIntegrate=${load.pendingSceneInsertions || 0}`,
-      `activeQueues immediate=${load.queueLength || 0} prefetch=${load.prefetchQueueLength || 0} http=${load.activeDirectLoadCount || 0} parse=${load.pendingParseCount || 0} mount=${load.pendingSceneInsertions || 0} integrated=${load.totalIntegrated || 0}`,
+      `activeQueues immediate=${load.queueLength || 0} urgentMissing=${load.urgentMissingCount || 0} urgentFailed=${load.urgentFailedCount || 0} prefetch=${load.prefetchQueueLength || 0} http=${load.activeDirectLoadCount || 0} parse=${load.pendingParseCount || 0} mount=${load.pendingSceneInsertions || 0} integrated=${load.totalIntegrated || 0}`,
       `cache total=${cache.totalNums || 0} visible=${cache.visibleNums || 0} invisible=${cache.invisibleNums || 0} inSceneHidden=${cache.inSceneNums || 0} mem=${fmt((cache.memoryUsedKB || 0) / 1024, 0)}MB`,
       `render working=${render.workingSetSize || 0} activeEval=${render.activeEvaluationSize || 0} evaluated=${render.evaluatedCount || 0} visible=${render.visibleCount || 0} skipped=${render.skippedByGate}`,
       `actual visibleMesh=${actualRender.visibleMeshCount || 0}/${actualRender.meshCount || 0} instancedMesh=${actualRender.visibleInstancedMeshCount || 0}/${actualRender.instancedMeshCount || 0} drawnInst=${actualRender.drawnInstanceCount || 0} tri≈${fmt(actualRender.visibleTriangleEstimate, 0)}`,
@@ -890,7 +890,9 @@ export class Viewer
       predictTimings.rawGlbCount != null ? predictTimings.rawGlbCount : visibility.rawGlbCount
     );
     this.runtimeDebugState.pvsImmediateGlbs = this._formatRuntimeDebugInt(
-      predictTimings.immediateGlbCount != null ? predictTimings.immediateGlbCount : notes.loadNowGlbCount
+      load.urgentWantedCount != null
+        ? load.urgentWantedCount
+        : (predictTimings.urgentGlbCount != null ? predictTimings.urgentGlbCount : notes.loadNowGlbCount)
     );
     this.runtimeDebugState.pvsPrefetchGlbs = this._formatRuntimeDebugInt(
       predictTimings.prefetchGlbCount != null ? predictTimings.prefetchGlbCount : load.prefetchQueueLength

@@ -127,11 +127,19 @@ export class CacheMgr
       {
         item.meshObject.removeFromParent();
       }
+      if (sceneMgr.glbResourceScheduler)
+      {
+        sceneMgr.glbResourceScheduler.markEvicted(hashCode || item.staticBatchHash);
+      }
       return;
     }
     if (item && item.meshObject)
     {
       this.releaseObject(item.meshObject);
+    }
+    if (sceneMgr && sceneMgr.glbResourceScheduler)
+    {
+      sceneMgr.glbResourceScheduler.markEvicted(hashCode);
     }
   }
 
@@ -269,6 +277,11 @@ export class CacheMgr
     }
 
     this.objectsPool[objDesc.hashCode] = newObject;
+    var sceneMgr = this.options ? this.options.sceneMgr : null;
+    if (sceneMgr && sceneMgr.glbResourceScheduler)
+    {
+      sceneMgr.glbResourceScheduler.markResident(objDesc.hashCode);
+    }
     this.applyRenderState(newObject);
     this.notifyResidentChanged(objDesc.hashCode);
   }

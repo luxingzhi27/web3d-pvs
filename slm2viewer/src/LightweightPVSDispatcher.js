@@ -40,7 +40,6 @@ export class LightweightPVSDispatcher {
     this.assetVersion = options.assetVersion || null;
     this.debugLogging = Boolean(options.debugLogging);
     this.cpuPerfMode = options.cpuPerfMode === 'mobile' ? 'mobile' : 'balanced';
-    this.maxImmediate = Number(options.maxImmediate || (this.cpuPerfMode === 'mobile' ? 160 : 384));
     this.maxPrefetch = Number(options.maxPrefetch || (this.cpuPerfMode === 'mobile' ? 768 : 2048));
     this.prefetchThreshold = options.prefetchThreshold !== undefined
       ? Number(options.prefetchThreshold)
@@ -109,7 +108,6 @@ export class LightweightPVSDispatcher {
         assetBaseUrl: resolveUrl(this.assetBaseUrl),
         assetVersion: this.assetVersion,
         debugLogging: this.debugLogging,
-        maxImmediate: this.maxImmediate,
         maxPrefetch: this.maxPrefetch,
         prefetchThreshold: this.prefetchThreshold,
         downloadPlanMode: this.downloadPlanMode,

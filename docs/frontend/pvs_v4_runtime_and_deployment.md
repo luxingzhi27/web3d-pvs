@@ -1,6 +1,6 @@
 # PVS V4 前端运行与部署
 
-更新时间：2026-08-28
+更新时间：2026-09-04
 
 本文是当前前端神经剔除的唯一运行说明。浏览器只接受 V4 运行包；旧方向代理、dynamic-pool、相机哈希、空间分页和二阶段后端升级接口已经从当前代码与部署包移除。
 
@@ -109,6 +109,31 @@ WASM 推理始终位于 `LightweightPVSWorker`，不会阻塞 Three.js 渲染主
 
 未达到阈值但分数不低于预取阈值 `0.04` 的实例可以参与 GLB 预取。当前 checkpoint 没有独立下载头，GLB 优先级由所属实例的最高可见性概率聚合得到；这属于当前部署实现，不应描述成模型已经学习了独立资源效用。
 
+## GLB 资源状态调度
+
+2026-09-04 将 Worker 和 Loader 中分散的“立即数组/预取数组”替换为单一资源状态机。Worker 只输出模型事实：后退 `66°` 区域内通过模型阈值的 GLB、真实 `60°` 视锥内最终 GLB，以及高于预取阈值但未通过显示阈值的 GLB。`GlbResourceScheduler` 统一把它们划分为三个运行层级：真实视锥内全部为 `urgent`，后退视锥内其余模型可见项为 `warm`，低分候选为 `speculative`。首屏 100 个固定构件在模型尚未就绪时使用独立 `startup` 层；首个模型结果产生后立即服从新的三层计划。
+
+每个 GLB 只保留一个状态：`queued`、`fetching`、`parsing`、`mounting`、`resident` 或 `failed`。层级只决定优先顺序，HTTP 并发数和解析/挂载预算才控制并发，不再用 160/384 个“立即队列上限”把真实视锥构件降级为预取。缓存重过滤进入真实视锥时执行 `warm -> urgent`，离开时执行 `urgent -> warm`；因此任意时刻 `urgentWanted` 必须等于当前真实视锥 GLB 数量。
+
+资源管线由事件推进：新计划、下载完成、解析完成、挂载完成和退避重试到期都会直接唤醒调度器。它不依赖连续 RAF，也不存在“立即数组已经排空、预取数组仍有内容但没有下一帧继续处理”的停转状态。下载失败最多退避重试四次；当前真实视锥内仍失败的数量通过 `urgentFailed` 单独暴露，不能被算成预取或已完成。调试面板中的 `urgentMissing` 表示当前视锥目标减去已驻留数量，可能处于下载、解析、挂载或重试阶段；仅看 `immediate=0` 不再用于判断画面资源是否齐全。
+
+主要修改文件为 `src/GlbResourceScheduler.js`、`src/LightweightPVSWorker.js`、`slm2/SLM2Loader.js` 和 `slm2/CacheMgr.js`。验证命令为：
+
+```bash
+cd slm2viewer
+node scripts/test_glb_resource_scheduler.mjs
+npm test
+npm run build
+npm run smoke:wasm-fallback
+npm run smoke:refilter
+```
+
+当前 HKUST 重过滤 smoke 在移动相机后得到 `1604` 个真实视锥 GLB，调度器同步报告 `urgentWanted=1604`；新增的 2 个 GLB 全部完成紧急晋升，紧急失败为 0。该 smoke 同时验证实例/GLB 差量、WASM 回退、下载阶段状态和画布非空，但其中 WebGPU adapter 为 SwiftShader，只能作为功能结果，不是硬件 WebGPU 性能数据。
+
+同日的 30 秒持续下载诊断从 `1438` 个紧急排队项和 `520` 个预取项开始：约 15 秒后紧急队列归零并继续处理预取，约 20 秒后 `2124` 个计划资源全部完成集成；随后紧急、预取、HTTP、解析和挂载队列均保持为零，未出现停转。这个结果验证的是调度活性和资源状态收敛，不代表固定公网带宽性能。
+
+Apple M2 上出现 WASM SIMD 比 WebGPU 更快并不表示 WASM 内核异常。当前模型每次查询规模较小，WebGPU 路径包含两次 compute dispatch、队列同步及约 `189940 bytes` 的完整预测回读；WASM 在 Worker 的常驻线性内存中通过一次 SIMD 调用完成。在 Apple Silicon 上，GPU 提交和同步固定成本可能超过计算收益。默认 `auto` 仍按 `WebGPU -> WASM SIMD` 的统一兼容协议运行；对已实测 WASM 更快的设备可显式使用 `?neuralRuntimeBackend=wasm`。跨后端性能结论必须比较相同相机、相同候选数、关闭调试概率回读后的 `inferenceMs` 和端到端 `totalMs`。
+
 HKUST 普通模式的固定回读布局为 `4 + 2×18831 + 3×3273` 个 32 位字，即 `189940 bytes`。其中只预留最终实例列表和 GLB 队列容量，不包含逐候选概率。开启 `neuralDebugLogs=true` 时才额外回读候选编号、概率和中间特征，用于数值 parity；调试模式的传输量和延迟不能代表生产运行。
 
 缓存重过滤使用实例和 GLB 位图，固定回读布局为 `2 + ceil(18831/32) + ceil(3273/32)` 个 32 位字，即 `694 words / 2776 bytes`。它不回读概率、不运行查询网络，也不重新生成下载优先级。Worker 直接对新旧位图求差，只把新增/移除的实例和 GLB 编号传给主线程，不再传送完整集合后重建 `Set`。
@@ -178,8 +203,9 @@ HKUST 页面功能 smoke 中，冻结前的最终集合为 `3769` 个实例和 `
 | `wasm/instance_pvs_v4/src/lib.rs` | SIMD 候选筛选、ray/频谱/生存场、V4 MLP、重过滤和 GLB 聚合 |
 | `src/InstancePVSRuntime.js` | `auto/webgpu/wasm` 后端选择及运行期故障切换 |
 | `src/InstancePVSBackendPolicy.js` | 后端参数规范化与 WebGPU 故障识别 |
-| `src/LightweightPVSWorker.js` | 构造 66°/60° 相机、运行统一后端、排序下载队列并传递最终结果 |
+| `src/LightweightPVSWorker.js` | 构造 66°/60° 相机、运行统一后端并传递模型可见性事实 |
 | `src/LightweightPVSDispatcher.js` | 相机快照、完整预测/缓存重过滤消息和请求串行号 |
+| `src/GlbResourceScheduler.js` | GLB 紧急/预热/推测分层、单一资源状态机、优先队列和失败退避 |
 | `src/CameraPredictionGate.js` | 判断是否越过 view-cell 需要完整预测，以及 cell 内是否需要重过滤 |
 | `src/neuralCullingBackendMode.js` | 只为有 V4 资产的场景启用神经模式 |
 | `src/RenderVisibilitySystem.js` | 按神经后端最终 GLB 集合增量挂载和移除驻留资源 |

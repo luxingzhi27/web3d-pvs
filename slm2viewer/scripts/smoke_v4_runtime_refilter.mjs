@@ -165,6 +165,7 @@ try {
     const gl = viewer.renderer.getContext();
     const cssWidth = Math.max(1, Math.round(viewer.renderer.domElement.clientWidth));
     const cssHeight = Math.max(1, Math.round(viewer.renderer.domElement.clientHeight));
+    const runtimeAfterRefilter = loader.getRuntimeStats();
     return {
       adapter: {
         vendor: String(adapterInfo.vendor || ''),
@@ -212,7 +213,8 @@ try {
       filterSerialAdvanced: dispatcher.lastFilterTimings.serial > previousFilterSerial,
       filterInferenceMs: Number(dispatcher.lastFilterTimings.inferenceMs || 0),
       duplicateCullRemoved: loader.renderVisibilitySystem.lastStats?.duplicateCullRemoved === true,
-      staticBatching: loader.getRuntimeStats().neural?.staticBatching || {},
+      staticBatching: runtimeAfterRefilter.neural?.staticBatching || {},
+      resourceSchedule: runtimeAfterRefilter.load?.resourceSchedule || {},
     };
   });
 
@@ -356,6 +358,10 @@ try {
     && result.transferredIdCount === result.reportedTransferredIdCount
     && result.transferredIdCount < result.fullInstanceCount + result.fullGlbCount
     && result.promotedGlbCount === result.expectedPromotedGlbCount
+    && result.resourceSchedule.urgentWanted === result.movedGlbCount
+    && result.resourceSchedule.urgentMissing
+      === result.resourceSchedule.urgentWanted - result.resourceSchedule.urgentResident
+    && result.resourceSchedule.urgentFailed === 0
     && result.renderComponentBitsetCount === result.movedInstanceCount
     && result.renderGlbBitsetCount === result.movedGlbCount
     && result.noPersistentRenderIdArray
