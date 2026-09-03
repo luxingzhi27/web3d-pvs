@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import {
+  BufferAttribute,
+  BufferGeometry,
   BoxGeometry,
   Group,
   InstancedMesh,
@@ -16,6 +18,7 @@ const material = new MeshStandardMaterial({ color: 0x8090a0 });
 let renderRequests = 0;
 const loader = {
   rootScene,
+  renderer: { backend: { isWebGPUBackend: true } },
   globalGlbHashToId: {},
   globalGlbToComponentIds: [],
   isMaterialConfigReady: true,
@@ -89,6 +92,47 @@ for (let index = 0; index < 4; index += 1) {
 }
 assert.equal(loader.staticSceneOptimizer.getStats().batchCount, 0);
 assert.equal(rootScene.children.some((child) => child.isBatchedMesh), false);
+
+const quantizedMaterial = new MeshStandardMaterial({ color: 0x607080 });
+for (let index = 0; index < 4; index += 1) {
+  const hash = `1-${index}`;
+  const glbId = 20 + index;
+  loader.globalGlbHashToId[hash] = glbId;
+  loader.globalGlbToComponentIds[glbId] = [glbId];
+  const geometry = new BufferGeometry();
+  geometry.setAttribute('position', new BufferAttribute(new Uint16Array([
+    0, 0, 0,
+    1, 0, 0,
+    0, 1, 0,
+  ]), 3));
+  geometry.setAttribute('normal', new BufferAttribute(new Int8Array([
+    0, 0, 127,
+    0, 0, 127,
+    0, 0, 127,
+  ]), 3, true));
+  geometry.setIndex([0, 1, 2]);
+  const scene = new Group();
+  scene.add(new Mesh(geometry, quantizedMaterial));
+  rootScene.add(scene);
+  loader.modelCacheMgr.objectsPool[hash] = {
+    meshObject: scene,
+    isVisible: true,
+    isInScene: true,
+  };
+  loader.staticSceneOptimizer.optimizeResident(hash, { scene, animations: [] });
+}
+
+assert.equal(loader.staticSceneOptimizer.processPending(performance.now() + 20), true);
+const quantizedBatch = loader.staticSceneOptimizer.bindingsByHash.get('1-0').batch;
+for (const attribute of Object.values(quantizedBatch.geometry.attributes)) {
+  assert.equal((attribute.itemSize * attribute.array.BYTES_PER_ELEMENT) % 4, 0);
+}
+assert.equal(quantizedBatch.geometry.getAttribute('position').array.constructor, Float32Array);
+assert.equal(quantizedBatch.geometry.getAttribute('normal').array.constructor, Float32Array);
+assert.equal(quantizedBatch.geometry.getAttribute('normal').getZ(0), 1);
+for (let index = 0; index < 4; index += 1) {
+  loader.staticSceneOptimizer.releaseHash(`1-${index}`);
+}
 
 const instancedHash = '0-9';
 loader.globalGlbHashToId[instancedHash] = 9;

@@ -164,7 +164,7 @@ GLB 编号仍只负责资源下载、驻留和根节点挂载；最终显示始�
 
 ## 固定原生分辨率
 
-渲染器始终直接使用完整 `window.devicePixelRatio`，不再设置分辨率档位、像素比例上限或自动升降逻辑。例如 `1600×900 @ DPR 2` 的绘制缓冲固定为 `3200×1800`。窗口尺寸、浏览器缩放或跨显示器变化时重新读取设备 DPR；连续 resize 事件使用 `150 ms` 尾部合并，相同尺寸和 DPR 不重建渲染目标。GTAO、原生 MSAA 和颜色链保持启用。
+渲染器始终直接使用完整 `window.devicePixelRatio`，不再设置分辨率档位、像素比例上限或自动升降逻辑。例如 `1600×900 @ DPR 2` 的绘制缓冲固定为 `3200×1800`。窗口尺寸、浏览器缩放或跨显示器变化时重新读取设备 DPR；连续 resize 事件使用 `150 ms` 尾部合并，相同尺寸和 DPR 不重建渲染目标。后处理路径使用非 MSAA 深度的 GTAO 与 FXAA；直接渲染路径使用原生 MSAA。
 
 场景不创建 Three.js Fog，配置文件和控制面板也不再提供雾化、远景雾区或动态分辨率选项。原有相关控制器、GPU timer 和测试入口已经删除，不保留禁用状态的兼容代码。
 
@@ -306,6 +306,6 @@ conda run -n slm_pvs python slm2viewer/scripts/verify_v4_frontend_parity.py \
 
 ## 渲染位图边界
 
-当前场景统一使用 Three.js `WebGPURenderer`。硬件 WebGPU 可用时，渲染和神经查询共享页面中的一个 `GPUDevice`；不可用时，同一渲染器切换到 WebGL2 backend，查询切换到 Worker WASM SIMD。TSL 背景、GTAO、环境 PMREM 和标准 PBR 材质在两个 backend 之间共享定义；抗锯齿由渲染器原生 4×MSAA 完成，不再叠加 SMAA。
+当前场景统一使用 Three.js `WebGPURenderer`。硬件 WebGPU 可用时，渲染和神经查询共享页面中的一个 `GPUDevice`；不可用时，同一渲染器切换到 WebGL2 backend，查询切换到 Worker WASM SIMD。TSL 背景、GTAO、FXAA、环境 PMREM 和标准 PBR 材质在两个 backend 之间共享定义。
 
 当前仍把压缩后的最终实例编号回读给 GLB 调度器和稠密实例槽位，因为资源下载、挂载和缓存状态位于 CPU。后续只有在渲染材质直接消费 GPU 可见性位图、且资源调度另有紧凑反馈协议后，才能进一步减少这次回读；不能把 GPU 位图回读后再上传纹理描述成零拷贝。

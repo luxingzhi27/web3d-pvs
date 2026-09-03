@@ -1,5 +1,6 @@
 import { RenderPipeline } from 'three/webgpu';
 import { pass, pow, uniform } from 'three/tsl';
+import { fxaa } from 'three/examples/jsm/tsl/display/FXAANode.js';
 import { ao } from 'three/examples/jsm/tsl/display/GTAONode.js';
 
 const DEFAULTS = Object.freeze({
@@ -22,6 +23,7 @@ export class RendererEffects {
     this.pipeline = null;
     this.scenePass = null;
     this.aoNode = null;
+    this.fxaaNode = null;
     this.aoStrength = uniform(this.options.aoStrength);
     this._rebuild();
   }
@@ -30,16 +32,20 @@ export class RendererEffects {
     this.pipeline?.dispose();
     this.scenePass?.dispose();
     this.aoNode?.dispose();
+    this.fxaaNode?.dispose?.();
     this.pipeline = null;
     this.scenePass = null;
     this.aoNode = null;
+    this.fxaaNode = null;
   }
 
   _rebuild() {
     this._disposeNodes();
     if (!this.options.enabled) return;
 
-    this.scenePass = pass(this.scene, this.camera);
+    // GTAO samples depth as a regular texture. A multisampled depth attachment
+    // cannot be sampled with the generated textureDimensions(texture, level) call.
+    this.scenePass = pass(this.scene, this.camera, { samples: 0 });
     let outputNode = this.scenePass.getTextureNode();
     if (this.options.aoEnabled) {
       this.aoNode = ao(this.scenePass.getTextureNode('depth'), null, this.camera);
@@ -47,6 +53,8 @@ export class RendererEffects {
       const aoFactor = pow(this.aoNode.getTextureNode().r.clamp(0, 1), this.aoStrength);
       outputNode = outputNode.mul(aoFactor);
     }
+    this.fxaaNode = fxaa(outputNode);
+    outputNode = this.fxaaNode;
 
     this.pipeline = new RenderPipeline(this.renderer);
     this.pipeline.outputNode = outputNode;

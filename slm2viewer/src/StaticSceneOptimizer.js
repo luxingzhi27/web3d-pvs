@@ -1,5 +1,6 @@
 import {
   BatchedMesh,
+  BufferAttribute,
   Color,
   Matrix4,
   Object3D,
@@ -51,6 +52,32 @@ function collectSingleStaticMesh(scene, gltf) {
   });
   if (meshes.length !== 1 || meshes[0].isSkinnedMesh) return null;
   return meshes[0];
+}
+
+function packedAttributeStride(attribute) {
+  return Number(attribute?.itemSize || 0) * Number(attribute?.array?.BYTES_PER_ELEMENT || 0);
+}
+
+function makeBatchCompatibleGeometry(source) {
+  const incompatible = Object.entries(source.attributes || {}).filter(([, attribute]) => (
+    packedAttributeStride(attribute) % 4 !== 0
+  ));
+  if (incompatible.length === 0) return source;
+
+  const geometry = source.clone();
+  for (const [name, attribute] of incompatible) {
+    const values = new Float32Array(attribute.count * attribute.itemSize);
+    for (let index = 0; index < attribute.count; index += 1) {
+      const offset = index * attribute.itemSize;
+      for (let component = 0; component < attribute.itemSize; component += 1) {
+        values[offset + component] = attribute.getComponent(index, component);
+      }
+    }
+    const replacement = new BufferAttribute(values, attribute.itemSize, false);
+    replacement.name = attribute.name;
+    geometry.setAttribute(name, replacement);
+  }
+  return geometry;
 }
 
 export class StaticSceneOptimizer {
@@ -233,10 +260,20 @@ export class StaticSceneOptimizer {
       rootInverse.copy(this.loader.rootScene.matrixWorld).invert();
     }
     const committed = [];
+    const requiresWebGPUAlignment = this.loader?.renderer?.backend?.isWebGPUBackend === true;
     try {
       for (const record of records) {
         const item = this.loader.modelCacheMgr.objectsPool[record.hash];
-        const geometryId = batch.addGeometry(record.mesh.geometry);
+        const sourceGeometry = record.mesh.geometry;
+        const batchGeometry = requiresWebGPUAlignment
+          ? makeBatchCompatibleGeometry(sourceGeometry)
+          : sourceGeometry;
+        let geometryId;
+        try {
+          geometryId = batch.addGeometry(batchGeometry);
+        } finally {
+          if (batchGeometry !== sourceGeometry) batchGeometry.dispose();
+        }
         const instanceId = batch.addInstance(geometryId);
         const relativeMatrix = rootInverse.clone().multiply(record.mesh.matrixWorld);
         batch.setMatrixAt(instanceId, relativeMatrix);
