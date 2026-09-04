@@ -81,9 +81,14 @@ try {
   const page = await browser.newPage({ viewport: { width: 694, height: 552 } });
   const pageErrors = [];
   const consoleErrors = [];
+  const rendererContractWarnings = [];
   page.on('pageerror', (error) => pageErrors.push(String(error)));
   page.on('console', (message) => {
     if (message.type() === 'error') consoleErrors.push(message.text());
+    if (message.type() === 'warning'
+        && /AttributeNode: Vertex attribute "uv" not found|arrayStride|Invalid ShaderModule|Invalid RenderPipeline/i.test(message.text())) {
+      rendererContractWarnings.push(message.text());
+    }
   });
   const port = server.address().port;
   const runtimeQuery = forceWasm ? '&neuralRuntimeBackend=wasm' : '';
@@ -404,8 +409,8 @@ try {
     && result.canvasChecks.desktopNative.aoEnabled
     && result.canvasChecks.mobileNative.aoEnabled
     && result.canvasChecks.mobileLayout.documentScrollWidth <= result.canvasChecks.mobileLayout.innerWidth;
-  if (pageErrors.length || consoleErrors.length || !passed) {
-    throw new Error(`Runtime refilter smoke failed: ${JSON.stringify({ pageErrors, consoleErrors, result })}`);
+  if (pageErrors.length || consoleErrors.length || rendererContractWarnings.length || !passed) {
+    throw new Error(`Runtime refilter smoke failed: ${JSON.stringify({ pageErrors, consoleErrors, rendererContractWarnings, result })}`);
   }
   console.log(JSON.stringify(result, null, 2));
 } finally {

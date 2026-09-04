@@ -1,5 +1,5 @@
 import { RenderPipeline } from 'three/webgpu';
-import { pass, pow, uniform } from 'three/tsl';
+import { pass, pow, renderOutput, uniform } from 'three/tsl';
 import { fxaa } from 'three/examples/jsm/tsl/display/FXAANode.js';
 import { ao } from 'three/examples/jsm/tsl/display/GTAONode.js';
 
@@ -53,11 +53,14 @@ export class RendererEffects {
       const aoFactor = pow(this.aoNode.getTextureNode().r.clamp(0, 1), this.aoStrength);
       outputNode = outputNode.mul(aoFactor);
     }
-    this.fxaaNode = fxaa(outputNode);
+    // FXAA expects display-encoded input. Apply the renderer's output transform
+    // first, then prevent RenderPipeline from applying it a second time.
+    this.fxaaNode = fxaa(renderOutput(outputNode));
     outputNode = this.fxaaNode;
 
     this.pipeline = new RenderPipeline(this.renderer);
     this.pipeline.outputNode = outputNode;
+    this.pipeline.outputColorTransform = false;
     this.pipeline.needsUpdate = true;
   }
 

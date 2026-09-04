@@ -118,7 +118,8 @@ requireText(effects, [
   'pass(this.scene, this.camera, { samples: 0 })',
   'ao(this.scenePass.getTextureNode',
   'pow(this.aoNode.getTextureNode().r.clamp(0, 1), this.aoStrength)',
-  'fxaa(outputNode)',
+  'fxaa(renderOutput(outputNode))',
+  'this.pipeline.outputColorTransform = false',
 ], 'TSL post-processing');
 requireText(background, ['viewportUV.y', 'smoothstep(', 'mix('], 'TSL background');
 requireText(dispatcher, [

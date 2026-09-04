@@ -94,11 +94,11 @@ export class Viewer
       textureEncoding: 'sRGB',
       directIntensity: 2.3,
       directColor: 0xffffff,
-      ambientIntensity: 0.7,
+      ambientIntensity: 1.15,
       ambientColor: 0xffffff,
       bgColor1: '#ffffff',
       bgColor2: '#353588',
-      envMapIntensity: 0.35,
+      envMapIntensity: 0.55,
       lightMapIntensity: 1.0,
       vertexColor: false,
 
