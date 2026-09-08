@@ -24,6 +24,7 @@
 | [`current/neuralstreamweb3d_dataset_protocol.md`](current/neuralstreamweb3d_dataset_protocol.md) | view-cell、subpose、Color-ID、候选集合、GT 和 Pose CSR 数据语义 |
 | [`experiments/ifcbench_sparse_triangle_relation_pipeline_2026-09-02.md`](experiments/ifcbench_sparse_triangle_relation_pipeline_2026-09-02.md) | IFCBench 三角形深度层的分片稀疏化、关系归并和验证记录 |
 | [`evaluation/unified_pvs_metrics_evaluation.md`](evaluation/unified_pvs_metrics_evaluation.md) | pose-macro/aggregate、weighted recall、分类、剔除、资源和运行指标口径 |
+| [`evaluation/pvs_frontend_inference_latency_protocol_2026-09-09.md`](evaluation/pvs_frontend_inference_latency_protocol_2026-09-09.md) | 桌面和真实移动设备的 PVS 前端推理耗时协议 |
 | [`evaluation/test_split_benchmark_protocol.md`](evaluation/test_split_benchmark_protocol.md) | train、calibration、validation、test 的职责及冻结 test 规则 |
 | [`evaluation/viewcell_image_per_evaluation.md`](evaluation/viewcell_image_per_evaluation.md) | 真实 `60°` 相机下的 Color-ID 图像漏检与额外像素评价 |
 
