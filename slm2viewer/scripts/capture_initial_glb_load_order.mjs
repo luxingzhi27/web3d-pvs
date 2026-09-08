@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { chromium } from 'playwright';
+import { headlessWebGpuArgs, resolveVulkanEnvironment } from './chrome_gpu_flags.mjs';
 
 function argument(name, fallback = null) {
   const prefix = `--${name}=`;
@@ -37,17 +38,8 @@ try {
   browser = await chromium.launch({
     headless: true,
     executablePath: chromePath,
-    args: [
-      '--no-sandbox',
-      '--disable-dev-shm-usage',
-      '--ignore-gpu-blocklist',
-      '--enable-gpu',
-      '--enable-webgpu',
-      '--enable-unsafe-webgpu',
-      '--enable-features=Vulkan',
-      '--use-vulkan',
-      '--use-angle=vulkan',
-    ],
+    args: headlessWebGpuArgs(),
+    env: resolveVulkanEnvironment(),
   });
   const page = await browser.newPage({
     viewport: { width: viewportWidth, height: viewportHeight },

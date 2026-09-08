@@ -4,6 +4,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { headlessWebGpuArgs, resolveVulkanEnvironment } from './chrome_gpu_flags.mjs';
 
 if (!process.argv.includes('--allow-software-gpu')) {
   throw new Error('This functional smoke requires the explicit --allow-software-gpu flag.');
@@ -61,17 +62,8 @@ try {
   browser = await chromium.launch({
     headless: true,
     executablePath: chromePath,
-    args: [
-      '--no-sandbox',
-      '--disable-dev-shm-usage',
-      '--ignore-gpu-blocklist',
-      '--enable-gpu',
-      '--enable-webgpu',
-      '--enable-unsafe-webgpu',
-      '--enable-features=Vulkan',
-      '--use-vulkan',
-      '--use-angle=vulkan',
-    ],
+    args: headlessWebGpuArgs(),
+    env: resolveVulkanEnvironment(),
   });
   const page = await browser.newPage({ viewport: { width: 694, height: 552 } });
   const pageErrors = [];

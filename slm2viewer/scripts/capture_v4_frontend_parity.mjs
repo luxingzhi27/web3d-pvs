@@ -5,6 +5,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { headlessWebGpuArgs, resolveVulkanEnvironment } from './chrome_gpu_flags.mjs';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const VIEWER_ROOT = path.resolve(SCRIPT_DIR, '..');
@@ -272,28 +273,11 @@ async function main() {
   fs.mkdirSync(path.dirname(options.out), { recursive: true });
   const chrome = findChrome(options.chromeExe);
   const { chromium } = await loadPlaywright();
-  const launchArgs = [
-    '--headless=new',
-    '--ozone-platform=headless',
-    '--ozone-override-screen-size=1280,720',
-    '--no-sandbox',
-    '--no-first-run',
-    '--disable-dev-shm-usage',
-    '--disable-background-networking',
-    '--disable-extensions',
-    '--enable-gpu',
-    '--enable-unsafe-webgpu',
-    '--enable-webgpu',
-    '--enable-webgl',
-    '--enable-features=Vulkan',
-    '--use-vulkan',
-    '--use-angle=vulkan',
-    '--enable-accelerated-2d-canvas',
-    '--enable-zero-copy',
-    '--ignore-gpu-blocklist',
-    '--disable-gpu-sandbox',
-    ...(options.requireHardwareGpu ? ['--disable-software-rasterizer'] : []),
-  ];
+  const launchArgs = headlessWebGpuArgs({
+    screenSize: '1280,720',
+    quietBrowser: true,
+  });
+  const launchEnvironment = resolveVulkanEnvironment();
   const hostGpuBefore = hostGpuEvidence();
   const pmon = startPmonSampler();
   const server = await startStaticServer(options.viewerDir, options.port);
@@ -303,7 +287,12 @@ async function main() {
   let chromeGpuInfo = null;
   let failure = null;
   try {
-    browser = await chromium.launch({ executablePath: chrome, headless: true, args: launchArgs });
+    browser = await chromium.launch({
+      executablePath: chrome,
+      headless: true,
+      args: launchArgs,
+      env: launchEnvironment,
+    });
     try {
       const cdp = await browser.newBrowserCDPSession();
       chromeGpuInfo = await cdp.send('SystemInfo.getInfo');
@@ -368,7 +357,7 @@ async function main() {
         executablePath: chrome,
         headless: true,
         args: launchArgs,
-        vulkanIcd: process.env.VK_ICD_FILENAMES || null,
+        vulkanIcd: launchEnvironment.VK_ICD_FILENAMES || null,
         chromeGpuInfo,
       },
       error: failure,

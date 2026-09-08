@@ -94,44 +94,104 @@ WebGL 的硬件门只证明 WebGL/ANGLE 的光栅化路径；它不能推断 Web
 
 同理，`nvidia-smi` 看到 Chrome 进程只能作为辅助证据，不能替代页面实际回报的 API 后端字段。正式报告必须注明被测 API（WebGL 或 WebGPU）、对应的 renderer/adapter、硬件门结果和同时间段的 NVIDIA 进程证据。
 
-### 无头 Playwright 的 WebGPU Vulkan 路径
+### 无头 Playwright 的 WebGPU Vulkan 硬件路径
 
-无头模式本身不是软件回退的充分条件。当前 V4 页面采集入口在 Playwright 启动 Chrome 时使用：
+无头模式可以使用 NVIDIA WebGPU。Chrome 官方的 Linux 无头示例明确要求
+[`--disable-vulkan-surface`](https://developer.chrome.com/blog/supercharge-web-ai-testing)，同时启用
+`--use-angle=vulkan`、`--enable-features=Vulkan` 和 `--enable-unsafe-webgpu`。仓库把当前
+参数集中在 `slm2viewer/scripts/chrome_gpu_flags.mjs`，页面采集、重过滤 smoke 和首屏队列采集都从
+这里读取，禁止各脚本继续复制一套不同的参数。
+
+当前硬件参数为：
 
 ```text
---headless=new --enable-gpu --enable-unsafe-webgpu --enable-webgpu
---enable-features=Vulkan --use-vulkan --use-angle=vulkan
---enable-webgl --enable-accelerated-2d-canvas --enable-zero-copy
---ignore-gpu-blocklist --disable-gpu-sandbox
---disable-software-rasterizer
+--headless=new
+--no-sandbox
+--no-first-run
+--disable-dev-shm-usage
+--enable-gpu
+--enable-unsafe-webgpu
+--enable-webgpu
+--enable-webgl
+--enable-features=Vulkan
+--use-vulkan
+--use-angle=vulkan
+--disable-vulkan-surface
+--enable-accelerated-2d-canvas
+--enable-zero-copy
+--ignore-gpu-blocklist
+--disable-gpu-sandbox
 ```
 
-Color-ID 采样不需要 WebGPU 专用的 `--enable-unsafe-webgpu` 和 `--enable-webgpu`，但仍使用
-`--enable-gpu --enable-webgl --use-angle=vulkan`，正式模式使用
-`--disable-software-rasterizer`。两条路径都使用 Playwright 启动系统 Chrome，不在 CPU 中模拟光栅化。
+WebGL Color-ID 和 WebGPU 使用不同的软件回退控制。正式 WebGL 光栅化继续使用
+`--disable-software-rasterizer`。Linux 无头 WebGPU 不使用该参数：在当前 Chrome
+`146.0.7680.177` 上，它会使 `requestAdapter()` 返回空值，即使 NVIDIA Vulkan 本身可用。
+WebGPU 正式任务通过 adapter 硬件门拒绝 SwiftShader，不靠这个 WebGL 开关判断。移除该参数并不降低
+验收标准；adapter 为空、vendor 为 `google`、architecture 为 `swiftshader` 或出现任何软件
+标记时，脚本仍以失败退出。
 
-如果 Vulkan loader 选择错误的 ICD，可以在不修改系统配置的前提下用用户级环境变量做诊断，例如：
+当前服务器安装了 NVIDIA、Intel、Lavapipe、Radeon 和 Virtio 等多个 Vulkan ICD。共享参数模块在
+`/etc/vulkan/icd.d/nvidia_icd.json` 存在、且外层没有指定 ICD 时，为 Chrome 子进程设置：
 
 ```bash
-VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json \
+VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json
+```
+
+这个变量只固定 Vulkan loader 的驱动选择，不能证明实际 adapter。正式结论仍要求页面
+`navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })` 返回 NVIDIA 信息，并要求
+WebGL renderer 和同一窗口的 `nvidia-smi`/`pmon` 证据同时通过。
+
+### 快速检查
+
+先运行不加载场景模型的硬件探针：
+
+```bash
+cd slm2viewer
+npm run probe:webgpu-hardware
+```
+
+探针使用一个临时 localhost 页面，在 Chrome 启动后重试 adapter 请求，避免 GPU 进程刚创建时短暂返回
+空 adapter。成功结果必须同时包含：
+
+```text
+hardware = true
+adapter.vendor = nvidia
+adapter.architecture = ampere
+webgl.renderer = ANGLE (NVIDIA, Vulkan ... NVIDIA RTX A6000 ...)
+nvidiaSmi = true
+```
+
+探针通过后再运行完整 V4 页面：
+
+```bash
 node slm2viewer/scripts/capture_v4_frontend_parity.mjs \
   --viewer-dir slm2viewer/public \
-  --out <v4-parity-capture.json> \
+  --out /tmp/pvs_v4_headless_nvidia_hardware.json \
   --require-hardware-gpu
 ```
 
-该变量只是选择 Vulkan ICD 的尝试，不能直接证明硬件成功。最终仍必须看到
-`navigator.gpu.requestAdapter({powerPreference: "high-performance"})` 返回的适配器包含 NVIDIA
-信息，并通过 `gpuGate.hardware=true`；若返回 `google/swiftshader`，即使 WebGL renderer 是 NVIDIA，
-也只能登记为 WebGPU 软件数值 parity。2026-08-25 使用当前 V4 前端和 Playwright 无头 Chrome 追加
-`--ozone-platform=headless`、`--ozone-override-screen-size=1280,720`，并指定
-`VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json` 复核；当前 Chrome `146.0.7680.177`
-仍返回 `google/swiftshader`。Chrome CDP 的 `SystemInfo.getInfo` 同时显示 WebGL 为 NVIDIA
-Vulkan/ANGLE，但 WebGPU 的硬件门仍失败。因此无头 Playwright 可以继续用于正式 WebGL 采样、图像评价
-和软件 WebGPU 数值 parity；在本机未出现 NVIDIA WebGPU adapter 之前，不能报告 WebGPU 硬件延迟，
-也不能用 `nvidia-smi` 中出现 Chrome 进程来替代 adapter 证据。软件数值验证使用
-`--allow-software-gpu` 生成 capture，再由 `verify_v4_frontend_parity.py` 与同一 checkpoint 的
-PyTorch 输出逐候选比较；这只验证实现一致性，不产生硬件延迟结论。
+2026-09-09 的实测环境是 Chrome `146.0.7680.177`、NVIDIA 驱动
+`535.183.01` 和四张 RTX A6000。补入 `--disable-vulkan-surface` 后，正式页面返回
+`backend=worker-webgpu-v4`、adapter `nvidia/ampere`、WebGL NVIDIA Vulkan，
+`gpuGate.hardware=true`、`formalReady=true`，执行窗口记录到 44 个 `pmon` 样本。
+同一机器缺少 `--disable-vulkan-surface` 时，WebGPU 会选择 SwiftShader；再加入
+`--disable-software-rasterizer` 时，adapter 为空。
+
+### 故障顺序
+
+1. 先运行 `npm run probe:webgpu-hardware`，不要等待完整场景加载后才判断 adapter。
+2. adapter 为 SwiftShader 时，检查启动参数是否缺少 `--disable-vulkan-surface`。
+3. adapter 为空时，检查 WebGPU 路径是否误加 `--disable-software-rasterizer`，再检查
+   `--enable-unsafe-webgpu` 和 `--enable-features=Vulkan`。
+4. 多 ICD 机器确认 Chrome 子进程的 `VK_ICD_FILENAMES` 指向 NVIDIA ICD，并检查
+   `/dev/nvidia*` 权限和 `nvidia-smi`。
+5. adapter 已是 NVIDIA 但正式门仍失败时，再检查 WebGL renderer、Chrome CDP
+   `SystemInfo.getInfo`、`nvidia-smi pmon` 和 capture 中的 `formalReady`。
+
+Dawn/Chromium 把
+[SwiftShader](https://chromium.googlesource.com/chromium/src/+/main/docs/gpu/swiftshader.md)
+定义为 CPU Vulkan/OpenGL 实现。页面能创建 WebGPU device 或运行 WGSL 不能证明使用硬件，必须保留上述
+adapter 和进程证据。
 
 ## 结果验收
 
@@ -153,9 +213,11 @@ PyTorch 输出逐候选比较；这只验证实现一致性，不产生硬件延
 1. 正式命令显式写出 `--require-hardware-gpu`，不要依赖脚本默认值；禁止使用
    `--allow-software-gpu` 或 `--no-require-hardware-gpu`。
 2. 正式输出目录使用独立的硬件标识，例如 `_hw` 或 `_hardware`，不能复用软件调试目录，也不能用软件结果补齐硬件目录。
-3. 启动参数必须保留 `--enable-gpu`、`--enable-webgl`、`--use-angle=vulkan` 和
-   `--disable-software-rasterizer`。不得加入 `--disable-gpu`、`--use-angle=swiftshader*`、
-   `--use-gl=swiftshader` 或其他软件后端参数。
+3. WebGL Color-ID 启动参数必须保留 `--enable-gpu`、`--enable-webgl`、
+   `--use-angle=vulkan` 和 `--disable-software-rasterizer`。WebGPU 启动参数必须保留
+   `--enable-unsafe-webgpu`、`--enable-features=Vulkan`、`--use-vulkan` 和
+   `--disable-vulkan-surface`，且不能加入 `--disable-software-rasterizer`。两条路径都不得加入
+   `--disable-gpu`、`--use-angle=swiftshader*`、`--use-gl=swiftshader` 或其他软件后端参数。
 4. 提交结果前逐项检查：页面后端非空且无软件标记、`gpuGate.required=true`、
    `gpuGate.hardware=true`、Chrome 日志存在、同一执行窗口的 `nvidia-smi` 和
    `nvidia-smi pmon` 证据存在。任一项缺失都只能标记为“浏览器渲染完成”，不能进入正式汇总。

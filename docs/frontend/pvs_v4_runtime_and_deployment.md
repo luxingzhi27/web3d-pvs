@@ -128,7 +128,7 @@ npm run smoke:wasm-fallback
 npm run smoke:refilter
 ```
 
-当前 HKUST 重过滤 smoke 在移动相机后得到 `1604` 个真实视锥 GLB，调度器同步报告 `urgentWanted=1604`；新增的 2 个 GLB 全部完成紧急晋升，紧急失败为 0。该 smoke 同时验证实例/GLB 差量、WASM 回退、下载阶段状态和画布非空，但其中 WebGPU adapter 为 SwiftShader，只能作为功能结果，不是硬件 WebGPU 性能数据。
+当前 HKUST 重过滤 smoke 在移动相机后得到 `1604` 个真实视锥 GLB，调度器同步报告 `urgentWanted=1604`；新增的 2 个 GLB 全部完成紧急晋升，紧急失败为 0。修正无头 Vulkan 参数后，该 smoke 的 WebGPU adapter 为 `nvidia/ampere`，WebGL renderer 为 RTX A6000 Vulkan。该命令仍带 `--allow-software-gpu` 且不保存完整正式证据，所以只用于功能回归；正式硬件结果使用 `capture_v4_frontend_parity.mjs --require-hardware-gpu`。
 
 同日的 30 秒持续下载诊断从 `1438` 个紧急排队项和 `520` 个预取项开始：约 15 秒后紧急队列归零并继续处理预取，约 20 秒后 `2124` 个计划资源全部完成集成；随后紧急、预取、HTTP、解析和挂载队列均保持为零，未出现停转。这个结果验证的是调度活性和资源状态收敛，不代表固定公网带宽性能。
 
@@ -216,7 +216,7 @@ node scripts/capture_v4_frontend_parity.mjs \
   --require-hardware-gpu
 ```
 
-验证结果：`npm test`、生产构建和 `npm run package:deploy` 均通过；Worker WASM smoke 保持 `9398` 个候选、`3728` 个模型可见实例和 `3633` 个真实视锥实例。缓存重过滤 smoke 的新旧集合一致，只向主线程传输 `5` 个变化 ID，固定回读为 `2776 bytes`。该无头 WebGPU 功能检查的 adapter 为 SwiftShader，只能证明数值和调度链路可运行；硬件 WebGPU 门在本次执行窗口未通过，因此本次重构不新增 WebGPU 硬件延迟结论。
+验证结果：`npm test`、生产构建和 `npm run package:deploy` 均通过；Worker WASM smoke 保持 `9398` 个候选、`3728` 个模型可见实例和 `3633` 个真实视锥实例。缓存重过滤 smoke 的新旧集合一致，只向主线程传输 `5` 个变化 ID，固定回读为 `2776 bytes`。2026-09-09 修正无头 Vulkan 参数后，完整页面的 WebGPU adapter 为 `nvidia/ampere`，WebGL renderer 为 RTX A6000 Vulkan，`gpuGate.hardware=true` 且 `formalReady=true`。
 
 | 模块 | 责任 |
 |---|---|
@@ -253,6 +253,8 @@ node scripts/capture_v4_frontend_parity.mjs \
 | `slm2/SLM2GlbPipeline.js` | GLB 计划消费、下载/解析/挂载推进和调度结果应用 |
 | `slm2/SLM2RuntimeAssets.js` | 共享 Draco/KTX2 loader、运行资产版本和 URL 处理 |
 | `scripts/test_current.mjs` | 当前单模型静态契约检查 |
+| `scripts/chrome_gpu_flags.mjs` | Linux 无头 WebGPU 的统一 Vulkan 参数和 NVIDIA ICD 环境 |
+| `scripts/probe_headless_webgpu_hardware.mjs` | 不加载场景的快速 WebGPU adapter 硬件门 |
 | `scripts/capture_v4_frontend_parity.mjs` | 从真实 V4 页面采集一次候选、概率和 WebGPU 后端证据 |
 | `scripts/verify_v4_frontend_parity.py` | PyTorch 与 WebGPU 同位姿数值比较 |
 
@@ -299,7 +301,7 @@ WGSL 必须与训练端依次对齐九维中心视角、`9×2` 视点区域轴�
 
 WASM SIMD 与 WebGPU 同位姿数值对照覆盖 `5959` 个候选。候选集合、阈值后可见实例集合和真实视锥实例集合完全一致；概率平均绝对误差为 `0.00000340`，最大绝对误差为 `0.0002782`。该 capture 的 WebGPU adapter 为 SwiftShader，只用于数值一致性验证，不作为硬件性能结果。
 
-该 smoke 的无头 Chrome WebGPU adapter 回报 `google/swiftshader`，仅证明功能和集合一致性。`totalMs` 不构成硬件或移动端性能结果；正式 WebGPU 延迟必须读取 adapter 信息并通过仓库 NVIDIA/Vulkan 硬件门，WebGL 硬件证据不能替代 WebGPU adapter 证据。
+以上 SwiftShader 数值对照产生于修正无头 Vulkan 参数之前，只保留为历史数值一致性结果。当前脚本已统一加入 `--disable-vulkan-surface`，正式 WebGPU 运行仍必须读取 adapter 信息并通过 NVIDIA/Vulkan 硬件门；旧软件耗时不能改写成硬件结果。
 
 ## 验证与打包
 
@@ -307,6 +309,7 @@ WASM 源码使用用户级 Rust 工具链构建，不需要 root。构建机必�
 
 ```bash
 cd slm2viewer
+npm run probe:webgpu-hardware
 npm test
 npm run build
 npm run smoke:refilter

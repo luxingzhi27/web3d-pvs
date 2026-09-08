@@ -25,7 +25,7 @@
 - 文档和新脚本中的可复现命令默认使用 Linux shell 口径，例如 `conda run -n slm_pvs python ... --device cuda`。
 - 如果必须保留历史 Windows/ROCm 命令，只能放在历史说明中并明确标注“历史迁移前命令，不作为当前推荐运行方式”。
 - 长时间训练、导出和 benchmark 仍必须写入明确 stdout/stderr 日志；Linux 下推荐使用 `> train_stdout.log 2> train_stderr.log` 或等价的日志方案。
-- 正式浏览器采样、实例级 Color-ID 图像评价和三角形 HZB 光栅化必须使用 Chrome 的硬件 GPU 路径，默认开启 `--use-angle=vulkan` 与 `--disable-software-rasterizer`，并保存页面 `gpuBackend`、`gpuGate` 以及同一执行窗口的 `nvidia-smi`/`pmon` 证据。检测到 SwiftShader、llvmpipe、softpipe、swrast 或无法确认后端时必须失败；只有显式 `--allow-software-gpu` 的小规模语义调试可以使用软件后端，不能进入正式数据集、GPU 性能或移动端性能结论。详细政策见 `docs/current/hardware_gpu_execution_policy.md`。
+- 正式浏览器采样、实例级 Color-ID 图像评价和三角形 HZB 光栅化必须使用 Chrome 的硬件 WebGL 路径，默认开启 `--use-angle=vulkan` 与 `--disable-software-rasterizer`，并保存页面 `gpuBackend`、`gpuGate` 以及同一执行窗口的 `nvidia-smi`/`pmon` 证据。检测到 SwiftShader、llvmpipe、softpipe、swrast 或无法确认后端时必须失败；只有显式 `--allow-software-gpu` 的小规模语义调试可以使用软件后端，不能进入正式数据集、GPU 性能或移动端性能结论。详细政策见 `docs/current/hardware_gpu_execution_policy.md`。
 - WebGL/ANGLE 与 WebGPU adapter 是两条独立的硬件证据链：WebGL 回报 NVIDIA 不能替代 WebGPU adapter 核验，`nvidia-smi` 中出现 Chrome 进程也不能替代被测 API 的后端字段。凡是 WebGPU/WGSL 性能实验都必须单独读取 adapter；若 adapter 回报 SwiftShader 或其他软件后端，必须停止硬件性能汇总。
 - Color-ID 正式采样还必须保留分片旁的 `*.jsonl.gpu_evidence.json` 和 view-cell 总目录的 `gpu_execution_summary.json`；其中要有页面 `gpuBackend`/`gpuGate`、Chrome 参数及同一窗口的 `nvidia-smi`/`pmon`。没有这些证据的历史 JSONL 不能追认为硬件采样。
 
@@ -36,8 +36,9 @@
 - Three.js Color-ID 采样入口 `neural_instance_culling/sampler/run_sampler.mjs` 使用系统 Chrome/Chromium，并传入：
   `--disable-dev-shm-usage`、`--ignore-gpu-blocklist`、`--enable-gpu`、`--enable-webgl`、`--use-angle=vulkan`、`--enable-accelerated-2d-canvas`、`--enable-zero-copy`。正式采样必须再传 `--require-hardware-gpu`，脚本据此追加 `--disable-software-rasterizer`。
 - view-cell 采样入口 `run_scene_viewcell_colorid_sampling.mjs` 不自行启动渲染器，而是为每个分片调用上述 `run_sampler.mjs`，强制传递 `--require-hardware-gpu`；所有分片都必须生成 GPU evidence，最后由 `gpu_execution_summary.json` 汇总检查。
-- 当前 V4 WebGPU/WGSL 页面采集入口 `slm2viewer/scripts/capture_v4_frontend_parity.mjs` 使用：
-  `--headless=new`、`--ozone-platform=headless`、`--ozone-override-screen-size=1280,720`、`--no-sandbox`、`--no-first-run`、`--disable-dev-shm-usage`、`--disable-background-networking`、`--disable-extensions`、`--enable-gpu`、`--enable-unsafe-webgpu`、`--enable-webgpu`、`--enable-webgl`、`--enable-features=Vulkan`、`--use-vulkan`、`--use-angle=vulkan`、`--enable-accelerated-2d-canvas`、`--enable-zero-copy`、`--ignore-gpu-blocklist` 和 `--disable-gpu-sandbox`；正式模式再追加 `--disable-software-rasterizer`。脚本还记录 `VK_ICD_FILENAMES` 和 Chrome DevTools `SystemInfo.getInfo`，用于区分 WebGL ANGLE 后端与 WebGPU adapter 后端。`--enable-unsafe-webgpu`、`--enable-webgpu`、`--enable-features=Vulkan` 和 `--use-vulkan` 是 WebGPU 路径的额外参数，不能误加到只做 WebGL 采样的脚本中作为替代证据。
+- 当前 V4 WebGPU/WGSL 页面采集入口 `slm2viewer/scripts/capture_v4_frontend_parity.mjs` 统一调用 `slm2viewer/scripts/chrome_gpu_flags.mjs`，使用：
+  `--headless=new`、`--ozone-platform=headless`、`--ozone-override-screen-size=1280,720`、`--no-sandbox`、`--no-first-run`、`--disable-dev-shm-usage`、`--disable-background-networking`、`--disable-extensions`、`--enable-gpu`、`--enable-unsafe-webgpu`、`--enable-webgpu`、`--enable-webgl`、`--enable-features=Vulkan`、`--use-vulkan`、`--use-angle=vulkan`、`--disable-vulkan-surface`、`--enable-accelerated-2d-canvas`、`--enable-zero-copy`、`--ignore-gpu-blocklist` 和 `--disable-gpu-sandbox`。Linux 无头 WebGPU 必须保留 `--disable-vulkan-surface`；Chrome 146 在当前机器缺少该参数时选择 SwiftShader。WebGPU 路径不得添加 `--disable-software-rasterizer`：当前 Chrome 146 加入后会返回空 adapter；正式 WebGPU 任务依靠 adapter 字段和硬件门拒绝软件实现。该限制不影响上一条 WebGL Color-ID 路径继续使用 `--disable-software-rasterizer`。
+- `chrome_gpu_flags.mjs` 在 `/etc/vulkan/icd.d/nvidia_icd.json` 存在且调用环境没有显式指定 ICD 时，为 Chrome 子进程设置 `VK_ICD_FILENAMES`。这只消除多 ICD 选择歧义，不能替代 adapter 检查。快速硬件门命令是 `cd slm2viewer && npm run probe:webgpu-hardware`；退出成功必须同时看到 `hardware=true`、adapter `vendor=nvidia`、非软件 WebGL renderer 和可用的 `nvidia-smi`。
 - WebGPU 页面必须调用 `navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })`，保存 `adapter.info.vendor`、`architecture`、`device`、`description`，并同时保存 WebGL renderer 作为辅助诊断。适配器或 renderer 文本含 `SwiftShader`、`llvmpipe`、`softpipe`、`swrast`、`software` 或为空时，硬件门失败。
 - 硬件门不是由命令退出码决定：采样和 WebGPU parity 都必须保存 API 后端字段、Chrome 启动参数，以及浏览器执行窗口的 `nvidia-smi` 和 `nvidia-smi pmon` before/during/after 证据。WebGL 的 NVIDIA/ANGLE 证据只能证明 WebGL 光栅化硬件路径，不能证明 WebGPU adapter 使用 NVIDIA 硬件。
 
@@ -61,7 +62,7 @@ conda run -n slm_pvs python slm2viewer/scripts/verify_v4_frontend_parity.py \
   --capture <v4-parity-capture.json>
 ```
 
-若 WebGPU 当前只能返回 SwiftShader，必须记录为“WebGPU 软件数值 parity 通过、硬件门失败”，不能写成硬件 WebGPU 延迟或移动端性能结果；不得通过删除 `--disable-software-rasterizer`、加入 SwiftShader 参数或复用 WebGL 证据绕过该门。
+若 WebGPU 返回 SwiftShader、空 adapter 或其他软件实现，必须记录为“WebGPU 软件数值 parity 通过、硬件门失败”，不能写成硬件 WebGPU 延迟或移动端性能结果。不得删除 `--disable-vulkan-surface`、加入 SwiftShader 参数或复用 WebGL 证据绕过该门；也不得把“WebGPU 路径不使用 `--disable-software-rasterizer`”误解为允许软件结果，最终裁决始终来自 adapter 硬件门和同窗口 NVIDIA 证据。
 
 ## 1.2 当前核心研究目标
 
