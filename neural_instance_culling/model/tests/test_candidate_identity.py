@@ -31,7 +31,7 @@ class _Dataset:
         }
         self._stored = stored
 
-    def frustum_slice(self, pose_index: int) -> np.ndarray:
+    def candidate_slice(self, pose_index: int) -> np.ndarray:
         if pose_index != 0:
             raise IndexError(pose_index)
         return self._stored

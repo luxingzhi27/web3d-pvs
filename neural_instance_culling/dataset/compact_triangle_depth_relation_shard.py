@@ -390,7 +390,7 @@ def compact_shard(
         relation, observations = extract_sparse_pose(
             np.asarray(cache_ids[row], dtype=np.uint32),
             metric_depth,
-            np.asarray(dataset.frustum_slice(source_pose), dtype=np.uint32),
+            np.asarray(dataset.candidate_slice(source_pose), dtype=np.uint32),
             centers,
             radii,
             camera_world,

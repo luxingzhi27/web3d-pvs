@@ -1,6 +1,6 @@
 # NeuralStreamWeb3D 数据集与采样协议
 
-更新时间：2026-08-12
+更新时间：2026-09-09
 
 本文定义当前训练数据如何从场景资产生成，以及每个二进制文件的语义。核心目标是让采样语义和 NeuralPVS 的 view-cell 思路一致：一个 view-cell 固定相机朝向和视场，在局部空间盒内随机生成多个位置不同但方向相同的子相机，最终可见集合取这些子相机结果的并集。参考论文：[NeuralPVS](https://arxiv.org/abs/2509.24677)。
 
@@ -12,7 +12,7 @@
 - **模型后退相机**：前端预测所使用的后退相机，垂直视场角 66°，与采样口径一致；
 - **真实渲染相机**：浏览器实际显示画面，垂直视场角 60°。
 
-后退相机可以沿当前视线反向移动指定距离，并使用 66° 模型视场角覆盖位置扰动带来的潜在可见实例。模型学习的是后退相机候选上的保守可见性；真实 60° 视锥负责最终实例级安全过滤。候选相机的视场角由当前协议统一给出，不从旧数据记录中回读。
+后退相机可以沿当前视线反向移动指定距离，并使用 66° 模型视场角覆盖位置扰动带来的潜在可见实例。模型学习的是后退相机候选上的保守可见性；真实 60° 视锥负责最终实例级安全过滤。候选相机的视场角由当前协议统一给出。
 
 采样宽高默认 512×288，宽高比会写入每条 pose。代码不应只根据垂直视场角推导横向视场角而忽略 aspect；数据构建同时保存 `tan_x` 和 `tan_y`，候选 AABB 计算也使用这两个量。
 
@@ -26,13 +26,13 @@
 4. 第一个 subpose 保留 view-cell 中心，便于保留代表点；
 5. 每个 subpose 写出独立世界坐标，但共用 `viewcell_id` 和方向信息。
 
-不同场景可以使用不同 view-cell 尺寸，但必须以实际 pose plan 和数据集 meta 为准。当前 HKUST 正式数据 `hkust_v3_viewcell_fov66` 使用水平圆盘，半径为 `2 m`、垂直扰动为 `0 m`，每个 cell 平均约 `34.88` 个成功 subpose。前端 `CameraPredictionGate` 已按同一契约判断：使用世界 XZ 平面位移、拒绝 Y 方向扰动、要求四元数朝向固定；越过边界时不受最小间隔抑制。显示相机保持 `60°`，Worker 的模型查询相机保持 `66°`，浏览器不展开 subpose。其他场景的尺寸必须单独登记，不能把一个场景的 cell 尺寸直接套到另一个场景。
+不同场景可以使用不同 view-cell 尺寸，但必须以实际 pose plan 和数据集 meta 为准。当前 HKUST view-cell 采样计划 `hkust_v3_viewcell_fov66` 使用水平圆盘，半径为 `2 m`、垂直扰动为 `0 m`，每个 cell 平均约 `34.88` 个成功 subpose。前端 `CameraPredictionGate` 已按同一契约判断：使用世界 XZ 平面位移、拒绝 Y 方向扰动、要求四元数朝向固定；越过边界时不受最小间隔抑制。显示相机保持 `60°`，Worker 的模型查询相机保持 `66°`，浏览器不展开 subpose。其他场景的尺寸必须单独登记，不能把一个场景的 cell 尺寸直接套到另一个场景。
 
 采样计划中的类别用于保证空间分布覆盖，包括街道缝隙、建筑近旁、广场、外围、天空俯视和远景等。采样点需要在场景空隙或可行走区域，避免大面积落在实体模型内部；如果需要建筑内部采样，必须在实验说明中单独声明。
 
 ## 3. Color-ID 光栅化
 
-当前没有把 rvcServer 作为所有场景的必要依赖。正式数据集采样使用 Three.js Color-ID 采样器在浏览器硬件 GPU 上进行离屏光栅化：每个实例分配一个可解码颜色，GPU 将颜色写入离屏缓冲，CPU 只负责资源加载、相机组织和颜色统计。采样器默认启用硬件 GPU 门，必须回报非软件 WebGL 后端；检测到 SwiftShader、llvmpipe、softpipe、swrast 或无法确认后端时直接失败。只有显式传入 `--allow-software-gpu` 才能进行非正式语义调试，这类输出不能作为正式采样性能或硬件 GPU 证据。
+正式数据集默认使用 Three.js Color-ID 采样器在浏览器硬件 GPU 上进行离屏光栅化：每个实例分配一个可解码颜色，GPU 将颜色写入离屏缓冲，CPU 只负责资源加载、相机组织和颜色统计。采样器默认启用硬件 GPU 门，必须回报非软件 WebGL 后端；检测到 SwiftShader、llvmpipe、softpipe、swrast 或无法确认后端时直接失败。rvcServer 的 `component_weights` 只作为特定历史数据来源，权重语义按第 6 节解释。
 
 每条原始采样记录通常包含：
 
@@ -44,32 +44,7 @@
 
 Color-ID 的权重可以用于视觉重要性监督，但它不是深度缓冲，也不能表达实例之间的遮挡深度。当前方向遮挡证据由后续离线几何投影步骤构建，而不是从 Color-ID 颜色计数直接推断。
 
-### 3.1 正式硬件 GPU 门
-
-正式采样、实例级 Color-ID 图像评价和浏览器三角形 HZB 构建都必须使用 Chrome 的硬件 Vulkan/NVIDIA 光栅化路径。入口默认带有 `--enable-gpu`、`--enable-webgl`、`--use-angle=vulkan`、`--enable-accelerated-2d-canvas`、`--enable-zero-copy` 和 `--disable-software-rasterizer`；页面必须通过 `WEBGL_debug_renderer_info` 回报实际 vendor、renderer 和 version。
-
-任何出现 `SwiftShader`、`llvmpipe`、`softpipe`、`swrast`、软件光栅化标记或无法确认后端的运行，都必须直接失败，不能继续生成或汇总为正式数据集、图像性能或 GPU 性能结果。正式摘要必须同时保存 `gpuBackend`、`gpuGate`、Chrome stdout/stderr，以及对应时间段的 `nvidia-smi` 和 `nvidia-smi pmon` 证据。`run_sampler.mjs` 会在每个分片旁写出 `<分片>.jsonl.gpu_evidence.json`，view-cell wrapper 会进一步写出 `gpu_execution_summary.json` 并逐分片复核；缺少任一证据时不得把采样标记为正式硬件结果。只有显式传入 `--allow-software-gpu` 的小规模语义调试才允许放宽硬件门；该结果必须标记为非正式，不能覆盖正式输出。
-
-完整的命令、证据清单和故障处理见 [`hardware_gpu_execution_policy.md`](hardware_gpu_execution_policy.md)。
-
-采样脚本支持按 pose plan 分片并行执行，每个分片独立写 JSONL、GPU 证据、stdout 和 stderr 日志。运行前要确保不同分片的 `pose_index` 不重叠，运行后要同时检查每个分片行数与计划范围一致，以及 `gpu_execution_summary.json` 的 `formalReady=true`。
-
-### 3.2 本机硬件核验记录（2026-08-04）
-
-本机已经用与正式采样相同的 Chrome 启动链路完成硬件核验，不能再把“采样成功”作为 GPU 证据的替代品。系统 Chrome 为 `/usr/bin/google-chrome`，页面返回：
-
-```text
-api      = WebGL
-vendor   = Google Inc. (NVIDIA)
-renderer = ANGLE (NVIDIA, Vulkan ... NVIDIA RTX A6000 ...)
-gpuGate  = required=true, hardware=true, software=false
-```
-
-采样期间的 `nvidia-smi`/`nvidia-smi pmon` 快照还观察到 Chrome GPU 进程；参数、页面后端和主机快照按 [`hardware_gpu_execution_policy.md`](hardware_gpu_execution_policy.md) 归档。由此可以确认，当前 Color-ID 采样链路是 Three.js WebGL 在 NVIDIA 硬件上完成离屏光栅化，CPU 只读取颜色 ID 并汇总实例集合和覆盖权重。
-
-后续任何正式数据集重建都必须逐分片检查旁路的 `*.jsonl.gpu_evidence.json` 和总目录的 `gpu_execution_summary.json`。旧采样目录如果没有这些旁路证据，只能记录为“后端无法事后核验”，不能因为有 JSONL、PNG 或浏览器退出码就追认为硬件 GPU 采样，也不能用软件后端补齐正式数据。`--allow-software-gpu` 仅允许用于单独命名的小规模语义调试目录。
-
-这里的硬件结论只适用于 WebGL Color-ID 光栅化。WebGPU 推理仍需读取并单独核验 `navigator.gpu.requestAdapter()`；WebGL 返回 NVIDIA 不能推导 WebGPU 使用硬件。当前 WebGPU 探针回报 SwiftShader 的结果继续按“WebGL 硬件通过、WebGPU 硬件门失败”记录。
+正式采样的 Chrome 启动参数、WebGL/WebGPU 后端核验、GPU evidence 文件和软件路径边界见[硬件 GPU 执行政策](hardware_gpu_execution_policy.md)。本协议只定义数据语义；正式 view-cell 采样还必须确认每个分片的行数、`pose_index` 覆盖和 `gpu_execution_summary.json` 的 `formalReady=true`。
 
 ## 4. 从 subpose 聚合到 view-cell
 
@@ -119,15 +94,13 @@ CSR（压缩稀疏行）用一个 offsets 数组描述每个 pose 的连续 ID �
 | `visible_hit_counts.bin` | uint16 | 一个实例在多少个成功 subpose 中命中 |
 | `candidate_offsets.bin` | uint64 | 每个 pose 的候选 ID 起止位置 |
 | `candidate_ids.bin` | uint32 | 后退/子 pose AABB 候选实例编号 |
-| `frustum_offsets.bin` | uint64 | 当前与 candidate offsets 对齐的兼容字段 |
-| `frustum_ids.bin` | uint32 | 当前与 candidate IDs 对齐的兼容字段 |
 | `dataset_meta.json` | JSON | schema、相机口径、统计、原始候选语义、文件语义和 split |
 
 `visible_weights` 必须在报告中说明来源：Color-ID 数据是屏幕覆盖率 parts-per-million；历史 rvcServer 数据是 `component_weights`，只能按可见重要性权重解释，不能宣称为严格像素覆盖率。
 
 ## 7. 训练数据与运行时资源的一致性
 
-训练前由 `current_pvs_utils.validate_training_resources` 检查：
+训练前由 `benchmark/run_pvs.py preflight` 和 `train_pvs.py` 检查：
 
 - 数据集元数据、pose、visible 和 candidate 文件存在；
 - visible/candidate ID 不越过运行时实例数量；
@@ -144,10 +117,10 @@ CSR（压缩稀疏行）用一个 offsets 数组描述每个 pose 的连续 ID �
 
 | 数据集 | 采样来源 | 模型/采样 FOV | 前端真实 FOV | 权重语义 |
 |---|---|---|---|---|
-| `pose_csr_hkust_v3_viewcell_colorid_fov66` | Three.js Color-ID | 66° Y | 60° Y | 屏幕覆盖率 parts-per-million |
-| `ifcbench_fantasy_metropolis_instanced_v2_viewcell_colorid_k4` | Three.js Color-ID | 66° Y | 60° Y | 屏幕覆盖率 parts-per-million |
+| `pose_csr_hkust_v3_main_stratified_calibration_fov66_v1` | HKUST Color-ID view-cell + 显式 split | 66° Y | 60° Y | 屏幕覆盖率 parts-per-million |
+| `pose_csr_ifcbench_fantasy_metropolis_main_stratified_calibration_fov66_v1` | IFCBench Metropolis Color-ID view-cell + 显式 split | 66° Y | 60° Y | 屏幕覆盖率 parts-per-million |
 
-`build_color_id_pose_csr.py` 是“每条 JSONL 记录一个 pose”的打包器，不会自动把 subpose 聚合成 view-cell；需要 NeuralPVS view-cell 并集时必须使用 `build_rvc_viewcell_pose_csr.py`。名称中的 `rvc` 是历史命名，脚本也可以读取 Color-ID 原始记录，实际数据来源以 `sourceSampler` 和 `dataset_meta.json` 为准。
+正式训练数据使用上表中带显式 split 的目录。`build_color_id_pose_csr.py` 只把每条 JSONL 记录作为一个 pose 打包，不会聚合 subpose；需要 NeuralPVS view-cell 并集时使用 `build_rvc_viewcell_pose_csr.py`，实际数据来源以 `sourceSampler` 和 `dataset_meta.json` 为准。
 
 ## 9. 推荐复现顺序
 
@@ -165,12 +138,14 @@ conda run -n slm_pvs node neural_instance_culling/sampler/run_scene_viewcell_col
   --output-dir neural_instance_culling/sampler/out/<scene>/color_id \
   --parallel 4 --shards 16 --fov-y 66
 
-conda run -n slm_pvs python neural_instance_culling/dataset/build_color_id_pose_csr.py \
-  --samples neural_instance_culling/sampler/out/<scene>/color_id \
+conda run -n slm_pvs python neural_instance_culling/dataset/build_rvc_viewcell_pose_csr.py \
+  --raw-dir neural_instance_culling/sampler/out/<scene>/color_id \
   --output-dir neural_instance_culling/dataset/out/<scene>_viewcell_colorid \
-  --runtime-meta <scene>/assets/runtimeVisibilityMeta.json
+  --runtime-meta <scene>/assets/runtimeVisibilityMeta.json \
+  --source-sampler three_color_id \
+  --default-fov-y 66
 ```
 
-对于需要把原始 subpose 聚合成 view-cell 的流程，使用 `build_rvc_viewcell_pose_csr.py`，并在输出元数据中确认 `rawRows`、`viewcellCount`、`successSubposeCount`、`avgCandidate`、`avgVisible` 和 `candidateMissVisible`。正式训练和 benchmark 只能引用明确命名的输出目录，不能直接读取 sampler 的临时 JSONL。
+构建后确认 `rawRows`、`viewcellCount`、`successSubposeCount`、`avgCandidate`、`avgVisible` 和 `candidateMissVisible`。正式训练和 benchmark 只能引用明确命名的输出目录，不能直接读取 sampler 的临时 JSONL。
 
-重建任何场景时，采样和模型输入都必须使用 66°，真实前端保持 60°；不能从旧 Pose CSR 行中恢复另一套 FOV。
+重建任何场景时，采样和模型输入都必须使用 66°，真实前端保持 60°；不能从不同 FOV 的 Pose CSR 行中恢复当前数据集。

@@ -1,41 +1,20 @@
 import {
-  AmbientLight,
-  AnimationMixer,
-  AxesHelper,
   Box3,
-  Cache,
-  DirectionalLight,
   Frustum,
-  GridHelper,
-  HemisphereLight,
-  LinearEncoding,
   LoaderUtils,
   LoadingManager,
-  PMREMGenerator,
   PerspectiveCamera,
-  Scene,
-  SkeletonHelper,
   Vector3,
-  WebGLRenderer,
-  sRGBEncoding,
-  MeshStandardMaterial,
   DoubleSide,
-  Color,
-  FrontSide,
-  ClampToEdgeWrapping,
   Object3D,
   Matrix4,
   FileLoader,
-  TextureLoader,
   FloatType,
-  MeshBasicMaterial,
-  ConstantColorFactor,
-  SRGBColorSpace,
-  LinearSRGBColorSpace,
   LinearFilter,
   RepeatWrapping,
   ImageBitmapLoader,
-  CanvasTexture
+  CanvasTexture,
+  Vector2,
 } from 'three';
 
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
@@ -66,7 +45,6 @@ function joinUrlPath(baseUrl, pathPart)
 }
 
 import { CacheMgr } from './CacheMgr.js';
-import { Vector2 } from 'three';
 import { getInstancePVSAssetBaseUrl } from '../src/neuralCullingBackendMode.js';
 import { LightweightPVSDispatcher } from '../src/LightweightPVSDispatcher.js';
 import { CameraPredictionGate } from '../src/CameraPredictionGate.js';
@@ -207,7 +185,6 @@ export class SLM2Loader
     this.isMaterialConfigReady = false;
     this.lastMaterialRebindCount = 0;
 
-    this.rvCameraHash = null;
     
     // Custom full-load parameters
     this.fullLoadMode = false;
@@ -296,7 +273,6 @@ export class SLM2Loader
     // NeuralPVS parameters
     this.cullingMode = 'neural';
     this.neuralBackend = 'instance-pvs';
-    this.neuralDispatcherMode = 'lightweight-worker';
     this.useNeuralPVS = false;
     this.neuralPVS = null;
     this.neuralDebugLogs = false;
@@ -309,8 +285,6 @@ export class SLM2Loader
     this.neuralStaleCacheProjectedAreaThreshold = 0.02;
     this.neuralStaleCachePrefetchAreaThreshold = 0.005;
     this.neuralStaleCacheMaxMemoryRatio = 0.85;
-    this.neuralLoadSkippedAsDeferred = false;
-    this.neuralDeferredSkippedLoadLimit = 0;
     this.pendingGlbParseQueue = [];
     this.pendingGlbParseCursor = 0;
     this.pendingGlbParseBytes = 0;
@@ -2421,7 +2395,6 @@ export class SLM2Loader
       rawGlbCount: Number(metrics.rawGlbCount != null ? metrics.rawGlbCount : metrics.rawCount != null ? metrics.rawCount : metrics.visibleCount || 0),
       visibleInstanceCount: Number(metrics.visibleInstanceCount != null ? metrics.visibleInstanceCount : metrics.visibleCount || 0),
       rawInstanceCount: Number(metrics.rawInstanceCount != null ? metrics.rawInstanceCount : metrics.rawCount != null ? metrics.rawCount : metrics.visibleCount || 0),
-      cameraHash: metrics.cameraHash || null,
       requestId: metrics.requestId != null ? Number(metrics.requestId) : null,
       notes: metrics.notes || null,
       renderPolicy: this.getNeuralRenderPolicy(),
@@ -3040,7 +3013,6 @@ export class SLM2Loader
       visibleGlbCount: renderGlbIds.length,
       rawInstanceCount: candidateComponentIds.length,
       visibleInstanceCount: renderComponentIds.length,
-      cameraHash: this.rvCameraHash,
       notes: schedulerStats,
     });
 
@@ -3447,7 +3419,7 @@ export class SLM2Loader
     }, 0);
   }
 
-  _runCachedNeuralRenderFilter(predictionDispatcher, camera, groupSerial, lifecycleSerial, cameraHash)
+  _runCachedNeuralRenderFilter(predictionDispatcher, camera, groupSerial, lifecycleSerial)
   {
     var filterProcess = async () =>
     {
@@ -3481,7 +3453,6 @@ export class SLM2Loader
           visibleGlbCount: applied.renderGlbCount,
           rawInstanceCount: previousIds.rawComponentIds ? previousIds.rawComponentIds.length : 0,
           visibleInstanceCount: applied.renderComponentCount,
-          cameraHash: cameraHash,
           notes: {
             cachedModelPrediction: true,
             renderCandidateGlbCount: applied.renderGlbCount,
@@ -3582,9 +3553,6 @@ export class SLM2Loader
       this.lastCameraRotHash = cameraRotHash;
       this.lastScreenSizeHash = screenSizeHash;
 
-      var newCameraHash = cameraPosHash + ':' + cameraRotHash;
-      this.rvCameraHash = newCameraHash;
-
       if (this.cullingMode === 'frustum')
       {
         if (!this.runtimeVisibilityMeta)
@@ -3635,8 +3603,7 @@ export class SLM2Loader
               predictionDispatcher,
               visibilityCamera,
               predictionGroupSerial,
-              predictionLifecycleSerial,
-              newCameraHash
+              predictionLifecycleSerial
             );
             return;
           }
@@ -3734,7 +3701,6 @@ export class SLM2Loader
                   visibleInstanceCount: appliedVisibility.renderComponentModelList
                     ? appliedVisibility.renderComponentModelList.length
                     : 0,
-                  cameraHash: newCameraHash,
                   notes: {
                     loadNowGlbCount: Array.isArray(appliedVisibility.modelList) ? appliedVisibility.modelList.length : 0,
                     renderCandidateGlbCount: Array.isArray(appliedVisibility.renderModelList) ? appliedVisibility.renderModelList.length : 0,
@@ -4717,19 +4683,7 @@ export class SLM2Loader
     this._configureHttpAdaptiveConcurrency();
     this._configureGlbResourcePipelineOptions(params);
     this.setNeuralRenderPolicy(params['neuralRenderPolicy'] || params['neuralAlwaysRender']);
-    this.renderVisibilitySystem.configure(this.cpuPerfMode === 'mobile'
-      ? { mobileMinUpdateMs: 100, desktopMinUpdateMs: 100 }
-      : { desktopMinUpdateMs: 50 });
     if (this.neuralDebugLogs) console.log('[SLM2Loader] CPU perf mode:', this.cpuPerfMode);
-    if (params['neuralLoadSkippedAsDeferred'] != null)
-    {
-      this.neuralLoadSkippedAsDeferred = !(params['neuralLoadSkippedAsDeferred'] === 'false' ||
-        params['neuralLoadSkippedAsDeferred'] === '0');
-    }
-    if (params['neuralDeferredSkippedLoadLimit'] != null)
-    {
-      this.neuralDeferredSkippedLoadLimit = Math.max(0, Number(params['neuralDeferredSkippedLoadLimit'] || 0));
-    }
     var gateMode = String(params['neuralPredictionGateMode'] || params['neuralPredictionMode'] || 'viewcell').toLowerCase();
     if (gateMode !== 'delta' && gateMode !== 'viewcell')
     {
@@ -4754,7 +4708,6 @@ export class SLM2Loader
       minIntervalMs: this._parseIntParam(params, 'neuralPredictionMinIntervalMs', defaultMinIntervalMs, 50, 5000),
     });
     this.neuralBackend = 'lightweight-worker-pvs';
-    this.neuralDispatcherMode = 'lightweight-worker';
     var configuredNeuralScene = baseConfig.loader.neuralScene || baseConfig.loader.neuralSceneName || null;
     var configuredNeuralAssetBase = this.neuralAssetBaseUrl || baseConfig.loader.neuralAssetBaseUrl || baseConfig.loader.neuralAssetBase || null;
     var neuralSceneName = String(params['neuralScene'] || params['scene'] || configuredNeuralScene || baseConfig.name || 'hkust-v3');

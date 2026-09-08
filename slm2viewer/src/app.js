@@ -26,7 +26,6 @@ class App
       cameraPosition: hash.cameraPosition ? hash.cameraPosition.split(',').map(Number) : null
     };
 
-    this.el = el;
     this.viewer = null;
     this.viewerEl = null;
     this.root = el.querySelector('.wrap');
@@ -52,18 +51,6 @@ class App
     viewer.load();
   }
 
-  onError (error) 
-  {
-    console.error(error);
-  }
-
-  showSpinner () {
-    this.spinnerEl.style.display = '';
-  }
-
-  hideSpinner () {
-    this.spinnerEl.style.display = 'none';
-  }
 }
 
 document.addEventListener('DOMContentLoaded', () => 

@@ -1,4 +1,4 @@
-"""Pose-balanced visibility learning with an RVL safety guard and shared tail mining.
+"""Pose-balanced visibility learning with an RVL safety guard and tail margin.
 
 The objective deliberately does not add the complete historical RVL loss to
 the pose-balanced frontier loss.  Both contain classification and ranking
@@ -7,11 +7,8 @@ module assigns one responsibility to each term instead:
 
 * pose-balanced BCE learns the ordinary visible/invisible decision;
 * a one-sided, visible-weighted recall guard supplies the RVL safety signal;
-* one shared hard-tail selection drives both logit and representation
-  separation, mixed at a fixed total tail weight.
-
-The projection head is training-only.  It never enters the runtime model or
-the exported fixed instance table.
+* one shared hard-tail selection separates difficult positive and negative
+  logits without adding a second classifier or runtime asset.
 """
 from __future__ import annotations
 
@@ -19,26 +16,7 @@ import math
 from typing import Iterator
 
 import torch
-from torch import nn
 import torch.nn.functional as F
-
-class TrainingOnlyContrastiveProjectionHead(nn.Module):
-    """Project final query features for auxiliary hard-tail contrastive learning."""
-
-    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int):
-        super().__init__()
-        if min(int(input_dim), int(hidden_dim), int(output_dim)) <= 0:
-            raise ValueError("contrastive projection dimensions must be positive")
-        self.net = nn.Sequential(
-            nn.Linear(int(input_dim), int(hidden_dim)),
-            nn.ReLU(inplace=True),
-            nn.Linear(int(hidden_dim), int(output_dim)),
-        )
-
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
-        if features.ndim != 2:
-            raise ValueError("contrastive projection input must be a matrix")
-        return F.normalize(self.net(features.float()), dim=-1, eps=1e-6)
 
 
 def _pose_slices(
@@ -308,9 +286,8 @@ def _weighted_low_tail_indices(
     return indices, normalized_mass / normalized_mass.sum().clamp_min(1e-12)
 
 
-def shared_tail_logit_contrastive_loss(
+def shared_tail_logit_margin_loss(
     logits: torch.Tensor,
-    embeddings: torch.Tensor,
     target: torch.Tensor,
     pose_offsets: torch.Tensor,
     positive_weights: torch.Tensor,
@@ -321,10 +298,8 @@ def shared_tail_logit_contrastive_loss(
     negative_count_cap: int = 256,
     margin: float = 0.5,
     logit_temperature: float = 0.25,
-    contrastive_temperature: float = 0.10,
-    contrastive_mix: float = 0.25,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor | float]]:
-    """Separate one shared violating tail in score and representation space."""
+    """Separate difficult weighted positives from high-scoring negatives."""
     if not 0.0 < float(positive_mass_fraction) <= 1.0:
         raise ValueError("tail positive mass fraction must lie in (0, 1]")
     if int(positive_count_cap) <= 0:
@@ -333,22 +308,13 @@ def shared_tail_logit_contrastive_loss(
         raise ValueError("tail negative fraction must lie in (0, 1]")
     if int(negative_count_cap) <= 0:
         raise ValueError("tail negative count cap must be positive")
-    if float(margin) < 0.0 or min(float(logit_temperature), float(contrastive_temperature)) <= 0.0:
+    if float(margin) < 0.0 or float(logit_temperature) <= 0.0:
         raise ValueError("tail margins and temperatures are invalid")
-    if not 0.0 <= float(contrastive_mix) <= 1.0:
-        raise ValueError("contrastive mix must lie in [0, 1]")
     values, labels, weights = _flat_inputs(
         logits, target, positive_weights, pose_offsets
     )
-    z = embeddings.float()
-    if z.ndim != 2 or z.shape[0] != values.numel() or z.shape[1] <= 0:
-        raise ValueError("contrastive embeddings must align with visibility candidates")
-    if not bool(torch.isfinite(z).all()):
-        raise ValueError("contrastive embeddings must be finite")
-    z = F.normalize(z, dim=-1, eps=1e-6)
 
     logit_terms: list[torch.Tensor] = []
-    contrastive_terms: list[torch.Tensor] = []
     gap_terms: list[torch.Tensor] = []
     selected_positive_count = 0
     selected_negative_count = 0
@@ -404,65 +370,17 @@ def shared_tail_logit_contrastive_loss(
             / pair_weight.sum().clamp_min(1e-12)
         )
 
-        local_z = z[start:end]
-        positive_z = local_z[positive_mask]
-        negative_z = local_z[negative_mask][tail_negative]
-        positive_mass_all = _positive_mass(positive_weights_local)
-        weighted_sum = (positive_mass_all[:, None] * positive_z).sum(dim=0)
-        anchor_losses: list[torch.Tensor] = []
-        anchor_weights: list[torch.Tensor] = []
-        for tail_position, positive_index in enumerate(tail_positive):
-            active_negative = violation[:, tail_position]
-            if not bool(active_negative.any()):
-                continue
-            index = int(positive_index)
-            remaining_mass = 1.0 - positive_mass_all[index]
-            if not bool(remaining_mass > 1e-6):
-                continue
-            prototype = F.normalize(
-                (weighted_sum - positive_mass_all[index] * positive_z[index])
-                / remaining_mass,
-                dim=0,
-                eps=1e-6,
-            )
-            anchor = positive_z[index]
-            positive_similarity = torch.sum(anchor * prototype) / float(
-                contrastive_temperature
-            )
-            negative_similarity = (
-                negative_z[active_negative] @ anchor
-            ) / float(contrastive_temperature)
-            denominator = torch.logsumexp(
-                torch.cat([positive_similarity.reshape(1), negative_similarity]),
-                dim=0,
-            )
-            anchor_losses.append(denominator - positive_similarity)
-            anchor_weights.append(tail_mass[tail_position])
-        if anchor_losses:
-            anchor_weight = torch.stack(anchor_weights)
-            anchor_weight = anchor_weight / anchor_weight.sum().clamp_min(1e-12)
-            contrastive_terms.append(
-                (torch.stack(anchor_losses) * anchor_weight).sum()
-            )
         selected_positive_count += int(tail_positive.numel())
         selected_negative_count += int(tail_negative.numel())
         active_pair_count += int(violation.sum())
 
-    zero = values.sum() * 0.0 + z.sum() * 0.0
-    logit_loss = torch.stack(logit_terms).mean() if logit_terms else zero
-    contrastive_loss = (
-        torch.stack(contrastive_terms).mean() if contrastive_terms else zero
-    )
-    effective_mix = float(contrastive_mix) if contrastive_terms else 0.0
-    total = (1.0 - effective_mix) * logit_loss + effective_mix * contrastive_loss
+    zero = values.sum() * 0.0
+    total = torch.stack(logit_terms).mean() if logit_terms else zero
     if not bool(torch.isfinite(total)):
-        raise FloatingPointError("shared tail separation loss is non-finite")
+        raise FloatingPointError("shared tail margin loss is non-finite")
     mean_gap = torch.stack(gap_terms).mean() if gap_terms else zero.detach()
     return total, {
-        "lossSharedTailSeparation": total,
-        "lossSharedTailLogit": logit_loss,
-        "lossSharedTailContrastive": contrastive_loss,
-        "sharedTailContrastiveMix": float(effective_mix),
+        "lossSharedTailMargin": total,
         "sharedTailPoseCount": float(len(logit_terms)),
         "sharedTailPositiveCount": float(selected_positive_count),
         "sharedTailNegativeCount": float(selected_negative_count),
@@ -473,7 +391,6 @@ def shared_tail_logit_contrastive_loss(
 
 def pose_balanced_rvl_contrastive_visibility_loss(
     logits: torch.Tensor,
-    embeddings: torch.Tensor,
     target: torch.Tensor,
     pose_offsets: torch.Tensor,
     positive_weights: torch.Tensor,
@@ -485,14 +402,12 @@ def pose_balanced_rvl_contrastive_visibility_loss(
     recall_pose_cvar_weight: float = 0.25,
     separation_weight: float = 0.20,
     separation_scale: float = 1.0,
-    contrastive_mix: float = 0.25,
     positive_mass_fraction: float = 0.005,
     positive_count_cap: int = 64,
     negative_top_fraction: float = 0.01,
     negative_count_cap: int = 256,
     margin: float = 0.5,
     logit_temperature: float = 0.25,
-    contrastive_temperature: float = 0.10,
     positive_importance_floor: float = 0.5,
     positive_importance_power: float = 0.5,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor | float]]:
@@ -517,9 +432,8 @@ def pose_balanced_rvl_contrastive_visibility_loss(
         pose_cvar_fraction=recall_pose_cvar_fraction,
         pose_cvar_weight=recall_pose_cvar_weight,
     )
-    separation, separation_parts = shared_tail_logit_contrastive_loss(
+    separation, separation_parts = shared_tail_logit_margin_loss(
         logits,
-        embeddings,
         target,
         pose_offsets,
         positive_weights,
@@ -529,8 +443,6 @@ def pose_balanced_rvl_contrastive_visibility_loss(
         negative_count_cap=negative_count_cap,
         margin=margin,
         logit_temperature=logit_temperature,
-        contrastive_temperature=contrastive_temperature,
-        contrastive_mix=contrastive_mix,
     )
     weighted_recall_guard = float(recall_guard_weight) * recall_guard
     weighted_separation = (
@@ -554,9 +466,8 @@ def pose_balanced_rvl_contrastive_visibility_loss(
 
 
 __all__ = [
-    "TrainingOnlyContrastiveProjectionHead",
     "pose_balanced_binary_cross_entropy",
     "pose_balanced_rvl_contrastive_visibility_loss",
     "pose_weighted_recall_guard_loss",
-    "shared_tail_logit_contrastive_loss",
+    "shared_tail_logit_margin_loss",
 ]

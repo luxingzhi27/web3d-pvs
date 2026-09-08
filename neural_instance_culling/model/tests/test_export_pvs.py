@@ -166,8 +166,8 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
             "relationArtifactDigest": "5" * 64,
             "protocol": {
                 "schema": "pvs-bounded-relation-prior-instance-calibrated-moment-training-v4",
-                "variant": "full",
-                "lossVariant": "safety_reserve",
+                "variant": "full_integrated_visibility_mainline",
+                "lossVariant": "pose_balanced_rvl_contrastive",
                 "testRead": False,
                 "candidateUnion": False,
                 "instanceCalibration": {"mode": "residual"},
@@ -506,7 +506,7 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
             root = Path(temporary)
             checkpoint = self._checkpoint(root)
             checkpoint["config"]["spectralMode"] = "point"
-            checkpoint["protocol"]["variant"] = "without_viewcell_moment_envelope"
+            checkpoint["protocol"]["variant"] = "core_no_moment"
             output = self._export(root, checkpoint, name="point-query")
             meta = json.loads((output / "model_meta.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["modelConfig"]["spectralMode"], "point")
@@ -550,37 +550,6 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
                             str(self._runtime_meta(root)),
                             "--output-dir",
                             str(root / "missing-viewcell-out"),
-                        ]
-                    )
-                )
-
-    def test_disabled_residual_checkpoint_must_be_exactly_disabled(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            checkpoint = self._checkpoint(root)
-            checkpoint["protocol"]["variant"] = "without_instance_calibration_residual"
-            checkpoint["protocol"]["instanceCalibration"]["mode"] = "disabled"
-            checkpoint["config"]["instanceCalibration"]["mode"] = "disabled"
-            checkpoint["instanceCalibration"]["mode"] = "disabled"
-            checkpoint["instanceCalibration"]["blend"] = 0.0
-            checkpoint["model"].pop("instance_calibration_residual_raw")
-            coefficients = checkpoint["instanceSurvivalCoefficients"]
-            checkpoint["instanceSurvivalCalibrationResidual"] = torch.full_like(
-                coefficients, 0.25
-            )
-            checkpoint["instanceSurvivalPriorCoefficients"] = coefficients - 0.25
-            path = root / "tampered-disabled.pt"
-            torch.save(checkpoint, path)
-            with self.assertRaisesRegex(ValueError, "non-zero residual"):
-                export(
-                    parse_args(
-                        [
-                            "--checkpoint",
-                            str(path),
-                            "--runtime-meta",
-                            str(self._runtime_meta(root)),
-                            "--output-dir",
-                            str(root / "tampered-disabled-out"),
                         ]
                     )
                 )
@@ -716,6 +685,14 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
             output = self._export(root, mismatched_relation, name="mismatched-relation")
             meta = json.loads((output / "model_meta.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["provenance"]["relation"]["schema"], "pvs-viewcell-train-observed-relation-csr-v3")
+
+    def test_export_uses_member_local_geometry_after_source_moves(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkpoint = self._checkpoint(root)
+            checkpoint["geometry"]["path"] = "/deleted/old-experiment/geometry.bin"
+            output = self._export(root, checkpoint)
+            self.assertTrue((output / "instance_runtime_features_fp16.bin").is_file())
 
     def test_unsafe_calibration_requires_explicit_diagnostic_flag(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

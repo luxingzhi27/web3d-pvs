@@ -32,7 +32,7 @@ from common.candidate_identity import candidate_digest_for_pose_sequence  # noqa
 class RayContextRelationEvidenceTest(unittest.TestCase):
     def test_repeated_render_source_poses_have_a_distinct_digest_from_canonical_split(self) -> None:
         class Dataset:
-            def frustum_slice(self, pose_index: int) -> np.ndarray:
+            def candidate_slice(self, pose_index: int) -> np.ndarray:
                 return np.asarray([pose_index, pose_index + 10], dtype=np.uint32)
 
         dataset = Dataset()

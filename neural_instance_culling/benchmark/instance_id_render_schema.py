@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared validation for the M5 component-ID render manifest.
+"""Shared validation for the instance Color-ID render manifest.
 
 This module deliberately inspects only the JSON chunk of each GLB.  It does
 not decode geometry or start a browser.  The purpose is to make the mapping
@@ -269,7 +269,7 @@ def validate_instance_render_manifest(manifest: dict[str, Any]) -> None:
     except (TypeError, ValueError) as error:
         raise InstanceBindingError("manifest renderFovYDeg is missing") from error
     if abs(fov - RENDER_FOV_Y_DEG) > 1e-6:
-        raise InstanceBindingError(f"M5 render FOV must be exactly {RENDER_FOV_Y_DEG}, got {fov}")
+        raise InstanceBindingError(f"render FOV must be exactly {RENDER_FOV_Y_DEG}, got {fov}")
     if manifest.get("formalImageEvaluationReady") is not False:
         raise InstanceBindingError("component renderer manifest must be marked not formal-ready")
     try:
@@ -278,7 +278,7 @@ def validate_instance_render_manifest(manifest: dict[str, Any]) -> None:
         raise InstanceBindingError("manifest modelInputFovYDeg is missing") from error
     if abs(model_fov - MODEL_INPUT_FOV_Y_DEG) > 1e-6:
         raise InstanceBindingError(
-            f"M5 model-input FOV must be exactly {MODEL_INPUT_FOV_Y_DEG}, got {model_fov}"
+            f"model-input FOV must be exactly {MODEL_INPUT_FOV_Y_DEG}, got {model_fov}"
         )
     selected_glbs = manifest.get("selectedGlbs")
     if not isinstance(selected_glbs, list) or any(

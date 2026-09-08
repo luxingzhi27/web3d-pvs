@@ -416,7 +416,7 @@ def _shell_id(relative_gap: float, shells: int) -> int:
 
 
 def _read_candidate_pose(dataset: PoseCSRDataset, pose_index: int) -> np.ndarray:
-    return np.asarray(dataset.frustum_slice(int(pose_index)), dtype=np.uint32)
+    return np.asarray(dataset.candidate_slice(int(pose_index)), dtype=np.uint32)
 
 
 def _adjacent_occlusion_pixel_counts(

@@ -36,7 +36,7 @@ class SurvivalRankCapacityRunnerTests(unittest.TestCase):
         self.assertEqual(FORMAL_EPOCHS, 40)
         self.assertEqual(FORMAL_STEPS_PER_EPOCH, 900)
 
-    def test_commands_use_no_contrastive_full_from_scratch(self) -> None:
+    def test_commands_use_current_full_from_scratch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             for rank in CAPACITY_RANKS:
                 with self.subTest(rank=rank):
@@ -49,8 +49,10 @@ class SurvivalRankCapacityRunnerTests(unittest.TestCase):
                     )
                     self.assertNotIn("--initial-checkpoint", command)
                     self.assertEqual(_argument(command, "--survival-rank"), str(rank))
+                    self.assertNotIn("--integrated-contrastive-mix", command)
                     self.assertEqual(
-                        _argument(command, "--integrated-contrastive-mix"), "0.0"
+                        _argument(command, "--loss-variant"),
+                        "pose_balanced_rvl_contrastive",
                     )
                     self.assertEqual(
                         _argument(command, "--relation-source"),
@@ -71,7 +73,6 @@ class SurvivalRankCapacityRunnerTests(unittest.TestCase):
         self.assertEqual(contract["ranks"], [2, 4, 8, 12])
         self.assertEqual(contract["survivalDims"], [14, 28, 56, 84])
         self.assertEqual(contract["runtimeFeatureDims"], [110, 124, 152, 180])
-        self.assertEqual(contract["contrastiveMix"], 0.0)
         self.assertTrue(contract["fromScratch"])
         self.assertFalse(contract["testRead"])
 

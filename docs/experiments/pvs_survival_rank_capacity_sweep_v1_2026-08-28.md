@@ -29,10 +29,10 @@
 - 三个随机种子固定为 `20260801/20260802/20260803`。
 - 每个成员从头训练 `40 epoch x 900 step/epoch`，`poses-per-batch=4`。
 - 保留共享分层遮挡关系先验、逐实例校准残差和视点区域矩包络频谱查询。
-- 损失固定为当前无对比学习的完整模型：逐 pose 平衡分类、RVL 加权召回保护和困难边界间隔；`integrated_contrastive_mix=0.0`。
+- 损失固定为当前完整模型：逐 pose 平衡分类、RVL 加权召回保护和困难边界间隔。
 - 不启用视觉效用、下载优先级或 GLB 字节训练目标。
 - 每个 checkpoint 只能使用自己的 calibration split 冻结阈值；test 不参与阈值选择，也不在容量选择阶段读取。
-- 画面安全主门为 validation weighted recall 点估计和单侧 95% 置信下界均大于 `0.99`。
+- 画面安全工作点由 calibration weighted recall 点估计和单侧 95% 置信下界均大于 `0.99` 判定；validation 在同一冻结阈值下比较各 rank。
 
 ## 运行与评价
 
@@ -58,7 +58,7 @@ runner 同时运行四个成员，每张 GPU 保持一个训练进程；一个�
 
 ## 正式结果
 
-所有 12 个成员均完成训练，并使用各 checkpoint 自己的 calibration 阈值回放相同的 730 个 validation pose；三个种子全部通过 weighted-recall 安全门，test 未读取。
+所有 12 个成员均完成训练，并使用各 checkpoint 自己的 calibration 阈值回放相同的 730 个 validation pose；三个种子在 validation 核验中均满足 weighted-recall 安全要求，test 未读取。
 
 | 方向秩 | 生存维度 | 固定表 | Pose precision | Pose recall | Aggregate precision | Aggregate recall | Aggregate weighted recall | Aggregate accuracy | Aggregate balanced accuracy | Aggregate useful cull | Aggregate bad cull | 平均预测数 |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|

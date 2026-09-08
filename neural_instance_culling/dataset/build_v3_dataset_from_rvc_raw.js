@@ -407,15 +407,6 @@ async function main() {
   writeTypedArray(path.join(args.outputDir, 'visible_ids.bin'), Uint32Array.from(visibleIds));
   writeTypedArray(path.join(args.outputDir, 'visible_pixels.bin'), Uint32Array.from(visiblePixels));
   writeTypedArray(path.join(args.outputDir, 'candidate_offsets.bin'), BigUint64Array.from(candidateOffsets, (v) => BigInt(v)));
-  // 兼容旧读取器命名。
-  writeTypedArray(path.join(args.outputDir, 'frustum_offsets.bin'), BigUint64Array.from(candidateOffsets, (v) => BigInt(v)));
-  const frustumIdsPath = path.join(args.outputDir, 'frustum_ids.bin');
-  try {
-    if (fs.existsSync(frustumIdsPath)) fs.unlinkSync(frustumIdsPath);
-    fs.linkSync(candidateIdsPath, frustumIdsPath);
-  } catch (_error) {
-    fs.copyFileSync(candidateIdsPath, frustumIdsPath);
-  }
   writeTypedArray(path.join(args.outputDir, 'instance_to_glb.bin'), instanceToGlb);
 
   const firstSample = rawSamples[0] || {};

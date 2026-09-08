@@ -1,1 +1,0 @@
-hkust-v3.exe config.json

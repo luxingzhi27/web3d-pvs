@@ -73,7 +73,7 @@ def _sha256(path: Path) -> str:
 
 def _candidate_summary(dataset: PoseCSRDataset, poses: np.ndarray, num_instances: int):
     poses = np.asarray(poses, dtype="<i8").reshape(-1)
-    rows = [np.asarray(dataset.frustum_slice(int(p)), dtype="<u4") for p in poses.tolist()]
+    rows = [np.asarray(dataset.candidate_slice(int(p)), dtype="<u4") for p in poses.tolist()]
     offsets = np.zeros((poses.size + 1,), dtype="<i8")
     if rows:
         offsets[1:] = np.cumsum([row.size for row in rows], dtype=np.int64)

@@ -87,19 +87,19 @@ conda run -n slm_pvs python slm2viewer/scripts/verify_v4_frontend_parity.py \
 - 当前论文模型的训练协议是 `docs/experiments/pvs_mainline_training_2026-08-21.md`，统一实验前缀为 `pvs_v4_integrated_visibility_mainline_v1`。固定架构为分层遮挡关系先验与逐实例校准生存场、视点区域矩包络频谱查询，以及逐 pose 平衡分类、单侧 RVL 加权召回保护和共享困难边界对比组成的综合可见性损失。
 - 本轮只优化实例可见性。视觉效用、下载优先级、GLB 字节预算和资源调度损失必须为零，不参与参数扫描排名；训练期对比投影头不得进入运行时导出。旧 108 维尾部分离器、冻结主干 refinement 和完整旧 RVL 叠加不再是执行入口。
 - 主实验固定使用 `5926 train / 659 calibration / 730 validation / 684 test`；旧 684 test 不变。每个 checkpoint 只用自己的 calibration 冻结阈值，validation 比较配置，test 在模型和阈值全部冻结后读取一次。
-- 已完成八组单种子快速扫描、配置复核、完整模型与六个核心消融的三种子 `40 epoch × 900 step` 从头长训。正式评价入口是 `neural_instance_culling/benchmark/reaudit_pvs.py`，当前结论见 `docs/evaluation/pvs_mainline_core_ablation_paper_analysis_2026-08-28.md`。
+- 已完成完整模型与六个核心消融的三种子 `40 epoch × 900 step` 从头长训。正式评价入口是 `neural_instance_culling/benchmark/evaluate_pvs.py` 和 `summarize_core_ablation.py`，当前结论见 `docs/evaluation/pvs_mainline_core_ablation_paper_analysis_2026-08-28.md`。
 - 本阶段暂不把 `bad cull` 置信区间上界作为路线否决条件，但仍必须报告 `bad cull`、漏检数量和图像级漏检指标；不得用减少预测数量掩盖画面风险。
 - 画面安全主门仍是每个 checkpoint 在 calibration 上冻结的 `weighted recall > 0.99` 及其单侧 95% 置信下界大于 `0.99`。普通 pose recall 只作诊断。
 - 安全阈值的位置只作分布健康诊断，不作固定 `p=0.5` 硬门。必须同时记录安全阈值区间、阈值扰动稳定性、正样本加权 q01/q005、负样本 q99/q99.5、logit 间隔、Brier/ECE 和可靠性图；低阈值本身不能否决模型，因为 bias 或温度缩放可以移动概率阈值而不改变排序。不得用这种后处理伪装模型改进，主线资格仍由 calibration 的 weighted recall 安全门，以及同一安全门下的 precision、accuracy、balanced accuracy、specificity、useful cull、图像和资源指标共同决定。
 - 如果启用按最差 pose 加权的锚点风险项，训练批次必须包含至少两个 pose；单 pose 批次只能报告普通锚点项，不能宣称完成尾部风险约束。关系系数反向传播的显存峰值必须单独记录，不能为了尾部统计扩大到超出单卡预算。
-- 2026-08-09 以前的 M4/M5/M6 路线结论属于历史记录，不回写、不改名；后续新实验不得继续引用旧路线名称作为默认主线。
+- 旧 M4-M12、OWRB 和方向代理路线只存在于 Git 历史，不得恢复为默认入口或在当前论文材料中继续引用。
 
 ## 2. 实验版本管理
 
 - 每个正式实验必须有清晰稳定名称，推荐格式为：
   - `pvs_<核心方法>_<关键特性>`
-  - `pvs_directional_occlusion_proxy_encoder_rvl_w042_full40`
-  - `baseline_aabb_hzb`
+  - `pvs_v4_integrated_visibility_mainline_v1`
+  - `baseline_geometry_shell_hzb`
 - 禁止使用含糊名称，如 `new_model`、`test2`、`final_final`、`v6_recall_tmp`。
 - 新实验输出目录必须独立，不能覆盖已有保留版本：
   - `neural_instance_culling/model/out/<experiment_name>`
@@ -273,12 +273,12 @@ conda run -n slm_pvs python slm2viewer/scripts/verify_v4_frontend_parity.py \
 
 ## 11. 当前项目特定约束
 
-- 当前 HKUST 前端只允许加载 `pvs_mainline_v4`，运行 schema 为 `pvs-bounded-relation-prior-instance-calibrated-moment-runtime-v4`。旧方向代理模型和 `baseline_aabb_hzb` 可以作为历史 benchmark 保留，但不能再出现在前端兼容分支、默认资产映射或部署包中。
-- 当前 HKUST 前端 checkpoint 为 `pvs_v4_integrated_visibility_mainline_v1_20260821/formal40_s02_ablation_without_contrastive_separation_s02_guard030_sep020_mix025_seed20260802_e40/best_safe.pt`，导出选中 epoch 36，calibration 阈值为 `0.6800000071525574`。
+- 当前 HKUST 前端只允许加载 `pvs_mainline_v4`，运行 schema 为 `pvs-bounded-relation-prior-instance-calibrated-moment-runtime-v4`。旧方向代理和 AABB depth proxy 只存在于 Git 历史；后续 HZB 对照必须重新实现为独立的简化几何外壳基线。
+- 当前 HKUST 前端 checkpoint 为 `neural_instance_culling/model/out/pvs_v4_integrated_visibility_mainline_v1/paper_full_seed20260802_e40/best_safe.pt`，导出选中 epoch 36，calibration 阈值为 `0.6800000071525574`。
 - 当前默认模型运行时读取 `96` 维几何和 `28` 维融合生存场组成的 `124` 维离线固定实例特征表，不在前端运行 PointNet++、Graph U-Net、分层关系网络、Triplane、dynamic-pool 或任何动态图传播。
 - 当前 HKUST 前端资产路径为 `slm2viewer/assets/neural_instance_culling/pvs_mainline_v4`，生产构建同步到 `slm2viewer/public/assets/neural_instance_culling/pvs_mainline_v4`。其他场景没有匹配 V4 权重时必须使用实例 AABB 视锥模式，不得复用 HKUST 权重或回退旧神经模型。
-- 必须保留 2026-08-11 修正正式矩阵、2026-08-12 Fourier 补充矩阵的 model/benchmark 输出，以及 `neural_instance_culling/benchmark/out/pvs_ray_context_survival_owrb_v1_subpose5_20260811_directchrome` 三角形深度层硬件缓存；后者是新分层关系网络构建 train-only 遮挡关系 CSR 的数据依赖。
-- 当前论文模型唯一训练主线由共享分层遮挡关系先验与逐实例校准生存场、视点区域矩包络频谱查询和综合可见性损失组成。计划、runner、评价和前缀分别为 `docs/experiments/pvs_mainline_training_2026-08-21.md`、`neural_instance_culling/benchmark/run_pvs.py`、`neural_instance_culling/benchmark/reaudit_pvs.py` 与 `pvs_v4_integrated_visibility_mainline_v1`；HKUST 当前前端已使用该主线的冻结 V4 导出。
+- 当前训练依赖的三角形深度层硬件缓存和由其生成的 train-only 遮挡关系 CSR 属于数据资产，必须保留；旧 OWRB runner、模型和报告不再作为源码主线保留。
+- 当前论文模型唯一训练主线由共享分层遮挡关系先验与逐实例校准生存场、视点区域矩包络频谱查询和综合可见性损失组成。计划、runner、评价和前缀分别为 `docs/experiments/pvs_mainline_training_2026-08-21.md`、`neural_instance_culling/benchmark/run_pvs.py`、`neural_instance_culling/benchmark/evaluate_pvs.py` 与 `pvs_v4_integrated_visibility_mainline_v1`；HKUST 当前前端已使用该主线的冻结 V4 导出。
 - 历史字段 `visible_pixels.bin` 当前按 `visible_weights` 处理，不能宣称是真实 pixel coverage。
 - 后退扩大视锥候选上的 no-hash 主线相机输入必须参考 `Neural Visibility of Point Sets` 的视角条件化方式：以“当前相机到实例中心的单位视线方向 / ray direction”及轻量 ray-space 标量查询固定实例特征，不能把 raw camera xyz 或 raw world-space delta xyz 直接作为 visibility MLP 的主要输入。camera hash 只能作为消融或辅助，不得替代这种 view-ray 查询叙事。
 

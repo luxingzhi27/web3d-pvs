@@ -40,7 +40,7 @@ def candidate_digest_for_pose_sequence(dataset: object, pose_indices: Iterable[i
     """Hash the native stored candidate CSR in the supplied row order."""
     poses = np.asarray(list(pose_indices), dtype=np.int64).reshape(-1)
     parts = [
-        np.asarray(dataset.frustum_slice(int(pose)), dtype=np.uint32).reshape(-1)
+        np.asarray(dataset.candidate_slice(int(pose)), dtype=np.uint32).reshape(-1)
         for pose in poses.tolist()
     ]
     offsets = np.zeros((poses.size + 1,), dtype="<i8")
@@ -67,7 +67,7 @@ def audit_native_aabb_candidates(
     """Recompute and verify the stored native AABB candidate CSR.
 
     Some historical dataset metadata describes a candidate file as a union
-    with dense-subpose positives even when the stored ``frustum_ids`` are the
+    with dense-subpose positives even when the stored ``candidate_ids`` are the
     original AABB result.  Formal experiments must establish the candidate
     semantics from the pose and AABB data, not from that description.  This
     audit therefore recomputes the exact ordered result for every requested
@@ -148,7 +148,7 @@ def audit_native_aabb_candidates(
                 aabbs,
                 near=float(near),
             )
-        stored = np.asarray(dataset.frustum_slice(int(pose_index)), dtype=np.uint32)
+        stored = np.asarray(dataset.candidate_slice(int(pose_index)), dtype=np.uint32)
         stored_refs += int(stored.size)
         recomputed_refs += int(expected.size)
         if not np.array_equal(stored, expected):
@@ -165,7 +165,7 @@ def audit_native_aabb_candidates(
                 break
     if mismatch_rows:
         raise ValueError(
-            "formal candidate audit failed: stored frustum_ids do not equal "
+            "formal candidate audit failed: stored candidate_ids do not equal "
             f"native AABB candidates at {len(mismatch_rows)} pose(s); "
             f"first={mismatch_rows[0]}"
         )

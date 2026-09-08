@@ -59,8 +59,8 @@ class TriangleDepthEvidenceTest(unittest.TestCase):
             np.asarray([0, 1], dtype="<u8").tofile(dataset_dir / "visible_offsets.bin")
             np.asarray([1], dtype="<u4").tofile(dataset_dir / "visible_ids.bin")
             np.asarray([1.0], dtype="<f4").tofile(dataset_dir / "visible_weights.bin")
-            np.asarray([0, 3], dtype="<u8").tofile(dataset_dir / "frustum_offsets.bin")
-            np.asarray([0, 1, 2], dtype="<u4").tofile(dataset_dir / "frustum_ids.bin")
+            np.asarray([0, 3], dtype="<u8").tofile(dataset_dir / "candidate_offsets.bin")
+            np.asarray([0, 1, 2], dtype="<u4").tofile(dataset_dir / "candidate_ids.bin")
             (dataset_dir / "dataset_meta.json").write_text(json.dumps({"splitIds": {"train": 0, "validation": 1, "calibration": 2, "test": 3}, "poseStrideBytes": 64}), encoding="utf-8")
             ids = np.zeros((1, 2, 2, 2), dtype="<u4")
             depths = np.ones((1, 2, 2, 2), dtype="<f4")
@@ -142,8 +142,8 @@ class TriangleDepthEvidenceTest(unittest.TestCase):
             np.asarray([0, 1], dtype="<u8").tofile(dataset_dir / "visible_offsets.bin")
             np.asarray([1], dtype="<u4").tofile(dataset_dir / "visible_ids.bin")
             np.asarray([1.0], dtype="<f4").tofile(dataset_dir / "visible_weights.bin")
-            np.asarray([0, 3], dtype="<u8").tofile(dataset_dir / "frustum_offsets.bin")
-            np.asarray([0, 1, 2], dtype="<u4").tofile(dataset_dir / "frustum_ids.bin")
+            np.asarray([0, 3], dtype="<u8").tofile(dataset_dir / "candidate_offsets.bin")
+            np.asarray([0, 1, 2], dtype="<u4").tofile(dataset_dir / "candidate_ids.bin")
             (dataset_dir / "dataset_meta.json").write_text(json.dumps({
                 "splitIds": {"train": 0, "validation": 1, "calibration": 2, "test": 3},
                 "poseStrideBytes": 64,

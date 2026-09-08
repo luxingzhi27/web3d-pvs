@@ -1,30 +1,21 @@
 import {
   AmbientLight,
-  AnimationMixer,
-  AxesHelper,
   Box3,
   Cache,
   DirectionalLight,
   GridHelper,
-  HemisphereLight,
   LinearEncoding,
-  LoaderUtils,
   LoadingManager,
   PMREMGenerator,
   PerspectiveCamera,
   OrthographicCamera,
   Scene,
-  SkeletonHelper,
   Vector3,
   WebGLRenderer,
   sRGBEncoding,
-  MeshStandardMaterial,
   DoubleSide,
   Color,
-  FrontSide,
-  ClampToEdgeWrapping,
   Object3D,
-  Matrix4,
   FileLoader,
   Mesh,
   MeshBasicMaterial,
@@ -54,13 +45,9 @@ import {
   sameRenderSurface,
 } from './RenderSurfacePolicy.js';
 
-//import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
-import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js';
 import { N8AOPostPass  } from 'n8ao';
-import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 
 import { EffectComposer, RenderPass, EffectPass, SMAAEffect, SMAAPreset } from "postprocessing";
-import { Camera } from 'three';
 
 import { HDRJPGLoader } from '@monogrid/gainmap-js'
 
@@ -68,7 +55,6 @@ const MANAGER = new LoadingManager();
 const DRACO_LOADER = new DRACOLoader( MANAGER ).setDecoderPath( './assets/three/draco/gltf/' );
 const KTX2_LOADER = new KTX2Loader( MANAGER ).setTranscoderPath( './assets/three/basis/' );
 
-import { Loader3DTiles } from 'three-loader-3dtiles';
 
 const MAP_NAMES = [
   'map',
@@ -162,8 +148,6 @@ export class Viewer
     this.resizeDebounceMs = 150;
     this.resizeTimer = null;
 
-    this.materials = [];
-
     this.prevTime = 0;
 
     this.stats = new Stats();
@@ -177,8 +161,6 @@ export class Viewer
     const fov = FRONTEND_RENDER_FOV_Y_DEG;
     this.activeCamera = new PerspectiveCamera(fov, el.clientWidth / el.clientHeight, this.state.nearPlane, this.state.farPlane);
     this.scene.add(this.activeCamera);
-
-    this.debugLoadingMode = false;
 
     this.renderer = window.renderer = new WebGLRenderer();//{antialias: (this.DebugMode ? false: true)});
     this.renderer.physicallyCorrectLights = true;
@@ -213,8 +195,6 @@ export class Viewer
     this.el.appendChild(this.renderer.domElement);
     startupLog('viewer:canvas-attached');
 
-    this.cameraCtrl = null;
-    this.cameraFolder = null;
     this.showGUI = true;
 
     if (this.paramJson['showGUI'])
@@ -244,8 +224,6 @@ export class Viewer
     window.addEventListener('resize', this.scheduleResize, false);
 
     window.addEventListener('keydown', this.keydown.bind(this), false);
-    window.addEventListener('keyup', this.keyup.bind(this), false);
-
     this.slm2Loader = new SLM2Loader();
     this.keyboardMgr = new keyboardMgr(this);
     this.touchMoveController = new TouchMoveController(this);
@@ -366,50 +344,6 @@ export class Viewer
     }
 
     startupLog('viewer:constructor:end');
-    //this.setup3DTiles();
-  }
-
-  setup3DTiles()
-  {
-    var scope = this;
-    scope.tilesRuntime = null;
-
-    new Promise( ( resolve, reject ) => {
-      Loader3DTiles.load(
-        {
-        url: 'https://tile.googleapis.com/v1/3dtiles/root.json',
-        viewport: {
-          width: window.innerWidth,
-          height: window.innerHeight,
-          devicePixelRatio: window.devicePixelRatio
-        },
-        options: 
-        {
-          googleApiKey: 'AIzaSyBUVr4yky9VLM-M4FJgD5xQvvDjux2WZvU',
-          dracoDecoderPath: 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/libs/draco',
-          basisTranscoderPath: 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/libs/basis',
-          maximumScreenSpaceError: 48
-        }
-      }
-    ).then(( result ) => {
-      
-      if (scope.DebugMode) console.log(result);
-
-      const {model, runtime} = result
-      scope.tilesRuntime = runtime
-      scope.scene.add(model);
-
-      // To HKUST(GZ)
-      scope.tilesRuntime.orientToGeocoord({
-        lat: Number(22.8912), 
-        long: Number(113.4772), 
-        height: Number(100)
-      });
-
-      scope.activeCamera.translateY(1000);
-      scope.controls.update();
-    });
-    });
   }
 
   keydown(keyEvent) 
@@ -436,11 +370,6 @@ export class Viewer
         '\"cameraPostion\": [' + this.activeCamera.position.x.toFixed(2) + ',' + this.activeCamera.position.y.toFixed(2) + ',' + this.activeCamera.position.z.toFixed(2) + '],\n' + 
         '\"cameraTarget\": [' + this.controls.target.x.toFixed(2) + ',' + this.controls.target.y.toFixed(2) + ',' + this.controls.target.z.toFixed(2) + '],');
     }
-  }
-
-  keyup(keyEvent) 
-  {
-
   }
 
   requestRender(reason = 'viewer')
@@ -484,7 +413,6 @@ export class Viewer
       || this.keyboardMgr?.hasActiveInput()
       || this.touchMoveController?.hasActiveInput()
       || this.trajectoryCollector?.isRecording
-      || this.tilesRuntime
       || (this.gui && !this.gui.closed)
     );
   }
@@ -510,11 +438,6 @@ export class Viewer
     if (cameraChanged && this.slm2Loader)
     {
       this.slm2Loader.notifyCameraChanged();
-    }
-
-    if (this.tilesRuntime)
-    {
-      this.tilesRuntime.update(dt, this.activeCamera);
     }
 
     if (this.trajectoryCollector)
@@ -2472,35 +2395,14 @@ export class Viewer
       node.geometry.dispose();
     } );
 
-    // dispose textures
-    traverseMaterials( this.content, (material) => 
-    {
-      MAP_NAMES.forEach( (map) => {
-        if (material[ map ]) material[ map ].dispose();
+    this.content.traverse((node) => {
+      if (!node.isMesh || !node.material) return;
+      const materials = Array.isArray(node.material) ? node.material : [node.material];
+      materials.forEach((material) => {
+        MAP_NAMES.forEach((map) => {
+          if (material[map]) material[map].dispose();
+        });
       });
     });
   }
 };
-
-function traverseMaterials (object, callback) {
-  // object.traverse((node) => {
-  //   if (!node.isMesh) return;
-  //   const materials = Array.isArray(node.material)
-  //     ? node.material
-  //     : [node.material];
-  //   materials.forEach(callback);
-  // });
-}
-
-function getGometrySize (obj) {
-  let size = 0;
-  obj.traverse((node) => {
-    if (node.isMesh) {
-      const geometry = node.geometry;
-      if (geometry) {
-        size += BufferGeometryUtils.estimateBytesUsed(geometry); //加上几何体大小
-      }
-    }
-  });
-  return size;
-}

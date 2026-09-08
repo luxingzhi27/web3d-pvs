@@ -16,7 +16,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from neural_instance_culling.benchmark.run_pvs import (
-    CORE_CONFIG,
+    MAINLINE_CONFIG,
     FORMAL_BOOTSTRAP_REPLICATES,
     FORMAL_EPOCHS,
     FORMAL_SEEDS,
@@ -73,7 +73,7 @@ def build_capacity_train_command(
     command = build_train_command(
         data_root,
         member,
-        CORE_CONFIG,
+        MAINLINE_CONFIG,
         "full",
         seed=seed,
         epochs=FORMAL_EPOCHS,
@@ -84,8 +84,6 @@ def build_capacity_train_command(
     )
     command[command.index("--experiment-name") + 1] = f"{EXPERIMENT}_{member.name}"
     command[command.index("--variant") + 1] = "survival_rank_capacity"
-    if _argument(command, "--integrated-contrastive-mix") != "0.0":
-        raise RuntimeError("capacity experiment must use the no-contrastive Full objective")
     return command
 
 
@@ -101,7 +99,6 @@ def preflight(data_root: Path) -> dict[str, Any]:
         "epochs": FORMAL_EPOCHS,
         "stepsPerEpoch": FORMAL_STEPS_PER_EPOCH,
         "fromScratch": True,
-        "contrastiveMix": 0.0,
         "thresholdSplit": "calibration",
         "selectionSplit": "validation",
         "testRead": False,
@@ -131,7 +128,7 @@ def _member_complete(member: Path, *, rank: int, seed: int, smoke: bool) -> bool
             and int(arguments.get("seed", -1)) == int(seed)
             and int(arguments.get("epochs", -1)) == expected_epochs
             and int(arguments.get("steps_per_epoch", -1)) == expected_steps
-            and float(arguments.get("integrated_contrastive_mix", -1.0)) == 0.0
+            and arguments.get("loss_variant") == "pose_balanced_rvl_contrastive"
             and arguments.get("relation_source") == "bounded_hierarchical"
             and arguments.get("spectral_mode") == "moment_envelope"
             and arguments.get("instance_calibration_mode") == "residual"
@@ -338,7 +335,6 @@ def summarize(model_root: Path, benchmark_root: Path, ranks: Sequence[int]) -> d
         "seeds": list(FORMAL_SEEDS),
         "thresholdSource": "each checkpoint's calibration split",
         "selectionSplit": "validation",
-        "contrastiveMix": 0.0,
         "rows": rows,
         "byRank": by_rank,
         "testRead": False,

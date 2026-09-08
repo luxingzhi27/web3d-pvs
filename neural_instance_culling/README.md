@@ -1,6 +1,6 @@
 # Neural Instance Culling
 
-本目录包含实例级可见性的数据采样、训练、评价、导出和场景实例化工具。当前论文模型与部署模型分开管理：论文模型已经完成三种子正式 validation，但尚未替换前端默认资产。
+本目录包含实例级可见性的数据采样、训练、评价、导出和场景实例化工具。论文模型与 HKUST 前端均使用当前 V4 主线；没有匹配 V4 资产的场景明确使用实例 AABB 视锥模式。
 
 ## 目录
 
@@ -20,10 +20,10 @@ tools/        GLB/IFC 场景实例化工具
 model/pvs_model.py
 model/train_pvs.py
 model/export_pvs.py
+model/prepare_fixed_geometry_features.py
 benchmark/run_pvs.py
 benchmark/evaluate_pvs.py
-benchmark/summarize_pvs.py
-benchmark/reaudit_pvs.py
+benchmark/summarize_core_ablation.py
 ```
 
 训练前预检：
@@ -34,7 +34,7 @@ conda run -n slm_pvs python \
   preflight --data-root /mnt/sda/rhyang/slm
 ```
 
-runner 固定主 split、关系证据、几何表、三种子和五个正式变体，不读取 test。具体架构、训练配置和结果见 [`../docs/current/pvs_mainline_2026-08-23.md`](../docs/current/pvs_mainline_2026-08-23.md)。
+runner 固定主 split、关系证据、几何表、三种子、完整模型和核心消融，不在训练或阈值选择阶段读取 test。具体架构、训练配置和结果见 [`../docs/current/pvs_mainline_2026-08-23.md`](../docs/current/pvs_mainline_2026-08-23.md)。
 
 ## 统一评价
 
@@ -45,7 +45,8 @@ runner 固定主 split、关系证据、几何表、三种子和五个正式变�
 ```bash
 conda run -n slm_pvs python \
   neural_instance_culling/benchmark/evaluate_unified_pvs_metrics.py \
-  --models baseline_aabb_hzb,<model-name> \
+  --models baseline_keep_all,baseline_aabb_ray \
+  --split validation \
   --dataset-dir <pose-csr> \
   --runtime-meta <scene>/assets/runtimeVisibilityMeta.json \
   --output-dir neural_instance_culling/benchmark/out/<evaluation> \
@@ -53,15 +54,18 @@ conda run -n slm_pvs python \
 ```
 
 指标语义见 [`../docs/evaluation/unified_pvs_metrics_evaluation.md`](../docs/evaluation/unified_pvs_metrics_evaluation.md)。
+正式 test 评价还必须提供冻结阈值文件，并遍历完整 test split；规则见 [`../docs/evaluation/test_split_benchmark_protocol.md`](../docs/evaluation/test_split_benchmark_protocol.md)。
 
-## 当前部署基线
+## 当前部署
 
 | 场景 | 实例数 | GLB 数 | 前端模型 |
 |---|---:|---:|---|
-| `hkust-v3` | 18,831 | 3,273 | `pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_best` |
-| `ifcbench_fantasy_metropolis_instanced_v2` | 41,298 | 3,669 | `pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40_best` |
+| `hkust-v3` | 18,831 | 3,273 | `pvs_mainline_v4` |
+| `ifcbench_fantasy_metropolis_instanced_v2` | 41,298 | 3,669 | 显式实例 AABB 视锥模式 |
 
-部署模型仍由 `model/train_directional_occlusion_proxy_encoder.py` 和 `model/export_directional_occlusion_proxy_frontend.py` 维护。不得因论文模型代码整理而删除其 checkpoint、固定特征或前端资产。
+V4 资产由 `model/export_pvs.py` 导出。HKUST 当前阈值和运行 schema 见 [`../docs/current/current_instance_pvs_versions.md`](../docs/current/current_instance_pvs_versions.md)；不得向没有匹配实例表的场景复用 HKUST 权重。
+
+前端运行和部署步骤见 [`../docs/frontend/pvs_v4_runtime_and_deployment.md`](../docs/frontend/pvs_v4_runtime_and_deployment.md)。
 
 ## 数据与 GPU
 

@@ -84,28 +84,7 @@ MAX_NEURAL_ASSET_BYTES = 7 * 1024 * 1024
 MAX_FP16_FUSION_ABS_ERROR = 0.02
 DEFAULT_VIEWCELL_SHAPE = "horizontal_disk"
 V4_VARIANT_CONTRACTS: dict[str, tuple[str, str]] = {
-    "full": ("safety_reserve", "residual"),
-    "without_bounded_relation": ("safety_reserve", "residual"),
-    "without_viewcell_moment_envelope": ("safety_reserve", "residual"),
-    "without_safety_reserve_utility": ("normalized_rvl", "residual"),
-    "without_instance_calibration_residual": ("safety_reserve", "disabled"),
     "full_integrated_visibility_mainline": (
-        "pose_balanced_rvl_contrastive",
-        "residual",
-    ),
-    "integrated_without_bounded_relation": (
-        "pose_balanced_rvl_contrastive",
-        "residual",
-    ),
-    "integrated_without_viewcell_moment_envelope": (
-        "pose_balanced_rvl_contrastive",
-        "residual",
-    ),
-    "integrated_without_rvl_recall_guard": (
-        "pose_balanced_rvl_contrastive",
-        "residual",
-    ),
-    "integrated_without_contrastive_separation": (
         "pose_balanced_rvl_contrastive",
         "residual",
     ),
@@ -444,10 +423,11 @@ def _load_runtime_features(
 
     The training directory also contains a last-epoch runtime table.  It is
     intentionally ignored because the selected ``best.pt`` may come from an
-    earlier epoch.  The checkpoint records the geometry table's source,
-    shape, and dtype, while storing its own 28 survival coefficients.  These
-    structural fields are the accepted sources for a formal bundle; file
-    fingerprints are deliberately not part of the export contract.
+    earlier epoch. Every training member stores its fixed geometry table
+    beside its checkpoints. The exporter reads that member-local table, so a
+    moved source dataset cannot invalidate a complete member. The checkpoint
+    still records the table shape and dtype while storing its own 28 survival
+    coefficients.
     """
 
     geometry_meta = _as_mapping(checkpoint.get("geometry"), "checkpoint.geometry")
@@ -456,12 +436,10 @@ def _load_runtime_features(
     if geometry_meta.get("dtype") != "float16":
         raise ValueError("checkpoint.geometry.dtype must be 'float16'")
     geometry_path = _resolve_input_path(
-        geometry_meta.get("path"),
+        checkpoint_path.parent / "instance_geo_features_fp16.bin",
         base_dir=checkpoint_path.parent,
-        name="checkpoint geometry",
+        name="member-local checkpoint geometry",
     )
-    if geometry_path is None:
-        raise ValueError("checkpoint.geometry.path is required")
     geometry = _read_binary(
         geometry_path,
         "<f2",

@@ -20,29 +20,14 @@ from common.threshold_selection import (  # noqa: E402
     select_weighted_precision_workpoint,
     target_weighted_recall_from_payload,
 )
-from directional_occlusion_proxy_encoder_model import DirectionalOcclusionProxyEncoderPVSModel  # noqa: E402
 from pvs_model import (  # noqa: E402
     BoundedRelationSurvivalMomentModel,
     MODEL_SCHEMA as BOUNDED_RELATION_SURVIVAL_MOMENT_SCHEMA,
     OCCLUSION_REPRESENTATION_MODES,
-    VIEWCELL_EXTREME_VISIBILITY_INPUT_DIM,
-    VIEWCELL_EXTREME_VISIBILITY_PROJECTION_DIM,
-    VIEWCELL_REGION_CONDITIONED_VISIBILITY_FUSION_DIM,
-    VIEWCELL_REGION_CONDITIONED_VISIBILITY_HEAD_DIM,
-    VIEWCELL_REGION_CONDITIONED_VISIBILITY_PROJECTION_DIM,
-    VIEWCELL_REGION_CONDITIONED_VISIBILITY_REGION_DIM,
 )
 from pose_csr_dataset import PoseCSRDataset, _project_aabb_features_numpy  # noqa: E402
 from aabb_ray_feature_utils import FEATURE_DIM as AABB_RAY_FEATURE_DIM, build_aabb_ray_features  # noqa: E402
-from utility_ranker import FEATURE_DIM as UTILITY_RANKER_FEATURE_DIM, IndependentUtilityRankerMLP  # noqa: E402
 from train_aabb_ray_baseline import AabbRayMLP  # noqa: E402
-from triangle_hzb import (  # noqa: E402
-    camera_basis as triangle_hzb_camera_basis,
-    load_triangle_hzb_cache,
-    project_aabb_to_camera,
-    query_hzb_levels,
-    unflatten_hzb_levels,
-)
 
 
 DEFAULT_MODEL_SPECS: dict[str, dict[str, str]] = {
@@ -64,40 +49,7 @@ DEFAULT_MODEL_SPECS: dict[str, dict[str, str]] = {
     "baseline_viewcell_bitset_train": {
         "kind": "viewcell_bitset_train",
     },
-    "baseline_aabb_hzb": {
-        "kind": "aabb_hzb",
-        "display_name": "baseline_aabb_depth_proxy",
-        "legacy_name": "baseline_aabb_hzb",
-    },
-    "baseline_triangle_hzb": {
-        "kind": "triangle_hzb",
-        "display_name": "baseline_triangle_hzb",
-    },
-    "pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_best": {
-        "kind": "directional_occlusion_proxy_encoder",
-        "checkpoint": str(ROOT / "model/out/pvs_directional_occlusion_proxy_encoder_rvl_w042_full40/best.pt"),
-        "runtime_features": str(ROOT / "model/out/pvs_directional_occlusion_proxy_encoder_rvl_w042_full40/instance_runtime_features_fp16.bin"),
-        "eval_summary": str(ROOT / "model/out/pvs_directional_occlusion_proxy_encoder_rvl_w042_full40/eval_summary.json"),
-    },
-    "pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best": {
-        "kind": "directional_occlusion_proxy_encoder",
-        "checkpoint": str(ROOT / "model/out/pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66/best.pt"),
-        "runtime_features": str(ROOT / "model/out/pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66/instance_runtime_features_fp16.bin"),
-        "eval_summary": str(ROOT / "model/out/pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66/eval_summary.json"),
-    },
-    "pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40_best": {
-        "kind": "directional_occlusion_proxy_encoder",
-        "checkpoint": str(ROOT / "model/out/pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40/best.pt"),
-        "runtime_features": str(ROOT / "model/out/pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40/instance_runtime_features_fp16.bin"),
-        "eval_summary": str(ROOT / "model/out/pvs_directional_occlusion_proxy_ifcbench_fantasy_metropolis_instanced_v2_k4_full40/eval_summary.json"),
-    },
 }
-
-MODEL_ALIASES: dict[str, str] = {
-    "pvs_directional_occlusion_proxy_encoder_full40_best": "pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_best",
-}
-
-
 @dataclass
 class PredictionResult:
     scores: np.ndarray
@@ -106,7 +58,6 @@ class PredictionResult:
     diagnostics: dict | None = None
     utility_scores: np.ndarray | None = None
     download_scores: np.ndarray | None = None
-    independent_utility_scores: np.ndarray | None = None
 
 
 class BaseModelRunner:
@@ -134,7 +85,7 @@ class BaseModelRunner:
         self.display_name = str(
             (checkpoint or {}).get("displayName")
             or (checkpoint or {}).get("display_name")
-            or ("baseline_aabb_depth_proxy" if kind == "aabb_hzb" else name)
+            or name
         )
         self.model = model
         self.world_aabbs = world_aabbs
@@ -620,75 +571,7 @@ class TrainViewcellBitsetRunner(StaticRuleRunner):
         return PredictionResult(scores=scores, forward_ms=(t1 - t0) * 1000.0, total_ms=(t1 - t0) * 1000.0)
 
 
-class DirectionalOcclusionProxyEncoderRunner(BaseModelRunner):
-    """Current deployed model runner.
-
-    Runtime reads fixed instance features and queries them with ray-space camera
-    features. It does not run PointNet++ or graph propagation during benchmark
-    or in the frontend path.
-    """
-
-    def __init__(self, *args, runtime_features: torch.Tensor, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.runtime_features = runtime_features
-
-    @torch.no_grad()
-    def score_arrays(
-        self,
-        camera_norm: np.ndarray,
-        camera_world: np.ndarray,
-        camera_view: np.ndarray,
-        instance_ids: np.ndarray,
-        mvp: np.ndarray | None = None,
-    ) -> PredictionResult:
-        count = int(instance_ids.size)
-        return self.score_batch({
-            "camera": camera_norm.astype(np.float32, copy=False),
-            "camera_world": camera_world.astype(np.float32, copy=False),
-            "camera_view": camera_view.astype(np.float32, copy=False),
-            "instance": instance_ids.astype(np.int64, copy=False),
-            "pose_offsets": np.asarray([0, count], dtype=np.int64),
-        })
-
-    @torch.no_grad()
-    def score_batch(self, batch: dict[str, np.ndarray]) -> PredictionResult:
-        t0 = time.perf_counter()
-        ids = torch.from_numpy(batch["instance"].astype(np.int64, copy=False)).to(self.device)
-        camera = torch.from_numpy(batch["camera"].astype(np.float32, copy=False)).to(self.device)
-        world = torch.from_numpy(batch["camera_world"].astype(np.float32, copy=False)).to(self.device)
-        view = torch.from_numpy(batch["camera_view"].astype(np.float32, copy=False)).to(self.device)
-        if self.device.type == "cuda":
-            torch.cuda.synchronize()
-        t1 = time.perf_counter()
-        logits, aux = self.model.compute_logits_with_aux(camera, view, world, ids, runtime_features=self.runtime_features)
-        scores = torch.sigmoid(logits).detach().cpu().numpy().reshape(-1)
-        utility_scores = None
-        download_scores = None
-        diagnostics = {}
-        if "utility_logits" in aux:
-            utility_scores = torch.sigmoid(aux["utility_logits"]).detach().cpu().numpy().reshape(-1)
-            diagnostics["avgUtilityScore"] = float(np.mean(utility_scores)) if utility_scores.size else 0.0
-        if "download_logits" in aux:
-            download_scores = aux["download_logits"].detach().cpu().numpy().reshape(-1)
-            diagnostics["avgDownloadScore"] = float(np.mean(download_scores)) if download_scores.size else 0.0
-        if "inhibition" in aux:
-            diagnostics["avgProxyInhibition"] = float(aux["inhibition"].detach().mean().cpu())
-        if "selected_proxy" in aux:
-            diagnostics["avgSelectedProxyAbs"] = float(aux["selected_proxy"].detach().abs().mean().cpu())
-        if self.device.type == "cuda":
-            torch.cuda.synchronize()
-        t2 = time.perf_counter()
-        return PredictionResult(
-            scores=scores,
-            forward_ms=(t2 - t1) * 1000.0,
-            total_ms=(t2 - t0) * 1000.0,
-            diagnostics=diagnostics,
-            utility_scores=utility_scores,
-            download_scores=download_scores,
-        )
-
-
-class BoundedRelationSurvivalMomentV3Runner(BaseModelRunner):
+class PvsV4Runner(BaseModelRunner):
     """Query one checkpoint-owned fixed table at a registered view-cell."""
 
     def __init__(self, *args, runtime_features: torch.Tensor, **kwargs):
@@ -800,310 +683,6 @@ class BoundedRelationSurvivalMomentV3Runner(BaseModelRunner):
         result = self.score_batch(batch)
         selected = ids[result.scores >= float(self.threshold if threshold is None else threshold)]
         return selected.astype(np.uint32, copy=False), result
-
-
-class IndependentUtilityRankerRunner(BaseModelRunner):
-    """Cold-start GLB utility ranker with no visibility-score input."""
-
-    def __init__(self, *args, scene_diagonal: float, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.scene_diagonal = float(scene_diagonal)
-        self.requires_mvp = True
-        self.information_level = "L0_metadata_cold_start"
-        self.decision_mode = "score_only"
-
-    @torch.no_grad()
-    def _score_pose(self, camera_world, camera_view, instance_ids, mvp) -> np.ndarray:
-        features = build_aabb_ray_features(
-            self.world_aabbs,
-            instance_ids,
-            camera_world,
-            camera_view,
-            mvp,
-            self.scene_diagonal,
-        )
-        logits = self.model(torch.from_numpy(features).to(self.device))
-        return torch.sigmoid(logits).detach().cpu().numpy().astype(np.float32, copy=False)
-
-    @torch.no_grad()
-    def score_arrays(self, camera_norm, camera_world, camera_view, instance_ids, mvp=None):
-        del camera_norm
-        if mvp is None:
-            raise RuntimeError("independent utility ranker requires MVP rows")
-        t0 = time.perf_counter()
-        scores = self._score_pose(
-            np.asarray(camera_world)[0],
-            np.asarray(camera_view)[0],
-            np.asarray(instance_ids, dtype=np.int64),
-            np.asarray(mvp)[0] if np.asarray(mvp).ndim == 2 else np.asarray(mvp),
-        )
-        t1 = time.perf_counter()
-        return PredictionResult(
-            scores=scores,
-            forward_ms=(t1 - t0) * 1000.0,
-            total_ms=(t1 - t0) * 1000.0,
-            independent_utility_scores=scores,
-        )
-
-    @torch.no_grad()
-    def score_batch(self, batch):
-        t0 = time.perf_counter()
-        ids_all = np.asarray(batch["instance"], dtype=np.int64).reshape(-1)
-        offsets = np.asarray(batch["pose_offsets"], dtype=np.int64)
-        scores = np.zeros((ids_all.size,), dtype=np.float32)
-        for pose_id in range(offsets.size - 1):
-            start, end = int(offsets[pose_id]), int(offsets[pose_id + 1])
-            if end <= start:
-                continue
-            if "mvp" not in batch:
-                raise RuntimeError("independent utility ranker requires MVP rows")
-            scores[start:end] = self._score_pose(
-                batch["camera_world"][start],
-                batch["camera_view"][start],
-                ids_all[start:end],
-                batch["mvp"][start],
-            )
-        t1 = time.perf_counter()
-        return PredictionResult(
-            scores=scores,
-            forward_ms=(t1 - t0) * 1000.0,
-            total_ms=(t1 - t0) * 1000.0,
-            independent_utility_scores=scores,
-        )
-
-
-class AabbHzbRunner(BaseModelRunner):
-    """AABB depth-proxy baseline kept under a legacy compatibility key.
-
-    It rasterizes projected AABB rectangles into CPU proxy depth grids.  It does
-    not rasterize triangles and therefore is not a standard geometric HZB.
-    """
-
-    def __init__(self, *args, levels: tuple[tuple[int, int], ...] = ((64, 36), (128, 72)), depth_margin: float = 0.01, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.levels = tuple((int(w), int(h)) for w, h in levels)
-        self.depth_margin = float(depth_margin)
-        self.requires_mvp = True
-
-    def _scores_for_pose(self, instance_ids: np.ndarray, mvp: np.ndarray) -> np.ndarray:
-        if instance_ids.size == 0:
-            return np.zeros((0,), dtype=np.float32)
-        rect, area, depth, valid = _project_aabb_features_numpy(self.world_aabbs[instance_ids.astype(np.int64, copy=False)], mvp)
-        log_depth = np.log1p(np.maximum(depth, 1e-3) / 100.0).astype(np.float32, copy=False)
-        scores = np.zeros((instance_ids.size,), dtype=np.float32)
-        order = np.argsort(log_depth)
-        for width, height in self.levels:
-            depth_buffer = np.full((height, width), np.inf, dtype=np.float32)
-            level_scores = np.zeros((instance_ids.size,), dtype=np.float32)
-            for idx in order.tolist():
-                if not bool(valid[idx]) or area[idx] <= 0.0:
-                    continue
-                x0 = int(np.floor(np.clip((rect[idx, 0] + 1.0) * 0.5 * width, 0, width - 1)))
-                y0 = int(np.floor(np.clip((rect[idx, 1] + 1.0) * 0.5 * height, 0, height - 1)))
-                x1 = int(np.floor(np.clip((rect[idx, 2] + 1.0) * 0.5 * width, 0, width - 1)))
-                y1 = int(np.floor(np.clip((rect[idx, 3] + 1.0) * 0.5 * height, 0, height - 1)))
-                if x1 < x0 or y1 < y0:
-                    continue
-                tile = depth_buffer[y0:y1 + 1, x0:x1 + 1]
-                visible_mask = log_depth[idx] <= (tile + self.depth_margin)
-                level_scores[idx] = float(np.mean(visible_mask)) if visible_mask.size else 0.0
-                np.minimum(tile, log_depth[idx], out=tile)
-            scores = np.maximum(scores, level_scores)
-        return scores
-
-    def score_arrays(
-        self,
-        camera_norm: np.ndarray,
-        camera_world: np.ndarray,
-        camera_view: np.ndarray,
-        instance_ids: np.ndarray,
-        mvp: np.ndarray | None = None,
-    ) -> PredictionResult:
-        if mvp is None:
-            raise RuntimeError("AABB depth-proxy runner requires mvp rows in dataset or live raw.")
-        t0 = time.perf_counter()
-        first_mvp = np.asarray(mvp[0] if np.asarray(mvp).ndim == 2 else mvp, dtype=np.float32)
-        scores = self._scores_for_pose(instance_ids.astype(np.uint32, copy=False), first_mvp)
-        t1 = time.perf_counter()
-        return PredictionResult(scores=scores, forward_ms=(t1 - t0) * 1000.0, total_ms=(t1 - t0) * 1000.0)
-
-
-    def score_batch(self, batch: dict[str, np.ndarray]) -> PredictionResult:
-        if "mvp" not in batch:
-            raise RuntimeError("AABB depth-proxy runner requires mvp.bin in CSR dataset.")
-        t0 = time.perf_counter()
-        scores = np.zeros((batch["instance"].shape[0],), dtype=np.float32)
-        offsets = batch["pose_offsets"]
-        for pose_id in range(offsets.size - 1):
-            start = int(offsets[pose_id])
-            end = int(offsets[pose_id + 1])
-            if end <= start:
-                continue
-            scores[start:end] = self._scores_for_pose(
-                batch["instance"][start:end].astype(np.uint32, copy=False),
-                batch["mvp"][start],
-            )
-        t1 = time.perf_counter()
-        return PredictionResult(scores=scores, forward_ms=(t1 - t0) * 1000.0, total_ms=(t1 - t0) * 1000.0)
-
-
-class TriangleHzbRunner(StaticRuleRunner):
-    """Warm-cache HZB baseline built from rasterized scene triangles.
-
-    The cache contains a level-zero depth image rendered from all local GLB
-    triangles and min-pooled mip levels.  Runtime queries still use the
-    candidate AABB, but the occluder depth is geometric rather than an AABB
-    proxy.  This runner is deliberately not presented as a cold-start method:
-    loading the triangle scene and building the HZB are measured separately by
-    the cache-generation pipeline.
-    """
-
-    def __init__(
-        self,
-        *args,
-        cache_path: str | Path,
-        depth_bias: float = 0.003,
-        **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
-        self.cache_path = Path(cache_path).resolve()
-        self.cache_meta, self.cache_values = load_triangle_hzb_cache(self.cache_path)
-        self.requires_mvp = False
-        self.information_level = "L2_warm_triangle_depth"
-        self.resource_assumption = "full_local_glb_triangle_geometry_and_triangle_hzb_cache"
-        self.depth_bias = float(depth_bias)
-        if not np.isfinite(self.depth_bias) or self.depth_bias < 0.0:
-            raise ValueError("triangle HZB depth_bias must be finite and non-negative")
-        self.camera_far = float(self.cache_meta.get("cameraFar", 0.0))
-        if not np.isfinite(self.camera_far) or self.camera_far <= 0.0:
-            raise ValueError("triangle HZB cache must declare a positive cameraFar")
-        self.level_descriptors = list(self.cache_meta.get("levelDescriptors") or [])
-        if not self.level_descriptors:
-            raise ValueError("triangle HZB cache has no levelDescriptors")
-        self.pose_records = {
-            int(row["poseIndex"]): row
-            for row in (self.cache_meta.get("poses") or [])
-            if isinstance(row, dict) and row.get("poseIndex") is not None
-        }
-        if not self.pose_records:
-            raise ValueError("triangle HZB cache has no pose records")
-        self.pose_indices = np.asarray(sorted(self.pose_records), dtype=np.int64)
-        self.pose_world = np.asarray(
-            [self.pose_records[int(index)]["cameraWorld"] for index in self.pose_indices],
-            dtype=np.float32,
-        ).reshape(-1, 3)
-        self.pose_forward = np.asarray(
-            [self.pose_records[int(index)]["cameraForward"] for index in self.pose_indices],
-            dtype=np.float32,
-        ).reshape(-1, 3)
-        self.pose_forward = np.asarray(
-            [triangle_hzb_camera_basis(value)[0] for value in self.pose_forward],
-            dtype=np.float32,
-        )
-        expected_level_count = sum(int(row["count"]) for row in self.level_descriptors)
-        self.level_value_count = int(expected_level_count)
-        for pose_index, row in self.pose_records.items():
-            offset = int(row.get("valueOffset", -1))
-            count = int(row.get("valueCount", -1))
-            if offset < 0 or count != expected_level_count or offset + count > self.cache_values.size:
-                raise ValueError(f"invalid triangle HZB pose range for pose {pose_index}")
-
-    def _levels_for_pose(self, pose_index: int) -> list[np.ndarray]:
-        row = self.pose_records.get(int(pose_index))
-        if row is None:
-            raise KeyError(f"triangle HZB cache has no exact pose {pose_index}")
-        start = int(row["valueOffset"])
-        values = self.cache_values[start:start + self.level_value_count]
-        return unflatten_hzb_levels(values, self.level_descriptors)
-
-    def _nearest_cached_pose(self, camera_world: np.ndarray, camera_forward: np.ndarray) -> int:
-        position_delta = self.pose_world - np.asarray(camera_world, dtype=np.float32).reshape(1, 3)
-        position_term = np.sum(position_delta * position_delta, axis=1)
-        forward = triangle_hzb_camera_basis(camera_forward)[0]
-        direction_term = 1.0 - np.clip(self.pose_forward @ forward, -1.0, 1.0)
-        metric = position_term + direction_term * max(self.camera_far * self.camera_far * 0.01, 1.0)
-        return int(self.pose_indices[int(np.argmin(metric))])
-
-    def _score_pose(
-        self,
-        instance_ids: np.ndarray,
-        camera_world: np.ndarray,
-        camera_view: np.ndarray,
-        pose_index: int,
-    ) -> np.ndarray:
-        ids = self._validate_instance_ids(instance_ids)
-        if ids.size == 0:
-            return np.zeros((0,), dtype=np.float32)
-        view = np.asarray(camera_view, dtype=np.float32).reshape(-1)
-        if view.size < 5:
-            raise ValueError("triangle HZB runner requires camera_view=[forward_x, forward_y, forward_z, tan_x, tan_y]")
-        rects, nearest_depth, _far_depth, valid = project_aabb_to_camera(
-            self.world_aabbs[ids],
-            np.asarray(camera_world, dtype=np.float32),
-            view[:3],
-            float(view[3]),
-            float(view[4]),
-            self.camera_far,
-        )
-        levels = self._levels_for_pose(int(pose_index))
-        scores = np.zeros((ids.size,), dtype=np.float32)
-        for index in np.flatnonzero(valid).tolist():
-            scores[index] = query_hzb_levels(
-                levels,
-                rects[index],
-                float(nearest_depth[index]),
-                self.depth_bias,
-            )
-        return scores
-
-    def score_arrays(
-        self,
-        camera_norm: np.ndarray,
-        camera_world: np.ndarray,
-        camera_view: np.ndarray,
-        instance_ids: np.ndarray,
-        mvp: np.ndarray | None = None,
-    ) -> PredictionResult:
-        del camera_norm, mvp
-        t0 = time.perf_counter()
-        ids = self._validate_instance_ids(instance_ids)
-        worlds = np.asarray(camera_world, dtype=np.float32).reshape(-1, 3)
-        views = np.asarray(camera_view, dtype=np.float32).reshape(-1, 5)
-        if worlds.shape[0] != ids.size or views.shape[0] != ids.size:
-            raise ValueError("triangle HZB runner received misaligned camera and candidate rows")
-        if ids.size == 0:
-            scores = np.zeros((0,), dtype=np.float32)
-        else:
-            pose_index = self._nearest_cached_pose(worlds[0], views[0, :3])
-            scores = self._score_pose(ids, worlds[0], views[0], pose_index)
-        t1 = time.perf_counter()
-        return PredictionResult(scores=scores, forward_ms=(t1 - t0) * 1000.0, total_ms=(t1 - t0) * 1000.0)
-
-    def score_batch(self, batch: dict[str, np.ndarray]) -> PredictionResult:
-        if "pose_indices" not in batch:
-            raise RuntimeError("triangle HZB runner requires exact pose_indices in the PoseCSR batch")
-        t0 = time.perf_counter()
-        ids_all = np.asarray(batch["instance"], dtype=np.int64).reshape(-1)
-        offsets = np.asarray(batch["pose_offsets"], dtype=np.int64)
-        pose_indices = np.asarray(batch["pose_indices"], dtype=np.int64).reshape(-1)
-        if pose_indices.size != offsets.size - 1:
-            raise ValueError("triangle HZB pose_indices do not match pose_offsets")
-        scores = np.zeros((ids_all.size,), dtype=np.float32)
-        for pose_row in range(offsets.size - 1):
-            start = int(offsets[pose_row])
-            end = int(offsets[pose_row + 1])
-            if end <= start:
-                continue
-            scores[start:end] = self._score_pose(
-                ids_all[start:end],
-                np.asarray(batch["camera_world"][start], dtype=np.float32),
-                np.asarray(batch["camera_view"][start], dtype=np.float32),
-                int(pose_indices[pose_row]),
-            )
-        if not np.all(np.isfinite(scores)):
-            raise ValueError("triangle HZB runner returned non-finite scores")
-        t1 = time.perf_counter()
-        return PredictionResult(scores=scores, forward_ms=(t1 - t0) * 1000.0, total_ms=(t1 - t0) * 1000.0)
 
 
 class LearnedAabbRayRunner(BaseModelRunner):
@@ -1220,43 +799,6 @@ def load_threshold(eval_summary: str | Path | None, fallback: float) -> float:
     return float(fallback)
 
 
-def load_aabb_hzb_runner(name: str, runtime_meta_path: str | Path, fallback_threshold: float, device: torch.device) -> AabbHzbRunner:
-    world_aabbs, instance_to_glb, runtime = load_runtime_meta(runtime_meta_path)
-    return AabbHzbRunner(
-        name=name,
-        kind="aabb_hzb",
-        model=None,
-        world_aabbs=world_aabbs,
-        instance_to_glb=instance_to_glb,
-        runtime_meta=runtime,
-        checkpoint={"config": {"numInstances": int(world_aabbs.shape[0])}},
-        threshold=fallback_threshold,
-        device=device,
-    )
-
-
-def load_triangle_hzb_runner(
-    name: str,
-    cache_path: str | Path,
-    runtime_meta_path: str | Path,
-    fallback_threshold: float,
-    device: torch.device,
-) -> TriangleHzbRunner:
-    world_aabbs, instance_to_glb, runtime = load_runtime_meta(runtime_meta_path)
-    return TriangleHzbRunner(
-        name=name,
-        kind="triangle_hzb",
-        model=None,
-        world_aabbs=world_aabbs,
-        instance_to_glb=instance_to_glb,
-        runtime_meta=runtime,
-        checkpoint={"config": {"numInstances": int(world_aabbs.shape[0])}},
-        threshold=fallback_threshold,
-        device=device,
-        cache_path=cache_path,
-    )
-
-
 def load_learned_aabb_ray_runner(
     name: str,
     checkpoint_path: str | Path,
@@ -1265,7 +807,7 @@ def load_learned_aabb_ray_runner(
     fallback_threshold: float,
     device: torch.device,
 ) -> LearnedAabbRayRunner:
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint.get("config") or {}
     if checkpoint.get("schema") != "neuralstreamweb3d-learned-aabb-ray-v1":
         raise ValueError(f"{checkpoint_path} is not a learned AABB-ray v1 checkpoint")
@@ -1313,7 +855,7 @@ def compute_train_only_visibility_frequency(
     visible_counts = np.zeros((int(num_instances),), dtype=np.int64)
     candidate_counts = np.zeros((int(num_instances),), dtype=np.int64)
     for pose_index in train.pose_indices.tolist():
-        candidate_ids = np.unique(dataset.frustum_slice(int(pose_index)).astype(np.int64, copy=False))
+        candidate_ids = np.unique(dataset.candidate_slice(int(pose_index)).astype(np.int64, copy=False))
         visible_ids = np.unique(dataset.visible_slice(int(pose_index))[0].astype(np.int64, copy=False))
         if candidate_ids.size and (int(candidate_ids.min()) < 0 or int(candidate_ids.max()) >= int(num_instances)):
             raise ValueError(f"Train candidate ids are outside the configured instance range at pose {pose_index}.")
@@ -1355,7 +897,7 @@ def build_train_viewcell_bitsets(
     byte_width = (int(num_instances) + 7) // 8
     bitsets = np.zeros((train_indices.size, byte_width), dtype=np.uint8)
     for row, pose_index in enumerate(train_indices.tolist()):
-        candidate_ids = np.unique(dataset.frustum_slice(int(pose_index)).astype(np.int64, copy=False))
+        candidate_ids = np.unique(dataset.candidate_slice(int(pose_index)).astype(np.int64, copy=False))
         visible_ids = np.unique(dataset.visible_slice(int(pose_index))[0].astype(np.int64, copy=False))
         if candidate_ids.size and (int(candidate_ids.min()) < 0 or int(candidate_ids.max()) >= int(num_instances)):
             raise ValueError(f"Train candidate ids are outside the configured instance range at pose {pose_index}.")
@@ -1449,70 +991,6 @@ def load_train_viewcell_bitset_runner(
     )
 
 
-def load_directional_occlusion_proxy_encoder_runner(
-    name: str,
-    checkpoint_path: str | Path,
-    runtime_meta_path: str | Path,
-    runtime_features_path: str | Path,
-    eval_summary: str | Path | None,
-    fallback_threshold: float,
-    device: torch.device,
-) -> DirectionalOcclusionProxyEncoderRunner:
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    config = checkpoint["config"]
-    world_aabbs, instance_to_glb, runtime = load_runtime_meta(runtime_meta_path, config["numInstances"])
-    scene_min, _scene_max, scene_size = scene_min_max(runtime["sceneBounds"])
-    data = np.fromfile(runtime_features_path, dtype=np.float16)
-    expected = int(config["numInstances"]) * int(config["runtimeFeatureDim"])
-    if data.size != expected:
-        raise ValueError(f"{runtime_features_path} has {data.size} fp16 values, expected {expected}")
-    runtime_np = data.reshape(config["numInstances"], config["runtimeFeatureDim"]).astype(np.float32)
-    train_args = checkpoint.get("args", {})
-    model = DirectionalOcclusionProxyEncoderPVSModel(
-        num_instances=config["numInstances"],
-        num_glbs=config["numGlbs"],
-        geo_dim=config["geoDim"],
-        context_dim=config["contextDim"],
-        proxy_dim=config["proxyDim"],
-        direction_bins=config["directionBins"],
-        depth_shells=config["depthShells"],
-        source_k=config.get("sourceK", 8),
-        point_hidden_dim=train_args.get("point_hidden_dim", 160),
-        pointnetpp_centers=train_args.get("pointnetpp_centers", 24),
-        pointnetpp_neighbors=train_args.get("pointnetpp_neighbors", 12),
-        graph_hidden_dim=train_args.get("graph_hidden_dim", 160),
-        graph_message_dim=train_args.get("graph_message_dim", 96),
-        ray_fourier_bands=train_args.get("ray_fourier_bands", 10),
-        ray_scalar_fourier_bands=train_args.get("ray_scalar_fourier_bands", 4),
-        camera_location_dim=config.get("cameraLocationFeatureDim", train_args.get("camera_location_dim", 0)),
-        mlp_hidden=train_args.get("mlp_hidden", 128),
-        interaction_dim=train_args.get("interaction_dim", 64),
-        scene_size_m=config.get("sceneSizeM", scene_size.tolist()),
-        runtime_feature_ablation=str(config.get("runtimeFeatureAblation", "none")),
-        use_explicit_inhibition=bool(config.get("usesExplicitInhibition", True)),
-    ).to(device)
-    model.set_scene_bounds(torch.from_numpy(scene_min).to(device), torch.from_numpy(scene_size).to(device))
-    model.set_instance_world_aabbs(torch.from_numpy(world_aabbs).to(device))
-    model.set_instance_to_glb(torch.from_numpy(instance_to_glb).to(device))
-    model.load_state_dict(checkpoint["model"], strict=True)
-    model.eval()
-    runner = DirectionalOcclusionProxyEncoderRunner(
-        name=name,
-        kind="directional_occlusion_proxy_encoder",
-        model=model,
-        world_aabbs=world_aabbs,
-        instance_to_glb=instance_to_glb,
-        runtime_meta=runtime,
-        checkpoint=checkpoint,
-        threshold=load_threshold(eval_summary, fallback_threshold),
-        device=device,
-        runtime_features=torch.from_numpy(runtime_np).to(device),
-    )
-    runner.runtime_feature_file_bytes = int(Path(runtime_features_path).stat().st_size)
-    runner.checkpoint_file_bytes = int(Path(checkpoint_path).stat().st_size)
-    return runner
-
-
 def _v4_frozen_threshold(checkpoint: dict, calibration_path: str | Path) -> float:
     path = Path(calibration_path)
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -1537,306 +1015,14 @@ def _v4_frozen_threshold(checkpoint: dict, calibration_path: str | Path) -> floa
     return threshold
 
 
-def _v4_optional_head_constructor_values(
-    config: Mapping[str, Any],
-) -> dict[str, Any]:
-    certificate = config.get("cullCertificate")
-    certificate_enabled = isinstance(certificate, Mapping) and bool(
-        certificate.get("enabled", False)
-    )
-    view_residual = config.get("viewResidual")
-    view_residual_enabled = isinstance(view_residual, Mapping) and bool(
-        view_residual.get("enabled", False)
-    )
-    opportunity = config.get("boundaryOpportunity")
-    opportunity_enabled = isinstance(opportunity, Mapping) and bool(
-        opportunity.get("enabled", False)
-    )
-    tail_residual = config.get("boundaryTailResidual")
-    tail_residual_enabled = isinstance(tail_residual, Mapping) and bool(
-        tail_residual.get("enabled", False)
-    )
-    viewcell_extreme_visibility = config.get("viewcellExtremeVisibility")
-    if viewcell_extreme_visibility is not None and not isinstance(
-        viewcell_extreme_visibility, Mapping
-    ):
-        raise ValueError(
-            "v4 viewcell-extreme-visibility configuration is invalid"
-        )
-    viewcell_extreme_visibility_enabled = isinstance(
-        viewcell_extreme_visibility, Mapping
-    ) and bool(viewcell_extreme_visibility.get("enabled", False))
-    viewcell_region_conditioned_visibility = config.get(
-        "viewcellRegionConditionedVisibility"
-    )
-    if viewcell_region_conditioned_visibility is not None and not isinstance(
-        viewcell_region_conditioned_visibility, Mapping
-    ):
-        raise ValueError(
-            "v4 viewcell-region-conditioned-visibility configuration is invalid"
-        )
-    viewcell_region_conditioned_visibility_enabled = isinstance(
-        viewcell_region_conditioned_visibility, Mapping
-    ) and bool(viewcell_region_conditioned_visibility.get("enabled", False))
-    dual_probe_rescue = config.get("dualProbeRescue")
-    if dual_probe_rescue is not None and not isinstance(dual_probe_rescue, Mapping):
-        raise ValueError("v4 dual-probe-rescue configuration is invalid")
-    dual_probe_rescue_enabled = isinstance(dual_probe_rescue, Mapping) and bool(
-        dual_probe_rescue.get("enabled", False)
-    )
-    values: dict[str, Any] = {
-        "cull_certificate_max_suppression": (
-            float(certificate.get("maximumSuppressionLogit"))
-            if certificate_enabled
-            else 0.0
-        ),
-        "cull_certificate_initial_suppression": (
-            float(certificate.get("initialSuppressionLogit", 0.05))
-            if certificate_enabled
-            else 0.05
-        ),
-        "cull_certificate_hidden_dim": (
-            int(certificate.get("hiddenDim", 0)) if certificate_enabled else 0
-        ),
-        "cull_certificate_input_mode": (
-            str(certificate.get("inputMode", "hidden"))
-            if certificate_enabled
-            else "hidden"
-        ),
-        "view_residual_max_abs": (
-            float(view_residual.get("maximumAbsoluteResidual"))
-            if view_residual_enabled
-            else 0.0
-        ),
-        "view_residual_hidden_dim": (
-            int(view_residual.get("hiddenDim", 16))
-            if view_residual_enabled
-            else 16
-        ),
-        "boundary_opportunity_hidden_dim": (
-            int(opportunity.get("hiddenDim", 0)) if opportunity_enabled else 0
-        ),
-        "boundary_opportunity_projection_dim": (
-            int(opportunity.get("projectionDim", 24))
-            if opportunity_enabled
-            else 24
-        ),
-        "boundary_opportunity_initial_logit": (
-            float(opportunity.get("initialLogit", -6.0))
-            if opportunity_enabled
-            else -6.0
-        ),
-        "boundary_opportunity_max_logit_uplift": (
-            float(opportunity.get("maximumLogitUplift", 6.0))
-            if opportunity_enabled
-            else 6.0
-        ),
-        "boundary_tail_residual_hidden_dim": (
-            int(tail_residual.get("hiddenDim", 0))
-            if tail_residual_enabled
-            else 0
-        ),
-        "boundary_tail_residual_projection_dim": (
-            int(tail_residual.get("projectionDim", 24))
-            if tail_residual_enabled
-            else 24
-        ),
-        "boundary_tail_residual_max_abs": (
-            float(tail_residual.get("maximumAbsoluteResidual", 1.0))
-            if tail_residual_enabled
-            else 1.0
-        ),
-        "boundary_tail_residual_centering": (
-            str(tail_residual.get("centering", "pose_mean"))
-            if tail_residual_enabled
-            else "pose_mean"
-        ),
-        "boundary_tail_residual_shortcut": (
-            str(tail_residual.get("shortcut", "none"))
-            if tail_residual_enabled
-            else "none"
-        ),
-        "boundary_tail_residual_fusion": (
-            str(tail_residual.get("fusionMode", "product"))
-            if tail_residual_enabled
-            else "product"
-        ),
-        "boundary_tail_residual_output_init_std": (
-            float(tail_residual.get("outputInitializationStd", 0.0))
-            if tail_residual_enabled
-            else 0.0
-        ),
-        "viewcell_extreme_visibility_enabled": viewcell_extreme_visibility_enabled,
-        "viewcell_region_conditioned_visibility_enabled": (
-            viewcell_region_conditioned_visibility_enabled
-        ),
-        "viewcell_region_conditioned_visibility_centering": "none",
-        "dual_probe_rescue": (
-            dict(dual_probe_rescue) if dual_probe_rescue_enabled else None
-        ),
-    }
-    numeric_values = [
-        value
-        for value in values.values()
-        if isinstance(value, (bool, int, float))
-    ]
-    if not all(np.isfinite(float(value)) for value in numeric_values):
-        raise ValueError("v4 optional-head configuration contains non-finite values")
-    if certificate_enabled and (
-        int(values["cull_certificate_hidden_dim"]) <= 0
-        or float(values["cull_certificate_max_suppression"]) <= 0.0
-    ):
-        raise ValueError("v4 enabled cull-certificate configuration is invalid")
-    if view_residual_enabled and (
-        int(values["view_residual_hidden_dim"]) <= 0
-        or float(values["view_residual_max_abs"]) <= 0.0
-    ):
-        raise ValueError("v4 enabled view-residual configuration is invalid")
-    if opportunity_enabled and (
-        int(values["boundary_opportunity_hidden_dim"]) <= 0
-        or int(values["boundary_opportunity_projection_dim"]) <= 0
-        or float(values["boundary_opportunity_max_logit_uplift"]) <= 0.0
-    ):
-        raise ValueError("v4 enabled boundary-opportunity configuration is invalid")
-    if tail_residual_enabled and (
-        int(values["boundary_tail_residual_hidden_dim"]) <= 0
-        or int(values["boundary_tail_residual_projection_dim"]) <= 0
-        or float(values["boundary_tail_residual_max_abs"]) <= 0.0
-        or str(values["boundary_tail_residual_centering"])
-        not in {"pose_mean", "none"}
-        or str(values["boundary_tail_residual_shortcut"])
-        not in {"none", "region_linear"}
-        or str(values["boundary_tail_residual_fusion"])
-        not in {"product", "affine_region"}
-        or float(values["boundary_tail_residual_output_init_std"]) < 0.0
-    ):
-        raise ValueError("v4 enabled boundary-tail-residual configuration is invalid")
-    if viewcell_extreme_visibility_enabled:
-        if not isinstance(viewcell_extreme_visibility, Mapping):
-            raise ValueError(
-                "v4 enabled viewcell-extreme-visibility configuration is invalid"
-            )
-        try:
-            input_dim = int(viewcell_extreme_visibility["inputDim"])
-            query_aux_key = str(viewcell_extreme_visibility["queryAuxKey"])
-            query_aux_dim = int(viewcell_extreme_visibility["queryAuxFeatureDim"])
-            projection_dim = int(viewcell_extreme_visibility["projectionDim"])
-            activation = str(viewcell_extreme_visibility["activation"])
-            pose_reduction = str(viewcell_extreme_visibility["poseReduction"])
-            bounded_correction = viewcell_extreme_visibility["boundedCorrection"]
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(
-                "v4 enabled viewcell-extreme-visibility configuration is incomplete"
-            ) from exc
-        if (
-            input_dim != VIEWCELL_EXTREME_VISIBILITY_INPUT_DIM
-            or query_aux_key != "viewcell_extreme_features"
-            or query_aux_dim != input_dim - 10
-            or projection_dim != VIEWCELL_EXTREME_VISIBILITY_PROJECTION_DIM
-            or activation != "SiLU"
-            or pose_reduction != "none"
-            or bounded_correction is not False
-        ):
-            raise ValueError(
-                "v4 enabled viewcell-extreme-visibility configuration has invalid schema"
-            )
-    if viewcell_region_conditioned_visibility_enabled:
-        if not isinstance(viewcell_region_conditioned_visibility, Mapping):
-            raise ValueError(
-                "v4 enabled viewcell-region-conditioned-visibility configuration is invalid"
-            )
-        try:
-            region_input_dim = int(
-                viewcell_region_conditioned_visibility["regionInputDim"]
-            )
-            query_aux_key = str(
-                viewcell_region_conditioned_visibility["queryAuxKey"]
-            )
-            query_aux_dim = int(
-                viewcell_region_conditioned_visibility["queryAuxFeatureDim"]
-            )
-            hidden_input_dim = int(
-                viewcell_region_conditioned_visibility["hiddenInputDim"]
-            )
-            projection_dim = int(
-                viewcell_region_conditioned_visibility["projectionDim"]
-            )
-            fusion_dim = int(viewcell_region_conditioned_visibility["fusionDim"])
-            head_hidden_dim = int(
-                viewcell_region_conditioned_visibility["headHiddenDim"]
-            )
-            activation = str(viewcell_region_conditioned_visibility["activation"])
-            centering = str(viewcell_region_conditioned_visibility["centering"])
-            pose_reduction = str(
-                viewcell_region_conditioned_visibility["poseReduction"]
-            )
-            runtime_reduction = str(
-                viewcell_region_conditioned_visibility["runtimeReduction"]
-            )
-            bounded_correction = viewcell_region_conditioned_visibility[
-                "boundedCorrection"
-            ]
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(
-                "v4 enabled viewcell-region-conditioned-visibility configuration is incomplete"
-            ) from exc
-        expected_hidden_dim = int(config.get("hiddenDim", 64))
-        fusion = viewcell_region_conditioned_visibility.get(
-            "fusion",
-            "concat(region_projection, hidden_projection, "
-            "region_projection * hidden_projection)",
-        )
-        output = viewcell_region_conditioned_visibility.get(
-            "output", "unbounded additive main visibility logit"
-        )
-        output_initialization = viewcell_region_conditioned_visibility.get(
-            "outputInitialization", "zero weight and bias"
-        )
-        if (
-            region_input_dim != VIEWCELL_REGION_CONDITIONED_VISIBILITY_REGION_DIM
-            or query_aux_key != "viewcell_extreme_features"
-            or query_aux_dim != 17
-            or hidden_input_dim != expected_hidden_dim
-            or projection_dim
-            != VIEWCELL_REGION_CONDITIONED_VISIBILITY_PROJECTION_DIM
-            or fusion_dim != VIEWCELL_REGION_CONDITIONED_VISIBILITY_FUSION_DIM
-            or head_hidden_dim != VIEWCELL_REGION_CONDITIONED_VISIBILITY_HEAD_DIM
-            or activation != "SiLU"
-            or fusion
-            != "concat(region_projection, hidden_projection, "
-            "region_projection * hidden_projection)"
-            or output != "unbounded additive main visibility logit"
-            or output_initialization != "zero weight and bias"
-            or centering not in {"none", "pose_mean"}
-            or pose_reduction
-            != (
-                "candidate_mean_per_pose"
-                if centering == "pose_mean"
-                else "none"
-            )
-            or runtime_reduction
-            != (
-                "candidate_mean_per_pose"
-                if centering == "pose_mean"
-                else "none"
-            )
-            or bounded_correction is not False
-        ):
-            raise ValueError(
-                "v4 enabled viewcell-region-conditioned-visibility configuration has invalid schema"
-            )
-        values["viewcell_region_conditioned_visibility_centering"] = centering
-    return values
-
-
-def load_bounded_relation_survival_moment_v4_runner(
+def load_pvs_v4_runner(
     name: str,
     checkpoint_path: str | Path,
     runtime_meta_path: str | Path,
     runtime_features_path: str | Path,
     calibration_summary: str | Path,
     device: torch.device,
-) -> BoundedRelationSurvivalMomentV3Runner:
+) -> PvsV4Runner:
     try:
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     except TypeError:
@@ -1867,7 +1053,19 @@ def load_bounded_relation_survival_moment_v4_runner(
     )
     if representation_mode not in OCCLUSION_REPRESENTATION_MODES:
         raise ValueError("v4 checkpoint occlusion representation is invalid")
-    runtime_feature_dim = 96 if representation_mode == "none" else 124
+    survival_shape = config.get("survivalCoefficientShape")
+    survival_rank = (
+        int(survival_shape[0])
+        if representation_mode == "survival"
+        and isinstance(survival_shape, list)
+        and len(survival_shape) == 2
+        else int((representation_config or {}).get("directionRank", 4))
+        if isinstance(representation_config, Mapping)
+        else 4
+    )
+    runtime_feature_dim = (
+        96 if representation_mode == "none" else 96 + survival_rank * 7
+    )
     if int(config.get("runtimeFeatureDim", -1)) != runtime_feature_dim:
         raise ValueError("v4 checkpoint runtime feature dimension is invalid")
     world_aabbs, instance_to_glb, runtime = load_runtime_meta(
@@ -1994,12 +1192,12 @@ def load_bounded_relation_survival_moment_v4_runner(
     ).astype(np.float32)
     depth = config.get("depthNormalization") or {}
     instance_calibration = config.get("instanceCalibration") or {}
-    optional_heads = _v4_optional_head_constructor_values(config)
     model = BoundedRelationSurvivalMomentModel(
         num_instances=int(config["numInstances"]),
         num_glbs=int(config["numGlbs"]),
         relation_hidden_dim=int(config["relationHiddenDim"]),
         hidden_dim=int(config["hiddenDim"]),
+        survival_rank=survival_rank,
         relation_source=str(config["relationSource"]),
         occlusion_representation=representation_mode,
         spectral_mode=str(config["spectralMode"]),
@@ -2010,13 +1208,12 @@ def load_bounded_relation_survival_moment_v4_runner(
         instance_calibration_mode=str(instance_calibration["mode"]),
         instance_calibration_max_abs=float(instance_calibration["maximumAbsoluteResidual"]),
         sparse_instance_penalty=float(instance_calibration["sparseInstancePenalty"]),
-        **optional_heads,
     ).to(device)
     model.set_instance_world_aabbs(torch.from_numpy(world_aabbs).to(device))
     model.set_instance_to_glb(torch.from_numpy(instance_to_glb).to(device))
     model.load_state_dict(checkpoint["modelState"], strict=True)
     model.eval()
-    runner = BoundedRelationSurvivalMomentV3Runner(
+    runner = PvsV4Runner(
         name=name,
         kind="bounded_relation_survival_moment_v4",
         model=model,
@@ -2032,37 +1229,6 @@ def load_bounded_relation_survival_moment_v4_runner(
     runner.checkpoint_file_bytes = int(Path(checkpoint_path).stat().st_size)
     runner.runtime_bundle_meta = bundle_meta
     return runner
-
-
-def load_independent_utility_ranker_runner(
-    name: str,
-    checkpoint_path: str | Path,
-    runtime_meta_path: str | Path,
-    fallback_threshold: float,
-    device: torch.device,
-) -> IndependentUtilityRankerRunner:
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    if checkpoint.get("schema") != "neuralstreamweb3d-independent-utility-ranker-v1":
-        raise ValueError(f"{checkpoint_path} is not an independent utility ranker v1 checkpoint")
-    config = checkpoint.get("config") or {}
-    if int(config.get("featureDim", -1)) != UTILITY_RANKER_FEATURE_DIM:
-        raise ValueError(f"{checkpoint_path} has an unexpected independent ranker featureDim")
-    world_aabbs, instance_to_glb, runtime = load_runtime_meta(runtime_meta_path, int(config["numInstances"]))
-    model = IndependentUtilityRankerMLP(UTILITY_RANKER_FEATURE_DIM).to(device)
-    model.load_state_dict(checkpoint["model"], strict=True)
-    model.eval()
-    return IndependentUtilityRankerRunner(
-        name=name,
-        kind="independent_utility_ranker",
-        model=model,
-        world_aabbs=world_aabbs,
-        instance_to_glb=instance_to_glb,
-        runtime_meta=runtime,
-        checkpoint=checkpoint,
-        threshold=float(fallback_threshold),
-        device=device,
-        scene_diagonal=float(config["sceneDiagonal"]),
-    )
 
 
 def load_runner(
@@ -2087,38 +1253,13 @@ def load_runner(
             fallback_threshold,
             device,
         )
-    if kind == "aabb_hzb":
-        return load_aabb_hzb_runner(name, runtime_meta, fallback_threshold, device)
-    if kind == "triangle_hzb":
-        cache_path = spec.get("cache")
-        if not cache_path:
-            raise ValueError("triangle_hzb runner requires an explicit cache path")
-        return load_triangle_hzb_runner(name, cache_path, runtime_meta, fallback_threshold, device)
-    if kind == "directional_occlusion_proxy_encoder":
-        return load_directional_occlusion_proxy_encoder_runner(
-            name,
-            spec["checkpoint"],
-            runtime_meta,
-            spec["runtime_features"],
-            spec.get("eval_summary"),
-            fallback_threshold,
-            device,
-        )
     if kind == "bounded_relation_survival_moment_v4":
-        return load_bounded_relation_survival_moment_v4_runner(
+        return load_pvs_v4_runner(
             name,
             spec["checkpoint"],
             runtime_meta,
             spec["runtime_features"],
             spec["eval_summary"],
-            device,
-        )
-    if kind == "independent_utility_ranker":
-        return load_independent_utility_ranker_runner(
-            name,
-            spec["checkpoint"],
-            runtime_meta,
-            fallback_threshold,
             device,
         )
     raise ValueError(f"Unsupported retained model kind: {kind}")
@@ -2130,9 +1271,7 @@ def selected_default_specs(names: str) -> dict[str, dict[str, str]]:
         name = raw.strip()
         if not name:
             continue
-        canonical_name = MODEL_ALIASES.get(name, name)
-        if canonical_name not in DEFAULT_MODEL_SPECS:
+        if name not in DEFAULT_MODEL_SPECS:
             raise KeyError(f"Unknown model '{name}'. Available: {', '.join(DEFAULT_MODEL_SPECS)}")
-        spec = DEFAULT_MODEL_SPECS[canonical_name]
-        selected[canonical_name] = spec
+        selected[name] = DEFAULT_MODEL_SPECS[name]
     return selected

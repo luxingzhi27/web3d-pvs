@@ -176,7 +176,7 @@ calibration aggregate weighted recall > 0.99
 calibration aggregate weighted recall 的单侧 95% 置信下界 > 0.99
 ```
 
-当前正式模型选择还要求该冻结阈值在 validation 上满足同样的 weighted recall 点估计和下界。Validation 只能比较 checkpoint 或配置，不能重选阈值；test 只能在模型、阈值、候选协议和资产全部冻结后读取一次。
+Validation 使用同一冻结阈值报告 weighted recall，并用于比较 checkpoint 或配置；它不能重选阈值。Test 只能在模型、阈值、候选协议和资产全部冻结后读取一次。
 
 固定阈值 `0.5`、best-F1 阈值和最高 precision 阈值只作为分布诊断，不是安全主工作点。低阈值必须结合分数分布解释，但不能通过 bias 或 temperature 把阈值移动到中间后宣称模型改善。
 
@@ -364,8 +364,8 @@ Pose-macro 是论文叙述“平均视点”的主口径；aggregate 必须同�
 
 ```text
 neural_instance_culling/benchmark/evaluate_pvs.py
-neural_instance_culling/benchmark/summarize_pvs.py
-neural_instance_culling/benchmark/reaudit_pvs.py
+neural_instance_culling/benchmark/run_pvs.py summarize
+neural_instance_culling/benchmark/summarize_core_ablation.py
 ```
 
 当前 JSON 字段解释：

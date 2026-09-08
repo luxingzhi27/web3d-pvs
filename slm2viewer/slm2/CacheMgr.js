@@ -313,17 +313,6 @@ export class CacheMgr
     return false;
   }
 
-  hideAll()
-  {
-    var scope = this;
-    this.traverseObj(this.objectsPool, function(key, item)
-    {
-      item.isVisible = false;
-      item.weight = 0;
-      scope.applyRenderState(item);
-    });
-  }
-
   refreshVisible(modelList, options = {})
   {
     var desiredByHash = new Map();
@@ -429,11 +418,6 @@ export class CacheMgr
     });
 
     return stats;
-  }
-
-  reset()
-  {
-    this.objectsPool = {};
   }
 
   clearAll()

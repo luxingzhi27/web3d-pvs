@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -54,15 +53,12 @@ def audit_candidate_subset(dataset_dir: Path, meta: dict[str, Any]) -> dict[str,
     visible_ids = np.memmap(dataset_dir / "visible_ids.bin", dtype=np.uint32, mode="r")
     candidate_offsets_path = dataset_dir / "candidate_offsets.bin"
     candidate_ids_path = dataset_dir / "candidate_ids.bin"
-    frustum_offsets_path = dataset_dir / "frustum_offsets.bin"
-    frustum_ids_path = dataset_dir / "frustum_ids.bin"
     result: dict[str, Any] = {
         "poseCount": int(visible_offsets.size - 1),
         "visibleRefCount": int(visible_ids.size),
         "candidateFilesPresent": candidate_offsets_path.exists() and candidate_ids_path.exists(),
         "candidateMissVisible": None,
         "candidateMissPoseCount": None,
-        "candidateAndFrustumSameInode": None,
         "candidateSemantics": meta.get("candidateSemantics"),
         "candidateRawIndependentlyAvailable": False,
         "candidateIncludesForcedVisiblePositives": False,
@@ -98,11 +94,6 @@ def audit_candidate_subset(dataset_dir: Path, meta: dict[str, Any]) -> dict[str,
             missing_poses += 1
     result["candidateMissVisible"] = int(missing_refs)
     result["candidateMissPoseCount"] = int(missing_poses)
-    if frustum_offsets_path.exists() and frustum_ids_path.exists():
-        result["candidateAndFrustumSameInode"] = bool(
-            os.stat(candidate_offsets_path).st_ino == os.stat(frustum_offsets_path).st_ino
-            and os.stat(candidate_ids_path).st_ino == os.stat(frustum_ids_path).st_ino
-        )
     return result
 
 

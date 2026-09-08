@@ -554,7 +554,7 @@ def build_evidence(args: argparse.Namespace) -> dict[str, Any]:
     for entry_index, (cache_row, render_pose_id, pose_index) in enumerate(selected_entries, start=1):
         ids = np.asarray(cache_ids[cache_row], dtype=np.uint32)
         encoded_depths = np.asarray(cache_depths[cache_row], dtype=np.float32)
-        candidate = np.asarray(dataset.frustum_slice(int(pose_index)), dtype=np.uint32)
+        candidate = np.asarray(dataset.candidate_slice(int(pose_index)), dtype=np.uint32)
         candidate_mask = np.zeros((num_instances,), dtype=bool)
         if candidate.size and int(candidate.max()) >= num_instances:
             raise ValueError(f"candidate ID exceeds runtime instance count at pose {pose_index}")

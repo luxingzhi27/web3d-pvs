@@ -26,9 +26,9 @@ http://localhost:3000/?scene=ifcbench_fantasy_metropolis_instanced_v2
 
 ```bash
 npm run build
-npm run package:deploy:direct
-npm run package:deploy:direct -- --scene hkust-v3
-npm run package:deploy:direct -- --scene ifcbench_fantasy_metropolis_instanced_v2
+npm run package:deploy
+npm run package:deploy -- --scene hkust-v3
+npm run package:deploy -- --scene ifcbench_fantasy_metropolis_instanced_v2
 ```
 
 部署包默认写入 `public_deploy/`，前端代码混淆默认开启；场景 GLB 本体使用

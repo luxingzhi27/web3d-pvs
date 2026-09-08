@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Render and validate the component-ID manifest used by the M5 image pipeline.
+ * Render and validate the component-ID manifest used by image evaluation.
  *
  * The browser path binds component IDs and visibility masks to each loaded
  * InstancedMesh.  --validate-only is intentionally dependency and Chrome
@@ -114,13 +114,13 @@ function validateInstanceRenderManifest(manifest) {
     throw new Error('manifest must encode componentGlobalId, not globalGlbId');
   }
   if (Number(manifest.renderFovYDeg) !== RENDER_FOV_Y_DEG) {
-    throw new Error(`M5 render FOV must be exactly ${RENDER_FOV_Y_DEG} degrees`);
+    throw new Error(`Render FOV must be exactly ${RENDER_FOV_Y_DEG} degrees`);
   }
   if (manifest.formalImageEvaluationReady !== false) {
     throw new Error('component browser renderer is not marked formal-ready');
   }
   if (Number(manifest.modelInputFovYDeg) !== MODEL_INPUT_FOV_Y_DEG) {
-    throw new Error(`M5 model-input FOV must be exactly ${MODEL_INPUT_FOV_Y_DEG} degrees`);
+    throw new Error(`Model-input FOV must be exactly ${MODEL_INPUT_FOV_Y_DEG} degrees`);
   }
   const bindings = manifest.instanceBindings;
   if (!bindings || bindings.schema !== INSTANCE_BINDING_SCHEMA) {

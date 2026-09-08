@@ -79,23 +79,13 @@ def _load_json(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _evaluation_path(core_root: Path, variant: str, seed: int) -> Path:
-    member = f"core_ablation_{variant}_final_seed{seed}_e40"
-    return core_root / "members" / member / "validation_evaluation.json"
+def _evaluation_path(root: Path, variant: str, seed: int) -> Path:
+    member = f"paper_{variant}_seed{seed}_e40"
+    return root / "members" / member / "validation_evaluation.json"
 
 
-def _full_reference_path(reference_root: Path, seed: int) -> Path:
-    matches = sorted(
-        reference_root.glob(
-            "formal40_s02_ablation_without_contrastive_separation_"
-            f"*seed{seed}_e40/validation_evaluation.json"
-        )
-    )
-    if len(matches) != 1:
-        raise ValueError(
-            f"expected one no-contrastive full reference for seed {seed}, got {matches}"
-        )
-    return matches[0]
+def _full_reference_path(root: Path, seed: int) -> Path:
+    return _evaluation_path(root, REFERENCE, seed)
 
 
 def _validate_evaluation(
@@ -336,8 +326,7 @@ def _aggregate_row(payload: Mapping[str, Any], source: Path) -> dict[str, Any]:
 
 
 def summarize(
-    core_root: Path,
-    reference_root: Path,
+    root: Path,
     output: Path,
     *,
     replicates: int = BOOTSTRAP_REPLICATES,
@@ -348,13 +337,13 @@ def summarize(
     }
     rows: dict[str, dict[str, Any]] = {name: {} for name in arrays}
     for current_seed in SEEDS:
-        full_path = _full_reference_path(reference_root, current_seed)
+        full_path = _full_reference_path(root, current_seed)
         full_payload = _load_json(full_path)
         full_rows = _validate_evaluation(full_payload, full_path, current_seed)
         arrays[REFERENCE][current_seed] = _row_arrays(full_rows)
         rows[REFERENCE][str(current_seed)] = _aggregate_row(full_payload, full_path)
         for variant in VARIANTS:
-            path = _evaluation_path(core_root, variant, current_seed)
+            path = _evaluation_path(root, variant, current_seed)
             payload = _load_json(path)
             variant_rows = _validate_evaluation(payload, path, current_seed)
             _validate_pair(full_rows, variant_rows, f"seed={current_seed} {variant}")
@@ -374,7 +363,7 @@ def summarize(
         "schema": "pvs-mainline-core-ablation-summary-v2",
         "split": "validation",
         "testRead": False,
-        "reference": "existing three-seed full model with contrastive representation loss disabled",
+        "reference": "three-seed V4 full model",
         "variants": list(VARIANTS),
         "seeds": list(SEEDS),
         "poseCountPerSeed": POSE_COUNT,
@@ -414,12 +403,18 @@ def summarize(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--core-root",
+        "--root",
         type=Path,
-        default=Path("neural_instance_culling/benchmark/out/pvs_mainline_core_ablation"),
+        default=Path("neural_instance_culling/benchmark/out/pvs_v4_integrated_visibility_mainline_v1"),
     )
-    parser.add_argument("--full-reference-root", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path(
+            "neural_instance_culling/benchmark/out/"
+            "pvs_v4_integrated_visibility_mainline_v1/paper_core_ablation_summary.json"
+        ),
+    )
     parser.add_argument("--bootstrap-replicates", type=int, default=BOOTSTRAP_REPLICATES)
     parser.add_argument("--seed", type=int, default=BOOTSTRAP_SEED)
     return parser.parse_args()
@@ -428,8 +423,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     payload = summarize(
-        args.core_root.resolve(),
-        args.full_reference_root.resolve(),
+        args.root.resolve(),
         args.output.resolve(),
         replicates=args.bootstrap_replicates,
         seed=args.seed,

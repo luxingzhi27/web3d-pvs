@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 import numpy as np
 
@@ -8,6 +9,8 @@ from neural_instance_culling.benchmark.summarize_core_ablation import (
     COUNT_FIELDS,
     POSE_COUNT,
     SEEDS,
+    _evaluation_path,
+    _full_reference_path,
     _validate_pair,
     paired_hierarchical_bootstrap,
 )
@@ -40,6 +43,18 @@ def _arrays(*, fp: float, tn: float, pred: float) -> dict[str, np.ndarray]:
 
 
 class CoreAblationSummaryTest(unittest.TestCase):
+    def test_all_members_use_the_canonical_paper_directory(self) -> None:
+        root = Path("/paper")
+        self.assertEqual(
+            _full_reference_path(root, SEEDS[0]),
+            root / "members/paper_full_seed20260801_e40/validation_evaluation.json",
+        )
+        self.assertEqual(
+            _evaluation_path(root, "no_relation", SEEDS[0]),
+            root
+            / "members/paper_no_relation_seed20260801_e40/validation_evaluation.json",
+        )
+
     def test_paired_bootstrap_reports_full_minus_ablation_direction(self) -> None:
         full = {seed: _arrays(fp=2.0, tn=88.0, pred=12.0) for seed in SEEDS}
         ablation = {seed: _arrays(fp=10.0, tn=80.0, pred=20.0) for seed in SEEDS}

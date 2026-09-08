@@ -58,4 +58,4 @@ SwiftShader、llvmpipe、softpipe、swrast 或无法确认后端的结果只能�
 - 预测 GLB 数、预测 GLB 字节和相对完整候选的削减；
 - 浏览器后端、GPU、分辨率、页面复用和运行时间。
 
-当前 V4 主线的 validation 图像指标尚未完成正式回填，应标记为 `not_available`。历史方向代理和 2026-08-11/12 矩阵的图像结果只能作为历史基线，不能改写成当前 V4 Full 的图像结论。
+当前 V4 主线的 validation 图像指标尚未完成正式回填，应标记为 `not_available`；完成硬件 Color-ID 评价后再补充结果。

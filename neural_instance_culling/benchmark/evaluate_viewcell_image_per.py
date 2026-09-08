@@ -79,15 +79,14 @@ class SetMetrics:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate viewcell PVS with component-ID image manifests.")
-    parser.add_argument("--model-name", default="pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_hkust_fov66_best")
+    parser.add_argument("--model-name", default="baseline_keep_all")
     parser.add_argument(
         "--model-spec",
         action="append",
         default=[],
         help=(
-            "Explicit dynamic model spec. Legacy syntax is "
-            "name|checkpoint|runtime_features|calibration_summary; "
-            "new syntax is name|kind|checkpoint|runtime_features|calibration_summary."
+            "Explicit model spec: "
+            "name|kind|checkpoint|runtime_features|calibration_summary."
         ),
     )
     parser.add_argument("--runtime-meta", type=Path, default=Path("hkust-v3/assets/runtimeVisibilityMeta.json"))
@@ -209,15 +208,12 @@ def subpose_selection_self_test() -> None:
 
 def parse_model_spec(value: str) -> tuple[str, dict[str, str]]:
     parts = [part.strip() for part in str(value).split("|")]
-    if len(parts) == 4:
-        name, checkpoint, runtime_features, eval_summary = parts
-        kind = "directional_occlusion_proxy_encoder"
-    elif len(parts) == 5:
+    if len(parts) == 5:
         name, kind, checkpoint, runtime_features, eval_summary = parts
     else:
         raise ValueError(
-            "--model-spec must use name|checkpoint|runtime_features|calibration_summary "
-            "or name|kind|checkpoint|runtime_features|calibration_summary"
+            "--model-spec must use "
+            "name|kind|checkpoint|runtime_features|calibration_summary"
         )
     if any(not part for part in parts):
         raise ValueError("--model-spec contains an empty field")
@@ -1321,7 +1317,7 @@ def main() -> None:
             gt_ids, gt_weights = pose_dataset.visible_slice(row)
             gt_ids = np.asarray(gt_ids, dtype=np.uint32)
             gt_weights = np.asarray(gt_weights, dtype=np.float32)
-            candidate_ids = pose_dataset.frustum_slice(row)
+            candidate_ids = pose_dataset.candidate_slice(row)
             camera_norm = np.asarray(pose_dataset.poses["camera_norm"][row], dtype=np.float32)
             camera_world = np.asarray(pose_dataset.poses["camera_world"][row], dtype=np.float32)
             camera_view = pose_dataset.camera_view(row)
@@ -1515,7 +1511,7 @@ def main() -> None:
             "limitations": [
                 "The browser path uses a per-instance visibility mask rather than matrix compaction; it preserves component semantics but still submits the complete loaded scene.",
                 "No formal image result may be reported from schema-only output or synthetic smoke.",
-                "Separate evaluator invocations do not share a Chrome page; use run_m5_component_image_batch.py to reuse assets across existing validation/calibration manifests.",
+                "Separate evaluator invocations do not share a Chrome page; run one formal manifest per invocation.",
             ],
         }
     else:

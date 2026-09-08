@@ -40,10 +40,9 @@ def paths(data_root: Path) -> dict[str, Path]:
         "dataset": root / "neural_instance_culling/dataset/out/pose_csr_ifcbench_fantasy_metropolis_main_stratified_calibration_fov66_v1",
         "relation": root / "neural_instance_culling/dataset/out/ifcbench_fantasy_metropolis_v4_bounded_relation_csr_v1",
         "runtime_meta": root / "ifcbench_fantasy_metropolis_instanced_v2/assets/runtimeVisibilityMeta.json",
-        "geometry": root / "neural_instance_culling/model/out/pvs_directional_occlusion_proxy_encoder_rvl_strong_v2_full40_metropolis_spatial_fov66_seed20260801_protocolfix_bs1_gpu2/instance_geo_features_fp16.bin",
+        "geometry": root / "neural_instance_culling/dataset/out/fixed_geometry_features_metropolis_v2/instance_geo_features_fp16.bin",
         "glb_index": root / "ifcbench_fantasy_metropolis_instanced_v2/assets/glbIndex.json",
         "glb_root": root / "ifcbench_fantasy_metropolis_instanced_v2/assets",
-        "subpose": root / "neural_instance_culling/dataset/out/ifcbench_fantasy_metropolis_main_subpose_supervision_v1",
     }
 
 
@@ -100,8 +99,6 @@ def preflight(data_root: Path) -> dict[str, Any]:
         "seeds": list(SEEDS),
         "epochs": EPOCHS,
         "stepsPerEpoch": STEPS_PER_EPOCH,
-        "visibilityFusion": "concat",
-        "contrastiveLossEnabled": False,
         "testRead": False,
         "paths": {name: str(path.resolve()) for name, path in registered.items()},
     }
@@ -122,7 +119,6 @@ def train_command(data_root: Path, output: Path, seed: int, smoke: bool) -> list
         "--initial-geo-features", str(p["geometry"]),
         "--glb-index", str(p["glb_index"]),
         "--glb-root", str(p["glb_root"]),
-        "--subpose-sidecar", str(p["subpose"]),
         "--output-dir", str(output),
         "--experiment-name", f"{EXPERIMENT}_seed{seed}",
         "--variant", "full_integrated_visibility_mainline",
@@ -131,9 +127,7 @@ def train_command(data_root: Path, output: Path, seed: int, smoke: bool) -> list
         "--relation-source", "bounded_hierarchical",
         "--spectral-mode", "moment_envelope",
         "--instance-calibration-mode", "residual",
-        "--visibility-fusion-mode", "concat",
         "--loss-variant", "pose_balanced_rvl_contrastive",
-        "--refinement-scope", "all",
         "--epochs", "1" if smoke else str(EPOCHS),
         "--steps-per-epoch", "2" if smoke else str(STEPS_PER_EPOCH),
         "--poses-per-batch", "4",
@@ -160,7 +154,6 @@ def train_command(data_root: Path, output: Path, seed: int, smoke: bool) -> list
         "--integrated-rvl-pose-cvar-fraction", "0.25",
         "--integrated-rvl-pose-cvar-weight", "0.25",
         "--integrated-separation-weight", "0.20",
-        "--integrated-contrastive-mix", "0.0",
         "--integrated-tail-ramp-fraction", "0.15",
         "--frontier-positive-mass-fraction", "0.005",
         "--frontier-positive-count-cap", "64",

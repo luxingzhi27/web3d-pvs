@@ -222,6 +222,7 @@ neural_instance_culling/**/cache/
 neural_instance_culling/**/artifacts/
 
 # Generic generated experiment data. Source files and documentation remain tracked.
+/output/
 **/out/
 **/outputs/
 **/runs/

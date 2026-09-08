@@ -775,7 +775,7 @@ def audit_real_subpose_ray_disk_envelope(
             for instance_id, hit in zip(visible_ids.tolist(), hit_counts.tolist(), strict=True)
         }
 
-        stored_candidates = np.asarray(dataset.frustum_slice(pose_index), dtype=np.int64)
+        stored_candidates = np.asarray(dataset.candidate_slice(pose_index), dtype=np.int64)
         candidate_ids = _sample_candidates(
             stored_candidates,
             visible_ids,

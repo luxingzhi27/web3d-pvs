@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the 66-degree browser manifest for triangle depth peeling.
 
-The existing M5 component-ID manifest supplies the audited component-to-GLB
+The instance Color-ID manifest supplies the audited component-to-GLB
 bindings.  Pose records and the candidate dataset remain the authoritative
 source for the new experiment.
 """

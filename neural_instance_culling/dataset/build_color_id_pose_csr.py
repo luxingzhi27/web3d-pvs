@@ -11,8 +11,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -313,14 +311,6 @@ def main() -> None:
     np.asarray(visible_ids_all, dtype="<u4").tofile(output_dir / "visible_ids.bin")
     np.asarray(visible_weights_all, dtype="<f4").tofile(output_dir / "visible_weights.bin")
     candidate_offsets.tofile(output_dir / "candidate_offsets.bin")
-    candidate_offsets.tofile(output_dir / "frustum_offsets.bin")
-    try:
-        frustum_path = output_dir / "frustum_ids.bin"
-        if frustum_path.exists():
-            frustum_path.unlink()
-        os.link(candidate_path, frustum_path)
-    except OSError:
-        shutil.copyfile(candidate_path, output_dir / "frustum_ids.bin")
 
     category_counts = {
         name: int(np.count_nonzero(poses["category"] == cid))
@@ -366,8 +356,6 @@ def main() -> None:
             "visibleWeights": "visible_weights.bin",
             "candidateOffsets": "candidate_offsets.bin",
             "candidateIds": "candidate_ids.bin",
-            "frustumOffsets": "frustum_offsets.bin",
-            "frustumIds": "frustum_ids.bin",
         },
     }
     (output_dir / "dataset_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")

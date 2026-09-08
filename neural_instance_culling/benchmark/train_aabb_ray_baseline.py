@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Train a small candidate-preserving learned AABB-plus-ray baseline.
 
-This is an M6 comparison model, not the proposed fixed-feature model.  It
+This is a lightweight comparison model, not the proposed fixed-feature model. It
 learns only from stored train candidates and uses no GLB triangles, materials,
 or test visibility data.  The output checkpoint is intentionally small and
 has an explicit schema consumed by ``model_runners.py``.
@@ -78,7 +78,7 @@ def _sample_rows(
     order = rng.permutation(np.asarray(pose_indices, dtype=np.int64))
     for pose_index in order.tolist():
         visible_ids, _weights = dataset.visible_slice(int(pose_index))
-        candidates = dataset.frustum_slice(int(pose_index)).astype(np.int64, copy=False)
+        candidates = dataset.candidate_slice(int(pose_index)).astype(np.int64, copy=False)
         if candidates.size == 0 or visible_ids.size == 0:
             continue
         positives = np.intersect1d(candidates, np.unique(visible_ids.astype(np.int64)), assume_unique=False)
@@ -125,7 +125,7 @@ def evaluate_loss(
     losses: list[float] = []
     for pose_index in np.asarray(pose_indices, dtype=np.int64)[:max_poses].tolist():
         visible_ids, _weights = dataset.visible_slice(int(pose_index))
-        candidates = dataset.frustum_slice(int(pose_index)).astype(np.int64, copy=False)
+        candidates = dataset.candidate_slice(int(pose_index)).astype(np.int64, copy=False)
         if candidates.size == 0:
             continue
         labels = np.isin(candidates, np.unique(visible_ids.astype(np.int64)), assume_unique=False).astype(np.float32)
@@ -208,7 +208,7 @@ def main() -> None:
             "sceneBounds": {"min": scene_min.tolist(), "size": scene_size.tolist()},
             "protocol": {
                 "trainOnly": True,
-                "candidateSemantics": "stored_frustum_ids_strict",
+                "candidateSemantics": "stored_candidate_ids_strict",
                 "geometryAccess": "instance_aabb_only_no_glb_geometry",
                 "validationPoseCount": int(validation.pose_indices.size),
             },

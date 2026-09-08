@@ -56,7 +56,7 @@ def validate_native_candidate_contract(
     candidate_sizes: list[int] = []
     visible_sizes: list[int] = []
     for pose in poses.tolist():
-        candidates = np.asarray(dataset.frustum_slice(int(pose)), dtype=np.int64).reshape(-1)
+        candidates = np.asarray(dataset.candidate_slice(int(pose)), dtype=np.int64).reshape(-1)
         visible = np.unique(np.asarray(dataset.visible_slice(int(pose))[0], dtype=np.int64).reshape(-1))
         if candidates.size != np.unique(candidates).size:
             raise ValueError(f"candidate IDs contain duplicates at pose {pose}")
@@ -138,7 +138,7 @@ def validate_replay_payload(
             raise ValueError(f"replay perPose order disagrees at pose {pose}")
         candidates = _as_ids(row.get("candidateIds"), label=f"pose {pose} candidateIds")
         predicted = _as_ids(row.get("predictedIds"), label=f"pose {pose} predictedIds")
-        expected_candidates = np.asarray(dataset.frustum_slice(pose), dtype=np.int64).reshape(-1)
+        expected_candidates = np.asarray(dataset.candidate_slice(pose), dtype=np.int64).reshape(-1)
         if not np.array_equal(candidates, expected_candidates):
             raise ValueError(f"replay candidate IDs disagree with the native candidate set at pose {pose}")
         if num_instances is not None and predicted.size and int(predicted.max()) >= int(num_instances):

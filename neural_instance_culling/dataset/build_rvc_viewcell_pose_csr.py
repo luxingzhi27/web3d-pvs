@@ -439,11 +439,6 @@ def main() -> None:
     np.asarray(visible_weights_all, dtype="<f4").tofile(output_dir / "visible_weights.bin")
     np.asarray(visible_hits_all, dtype="<u2").tofile(output_dir / "visible_hit_counts.bin")
     candidate_offsets.tofile(output_dir / "candidate_offsets.bin")
-    candidate_offsets.tofile(output_dir / "frustum_offsets.bin")
-    try:
-        os.link(candidate_path, output_dir / "frustum_ids.bin")
-    except OSError:
-        shutil.copyfile(candidate_path, output_dir / "frustum_ids.bin")
     # In formal mode candidate_ids is already the raw AABB result because GT
     # positive union is disabled. Keep an explicit alias so an audit can verify
     # that this claim is backed by a separately named artifact.
@@ -528,8 +523,6 @@ def main() -> None:
             "candidateIds": "candidate_ids.bin",
             "rawCandidateOffsets": "raw_candidate_offsets.bin" if not args.allow_candidate_visible_union else None,
             "rawCandidateIds": "raw_candidate_ids.bin" if not args.allow_candidate_visible_union else None,
-            "frustumOffsets": "frustum_offsets.bin",
-            "frustumIds": "frustum_ids.bin",
         },
     }
     (output_dir / "dataset_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -18,10 +18,6 @@ export class RenderVisibilitySystem {
     this.lastStats = null;
   }
 
-  configure() {
-    return this;
-  }
-
   clear() {
     this.currentIdMode = null;
     this.currentEpoch = 0;

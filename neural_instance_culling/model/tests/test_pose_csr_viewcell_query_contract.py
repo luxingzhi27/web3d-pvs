@@ -18,7 +18,7 @@ class PoseCSRViewCellQueryContractTest(unittest.TestCase):
     def test_capped_pose_set_batches_do_not_repeat_before_exhaustion(self) -> None:
         class DatasetStub:
             visible_counts = np.ones((20,), dtype=np.int64)
-            frustum_counts = np.ones((20,), dtype=np.int64)
+            candidate_counts = np.ones((20,), dtype=np.int64)
 
         split = PoseCSRSplit(
             DatasetStub(),
@@ -40,7 +40,7 @@ class PoseCSRViewCellQueryContractTest(unittest.TestCase):
     def test_capped_pose_set_batches_repeat_only_after_a_full_cycle(self) -> None:
         class DatasetStub:
             visible_counts = np.ones((5,), dtype=np.int64)
-            frustum_counts = np.ones((5,), dtype=np.int64)
+            candidate_counts = np.ones((5,), dtype=np.int64)
 
         split = PoseCSRSplit(
             DatasetStub(),
@@ -63,7 +63,7 @@ class PoseCSRViewCellQueryContractTest(unittest.TestCase):
     def test_capped_pose_set_batches_keep_a_short_last_batch(self) -> None:
         class DatasetStub:
             visible_counts = np.ones((5,), dtype=np.int64)
-            frustum_counts = np.ones((5,), dtype=np.int64)
+            candidate_counts = np.ones((5,), dtype=np.int64)
 
         split = PoseCSRSplit(
             DatasetStub(),
@@ -84,7 +84,7 @@ class PoseCSRViewCellQueryContractTest(unittest.TestCase):
     def test_hard_pose_batches_mix_registered_tail_and_uniform_poses(self) -> None:
         class DatasetStub:
             visible_counts = np.ones((20,), dtype=np.int64)
-            frustum_counts = np.ones((20,), dtype=np.int64)
+            candidate_counts = np.ones((20,), dtype=np.int64)
 
         split = PoseCSRSplit(
             DatasetStub(),
@@ -132,8 +132,8 @@ class PoseCSRViewCellQueryContractTest(unittest.TestCase):
             np.asarray([0, 1], dtype="<u8").tofile(root / "visible_offsets.bin")
             np.asarray([0], dtype="<u4").tofile(root / "visible_ids.bin")
             np.asarray([1.0], dtype="<f4").tofile(root / "visible_weights.bin")
-            np.asarray([0, 1], dtype="<u8").tofile(root / "frustum_offsets.bin")
-            np.asarray([0], dtype="<u4").tofile(root / "frustum_ids.bin")
+            np.asarray([0, 1], dtype="<u8").tofile(root / "candidate_offsets.bin")
+            np.asarray([0], dtype="<u4").tofile(root / "candidate_ids.bin")
             np.asarray([[0.0, 0.0, 0.0]], dtype="<f4").tofile(root / "query_center_world.bin")
             np.asarray([2.0], dtype="<f4").tofile(root / "viewcell_radius_m.bin")
 
@@ -167,8 +167,8 @@ class PoseCSRViewCellQueryContractTest(unittest.TestCase):
             np.asarray([0, 0], dtype="<u8").tofile(root / "visible_offsets.bin")
             np.asarray([], dtype="<u4").tofile(root / "visible_ids.bin")
             np.asarray([], dtype="<f4").tofile(root / "visible_weights.bin")
-            np.asarray([0, 0], dtype="<u8").tofile(root / "frustum_offsets.bin")
-            np.asarray([], dtype="<u4").tofile(root / "frustum_ids.bin")
+            np.asarray([0, 0], dtype="<u8").tofile(root / "candidate_offsets.bin")
+            np.asarray([], dtype="<u4").tofile(root / "candidate_ids.bin")
             dataset = PoseCSRDataset(root, num_instances=1)
             with self.assertRaisesRegex(ValueError, "query_center_world"):
                 dataset.query_center_world(0, required=True)
@@ -197,8 +197,8 @@ class PoseCSRViewCellQueryContractTest(unittest.TestCase):
             np.asarray([0, 1], dtype="<u8").tofile(root / "visible_offsets.bin")
             np.asarray([0], dtype="<u4").tofile(root / "visible_ids.bin")
             np.asarray([1.0], dtype="<f4").tofile(root / "visible_weights.bin")
-            np.asarray([0, 1], dtype="<u8").tofile(root / "frustum_offsets.bin")
-            np.asarray([0], dtype="<u4").tofile(root / "frustum_ids.bin")
+            np.asarray([0, 1], dtype="<u8").tofile(root / "candidate_offsets.bin")
+            np.asarray([0], dtype="<u4").tofile(root / "candidate_ids.bin")
             (sidecar / "sidecar_manifest.json").write_text(
                 json.dumps(
                     {

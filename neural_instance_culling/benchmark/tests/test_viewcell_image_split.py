@@ -66,8 +66,8 @@ def _write_fixture(root: Path, *, canonical_center: bool = False) -> tuple[Path,
     np.asarray([0, 1, 2, 3], dtype="<u8").tofile(pose_csr / "visible_offsets.bin")
     np.arange(count, dtype="<u4").tofile(pose_csr / "visible_ids.bin")
     np.ones((count,), dtype="<f4").tofile(pose_csr / "visible_weights.bin")
-    np.asarray([0, 1, 2, 3], dtype="<u8").tofile(pose_csr / "frustum_offsets.bin")
-    np.arange(count, dtype="<u4").tofile(pose_csr / "frustum_ids.bin")
+    np.asarray([0, 1, 2, 3], dtype="<u8").tofile(pose_csr / "candidate_offsets.bin")
+    np.arange(count, dtype="<u4").tofile(pose_csr / "candidate_ids.bin")
     pose_meta = {
         "poseCount": count,
         "poseStrideBytes": 64,

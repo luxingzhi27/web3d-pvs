@@ -1,19 +1,19 @@
 # SLM2Viewer 部署包
 
-当前状态和场景边界以 `../docs/README.md`、`../docs/current/current_instance_pvs_versions.md` 和 `assets/config.json` 为准。本文只描述当前两场景发布流程。
+当前状态和场景边界以 [`../docs/README.md`](../docs/README.md)、[`../docs/current/current_instance_pvs_versions.md`](../docs/current/current_instance_pvs_versions.md) 和 `assets/config.json` 为准。本文只描述当前两场景发布流程。
 
 完整的 V4 运行、资产和部署边界见
-`../docs/frontend/pvs_v4_runtime_and_deployment.md`；本文保留可直接执行的部署步骤。
+[`../docs/frontend/pvs_v4_runtime_and_deployment.md`](../docs/frontend/pvs_v4_runtime_and_deployment.md)；本文保留可直接执行的部署步骤。
 
 ## 包里有什么
 
 ```
 public_deploy/
 ├── index.html                         # 入口页面
-├── app.a6a4d504.js                    # 混淆后的前端代码
-├── LightweightPVSWorker.*.js          # PVS 推理 Worker(Web Worker)
-├── style.*.css                        # 样式
-├── favicon.df682a99.ico
+├── app.<hash>.js                      # 混淆后的前端代码
+├── LightweightPVSWorker.<hash>.js     # PVS 推理 Worker(Web Worker)
+├── style.<hash>.css                   # 样式
+├── favicon.<hash>.ico
 ├── assets/
 │   ├── config.json                    # 场景配置(控制 ?scene= 切换哪些场景)
 │   ├── neural_instance_culling/
@@ -25,7 +25,9 @@ public_deploy/
 │   │       ├── query_weights_fp16.bin
 │   │       ├── frequency_cycles_fp32.bin
 │   │       └── chi_table_fp32.bin
-│   └── scenes/                        # 场景元数据(不含 GLB 本体)
+│   ├── wasm/
+│   │   └── instance_pvs_v4.wasm        # WASM SIMD 兼容后端
+│   └── scenes/                          # 场景元数据(不含 GLB 本体)
 │       └── <scene>/
 │           ├── sceneWeb.json          # 场景结构(构件树/分组/包围盒)
 │           ├── glbIndex.json          # 构件ID→GLB文件路径映射
@@ -33,7 +35,7 @@ public_deploy/
 │           └── task-*/proxy/proxy.glb     # AABB代理模型(小文件,几个MB)
 ```
 
-`package:deploy:direct` 默认生成目录 `slm2viewer/public_deploy`，不会自动生成 tar 归档；需要上传单文件时再执行 `tar -czf public_deploy.tar.gz -C slm2viewer public_deploy`。
+`package:deploy` 默认生成目录 `slm2viewer/public_deploy`，不会自动生成 tar 归档；需要上传单文件时再执行 `tar -czf public_deploy.tar.gz -C slm2viewer public_deploy`。
 
 离线转换记录 `conversionManifest.json` 保留在源场景和实例化产物中，但不进入前端部署包，
 因为浏览器运行时不会读取它。
@@ -60,7 +62,7 @@ public_deploy/
 
 ```bash
 cd slm2viewer
-npm run package:deploy:direct
+npm run package:deploy
 ```
 
 场景 GLB 本体单独生成：
@@ -73,15 +75,15 @@ npm run package:scene-glb -- --scene ifcbench_fantasy_metropolis_instanced_v2
 也可以只生成一个场景。HKUST 专用包包含 V4 资产；Metropolis 专用包只包含场景元数据并使用 AABB 视锥模式：
 
 ```bash
-npm run package:deploy:direct -- --scene hkust-v3
-npm run package:deploy:direct -- --scene ifcbench_fantasy_metropolis_instanced_v2
+npm run package:deploy -- --scene hkust-v3
+npm run package:deploy -- --scene ifcbench_fantasy_metropolis_instanced_v2
 ```
 
 需要同时生成两个独立包时，可指定不同输出目录：
 
 ```bash
-npm run package:deploy:direct -- --scene hkust-v3 --output-dir public_deploy_hkust
-npm run package:deploy:direct -- --scene ifcbench_fantasy_metropolis_instanced_v2 --output-dir public_deploy_metropolis
+npm run package:deploy -- --scene hkust-v3 --output-dir public_deploy_hkust
+npm run package:deploy -- --scene ifcbench_fantasy_metropolis_instanced_v2 --output-dir public_deploy_metropolis
 ```
 
 `--scene` 的值必须是 `assets/config.json` 中注册的场景名。只有确实导出并校验过 V4 资产的场景才需要同步维护
@@ -93,7 +95,7 @@ npm run package:deploy:direct -- --scene ifcbench_fantasy_metropolis_instanced_v
 ### 1) 上传部署目录和场景 GLB
 
 ```bash
-# public_deploy 本体(每次发布都传); rsync 会移除远端已不再使用的旧文件
+# public_deploy 本体(每次发布都传); rsync 会移除远端未使用的文件
 rsync -av --delete public_deploy/ root@<服务器>:/var/www/slm2viewer/public_deploy/
 
 # 场景 GLB(只在场景几何变动时传); 文件名由脚本按场景名生成

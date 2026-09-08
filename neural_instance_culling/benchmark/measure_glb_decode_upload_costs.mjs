@@ -2,7 +2,7 @@
 /*
  * Measure per-GLB browser fetch, glTF parse and GPU upload time.
  *
- * The output is a cost index for M7/M8 replay. It deliberately records
+ * The output is a GLB decode and upload cost index. It deliberately records
  * missing files and browser failures instead of imputing a cost. The measured
  * decode/upload interval ends only after a real Three.js render has submitted
  * the loaded geometry to the browser graphics backend.

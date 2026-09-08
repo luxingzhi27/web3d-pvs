@@ -1,8 +1,8 @@
 # NeuralStreamWeb3D 当前架构
 
-更新时间：2026-08-25
+更新时间：2026-09-09
 
-当前系统把重型遮挡关系学习放在离线阶段，把浏览器运行路径限制为固定实例表、一次视角查询、实例级显示和 GLB 级下载聚合。HKUST 已接入 V4；没有匹配 V4 权重的场景使用实例 AABB 视锥模式，不保留旧神经模型兼容路径。
+当前系统把重型遮挡关系学习放在离线阶段，浏览器运行路径由固定实例表、一次视角查询、实例级显示和 GLB 级下载聚合组成。HKUST 使用 V4；未配置 V4 资产的场景使用实例 AABB 视锥模式。
 
 ## 端到端结构
 
@@ -34,7 +34,7 @@
 
 - 分层遮挡关系先验与逐实例校准生存场：真实遮挡边用于学习共享关系规律，每个实例再保存校准后的 `4×7` 系数。浏览器只读取融合结果，不运行关系网络。
 - 视点区域矩频谱查询：九维中心视角和 `9×2` 区域轴经 16 组频率生成 64 维区域频谱矩，表达 view-cell 内位置变化对实例可见性的影响。
-- pose 平衡、加权召回保护和尾部分离组成的主线损失：阈值由 calibration 冻结，安全门以 weighted recall 及其置信下界为准。
+- pose 平衡、加权召回保护和困难边界间隔组成的主线损失：阈值由 calibration 冻结，安全门以 weighted recall 及其置信下界为准。
 
 前端固定实例特征为 `96 + 28 = 124` 维 FP16。最终查询头输入为 `130` 维，隐藏层宽度为 `64`。训练端使用的点云、关系边、子视点和校准残差均已在导出时折叠，不进入运行包。
 
@@ -57,7 +57,7 @@ Worker 只构造两个相机并提交一次 WebGPU 查询。GPU 直接遍历实�
 | 模型结构 | `neural_instance_culling/model/pvs_model.py` |
 | 训练 | `neural_instance_culling/model/train_pvs.py` |
 | 导出 | `neural_instance_culling/model/export_pvs.py` |
-| 评价 | `neural_instance_culling/benchmark/evaluate_pvs.py`、`summarize_pvs.py`、`reaudit_pvs.py` |
+| 评价 | `neural_instance_culling/benchmark/evaluate_pvs.py`、`neural_instance_culling/benchmark/run_pvs.py summarize`、`neural_instance_culling/benchmark/summarize_core_ablation.py` |
 | 前端查询 | `slm2viewer/src/InstancePVS.js` |
 | Worker | `slm2viewer/src/LightweightPVSWorker.js` |
 | 主线程接入 | `slm2viewer/src/LightweightPVSDispatcher.js`、`slm2viewer/slm2/SLM2Loader.js` |

@@ -182,7 +182,7 @@ class PoseCSRSplit:
         self.pose_indices = np.unique(selected.astype(np.int64, copy=False))
         self.pose_indices_with_visible = self.pose_indices[dataset.visible_counts[self.pose_indices] > 0]
         self.total_positive_refs = int(dataset.visible_counts[self.pose_indices].sum())
-        self.total_frustum_refs = int(dataset.frustum_counts[self.pose_indices].sum())
+        self.total_candidate_refs = int(dataset.candidate_counts[self.pose_indices].sum())
 
     def pose_batches(
         self,
@@ -318,13 +318,13 @@ class PoseCSRSplit:
             visible_ids, visible_pixels = self.dataset.visible_slice(int(pose_index))
             if visible_ids.size == 0:
                 continue
-            frustum_ids = self.dataset.frustum_slice(int(pose_index))
+            candidate_ids = self.dataset.candidate_slice(int(pose_index))
             camera_norm = self.dataset.poses["camera_norm"][pose_index]
             camera_world_pose = self.dataset.candidate_camera_world(int(pose_index))
             query_center_pose = self.dataset.query_center_world(int(pose_index))
             query_radius = self.dataset.viewcell_radius_m(int(pose_index))
             view = self.dataset.camera_view(int(pose_index))
-            hard_negatives = np.setdiff1d(frustum_ids, visible_ids, assume_unique=True)
+            hard_negatives = np.setdiff1d(candidate_ids, visible_ids, assume_unique=True)
             visible_set = set(int(v) for v in visible_ids.tolist())
             positive_samples = max(1, min(int(positives_per_pose), int(visible_ids.size)))
 
@@ -424,10 +424,10 @@ class PoseCSRSplit:
             viewcell_radius_m = self.dataset.viewcell_radius_m(pose_index)
             forward = np.asarray(self.dataset.poses["camera_forward"][pose_index], dtype=np.float32)
             tan_x, tan_y = np.asarray(self.dataset.poses["camera_view"][pose_index], dtype=np.float32)
-            # v3 CSR 已经把“与前端一致的候选集合”写进 frustum_ids/candidate_ids。
+            # v3 CSR 已经把“与前端一致的候选集合”写进 candidate_ids/candidate_ids。
             # 正式运行只允许使用这份存储候选；旧数据缺失候选时的几何重算只能通过
             # allow_candidate_visible_union 显式开启，避免把候选生成错误隐藏在训练器里。
-            stored_candidates = self.dataset.frustum_slice(pose_index).astype(np.uint32, copy=False)
+            stored_candidates = self.dataset.candidate_slice(pose_index).astype(np.uint32, copy=False)
             candidate_ids = stored_candidates
             if candidate_ids.size == 0 and allow_candidate_visible_union:
                 candidate_ids = frustum_candidate_ids_for_pose(
@@ -550,8 +550,8 @@ class PoseCSRSplit:
     def eval_batches(self, batch_size: int, importance_pixels: float):
         for pose_index in self.pose_indices:
             visible_ids, visible_pixels = self.dataset.visible_slice(int(pose_index))
-            frustum_ids = self.dataset.frustum_slice(int(pose_index))
-            hard_negatives = np.setdiff1d(frustum_ids, visible_ids, assume_unique=True)
+            candidate_ids = self.dataset.candidate_slice(int(pose_index))
+            hard_negatives = np.setdiff1d(candidate_ids, visible_ids, assume_unique=True)
             if hard_negatives.size == 0 and visible_ids.size > 0:
                 rng = np.random.default_rng(0x5EED + int(pose_index))
                 visible_set = set(int(v) for v in visible_ids.tolist())
@@ -606,7 +606,7 @@ class PoseCSRDataset:
     文件组织方式：
     - poses.bin 存每个 pose 的固定相机信息。
     - visible_offsets/ids/weights 存 GT 可见实例和 rvcServer 重要性权重。
-    - frustum_offsets/ids 存当前视锥附近候选实例，用于 hard negative。
+    - candidate_offsets/ids 存当前视锥附近候选实例，用于 hard negative。
 
     注意：旧 CSR 数据集中 `visible_pixels.bin` 实际来自 rvcServer
     `component_weights`，不是严格像素数。这里为了兼容旧脚本会继续提供
@@ -719,14 +719,14 @@ class PoseCSRDataset:
         self.mvp = None
         if mvp_path.exists() and mvp_path.stat().st_size > 0:
             self.mvp = np.memmap(mvp_path, dtype=np.float32, mode="r").reshape(-1, 16)
-        self.frustum_offsets = np.memmap(self.dataset_dir / "frustum_offsets.bin", dtype=np.uint64, mode="r")
-        frustum_path = self.dataset_dir / "frustum_ids.bin"
-        if frustum_path.stat().st_size == 0:
-            self.frustum_ids = np.zeros((0,), dtype=np.uint32)
+        self.candidate_offsets = np.memmap(self.dataset_dir / "candidate_offsets.bin", dtype=np.uint64, mode="r")
+        candidate_path = self.dataset_dir / "candidate_ids.bin"
+        if candidate_path.stat().st_size == 0:
+            self.candidate_ids = np.zeros((0,), dtype=np.uint32)
         else:
-            self.frustum_ids = np.memmap(frustum_path, dtype=np.uint32, mode="r")
+            self.candidate_ids = np.memmap(candidate_path, dtype=np.uint32, mode="r")
         self.visible_counts = np.diff(self.visible_offsets).astype(np.int64, copy=False)
-        self.frustum_counts = np.diff(self.frustum_offsets).astype(np.int64, copy=False)
+        self.candidate_counts = np.diff(self.candidate_offsets).astype(np.int64, copy=False)
         files = self.meta.get("files", {})
         query_center_name = files.get("queryCenterWorld", "query_center_world.bin")
         candidate_camera_name = files.get("candidateCameraWorld", "candidate_camera_world.bin")
@@ -801,10 +801,10 @@ class PoseCSRDataset:
             return 0
         return int(self.subpose_counts[pose_index])
 
-    def frustum_slice(self, pose_index: int) -> np.ndarray:
-        start = int(self.frustum_offsets[pose_index])
-        end = int(self.frustum_offsets[pose_index + 1])
-        return self.frustum_ids[start:end]
+    def candidate_slice(self, pose_index: int) -> np.ndarray:
+        start = int(self.candidate_offsets[pose_index])
+        end = int(self.candidate_offsets[pose_index + 1])
+        return self.candidate_ids[start:end]
 
     def camera_view(self, pose_index: int) -> np.ndarray:
         if "camera_forward" in self.poses.dtype.names and "camera_view" in self.poses.dtype.names:

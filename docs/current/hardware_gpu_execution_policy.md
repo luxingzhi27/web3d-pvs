@@ -1,6 +1,6 @@
 # 正式浏览器采样与评价的硬件 GPU 执行政策
 
-更新时间：2026-08-12
+更新时间：2026-09-09
 
 ## 目的
 
@@ -44,9 +44,8 @@ gpuGate  = required=true, hardware=true
 |---|---|---|
 | 单场景 Color-ID 采样 | `neural_instance_culling/sampler/run_sampler.mjs` | 默认要求硬件 GPU |
 | NeuralPVS view-cell 分片采样 | `neural_instance_culling/sampler/run_scene_viewcell_colorid_sampling.mjs` | wrapper 强制传入 `--require-hardware-gpu` |
-| 实例级 Color-ID 图像评价 | `neural_instance_culling/benchmark/render_local_glb_color_id_browser.mjs` 与 `run_m5_component_image_batch.py` | 默认要求硬件 GPU |
-| 三角形 HZB 浏览器构建 | `neural_instance_culling/benchmark/build_triangle_hzb_cache_browser.mjs` | 默认要求硬件 GPU |
-| 方向深度关系实验的三角形深度层采集 | `neural_instance_culling/benchmark/build_triangle_depth_layer_evidence_browser.mjs` | 默认要求硬件 GPU，并保存 Chrome 日志与 GPU 证据 |
+| 实例级 Color-ID 图像评价 | `neural_instance_culling/benchmark/render_local_glb_color_id_browser.mjs` 与 `evaluate_viewcell_image_per.py` | 默认要求硬件 GPU |
+| 三角形深度层关系证据采集 | `neural_instance_culling/benchmark/build_triangle_depth_layer_evidence_browser.mjs` | 默认要求硬件 GPU，并保存 Chrome 日志与 GPU 证据 |
 
 正式采样的典型命令：
 
@@ -76,12 +75,12 @@ node neural_instance_culling/benchmark/render_local_glb_color_id_browser.mjs \
 `gpu_execution_summary.json`；它会逐分片检查证据，任何分片缺失证据、硬件门失败或出现错误都会使 wrapper
 以失败退出。
 
-因此，正式采样结果不能只依据 JSONL 行数或“浏览器成功输出”判定。若旧采样目录没有这些证据文件，不能事后
+因此，正式采样结果不能只依据 JSONL 行数或“浏览器成功输出”判定。若采样目录没有这些证据文件，不能事后
 推断它使用了硬件 GPU；需要在独立输出目录中按当前入口重新采样，不能覆盖旧结果。
 
 三角形深度层入口同样必须保存 `<output>.gpu_evidence.json`、`<output>.chrome_stdout.log` 和
-`<output>.chrome_stderr.log`，并在 `layer_cache_meta.json` 中写入 `gpuBackend`/`gpuGate`。这些文件由
-`pvs_direction_depth_relation_survival_constrained_v1` 的执行记录统一说明；没有完整旁路证据的深度缓存不能作为正式遮挡监督。
+`<output>.chrome_stderr.log`，并在 `layer_cache_meta.json` 中写入 `gpuBackend`/`gpuGate`。稀疏关系缓存的
+分片、归并和保留规则见[IFCBench 稀疏关系流水线记录](../experiments/ifcbench_sparse_triangle_relation_pipeline_2026-09-02.md)。没有完整旁路证据的深度缓存不能作为正式遮挡监督。
 
 ## 软件路径边界
 
