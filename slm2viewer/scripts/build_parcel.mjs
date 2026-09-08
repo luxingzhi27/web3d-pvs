@@ -16,7 +16,7 @@ WorkerFarm.prototype.shouldStartRemoteWorkers = function shouldStartRemoteWorker
 WorkerFarm.prototype.startMaxWorkers = function startMaxWorkers() {};
 
 const Bundler = require('parcel-bundler');
-const entry = resolve('index.html');
+const entry = [resolve('index.html'), resolve('runtime-benchmark.html')];
 const outDir = resolve('public');
 const buildCacheDir = resolve('.parcel-build-cache');
 const runtimeDecoderFiles = [

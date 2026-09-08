@@ -27,8 +27,9 @@ fn ${name}(input: array<f32, ${inputDim}>) -> array<f32, ${outputDim}> {
 }`;
 }
 
-export function buildPredictionShader() {
+export function buildPredictionShader(options = {}) {
     const offset = (name) => this._weightOffset(name);
+    const candidateOnly = options.candidateOnly === true;
     const layers = [
       linearFunction('relation_hidden', 28, 16, offset('relation_condition_head.0.weight'), offset('relation_condition_head.0.bias'), 'silu'),
       linearFunction('relation_output', 16, 8, offset('relation_condition_head.2.weight'), offset('relation_condition_head.2.bias')),
@@ -42,18 +43,55 @@ export function buildPredictionShader() {
     ].join('\n');
     const layout = this.resultLayout;
     const diagnosticWrites = this.debugLogging ? `
+  let diagnostic_query = make_ray_query(instance_id);
+  let diagnostic_spectral = spectral_features(diagnostic_query);
   atomicStore(&results[${layout.debugCandidateIds}u + candidate_index], instance_id);
   let diagnostic_offset = ${layout.debugRows}u + candidate_index * ${DIAGNOSTIC_OUTPUT_FLOATS}u;
   atomicStore(&results[diagnostic_offset], bitcast<u32>(probability));
   for (var value_index = 0u; value_index < 9u; value_index += 1u) {
-    atomicStore(&results[diagnostic_offset + 1u + value_index], bitcast<u32>(query.center[value_index]));
+    atomicStore(&results[diagnostic_offset + 1u + value_index], bitcast<u32>(diagnostic_query.center[value_index]));
   }
   for (var value_index = 0u; value_index < 18u; value_index += 1u) {
-    atomicStore(&results[diagnostic_offset + 10u + value_index], bitcast<u32>(query.axes[value_index]));
+    atomicStore(&results[diagnostic_offset + 10u + value_index], bitcast<u32>(diagnostic_query.axes[value_index]));
   }
   for (var value_index = 0u; value_index < 64u; value_index += 1u) {
-    atomicStore(&results[diagnostic_offset + 28u + value_index], bitcast<u32>(spectral[value_index]));
+    atomicStore(&results[diagnostic_offset + 28u + value_index], bitcast<u32>(diagnostic_spectral[value_index]));
   }` : '';
+    const storageBindings = candidateOnly ? `
+@group(0) @binding(7) var<storage, read> candidate_ids: array<u32>;
+@group(0) @binding(8) var<storage, read_write> candidate_scores: array<f32>;` : `
+@group(0) @binding(7) var<storage, read_write> results: array<atomic<u32>>;`;
+    const mainShader = candidateOnly ? `
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let candidate_index = global_id.x;
+  let candidate_count = u32(uniforms.depth_count.y);
+  if (candidate_index >= candidate_count) { return; }
+  let instance_id = candidate_ids[candidate_index];
+  candidate_scores[candidate_index] = visibility_probability(instance_id);
+}` : `
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let instance_id = global_id.x;
+  let count = u32(uniforms.depth_count.y);
+  if (instance_id >= count || !intersects_frustum(instance_id, false)) { return; }
+  let candidate_index = atomicAdd(&results[0], 1u);
+  let probability = visibility_probability(instance_id);
+  let global_glb_id = instance_to_glb[instance_id];
+  atomicMax(&results[${layout.glbScores}u + global_glb_id], bitcast<u32>(probability));
+  atomicOr(&results[${layout.glbFlags}u + global_glb_id], 4u);
+  if (probability >= uniforms.query_center_threshold.w) {
+    let visible_index = atomicAdd(&results[1], 1u);
+    atomicStore(&results[${layout.modelVisibleIds}u + visible_index], instance_id);
+    atomicOr(&results[${layout.glbFlags}u + global_glb_id], ${GLB_FLAG_MODEL_VISIBLE}u);
+    if (intersects_frustum(instance_id, true)) {
+      let render_index = atomicAdd(&results[2], 1u);
+      atomicStore(&results[${layout.renderVisibleIds}u + render_index], instance_id);
+      atomicOr(&results[${layout.glbFlags}u + global_glb_id], ${GLB_FLAG_RENDER_VISIBLE}u);
+    }
+  }
+${diagnosticWrites}
+}`;
 
     return `
 struct Uniforms {
@@ -79,7 +117,7 @@ struct RayQuery {
 @group(0) @binding(4) var<storage, read> frequency_cycles: array<f32>;
 @group(0) @binding(5) var<storage, read> chi_table: array<f32>;
 @group(0) @binding(6) var<storage, read> instance_to_glb: array<u32>;
-@group(0) @binding(7) var<storage, read_write> results: array<atomic<u32>>;
+${storageBindings}
 
 fn runtime_value(index: u32) -> f32 {
   let pair = unpack2x16float(runtime_words[index >> 1u]);
@@ -386,12 +424,7 @@ fn survival_semantic(
   return output;
 }
 
-@compute @workgroup_size(${WORKGROUP_SIZE})
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let instance_id = global_id.x;
-  let count = u32(uniforms.depth_count.y);
-  if (instance_id >= count || !intersects_frustum(instance_id, false)) { return; }
-  let candidate_index = atomicAdd(&results[0], 1u);
+fn visibility_probability(instance_id: u32) -> f32 {
   let query = make_ray_query(instance_id);
   let runtime_offset = instance_id * 124u;
   var coefficients: array<f32, 28>;
@@ -452,22 +485,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   trunk_input[129] = normalized_depth;
   let hidden = trunk_hidden1(trunk_hidden0(trunk_input));
   let logit = visibility_output(hidden)[0];
-  let probability = sigmoid(logit);
-  let global_glb_id = instance_to_glb[instance_id];
-  atomicMax(&results[${layout.glbScores}u + global_glb_id], bitcast<u32>(probability));
-  atomicOr(&results[${layout.glbFlags}u + global_glb_id], 4u);
-  if (probability >= uniforms.query_center_threshold.w) {
-    let visible_index = atomicAdd(&results[1], 1u);
-    atomicStore(&results[${layout.modelVisibleIds}u + visible_index], instance_id);
-    atomicOr(&results[${layout.glbFlags}u + global_glb_id], ${GLB_FLAG_MODEL_VISIBLE}u);
-    if (intersects_frustum(instance_id, true)) {
-      let render_index = atomicAdd(&results[2], 1u);
-      atomicStore(&results[${layout.renderVisibleIds}u + render_index], instance_id);
-      atomicOr(&results[${layout.glbFlags}u + global_glb_id], ${GLB_FLAG_RENDER_VISIBLE}u);
-    }
-  }
-${diagnosticWrites}
-}`;
+  return sigmoid(logit);
+}
+
+${mainShader}`;
   }
 
 export function buildGlbCompactionShader() {

@@ -24,7 +24,7 @@
 | [`current/neuralstreamweb3d_dataset_protocol.md`](current/neuralstreamweb3d_dataset_protocol.md) | view-cell、subpose、Color-ID、候选集合、GT 和 Pose CSR 数据语义 |
 | [`experiments/ifcbench_sparse_triangle_relation_pipeline_2026-09-02.md`](experiments/ifcbench_sparse_triangle_relation_pipeline_2026-09-02.md) | IFCBench 三角形深度层的分片稀疏化、关系归并和验证记录 |
 | [`evaluation/unified_pvs_metrics_evaluation.md`](evaluation/unified_pvs_metrics_evaluation.md) | pose-macro/aggregate、weighted recall、分类、剔除、资源和运行指标口径 |
-| [`evaluation/pvs_frontend_inference_latency_protocol_2026-09-09.md`](evaluation/pvs_frontend_inference_latency_protocol_2026-09-09.md) | 桌面和真实移动设备的 PVS 前端推理耗时协议 |
+| [`evaluation/pvs_frontend_inference_latency_protocol_2026-09-09.md`](evaluation/pvs_frontend_inference_latency_protocol_2026-09-09.md) | 桌面和真实移动设备的 WebGPU 候选模型前向耗时协议 |
 | [`evaluation/test_split_benchmark_protocol.md`](evaluation/test_split_benchmark_protocol.md) | train、calibration、validation、test 的职责及冻结 test 规则 |
 | [`evaluation/viewcell_image_per_evaluation.md`](evaluation/viewcell_image_per_evaluation.md) | 真实 `60°` 相机下的 Color-ID 图像漏检与额外像素评价 |
 
@@ -36,6 +36,7 @@
 | [`current/neuralstreamweb3d_architecture_technical.md`](current/neuralstreamweb3d_architecture_technical.md) | 离线编码、运行时查询、实例显示和 GLB 调度架构 |
 | [`current/hardware_gpu_execution_policy.md`](current/hardware_gpu_execution_policy.md) | Chrome NVIDIA Vulkan/ANGLE 采样、WebGL/WebGPU 硬件证据和软件路径边界 |
 | [`frontend/pvs_v4_runtime_and_deployment.md`](frontend/pvs_v4_runtime_and_deployment.md) | Worker WebGPU/WASM、统一资源状态机、前端 parity 和运行验证 |
+| [`frontend/pvs_runtime_benchmark_site.md`](frontend/pvs_runtime_benchmark_site.md) | 桌面/手机自助推理测试页、结果回传服务和部署方法 |
 | [`../slm2viewer/README_DEPLOY.md`](../slm2viewer/README_DEPLOY.md) | 发布包生成、场景 GLB 上传、nginx 配置和远端验证 |
 
 ## 计划与专利

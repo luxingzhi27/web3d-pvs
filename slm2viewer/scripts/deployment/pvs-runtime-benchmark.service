@@ -1,0 +1,24 @@
+[Unit]
+Description=PVS V4 browser runtime benchmark result receiver
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/pvs-runtime-benchmark
+Environment=PVS_BENCHMARK_HOST=127.0.0.1
+Environment=PVS_BENCHMARK_PORT=8321
+Environment=PVS_BENCHMARK_STATIC_ROOT=/var/www/pvs-runtime-benchmark/public
+Environment=PVS_BENCHMARK_OUTPUT_DIR=/var/lib/pvs-runtime-benchmark/results
+ExecStart=/usr/bin/node /opt/pvs-runtime-benchmark/runtime_benchmark_server.mjs
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pvs-runtime-benchmark/results
+
+[Install]
+WantedBy=multi-user.target

@@ -241,6 +241,7 @@ neural_instance_culling/**/artifacts/
 **/screenshots/
 **/captures/
 **/exports/
+slm2viewer/assets/benchmark/
 *.map
 
 # Local runtime manifests and generated reports that can grow without notice.
@@ -276,6 +277,7 @@ slm2viewer/assets/scenes/
 slm2viewer/public/
 slm2viewer/public_deploy/
 slm2viewer/public_deploy*/
+slm2viewer/public_runtime_benchmark/
 
 # Scene manifests and generated frontend runtime payloads
 **/runtimeVisibilityMeta.json

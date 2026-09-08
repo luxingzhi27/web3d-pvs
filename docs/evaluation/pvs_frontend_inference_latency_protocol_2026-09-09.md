@@ -1,213 +1,136 @@
-# PVS V4 前端推理耗时评价协议
+# PVS V4 浏览器模型推理耗时评价协议
 
-## Material Passport
+## 目标与口径
 
-- Origin Skill: experiment-agent
-- Origin Mode: plan
-- Origin Date: 2026-09-09
-- Verification Status: UNVERIFIED
-- Version Label: pvs_frontend_latency_protocol_v1
+本实验测量当前 PVS V4 模型在桌面和真实移动设备上的 WebGPU 前向耗时。论文主指标是：一个 pose 的候选实例 ID 已经确定并上传 GPU 后，V4 网络对这些候选完成可见性分数计算所需的时间。
 
-## 目标
+主指标不包含以下工作：
 
-本实验测量当前 PVS V4 模型在桌面浏览器和真实移动设备上的运行成本，为论文提供可复现的前端耗时数据。主指标是用户从主线程发起一次完整 view-cell 预测，到 Worker 返回最终实例集合和 GLB 队列的耗时。模型初始化、GPU 内核、缓存重过滤和场景显示更新分别报告，不能混成一个数字。
+- 页面、工作负载和模型资产下载；
+- WebGPU adapter/device、权重和固定实例表初始化；
+- 后退 66 度 AABB 候选生成；
+- 候选 ID 上传 GPU；
+- 冻结阈值筛选、真实 60 度视锥过滤；
+- 实例编号压缩、GLB 聚合和结果读回；
+- Worker 消息、GLB 下载、解析、挂载和 Three.js 渲染。
 
-实验只测当前生产模型和当前冻结阈值，不重新选择 checkpoint 或阈值。运行时关闭逐候选诊断，不加载场景 GLB，不运行材质解析和渲染，以免公网下载、Three.js 绘制和模型推理互相污染。完整页面调度成本另列为系统指标。
+因此，该数字只能写成“模型前向耗时”，不能写成完整 PVS 调度耗时或场景帧时间。生产路径的候选生成、筛选、压缩和 Worker 往返可在系统实验中另表报告。
 
-## 测量边界
+## 测量实现
 
-一次完整预测按以下路径计时：
+测试页复用生产 V4 的固定实例特征、模型权重和 WGSL 模型计算函数，不维护第二套网络公式。正式 dispatch 以当前 pose 的固定候选 ID 为索引，只执行以下过程：
 
 ```text
-主线程生成相机快照
-  -> postMessage 到 LightweightPVSWorker
-  -> 后退 66° AABB 候选过滤
-  -> V4 关系条件、频谱矩、生存场和 MLP
-  -> 冻结阈值筛选
-  -> 真实 60° 视锥过滤
-  -> 实例与 GLB 压缩/回读
-  -> Worker 后处理和 postMessage
-  -> 主线程收到结果
+已上传的候选 ID
+  -> 读取候选实例的 124 维固定运行特征
+  -> 根据 pose 生成视点区域频谱矩与关系条件
+  -> 查询逐实例校准遮挡生存场
+  -> 共享可见性 MLP
+  -> 写出每个候选的可见性分数
 ```
 
-| 指标 | 定义 | 论文用途 |
+不在该 dispatch 中执行 AABB 相交、阈值比较、真实视锥过滤或 GLB 聚合。输出分数只写入 GPU storage buffer，正式计时不读回。
+
+| 字段 | 定义 | 使用方式 |
 |---|---|---|
-| `queryE2EMs` | 主线程调用 `predict()` 前到 Promise 完成 | 前端推理主指标 |
-| `workerTotalMs` | Worker 收到请求到发送结果 | 排除主线程消息等待后的后端总成本 |
-| `backendTotalMs` | `InstancePVSRuntime.predict()` 的完整耗时 | 候选、模型、压缩和结果解码 |
-| `backendComputeMs` | WebGPU compute pass 的 GPU timestamp；设备不支持时为空 | 诊断 GPU 计算本身 |
-| `workerPostMs` | Worker 总耗时减去后端耗时 | 位图、排序和消息构造成本 |
-| `messageMs` | `queryE2EMs - workerTotalMs` | Worker 排队、结构化克隆和线程唤醒成本 |
-| `refilterE2EMs` | cell 内移动时只做真实 60° 缓存重过滤的往返耗时 | 系统交互成本，不算模型 forward |
-| `coldInitMs` | 新浏览器上下文、禁用 HTTP cache，从 init 到 Worker ready | 首次使用启动成本 |
-| `warmInitMs` | 浏览器缓存已有运行资产时的 init 到 ready | 后续页面启动成本 |
+| `gpuKernelMs` | WebGPU timestamp-query 记录的 compute pass 起止时间 | adapter 支持时的首选模型前向指标 |
+| `submitCompletionMs` | `queue.submit()` 到 `queue.onSubmittedWorkDone()` 完成 | timestamp-query 不可用时的模型 dispatch 墙钟指标 |
+| `modelInferenceMs` | `gpuKernelMs` 可用时取前者，否则取 `submitCompletionMs` | 页面显示和设备内汇总字段 |
+| `modelAssetAndPipelineInitMs` | 下载资产、上传权重和创建管线 | 单独记录，不进入前向时间 |
+| `workloadDownloadMs` | 下载 pose 元数据和候选 ID | 单独记录，不进入前向时间 |
 
-现有 Worker 字段 `inferenceMs` 包含后端完整调用，不应在论文中命名为纯 GPU kernel 时间。正式 benchmark 输出将它规范为 `backendTotalMs`，保留原字段只作源码定位。GPU timestamp 只在 adapter 支持 `timestamp-query` 时作为补充；主结论使用同步到最终回读后的 `queryE2EMs`，因为它对应用户实际等待。
-
-计时使用单调的 `performance.now()`，符合 [High Resolution Time](https://www.w3.org/TR/hr-time-3/) 语义。WebGPU timestamp 按 [WebGPU timestamp query](https://www.w3.org/TR/webgpu/#timestamp-query) 单独采集。开启 timestamp-query 的诊断轮次不能替代不带插桩的主轮次。
+论文表格必须注明每台设备的 `timingSource`。不能把 timestamp-query 与 submit-to-completion 混成同一组置信区间；需要跨设备统一比较时，同时给出所有设备都有的 `submitCompletionMs`。
 
 ## 固定工作负载
 
-### 标准跨设备工作负载
-
-输入来自：
+工作负载来自：
 
 ```text
 neural_instance_culling/dataset/out/
 pose_csr_hkust_v3_main_stratified_calibration_fov66_v1/
 ```
 
-使用全部 `684` 个冻结 test view-cell 的位置和朝向。test 仅提供固定、未调参的运行负载，不参与模型选择。所有设备统一使用垂直 FOV `60°`、模型候选 FOV `66°` 和固定 `16:9` aspect，保证硬件之间处理相同候选问题。
+使用全部 `684` 个冻结 test view-cell。test 这里只提供固定性能负载，不选择模型、checkpoint 或阈值。每条记录包含：
 
-benchmark 从 `poses.bin`、`split_manifest.json` 和相机语义生成只读回放文件。回放文件保存 pose ID、位置、四元数、FOV、aspect、near/far 和预期候选数量，不复制 GT，也不改变候选算法。
+- 原始 pose ID；
+- view-cell 查询中心和归一化观察方向；
+- 固定 `60` 度垂直 FOV、`16:9` aspect、near/far；
+- 原数据集已有的后退 `66` 度候选实例 ID。
 
-每次查询都直接调用 `LightweightPVSDispatcher.predict()`，强制执行完整模型。不能经过 `CameraPredictionGate`，否则相邻 pose 可能只运行缓存重过滤，使结果低估模型耗时。查询严格串行，前一个结果返回后才提交下一个。
+候选列表从 CSR 原样导出，不补入 GT，不由测试页重新生成。当前工作负载共 `3,174,148` 个候选引用，每 pose 平均 `4,640.57` 个，最少 `8` 个，最多 `18,831` 个。
 
-### 候选规模分层
-
-每条样本记录运行时实际 `candidateCount`。汇总时按标准工作负载的候选数量四分位分为 small、medium、large、very-large，并额外选取候选数最接近 `10,000` 的实际 pose 子集。
-
-现有移动端工程目标定义为：约 `10k` 候选时 `queryE2EMs p95 < 50 ms`。10k 子集要求每个 session 至少有 30 个候选数在 9k--11k 内的实际 pose。如果样本不足，不构造虚假候选；改为报告最大候选组的范围和 p95，并将 10k 结果标记为不可用。
-
-### 设备原生工作负载
-
-跨设备主表使用固定 `16:9`。附录再以每台设备真实前台视口的 aspect 回放同一批 pose，说明手机竖屏或宽屏导致的候选变化。原生视口结果不能与标准工作负载混合求平均。
-
-## 设备矩阵
-
-最低可发表配置包含一台桌面设备和一台真实 Android 设备。推荐配置再加入消费级集成 GPU 笔记本和第二台中端 Android 手机，避免结论只覆盖服务器显卡或单一移动 SoC。
-
-| 层级 | 设备要求 | 后端 |
-|---|---|---|
-| 必测桌面 | 当前 Linux 工作站，RTX A6000，记录 CPU、RAM、驱动和 Chrome 版本 | WebGPU、WASM SIMD |
-| 必测移动 | Android 12 以上、Qualcomm Adreno 或 ARM Mali、Chrome Stable 的真实手机 | WebGPU、WASM SIMD |
-| 推荐桌面 | Apple M2/M 系列或 Intel/AMD 集成 GPU 笔记本 | WebGPU、WASM SIMD |
-| 推荐移动 | 与第一台不同档位和 GPU 厂商的中端手机 | WebGPU、WASM SIMD |
-| 可选平台 | iPhone/iPad Safari；只在当前 V4 Worker 和资产可直接运行时加入 | WebGPU 或 WASM SIMD，分后端报告 |
-
-Chrome 从 Android 121 起默认支持 Android 12 以上的 Qualcomm 和 ARM GPU，设备范围见 [Chrome WebGPU Android 说明](https://developer.chrome.com/blog/new-in-webgpu-121)。模拟器、桌面 DevTools 设备模拟和远程云手机不能代替真实移动设备。
-
-每台设备必须记录：设备型号、SoC/GPU、RAM、操作系统、浏览器版本、后端、adapter 信息、是否 fallback、屏幕状态、供电状态和测试前后温度。论文不能只写“desktop”或“mobile”。
-
-## 浏览器与资产条件
-
-- 使用 production build 和正式 FP16 运行资产，`debugLogging=false`、`neuralDebugLogs=false`。
-- 模型资产由同机 localhost 或 Android `adb reverse` 提供，不经过公网；查询阶段所有资产已驻留内存。
-- 不加载任何场景 GLB、纹理、AO/SMAA 或调试面板。
-- WebGPU 固定请求 `powerPreference: 'high-performance'`。
-- 桌面无头 Chrome 使用 `chrome_gpu_flags.mjs`，必须通过 `npm run probe:webgpu-hardware`。
-- 移动浏览器保持前台、屏幕常亮，不启用 CPU throttling、低电量模式或 DevTools 性能模拟。
-- WebGPU 和 WASM 使用同一模型资产、相机序列和输出语义。
-
-桌面正式运行保存 adapter、WebGL renderer、Chrome 参数和同窗口 `nvidia-smi/pmon`。移动端保存 adapter 的 `vendor`、`architecture`、`isFallbackAdapter`（浏览器支持时）和 Chrome GPU 信息；任何 SwiftShader 或 fallback adapter 结果只能作为软件诊断。
-
-## 执行过程
-
-### 正确性预检
-
-每台设备先选固定的 10 个 pose，比较 WebGPU 和 WASM 返回的候选数、模型可见实例数、真实视锥实例数和 GLB 数。集合不一致时停止计时并修复实现。预检可以开启诊断；正式计时必须重新启动浏览器并关闭诊断。
-
-### 预热与正式测量
-
-每个“设备 × 后端”执行五个独立 session：
-
-1. 启动新的浏览器上下文并初始化模型，记录一次 init 分解。
-2. 用覆盖四个候选规模层的 50 个查询预热，不计入结果。
-3. 按预先生成的固定随机顺序串行执行全部 684 个 pose。
-4. 一次性把内存中的 JSONL 结果传回主机，不能每个 pose 经 CDP 拉取数据。
-5. 关闭浏览器。移动设备等待温度恢复后再开始下一 session。
-
-五个 session 共得到 `3420` 条正式查询。WebGPU/WASM 的执行顺序采用 AB/BA 交替，防止后运行的后端持续受热。任何 session 因页面进入后台、设备热保护、adapter 丢失或浏览器崩溃而无效时，整轮重跑；不能只删除慢样本。
-
-冷启动单独执行。桌面每个后端至少 10 次全新 context，移动端至少 5 次；每次禁用 HTTP cache，但仍使用本地服务器。warm init 使用已有浏览器缓存，次数相同。初始化样本不与 3420 条 warm query 混合。
-
-### 移动端连接
-
-Android 推荐使用 USB 和 Chrome remote debugging：
+生成命令：
 
 ```bash
-adb reverse tcp:8080 tcp:8080
-adb forward tcp:9222 localabstract:chrome_devtools_remote
+cd slm2viewer
+npm run build:benchmark-workload
 ```
 
-手机在前台打开 `http://localhost:8080/runtime-benchmark.html`。页面内部完成预热和 684 pose 回放，主机只负责开始、结束和接收最终 JSON。远程调试方法参考 [Chrome Android remote debugging](https://developer.chrome.com/docs/devtools/remote-debugging/local-server)。
+## 自助测试网站
 
-正式 session 前关闭其他应用和省电模式，固定屏幕亮度，保持浏览器前台。手机在不充电状态下开始计时；每轮记录 `adb shell dumpsys thermalservice` 和 `adb shell dumpsys battery`，达到严重 thermal throttling 时等待冷却并重跑整轮。
-
-## 统计分析
-
-论文主表对每个设备和后端分别报告，禁止把桌面和手机样本合并：
-
-- `queryE2EMs` 的 p50、p95 和 95% bootstrap CI；
-- `backendTotalMs` 的 p50、p95；
-- `messageMs` 和 `workerPostMs` 的 p50、p95；
-- 10k 候选子集的 p50、p95 和样本数；
-- `refilterE2EMs` 的 p50、p95，明确标注“不运行模型”；
-- cold/warm init 的 p50、p95；
-- 平均、p95 候选数，平均预测实例数和固定回读字节；
-- runtime asset 大小、峰值 Worker 内存（平台可获取时）。
-
-置信区间使用 10,000 次分层 bootstrap：先重采样五个 session，再在 session 内重采样 pose。WebGPU 与 WASM 比较使用相同 pose 和 session 序号的配对差值，报告 `WebGPU - WASM` 的 p50 差值、p95 差值、95% CI 和加速比。候选数量与延迟的 Spearman 相关系数及四分位结果放在附录。
-
-不裁剪最慢 1% 样本，不使用“稳定后最好 100 次”，不把均值最低的一轮挑作论文结果。发生 GC、系统调度或频率变化造成的长尾属于前端实际成本，应进入 p95。只有协议明确判定整个 session 无效时才能重跑。
-
-## 论文表格
-
-主表建议格式：
-
-| Device | Backend | Assets MiB | Candidates mean/p95 | Query p50 | Query p95 | Backend p50 | Backend p95 | 10k p95 | Cold init p50 |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| RTX A6000 desktop | WebGPU | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
-| RTX A6000 desktop | WASM SIMD | 同上 | 同上 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
-| Android device A | WebGPU | 同上 | 同上 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
-| Android device A | WASM SIMD | 同上 | 同上 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
-
-系统补充表报告缓存重过滤、主线程应用可见实例差量和完整页面帧时间。不能把无 GLB 的纯推理结果写成完整场景 FPS，也不能把完整页面下载卡顿写成模型 forward。
-
-## 输出和实现计划
-
-实验名称固定为：
+正式入口：
 
 ```text
-pvs_v4_frontend_inference_latency_v1
+https://139.196.34.161/pvs-runtime/
 ```
 
-输出目录：
+手机和电脑直接打开该 HTTPS 页面，不需要 ADB、CDP 或安装应用。页面流程如下：
+
+1. 填写设备名称和设备型号/GPU。
+2. 选择 `5` 轮论文正式测试并开始。
+3. 页面先下载工作负载和模型资产，初始化 WebGPU；这些时间单列。
+4. 每轮先执行覆盖候选规模的 `50` 个预热 pose，不计入结果。
+5. 按固定种子打乱顺序，串行执行全部 `684` 个 pose。
+6. 页面完成本机 p50/p95 汇总后，一次性上传全部样本。
+7. 上传失败时点击“下载结果”，保留同一 JSON 供人工回收。
+
+页面必须始终处于前台。进入后台、锁屏或切换应用会停止当前测试，避免把浏览器降频后的无效 session 混入正式结果。页面会申请 screen wake lock，但是否生效取决于浏览器和系统设置。
+
+## 硬件门
+
+- 页面必须由可信 HTTPS 上下文提供，局域网 IP 的普通 HTTP 不能作为移动端 WebGPU 正式入口。
+- adapter 通过 `requestAdapter({ powerPreference: 'high-performance' })` 获得。
+- 保存 `vendor`、`architecture`、`device` 和 `description`。
+- adapter 信息为空，或包含 `SwiftShader`、`llvmpipe`、`softpipe`、`swrast`、`software` 时停止测试。
+- WebGL renderer、Chrome 进程和 `nvidia-smi` 不能替代 WebGPU adapter 证据。
+- 真实手机关闭省电模式，保持浏览器前台；正式设备记录型号、SoC/GPU、系统和浏览器版本。
+
+Linux 桌面无头自动化继续使用 `chrome_gpu_flags.mjs` 的 NVIDIA Vulkan 路径；移动端正式数据由同一网页在真实设备本地运行。
+
+## 重复次数与统计
+
+每个设备执行五轮，每轮 `50` 次预热和 `684` 次正式查询，共 `3,420` 个正式样本。不得裁掉最慢 1%，不得只挑最快一轮。浏览器崩溃、adapter 丢失或页面进入后台时整轮作废。
+
+每个设备至少报告：
+
+- 候选数 mean/p95 和范围；
+- `modelInferenceMs` p50/p95；
+- `gpuKernelMs` p50/p95（支持 timestamp-query 时）；
+- `submitCompletionMs` p50/p95；
+- 9k 到 11k 候选子集的样本数和 p95；
+- 模型运行资产大小；
+- 模型/管线初始化耗时，明确不计入前向。
+
+置信区间使用 `10,000` 次分层 bootstrap：先重采样 session，再在选中的 session 内重采样 pose，报告 p50/p95 的 95% 置信区间。移动端约 10k 候选 `p95 < 50 ms` 是工程目标，不是取消实验的门控。
+
+汇总命令：
+
+```bash
+conda run -n slm_pvs python slm2viewer/scripts/summarize_pvs_runtime_benchmark.py \
+  --input-dir neural_instance_culling/benchmark/out/pvs_v4_frontend_inference_latency_v1/browser_uploads
+```
+
+## 服务端结果
+
+nginx 使用 `139.196.34.161` 的同名 IP SSL 证书提供静态页面，并把两个同源接口转发到只监听 `127.0.0.1` 的接收服务：
 
 ```text
-neural_instance_culling/benchmark/out/pvs_v4_frontend_inference_latency_v1/
-  workload.json
-  desktop/<device>/<backend>/run_*.jsonl
-  mobile/<device>/<backend>/run_*.jsonl
-  init/<device>/<backend>.jsonl
-  summary.json
-  paper_table.csv
+POST /api/pvs-runtime-session
+POST /api/pvs-runtime-results
 ```
 
-需要实现的入口：
+服务端签发短期上传 token，限制请求来源和 8 MiB payload，校验 schema、设备名称、`684` pose 数量、候选范围和数值有限性。文件名与 receipt ID 只由服务端生成，不接受客户端路径。正式部署结果保存在 `/var/lib/pvs-runtime-benchmark/results/`，页面显示回执编号。
 
-| 文件 | 责任 |
-|---|---|
-| `slm2viewer/scripts/build_pvs_runtime_workload.py` | 从正式 CSR 导出 684 pose 回放，不读取 GT 做选择 |
-| `slm2viewer/src/PVSRuntimeBenchmark.js` | 直接驱动生产 Dispatcher，收集一次 session 的内存结果 |
-| `slm2viewer/runtime-benchmark.html` | 无 GLB、无渲染的桌面/移动统一 benchmark 页面 |
-| `slm2viewer/scripts/run_pvs_runtime_benchmark.mjs` | 桌面 Playwright 硬件门、三轮回放和日志 |
-| `slm2viewer/scripts/run_android_pvs_runtime_benchmark.mjs` | Android CDP 控制、设备与温度元数据 |
-| `slm2viewer/scripts/summarize_pvs_runtime_benchmark.py` | 分位数、分层 bootstrap、配对后端比较和论文表格 |
+## 当前验证
 
-实现时先补 `queryE2EMs`，再增加可选 GPU timestamp。timestamp-query 不支持不能阻止正式端到端评价。所有长任务写日志；无论是否达到 50 ms 目标，都完成全部设备、后端和 session，并如实报告。
-
-## 验收条件
-
-- 桌面和至少一台真实移动设备均完成五个 session；
-- 每个正式组合有 `5 × 684 = 3420` 条有效查询；
-- timed run 关闭诊断概率和中间特征回读；
-- WebGPU adapter 通过各平台硬件门，WASM 明确标记 SIMD；
-- 同一 pose 的 WebGPU/WASM 输出集合通过预检；
-- 主表同时给出候选规模、p50、p95 和置信区间；
-- 10k p95 不可用时明确写出实际候选范围，不能插值或伪造；
-- 移动端 p95 是否低于 50 ms 只决定工程目标是否通过，不取消实验或隐藏结果。
-
-## 当前待办
-
-当前桌面 NVIDIA WebGPU 硬件门已经可用，但正式 684 pose benchmark 尚未实现。移动设备型号和连接方式需要在执行前填入设备登记表。本文只冻结测试方法，不包含任何正式论文耗时结果。
+2026-09-09 在本机 RTX A6000、NVIDIA Vulkan WebGPU adapter 上完成一轮实现 smoke：`684` 个 pose 全部执行并上传成功，GPU timestamp-query 的模型前向 `p50=0.237 ms`、`p95=0.287 ms`。模型资产和管线初始化约 `344 ms`，已单独记录且未计入前向指标。该轮用于验证代码和计时边界，不替代按设备登记完成的五轮论文正式结果。

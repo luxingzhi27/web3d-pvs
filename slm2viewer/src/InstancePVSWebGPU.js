@@ -49,11 +49,17 @@ async function getSharedWebGPUAdapter() {
   return state.adapterPromise;
 }
 
-async function getSharedWebGPUDevice(adapter) {
+async function getSharedWebGPUDevice(adapter, requiredFeatures = []) {
   const state = getSharedWebGPUState();
-  if (state.device) return state.device;
+  if (state.device) {
+    const missing = requiredFeatures.filter((feature) => !state.device.features.has(feature));
+    if (missing.length) {
+      throw new Error(`The shared WebGPU device is missing required features: ${missing.join(', ')}.`);
+    }
+    return state.device;
+  }
   if (!state.devicePromise) {
-    state.devicePromise = adapter.requestDevice().then((device) => {
+    state.devicePromise = adapter.requestDevice({ requiredFeatures }).then((device) => {
       state.device = device;
       device.lost.then(() => {
         if (state.device === device) {
@@ -73,6 +79,7 @@ async function getSharedWebGPUDevice(adapter) {
 export class InstancePVSWebGPU extends InstancePVSBase {
   constructor(assetBaseUrl, options = {}) {
     super(assetBaseUrl, options);
+    this.candidateBenchmarkEnabled = options.candidateBenchmark === true;
     this.adapter = null;
     this.device = null;
     this.pipeline = null;
@@ -96,6 +103,14 @@ export class InstancePVSWebGPU extends InstancePVSBase {
     this.hasCachedPrediction = false;
     this.resultLayout = null;
     this.readbackLayout = null;
+    this.candidateBenchmarkPipeline = null;
+    this.candidateIdBuffer = null;
+    this.candidateScoreBuffer = null;
+    this.candidateBenchmarkBindGroup = null;
+    this.timestampQuerySet = null;
+    this.timestampResolveBuffer = null;
+    this.timestampReadbackBuffer = null;
+    this.timestampQuerySupported = false;
   }
 
   async _initInternal() {
@@ -130,7 +145,10 @@ export class InstancePVSWebGPU extends InstancePVSBase {
     if (!this.adapter) throw new Error('WebGPU requestAdapter returned null.');
     const deviceStartedAt = nowMs();
     const deviceCached = Boolean(shared.device);
-    this.device = await getSharedWebGPUDevice(this.adapter);
+    const optionalFeatures = this.candidateBenchmarkEnabled
+      && this.adapter.features.has('timestamp-query') ? ['timestamp-query'] : [];
+    this.device = await getSharedWebGPUDevice(this.adapter, optionalFeatures);
+    this.timestampQuerySupported = this.device.features.has('timestamp-query');
 
     this.uniformBuffer = this.device.createBuffer({
       size: 256,
@@ -182,7 +200,27 @@ export class InstancePVSWebGPU extends InstancePVSBase {
     this.filterPipeline = this.device.createComputePipelineAsync
       ? await this.device.createComputePipelineAsync(filterDescriptor)
       : this.device.createComputePipeline(filterDescriptor);
+    if (this.candidateBenchmarkEnabled) {
+      const benchmarkModule = this.device.createShaderModule({
+        code: buildPredictionShader.call(this, { candidateOnly: true }),
+      });
+      if (typeof benchmarkModule.getCompilationInfo === 'function') {
+        const info = await benchmarkModule.getCompilationInfo();
+        const errors = (info.messages || [])
+          .filter((message) => message.type === 'error')
+          .map((message) => `${message.lineNum || 0}:${message.linePos || 0} ${message.message}`);
+        if (errors.length) throw new Error(`V4 candidate benchmark WGSL compilation failed: ${errors.join('; ')}`);
+      }
+      const benchmarkDescriptor = {
+        layout: 'auto',
+        compute: { module: benchmarkModule, entryPoint: 'main' },
+      };
+      this.candidateBenchmarkPipeline = this.device.createComputePipelineAsync
+        ? await this.device.createComputePipelineAsync(benchmarkDescriptor)
+        : this.device.createComputePipeline(benchmarkDescriptor);
+    }
     this._createRuntimeBuffers();
+    if (this.candidateBenchmarkEnabled) this._createCandidateBenchmarkResources();
     this.instanceAabbs = null;
     this.instanceToGlobalGlbArray = null;
     const adapterInfo = this.adapter.info || {};
@@ -198,6 +236,113 @@ export class InstancePVSWebGPU extends InstancePVSBase {
         description: adapterInfo.description || '',
       },
       packedFp16Storage: true,
+      timestampQuery: this.timestampQuerySupported,
+    };
+  }
+
+  _createCandidateBenchmarkResources() {
+    const byteLength = Math.max(4, Number(this.meta.numInstances) * 4);
+    this.candidateIdBuffer = this.device.createBuffer({
+      size: byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.candidateScoreBuffer = this.device.createBuffer({
+      size: byteLength,
+      usage: GPUBufferUsage.STORAGE,
+    });
+    this.candidateBenchmarkBindGroup = this.device.createBindGroup({
+      layout: this.candidateBenchmarkPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.uniformBuffer } },
+        { binding: 1, resource: { buffer: this.runtimeFeatureBuffer } },
+        { binding: 2, resource: { buffer: this.aabbBuffer } },
+        { binding: 3, resource: { buffer: this.weightBuffer } },
+        { binding: 4, resource: { buffer: this.frequencyBuffer } },
+        { binding: 5, resource: { buffer: this.chiBuffer } },
+        { binding: 7, resource: { buffer: this.candidateIdBuffer } },
+        { binding: 8, resource: { buffer: this.candidateScoreBuffer } },
+      ],
+    });
+    if (this.timestampQuerySupported) {
+      this.timestampQuerySet = this.device.createQuerySet({ type: 'timestamp', count: 2 });
+      this.timestampResolveBuffer = this.device.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+      });
+      this.timestampReadbackBuffer = this.device.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      });
+    }
+  }
+
+  async benchmarkCandidates(queryCamera, candidateIds) {
+    if (!this.isReady || !this.candidateBenchmarkEnabled) {
+      throw new Error('Candidate-only WebGPU benchmark mode is not initialized.');
+    }
+    const ids = candidateIds instanceof Uint32Array
+      ? candidateIds
+      : Uint32Array.from(candidateIds || []);
+    if (ids.length > Number(this.meta.numInstances)) {
+      throw new Error(`Candidate count ${ids.length} exceeds the runtime instance count.`);
+    }
+    for (const instanceId of ids) {
+      if (instanceId >= Number(this.meta.numInstances)) {
+        throw new Error(`Candidate instance ID ${instanceId} is out of range.`);
+      }
+    }
+    if (ids.length === 0) {
+      return { candidateCount: 0, gpuKernelMs: 0, submitCompletionMs: 0, timingSource: 'empty' };
+    }
+
+    const query = this._cameraQuery(queryCamera);
+    const depth = this.meta.depth;
+    const uniform = new Float32Array(64);
+    uniform.set([
+      query.center[0], query.center[1], query.center[2], Number(this.meta.threshold),
+      query.forward[0], query.forward[1], query.forward[2], query.tanX,
+      query.tanY, Number(this.meta.query.viewcellRadiusM), Number(depth.q01), Number(depth.q99),
+      Number(depth.epsilon), ids.length, 0, Number(this.meta.numGlbs),
+    ], 0);
+    this.device.queue.writeBuffer(this.uniformBuffer, 0, uniform);
+    this.device.queue.writeBuffer(this.candidateIdBuffer, 0, ids);
+    await this.device.queue.onSubmittedWorkDone();
+
+    const encoder = this.device.createCommandEncoder();
+    const passDescriptor = this.timestampQuerySet ? {
+      timestampWrites: {
+        querySet: this.timestampQuerySet,
+        beginningOfPassWriteIndex: 0,
+        endOfPassWriteIndex: 1,
+      },
+    } : undefined;
+    const pass = encoder.beginComputePass(passDescriptor);
+    pass.setPipeline(this.candidateBenchmarkPipeline);
+    pass.setBindGroup(0, this.candidateBenchmarkBindGroup);
+    pass.dispatchWorkgroups(Math.ceil(ids.length / WORKGROUP_SIZE));
+    pass.end();
+    if (this.timestampQuerySet) {
+      encoder.resolveQuerySet(this.timestampQuerySet, 0, 2, this.timestampResolveBuffer, 0);
+      encoder.copyBufferToBuffer(this.timestampResolveBuffer, 0, this.timestampReadbackBuffer, 0, 16);
+    }
+    const commandBuffer = encoder.finish();
+    const startedAt = nowMs();
+    this.device.queue.submit([commandBuffer]);
+    await this.device.queue.onSubmittedWorkDone();
+    const submitCompletionMs = nowMs() - startedAt;
+
+    let gpuKernelMs = null;
+    if (this.timestampQuerySet) {
+      await this.timestampReadbackBuffer.mapAsync(GPUMapMode.READ, 0, 16);
+      const timestamps = new BigUint64Array(this.timestampReadbackBuffer.getMappedRange(0, 16));
+      gpuKernelMs = Number(timestamps[1] - timestamps[0]) / 1e6;
+      this.timestampReadbackBuffer.unmap();
+    }
+    return {
+      candidateCount: ids.length,
+      gpuKernelMs,
+      submitCompletionMs,
+      timingSource: gpuKernelMs == null ? 'queue-submit-to-completion' : 'webgpu-timestamp-query',
     };
   }
 
@@ -588,7 +733,12 @@ export class InstancePVSWebGPU extends InstancePVSBase {
       this.readbackBuffer,
       this.filterResultBuffer,
       this.filterReadbackBuffer,
+      this.candidateIdBuffer,
+      this.candidateScoreBuffer,
+      this.timestampResolveBuffer,
+      this.timestampReadbackBuffer,
     ]) buffer?.destroy();
+    this.timestampQuerySet?.destroy();
     super.dispose();
   }
 
