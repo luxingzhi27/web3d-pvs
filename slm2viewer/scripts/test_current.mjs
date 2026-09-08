@@ -112,14 +112,46 @@ const wasmRuntimePath = requireFile('assets/wasm/instance_pvs_v4.wasm');
 if (fs.statSync(wasmRuntimePath).size <= 0) throw new Error('The V4 WASM SIMD runtime is empty.');
 
 const backendSource = fs.readFileSync(requireFile('src/neuralCullingBackendMode.js'), 'utf8');
-const runtimeSource = fs.readFileSync(requireFile('src/InstancePVS.js'), 'utf8');
+const runtimeBaseSource = fs.readFileSync(requireFile('src/InstancePVSBase.js'), 'utf8');
+const runtimeSource = [
+  'src/InstancePVSWebGPU.js',
+  'src/InstancePVSWebGPUShaders.js',
+].map((file) => fs.readFileSync(requireFile(file), 'utf8')).join('\n');
 const wasmRuntimeSource = fs.readFileSync(requireFile('src/InstancePVSWasm.js'), 'utf8');
 const unifiedRuntimeSource = fs.readFileSync(requireFile('src/InstancePVSRuntime.js'), 'utf8');
 const backendPolicySource = fs.readFileSync(requireFile('src/InstancePVSBackendPolicy.js'), 'utf8');
 const workerSource = fs.readFileSync(requireFile('src/LightweightPVSWorker.js'), 'utf8');
 const dispatcherSource = fs.readFileSync(requireFile('src/LightweightPVSDispatcher.js'), 'utf8');
-const loaderSource = fs.readFileSync(requireFile('slm2/SLM2Loader.js'), 'utf8');
-const viewerSource = fs.readFileSync(requireFile('src/viewer.js'), 'utf8');
+const loaderSource = [
+  'slm2/SLM2Loader.js',
+  'slm2/SLM2GlbPipeline.js',
+  'slm2/SLM2GlbFetchPipeline.js',
+  'slm2/SLM2VisibilityRuntime.js',
+  'slm2/SLM2InstanceVisibilityState.js',
+  'slm2/SLM2MaterialSystem.js',
+  'slm2/SLM2SceneCatalog.js',
+  'slm2/SLM2VisibilityIndex.js',
+  'slm2/SLM2RuntimeAssets.js',
+].map((file) => fs.readFileSync(requireFile(file), 'utf8')).join('\n');
+const loaderEntrySource = fs.readFileSync(requireFile('slm2/SLM2Loader.js'), 'utf8');
+const glbPipelineSource = fs.readFileSync(requireFile('slm2/SLM2GlbPipeline.js'), 'utf8');
+const glbFetchPipelineSource = fs.readFileSync(requireFile('slm2/SLM2GlbFetchPipeline.js'), 'utf8');
+const visibilityRuntimeSource = fs.readFileSync(requireFile('slm2/SLM2VisibilityRuntime.js'), 'utf8');
+const visibilityStateSource = fs.readFileSync(requireFile('slm2/SLM2InstanceVisibilityState.js'), 'utf8');
+const materialSystemSource = fs.readFileSync(requireFile('slm2/SLM2MaterialSystem.js'), 'utf8');
+const sceneCatalogSource = fs.readFileSync(requireFile('slm2/SLM2SceneCatalog.js'), 'utf8');
+const viewerSource = [
+  'src/viewer.js',
+  'src/ViewerSceneController.js',
+  'src/ViewerPresentation.js',
+  'src/ViewerRenderLoop.js',
+  'src/ViewerDiagnostics.js',
+  'src/ViewerQueueDiagnostics.js',
+].map((file) => fs.readFileSync(requireFile(file), 'utf8')).join('\n');
+const viewerDiagnosticsSource = [
+  'src/ViewerDiagnostics.js',
+  'src/ViewerQueueDiagnostics.js',
+].map((file) => fs.readFileSync(requireFile(file), 'utf8')).join('\n');
 const renderVisibilitySource = fs.readFileSync(requireFile('src/RenderVisibilitySystem.js'), 'utf8');
 const sortedIdDeltaSource = fs.readFileSync(requireFile('src/sortedIdDelta.js'), 'utf8');
 const denseSlotsSource = fs.readFileSync(requireFile('src/DenseInstancedSlots.js'), 'utf8');
@@ -137,6 +169,19 @@ if (config.scenes?.default_config?.loaderConfig?.glbResourcesBaseUrl !== hkustGl
 }
 if (fs.existsSync(path.join(viewerDir, 'src/NeuralPVS.js'))) {
   throw new Error('The unused legacy ONNX visibility backend must not return.');
+}
+if (fs.existsSync(path.join(viewerDir, 'src/InstancePVS.js'))
+    || !loaderEntrySource.includes('extends SLM2GlbPipeline')
+    || !glbPipelineSource.includes('extends SLM2GlbFetchPipeline')
+    || !glbFetchPipelineSource.includes('extends SLM2VisibilityRuntime')
+    || !visibilityRuntimeSource.includes('extends SLM2InstanceVisibilityState')
+    || !visibilityStateSource.includes('extends SLM2MaterialSystem')
+    || !materialSystemSource.includes('extends SLM2SceneCatalog')
+    || !sceneCatalogSource.includes('extends SLM2VisibilityIndex')) {
+  throw new Error('The frontend responsibility boundaries no longer match the V4 architecture.');
+}
+if ((loaderSource.match(/new GlbResourceScheduler\(/g) || []).length !== 1) {
+  throw new Error('The frontend must have exactly one GLB scheduler state machine.');
 }
 for (const forbidden of [
   'directional-occlusion-proxy-scheduler-v1',
@@ -167,8 +212,8 @@ for (const forbidden of [
     throw new Error(`Removed model compatibility API returned: ${forbidden}`);
   }
 }
-if (viewerSource.includes('Directional Proxy full40')
-    || !viewerSource.includes('PVS V4 固定实例特征与查询网络')) {
+if (viewerDiagnosticsSource.includes('Directional Proxy full40')
+    || !viewerDiagnosticsSource.includes('PVS V4 固定实例特征与查询网络')) {
   throw new Error('The debug panel still describes an old frontend model.');
 }
 if (workerSource.includes('testWorkpoint')
@@ -188,7 +233,7 @@ if (!workerSource.includes('buildCamera(snapshot, FRONTEND_RENDER_FOV_Y_DEG)')
   throw new Error('The worker no longer follows the 60-degree render / 66-degree candidate contract.');
 }
 if (!workerSource.includes("import { InstancePVSRuntime } from './InstancePVSRuntime.js'")
-    || workerSource.includes('new InstancePVS(')
+    || !unifiedRuntimeSource.includes('new InstancePVSWebGPU(')
     || !unifiedRuntimeSource.includes("this.backendPreference === 'wasm'")
     || !unifiedRuntimeSource.includes('await this._activateWasm(error)')
     || !backendPolicySource.includes("normalized === 'wasm' || normalized === 'webgpu'")
@@ -205,11 +250,19 @@ if (fs.existsSync(path.join(viewerDir, 'src/InstancePVSCPU.js'))
 }
 if (!runtimeSource.includes("source: 'gpu_v4_back_frustum_aabb'")
     || !runtimeSource.includes('fn intersects_frustum(instance_id: u32, render_frustum: bool)')
+    || !runtimeSource.includes('const WORKGROUP_SIZE = 64')
+    || !runtimeSource.includes('const GLB_FLAG_MODEL_VISIBLE = 1')
+    || !runtimeSource.includes('const GLB_FLAG_RENDER_VISIBLE = 2')
     || !runtimeSource.includes('atomicMax(&results[')
-    || !runtimeSource.includes('_buildGlbCompactionShader()')
-    || !runtimeSource.includes('_buildRenderFilterShader()')
+    || !runtimeSource.includes('buildGlbCompactionShader')
+    || !runtimeSource.includes('buildRenderFilterShader')
     || !runtimeSource.includes('cached-render-filter')) {
   throw new Error('The V4 runtime no longer performs candidate, render and GLB aggregation on the GPU.');
+}
+if (!runtimeBaseSource.includes('export class InstancePVSBase')
+    || !wasmRuntimeSource.includes('extends InstancePVSBase')
+    || !runtimeSource.includes('extends InstancePVSBase')) {
+  throw new Error('The V4 backends no longer share the explicit model-contract base runtime.');
 }
 if (!runtimeSource.includes('layout.instanceBitWords = Math.ceil(numInstances / 32)')
     || !runtimeSource.includes('layout.glbBitWords = Math.ceil(numGlbs / 32)')
@@ -387,8 +440,8 @@ if (!buildSource.includes('cache: false')
 }
 if (loaderSource.includes('unpkg.com/three')
     || viewerSource.includes('unpkg.com/three')
-    || !loaderSource.includes("setDecoderPath( './assets/three/draco/gltf/' )")
-    || !loaderSource.includes("setTranscoderPath( './assets/three/basis/' )")) {
+    || !loaderSource.includes("setDecoderPath('./assets/three/draco/gltf/')")
+    || !loaderSource.includes("setTranscoderPath('./assets/three/basis/')")) {
   throw new Error('The active GLB runtime still depends on third-party decoder CDNs.');
 }
 if (!viewerSource.includes('ids.renderComponentIds')

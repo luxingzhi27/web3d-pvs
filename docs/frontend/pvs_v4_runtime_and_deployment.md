@@ -196,9 +196,33 @@ HKUST 页面功能 smoke 中，冻结前的最终集合为 `3769` 个实例和 `
 
 ## 代码边界
 
+### 2026-09-09 前端架构重构
+
+本次重构只调整源码职责，不修改 V4 checkpoint、阈值、模型资产、候选口径、实例显示语义或 GLB 调度规则。重构前的三个入口同时承担多类工作：`SLM2Loader.js` 有 5665 行，`viewer.js` 有 2408 行，WebGPU 运行时有 1472 行。拆分后入口分别缩减为 634 行、304 行和约 600 行；较长的 WGSL 模板、诊断界面和资源管线均有独立文件。
+
+运行时依赖方向固定为：场景入口继承资源管线，资源管线继承神经可见性协调器，可见性协调器继承实例显示状态，实例显示状态再复用材质和场景目录服务。每层只持有一套共享 Loader 状态，不建立第二份下载队列或可见集合。Viewer 按“构造、场景控制、画面配置、按需渲染、诊断”拆分。WebGPU 和 WASM 则共同继承模型契约与相机查询基类，两者不再互相继承后端实现。
+
+硬件页面检查在重构过程中发现两个旧问题。原 `viewer.js` 调用了没有定义的 `traverseMaterials`；现在由 `ViewerMaterialTraversal.js` 实现并有单元测试。代理 GLB 的 Draco 配置原来把 loader 类传给 `GLTFLoader`，现在使用全局共享的 `DRACO_LOADER` 实例。所有跨文件常量和 URL 函数改为显式 import，源码不再依赖打包器产生的隐式全局变量。
+
+验证命令：
+
+```bash
+cd slm2viewer
+npm test
+npm run build
+node scripts/capture_v4_frontend_parity.mjs \
+  --viewer-dir public \
+  --out /tmp/pvs_frontend_refactor_parity.json \
+  --require-hardware-gpu
+```
+
+验证结果：`npm test`、生产构建和 `npm run package:deploy` 均通过；Worker WASM smoke 保持 `9398` 个候选、`3728` 个模型可见实例和 `3633` 个真实视锥实例。缓存重过滤 smoke 的新旧集合一致，只向主线程传输 `5` 个变化 ID，固定回读为 `2776 bytes`。该无头 WebGPU 功能检查的 adapter 为 SwiftShader，只能证明数值和调度链路可运行；硬件 WebGPU 门在本次执行窗口未通过，因此本次重构不新增 WebGPU 硬件延迟结论。
+
 | 模块 | 责任 |
 |---|---|
-| `src/InstancePVS.js` | V4 资产校验、GPU 候选、WGSL 查询、GPU 压缩和 GLB 聚合 |
+| `src/InstancePVSBase.js` | V4 schema、资产校验、相机查询和两种后端共享生命周期 |
+| `src/InstancePVSWebGPU.js` | WebGPU device、buffer、dispatch、压缩回读和结果解码 |
+| `src/InstancePVSWebGPUShaders.js` | 候选筛选、V4 查询、GLB 聚合与缓存重过滤 WGSL |
 | `src/InstancePVSWasm.js` | WASM 资产装载、常驻线性内存、单次批量调用和最终结果解码 |
 | `wasm/instance_pvs_v4/src/lib.rs` | SIMD 候选筛选、ray/频谱/生存场、V4 MLP、重过滤和 GLB 聚合 |
 | `src/InstancePVSRuntime.js` | `auto/webgpu/wasm` 后端选择及运行期故障切换 |
@@ -213,7 +237,21 @@ HKUST 页面功能 smoke 中，冻结前的最终集合为 `3769` 个实例和 `
 | `src/DenseInstancedSlots.js` | 稠密实例槽位、交换删除和矩阵变化区间上传 |
 | `src/StaticSceneOptimizer.js` | 单 Mesh 场景压平、材质/task 渐进合批和实例到 batch 对象映射 |
 | `src/RenderSurfacePolicy.js` | 固定设备原生 DPR 和渲染表面尺寸计算 |
-| `slm2/SLM2Loader.js` | HTTP 下载/解析/挂载管线、Worker 差量编排和场景资源生命周期 |
+| `src/viewer.js` | Viewer 依赖创建和初始状态，不承载运行期子系统实现 |
+| `src/ViewerSceneController.js` | 场景载入、相机、地面和剔除模式控制 |
+| `src/ViewerPresentation.js` | 材质、灯光、环境、后处理和 GUI |
+| `src/ViewerRenderLoop.js` | 按需 RAF、维护唤醒和 resize |
+| `src/ViewerQueueDiagnostics.js` | 资源队列和运行时指标面板 |
+| `src/ViewerDiagnostics.js` | 冻结结果检查、预测高亮和俯视调试图 |
+| `slm2/SLM2Loader.js` | Loader 共享状态构造、模式切换和冻结检查入口 |
+| `slm2/SLM2SceneCatalog.js` | 场景配置、GLB 索引、首屏队列和神经资产组 |
+| `slm2/SLM2VisibilityIndex.js` | 实例/GLB 编号解码和 CPU 诊断视锥过滤 |
+| `slm2/SLM2MaterialSystem.js` | 材质配置、纹理加载和材质缓存更新 |
+| `slm2/SLM2InstanceVisibilityState.js` | 实例位图、稠密槽位和驻留对象显示差量 |
+| `slm2/SLM2VisibilityRuntime.js` | Worker 初始化、完整预测和 cell 内缓存重过滤协调 |
+| `slm2/SLM2GlbFetchPipeline.js` | HTTP 并发、取消、解析队列、过期结果和挂载预算 |
+| `slm2/SLM2GlbPipeline.js` | GLB 计划消费、下载/解析/挂载推进和调度结果应用 |
+| `slm2/SLM2RuntimeAssets.js` | 共享 Draco/KTX2 loader、运行资产版本和 URL 处理 |
 | `scripts/test_current.mjs` | 当前单模型静态契约检查 |
 | `scripts/capture_v4_frontend_parity.mjs` | 从真实 V4 页面采集一次候选、概率和 WebGPU 后端证据 |
 | `scripts/verify_v4_frontend_parity.py` | PyTorch 与 WebGPU 同位姿数值比较 |

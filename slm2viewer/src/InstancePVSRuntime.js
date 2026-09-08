@@ -1,4 +1,4 @@
-import { InstancePVS } from './InstancePVS.js';
+import { InstancePVSWebGPU } from './InstancePVSWebGPU.js';
 import { InstancePVSWasm } from './InstancePVSWasm.js';
 import {
   canAttemptWebGPU,
@@ -54,7 +54,7 @@ export class InstancePVSRuntime {
   }
 
   async _activateWebGPU() {
-    const runtime = new InstancePVS(this.assetBaseUrl, this.options);
+    const runtime = new InstancePVSWebGPU(this.assetBaseUrl, this.options);
     try {
       await runtime.init();
     } catch (error) {

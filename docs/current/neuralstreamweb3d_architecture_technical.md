@@ -58,9 +58,9 @@ Worker 只构造两个相机并提交一次 WebGPU 查询。GPU 直接遍历实�
 | 训练 | `neural_instance_culling/model/train_pvs.py` |
 | 导出 | `neural_instance_culling/model/export_pvs.py` |
 | 评价 | `neural_instance_culling/benchmark/evaluate_pvs.py`、`neural_instance_culling/benchmark/run_pvs.py summarize`、`neural_instance_culling/benchmark/summarize_core_ablation.py` |
-| 前端查询 | `slm2viewer/src/InstancePVS.js` |
+| 前端查询 | `slm2viewer/src/InstancePVSBase.js`、`slm2viewer/src/InstancePVSWebGPU.js`、`slm2viewer/src/InstancePVSWebGPUShaders.js`、`slm2viewer/src/InstancePVSWasm.js` |
 | Worker | `slm2viewer/src/LightweightPVSWorker.js` |
-| 主线程接入 | `slm2viewer/src/LightweightPVSDispatcher.js`、`slm2viewer/slm2/SLM2Loader.js` |
+| 主线程接入 | `slm2viewer/src/LightweightPVSDispatcher.js`、`slm2viewer/slm2/SLM2Loader.js`、`slm2viewer/slm2/SLM2VisibilityRuntime.js`、`slm2viewer/slm2/SLM2GlbPipeline.js` |
 | 打包 | `slm2viewer/scripts/package_deploy.mjs` |
 
 ## 评价边界

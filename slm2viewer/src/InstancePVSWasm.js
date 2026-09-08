@@ -1,13 +1,9 @@
-import { InstancePVS } from './InstancePVS.js';
+import { InstancePVSBase, nowMs } from './InstancePVSBase.js';
 
 const RUNTIME_FEATURE_DIM = 124;
 const DEFAULT_WASM_URL = './assets/wasm/instance_pvs_v4.wasm';
 const GLB_FLAG_MODEL_VISIBLE = 1;
 const GLB_FLAG_RENDER_VISIBLE = 2;
-
-function nowMs() {
-  return typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
-}
 
 function clamp(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, value));
@@ -24,7 +20,7 @@ function requiredExport(exports, name) {
   return value;
 }
 
-export class InstancePVSWasm extends InstancePVS {
+export class InstancePVSWasm extends InstancePVSBase {
   constructor(assetBaseUrl, options = {}) {
     super(assetBaseUrl, options);
     this.wasmUrl = options.wasmUrl || DEFAULT_WASM_URL;
@@ -48,9 +44,7 @@ export class InstancePVSWasm extends InstancePVS {
     this.backend = 'wasm-simd-v4';
     this.lastInitTimings = {
       ...this.lastInitTimings,
-      wasmInitMs: Number(this.lastInitTimings?.gpuInitMs || 0),
-      gpuInitMs: 0,
-      webgpu: null,
+      wasmInitMs: Number(this.lastInitTimings?.backendInitMs || 0),
       wasm: this.wasmInfo,
     };
     if (this.debugLogging) console.log('[InstancePVSWasm] V4 WASM SIMD runtime ready.', this.lastInitTimings);
