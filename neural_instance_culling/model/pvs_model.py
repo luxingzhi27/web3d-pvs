@@ -57,6 +57,7 @@ SURVIVAL_SEMANTIC_DIM = 8
 RELATION_CONDITION_DIM = 8
 INSTANCE_CALIBRATION_MODES = ("residual", "disabled")
 OCCLUSION_REPRESENTATION_MODES = ("survival", "generic28", "none")
+VISIBILITY_FUSION_MODES = ("concat", "geometry96_residual_modulation")
 CULL_CERTIFICATE_INPUT_MODES = (
     "hidden",
     "evidence",
@@ -450,6 +451,8 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         query_tail_separator_hidden_dim: int = 8,
         query_tail_separator_max_abs: float = 0.5,
         query_tail_separator_centering: str = "pose_mean",
+        visibility_fusion_mode: str = "concat",
+        geometry_modulation_hidden_dim: int = 64,
         dual_probe_rescue: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__()
@@ -491,6 +494,17 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         if instance_calibration_mode not in INSTANCE_CALIBRATION_MODES:
             raise ValueError(
                 f"instance_calibration_mode must be one of {INSTANCE_CALIBRATION_MODES}"
+            )
+        if str(visibility_fusion_mode) not in VISIBILITY_FUSION_MODES:
+            raise ValueError(
+                f"visibility_fusion_mode must be one of {VISIBILITY_FUSION_MODES}"
+            )
+        if (
+            str(visibility_fusion_mode) == "geometry96_residual_modulation"
+            and occlusion_representation != "survival"
+        ):
+            raise ValueError(
+                "geometry96 residual modulation requires the survival representation"
             )
         if (
             occlusion_representation != "survival"
@@ -538,6 +552,7 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             not in QUERY_TAIL_SEPARATOR_CENTERING_MODES
             or not math.isfinite(float(boundary_tail_residual_output_init_std))
             or float(boundary_tail_residual_output_init_std) < 0.0
+            or int(geometry_modulation_hidden_dim) <= 0
         ):
             raise ValueError("depth epsilon and frequency norm bound must be positive")
         if float(cull_certificate_max_suppression) > 0.0 and not (
@@ -653,10 +668,12 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
         self.query_tail_separator_hidden_dim = int(query_tail_separator_hidden_dim)
         self.query_tail_separator_max_abs = float(query_tail_separator_max_abs)
         self.query_tail_separator_centering = str(query_tail_separator_centering)
+        self.visibility_fusion_mode = str(visibility_fusion_mode)
+        self.geometry_modulation_hidden_dim = int(geometry_modulation_hidden_dim)
         self.runtime_feature_dim = GEO_DIM + (
             self.survival_dim if self.occlusion_representation != "none" else 0
         )
-        self.runtime_head_input_dim = (
+        concatenated_runtime_head_input_dim = (
             GEO_DIM
             + self.survival_rank
             + SURVIVAL_SEMANTIC_DIM
@@ -666,6 +683,19 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             + 1
             if self.occlusion_representation != "none"
             else RUNTIME_HEAD_INPUT_DIM_WITHOUT_OCCLUSION
+        )
+        self.geometry_modulation_dynamic_input_dim = (
+            self.survival_rank
+            + SURVIVAL_SEMANTIC_DIM
+            + BOUNDARY_SUMMARY_DIM
+            + VIEW_DIM
+            + LOW_RANK_SUMMARY_DIM
+            + 1
+        )
+        self.runtime_head_input_dim = (
+            GEO_DIM + SURVIVAL_SEMANTIC_DIM + 1
+            if self.visibility_fusion_mode == "geometry96_residual_modulation"
+            else concatenated_runtime_head_input_dim
         )
         self.view_residual_dynamic_input_dim = (
             self.survival_rank
@@ -808,6 +838,19 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             )
         else:
             self.direction_basis_head = None
+        if self.visibility_fusion_mode == "geometry96_residual_modulation":
+            self.geometry_modulation_head: nn.Module | None = nn.Sequential(
+                nn.Linear(
+                    self.geometry_modulation_dynamic_input_dim,
+                    self.geometry_modulation_hidden_dim,
+                ),
+                nn.SiLU(),
+                nn.Linear(self.geometry_modulation_hidden_dim, GEO_DIM),
+            )
+            nn.init.zeros_(self.geometry_modulation_head[-1].weight)
+            nn.init.zeros_(self.geometry_modulation_head[-1].bias)
+        else:
+            self.geometry_modulation_head = None
         self.shared_trunk = nn.Sequential(
             nn.Linear(self.runtime_head_input_dim, self.hidden_dim),
             nn.ReLU(inplace=True),
@@ -1235,6 +1278,21 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
                 "online graph propagation",
             ],
         }
+        if self.visibility_fusion_mode != "concat":
+            result["visibilityFusion"] = {
+                "mode": self.visibility_fusion_mode,
+                "dynamicInputDim": self.geometry_modulation_dynamic_input_dim,
+                "modulationHiddenDim": self.geometry_modulation_hidden_dim,
+                "modulationDim": GEO_DIM,
+                "trunkInputDim": self.runtime_head_input_dim,
+                "fusion": "geometry * (1 + tanh(dynamic_delta))",
+                "trunkLayout": [
+                    self.runtime_head_input_dim,
+                    self.hidden_dim,
+                    self.hidden_dim,
+                    1,
+                ],
+            }
         if self.spectral_mode in {"moment_extrema", "moment_extrema_support"}:
             result["viewcellExtremeEnvelope"] = (
                 export_viewcell_extreme_envelope_schema()
@@ -2513,9 +2571,8 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             raise ValueError(f"disk_axes must have shape [{batch}, {VIEW_DIM}, {DISK_AXIS_DIM}]")
         depth = _broadcast_scalar(normalized_depth, batch, "normalized_depth", device=device).clamp(0.0, 1.0)
         basis, semantic, query_aux = self._query_basis_and_semantic(center, axes, depth, coefficients)
-        trunk_input = torch.cat(
+        dynamic_query = torch.cat(
             [
-                geometry,
                 *(
                     [basis, semantic]
                     if self.occlusion_representation != "none"
@@ -2528,6 +2585,18 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             ],
             dim=-1,
         )
+        geometry_modulation_delta: torch.Tensor | None = None
+        if self.visibility_fusion_mode == "geometry96_residual_modulation":
+            assert self.geometry_modulation_head is not None
+            if dynamic_query.shape[1] != self.geometry_modulation_dynamic_input_dim:
+                raise RuntimeError("geometry modulation dynamic input layout drifted")
+            geometry_modulation_delta = torch.tanh(
+                self.geometry_modulation_head(dynamic_query)
+            )
+            modulated_geometry = geometry * (1.0 + geometry_modulation_delta)
+            trunk_input = torch.cat([modulated_geometry, semantic, depth], dim=-1)
+        else:
+            trunk_input = torch.cat([geometry, dynamic_query], dim=-1)
         if trunk_input.shape[1] != self.runtime_head_input_dim:
             raise RuntimeError("v4 runtime input layout drifted from its schema")
         hidden = self.shared_trunk(trunk_input)
@@ -2718,6 +2787,8 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             **query_aux,
             **dual_probe_rescue_aux,
         }
+        if geometry_modulation_delta is not None:
+            auxiliary["geometry_modulation_delta"] = geometry_modulation_delta
         if self.viewcell_extreme_visibility_enabled:
             assert viewcell_extreme_visibility_logit is not None
             assert viewcell_extreme_visibility_input is not None

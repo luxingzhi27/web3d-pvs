@@ -2,6 +2,8 @@
 
 日期：2026-08-11
 
+> 历史机制矩阵，不是当前 V4 Full。保留其硬件图像评价和关系/生存场演进证据。
+
 ## 评价范围
 
 - 完整三因素矩阵：8 个变体 × 3 个随机种子 × 40 epoch。
@@ -12,7 +14,13 @@
 - Color-ID 图像评价：24 个成员均通过 NVIDIA Vulkan/ANGLE 硬件 WebGL 门。
 - WebGPU parity：使用 Playwright 无头 Chrome 完成 8 个 case 的软件后端数值校验，最大绝对误差为 `2.861e-6`、最大相对误差为 `6.787e-6`；适配器为 `google/swiftshader`，`formalReady=false`，因此不能把该结果或延迟写成 NVIDIA WebGPU 硬件性能。
 
-完整逐成员指标和所有成对置信区间见[validation 明细报告](pvs_direction_depth_relation_survival_constrained_v1_surface_fallback_owrb_formal40_pooled_context_20260811_formal_validation.md)。
+完整逐成员指标和所有成对置信区间保存在机器可读结果：
+
+```text
+neural_instance_culling/benchmark/out/
+  pvs_direction_depth_relation_survival_constrained_v1_surface_fallback_owrb_formal40_pooled_context_20260811/
+  pvs_direction_depth_relation_survival_constrained_v1_surface_fallback_owrb_formal40_pooled_context_20260811_formal_summary.json
+```
 
 ## 主要结果
 

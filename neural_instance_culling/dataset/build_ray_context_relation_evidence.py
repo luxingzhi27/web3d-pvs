@@ -231,19 +231,24 @@ def _reduce_pose_events(
         unique_pairs, inverse, counts = np.unique(
             pairs, axis=0, return_inverse=True, return_counts=True
         )
-        order = np.argsort(inverse, kind="stable")
-        sorted_inverse = inverse[order]
-        sorted_gap = gap[order]
-        starts = np.r_[0, np.flatnonzero(np.diff(sorted_inverse)) + 1]
-        ends = np.r_[starts[1:], sorted_inverse.size]
-        gap_mean = np.asarray(
-            [float(sorted_gap[start:end].mean()) for start, end in zip(starts, ends, strict=False)],
-            dtype=np.float32,
+        gap_sum = np.bincount(
+            inverse,
+            weights=gap.astype(np.float64, copy=False),
+            minlength=unique_pairs.shape[0],
         )
-        gap_std = np.asarray(
-            [float(sorted_gap[start:end].std()) for start, end in zip(starts, ends, strict=False)],
-            dtype=np.float32,
+        gap_square_sum = np.bincount(
+            inverse,
+            weights=np.square(gap.astype(np.float64, copy=False)),
+            minlength=unique_pairs.shape[0],
         )
+        gap_mean64 = gap_sum / np.maximum(counts.astype(np.float64), 1.0)
+        gap_variance = np.maximum(
+            gap_square_sum / np.maximum(counts.astype(np.float64), 1.0)
+            - np.square(gap_mean64),
+            0.0,
+        )
+        gap_mean = gap_mean64.astype(np.float32)
+        gap_std = np.sqrt(gap_variance).astype(np.float32)
 
         # Estimate target depth from the complete deeper layer.  This gives a
         # stable relative gap for ordered depth shells without AABB overlap.
@@ -251,8 +256,11 @@ def _reduce_pose_events(
             depths[layer + 1].reshape(-1)
         )
         target_values, target_inverse = np.unique(back_all[finite], return_inverse=True)
-        target_depth = np.zeros(target_values.shape[0], dtype=np.float32)
-        np.add.at(target_depth, target_inverse, depths[layer + 1].reshape(-1)[finite])
+        target_depth = np.bincount(
+            target_inverse,
+            weights=depths[layer + 1].reshape(-1)[finite].astype(np.float64, copy=False),
+            minlength=target_values.size,
+        ).astype(np.float32)
         target_count = np.bincount(target_inverse, minlength=target_values.size).astype(np.float32)
         target_depth /= np.maximum(target_count, 1.0)
         target_depth_map = np.zeros((num_instances,), dtype=np.float32)

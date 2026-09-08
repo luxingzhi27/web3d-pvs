@@ -1,6 +1,6 @@
 # SLM2Viewer 部署包
 
-当前状态和场景边界以 `../docs/README.md`、`../docs/current/repository_layout_2026-07-31.md` 和 `assets/config.json` 为准。本文只描述当前两场景发布流程。
+当前状态和场景边界以 `../docs/README.md`、`../docs/current/current_instance_pvs_versions.md` 和 `assets/config.json` 为准。本文只描述当前两场景发布流程。
 
 完整的 V4 运行、资产和部署边界见
 `../docs/frontend/pvs_v4_runtime_and_deployment.md`；本文保留可直接执行的部署步骤。

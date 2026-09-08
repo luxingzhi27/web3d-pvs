@@ -5,7 +5,7 @@
 GLB 下载调度；Metropolis 没有匹配的 V4 权重，使用实例 AABB 视锥模式。
 
 当前仓库状态以 [`../docs/README.md`](../docs/README.md) 和
-[`../docs/current/repository_layout_2026-07-31.md`](../docs/current/repository_layout_2026-07-31.md)
+[`../docs/current/current_instance_pvs_versions.md`](../docs/current/current_instance_pvs_versions.md)
 为准。部署细节见 [`README_DEPLOY.md`](README_DEPLOY.md)。
 
 ## 本地运行

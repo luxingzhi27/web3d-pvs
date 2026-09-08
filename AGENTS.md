@@ -87,7 +87,7 @@ conda run -n slm_pvs python slm2viewer/scripts/verify_v4_frontend_parity.py \
 - 当前论文模型的训练协议是 `docs/experiments/pvs_mainline_training_2026-08-21.md`，统一实验前缀为 `pvs_v4_integrated_visibility_mainline_v1`。固定架构为分层遮挡关系先验与逐实例校准生存场、视点区域矩包络频谱查询，以及逐 pose 平衡分类、单侧 RVL 加权召回保护和共享困难边界对比组成的综合可见性损失。
 - 本轮只优化实例可见性。视觉效用、下载优先级、GLB 字节预算和资源调度损失必须为零，不参与参数扫描排名；训练期对比投影头不得进入运行时导出。旧 108 维尾部分离器、冻结主干 refinement 和完整旧 RVL 叠加不再是执行入口。
 - 主实验固定使用 `5926 train / 659 calibration / 730 validation / 684 test`；旧 684 test 不变。每个 checkpoint 只用自己的 calibration 冻结阈值，validation 比较配置，test 在模型和阈值全部冻结后读取一次。
-- 已完成八组单种子快速扫描、配置复核、完整模型与四个核心消融的三种子 `40 epoch × 900 step` 从头长训。正式评价入口是 `neural_instance_culling/benchmark/reaudit_pvs.py`，结论见 `docs/evaluation/pvs_mainline_validation_2026-08-23.md`。
+- 已完成八组单种子快速扫描、配置复核、完整模型与六个核心消融的三种子 `40 epoch × 900 step` 从头长训。正式评价入口是 `neural_instance_culling/benchmark/reaudit_pvs.py`，当前结论见 `docs/evaluation/pvs_mainline_core_ablation_paper_analysis_2026-08-28.md`。
 - 本阶段暂不把 `bad cull` 置信区间上界作为路线否决条件，但仍必须报告 `bad cull`、漏检数量和图像级漏检指标；不得用减少预测数量掩盖画面风险。
 - 画面安全主门仍是每个 checkpoint 在 calibration 上冻结的 `weighted recall > 0.99` 及其单侧 95% 置信下界大于 `0.99`。普通 pose recall 只作诊断。
 - 安全阈值的位置只作分布健康诊断，不作固定 `p=0.5` 硬门。必须同时记录安全阈值区间、阈值扰动稳定性、正样本加权 q01/q005、负样本 q99/q99.5、logit 间隔、Brier/ECE 和可靠性图；低阈值本身不能否决模型，因为 bias 或温度缩放可以移动概率阈值而不改变排序。不得用这种后处理伪装模型改进，主线资格仍由 calibration 的 weighted recall 安全门，以及同一安全门下的 precision、accuracy、balanced accuracy、specificity、useful cull、图像和资源指标共同决定。

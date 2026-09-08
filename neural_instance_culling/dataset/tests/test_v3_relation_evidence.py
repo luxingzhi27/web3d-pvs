@@ -16,9 +16,16 @@ from build_triangle_depth_layer_evidence import (  # noqa: E402
     select_topk_evidence,
 )
 from build_observed_relation_csr import (  # noqa: E402
+    _aggregate_sparse_relation_rows,
+    _merge_sparse_relation_moments,
+    _vectorized_topk,
     derive_hierarchy_diameter_limits,
     summarize_topk_diagnostics_for_metadata,
     truncate_relation_topk,
+)
+from compact_triangle_depth_relation_shard import (  # noqa: E402
+    aggregate_relation_moments,
+    extract_sparse_pose,
 )
 
 
@@ -85,6 +92,106 @@ class V3RelationEvidenceTests(unittest.TestCase):
             summary["retainedQualityQuantiles"]["min"],
             expected_quality,
         )
+
+        vectorized = _vectorized_topk(
+            targets,
+            directions,
+            shells,
+            sources,
+            features,
+            k=2,
+        )
+        self.assertEqual(vectorized[3].tolist(), kept_sources)
+        self.assertTrue(np.allclose(vectorized[4], result[4]))
+        self.assertAlmostEqual(
+            vectorized[-1]["retainedQualityQuantiles"]["min"],
+            expected_quality,
+        )
+
+    def test_sparse_pose_preserves_dense_relation_and_survival_semantics(self) -> None:
+        ids = np.asarray([
+            [[0, 0, 1], [0, 1, 1]],
+            [[2, 2, 1], [2, 3, 3]],
+            [[4, 4, 1], [4, 3, 3]],
+        ], dtype=np.uint32)
+        depths = np.asarray([
+            [[1, 1, 2], [1, 2, 2]],
+            [[3, 3, 2], [3, 4, 4]],
+            [[6, 6, 2], [6, 4, 4]],
+        ], dtype=np.float32)
+        ids = np.tile(ids, (1, 16, 16))
+        depths = np.tile(depths, (1, 16, 16))
+        centers = np.asarray([
+            [0, 0, 1], [1, 0, 2], [0, 0, 3], [1, 0, 4], [0, 0, 6],
+        ], dtype=np.float32)
+        radii = np.ones((5,), dtype=np.float32)
+        relation, observations = extract_sparse_pose(
+            ids,
+            depths,
+            np.arange(5, dtype=np.uint32),
+            centers,
+            radii,
+            np.zeros((3,), dtype=np.float32),
+            render_pose_id=9,
+            min_depth_gap=1e-4,
+        )
+        self.assertGreater(relation.size, 0)
+        self.assertTrue(np.all(relation["renderPoseId"] == 9))
+        self.assertTrue(np.all(relation["target"] != relation["source"]))
+        self.assertGreater(observations.size, 0)
+        self.assertTrue(np.all(observations["renderPoseId"] == 9))
+        self.assertAlmostEqual(float(observations["weight"].sum()), 1.0, places=6)
+        self.assertEqual(set(observations["event"].tolist()), {0, 1})
+        dense_bytes = ids.nbytes + depths.nbytes
+        self.assertLess(relation.nbytes + observations.nbytes, dense_bytes)
+
+    def test_sparse_aggregate_keeps_pose_support_and_finite_features(self) -> None:
+        ids = np.asarray([
+            [[0, 0], [1, 1]],
+            [[2, 2], [3, 3]],
+        ], dtype=np.uint32)
+        depths = np.asarray([
+            [[1, 1], [2, 2]],
+            [[3, 3], [4, 4]],
+        ], dtype=np.float32)
+        centers = np.asarray(
+            [[0, 0, 1], [1, 0, 2], [0, 0, 3], [1, 0, 4]],
+            dtype=np.float32,
+        )
+        radii = np.ones((4,), dtype=np.float32)
+        first, _ = extract_sparse_pose(
+            ids, depths, np.arange(4, dtype=np.uint32), centers, radii,
+            np.zeros(3, dtype=np.float32), render_pose_id=0, min_depth_gap=1e-4,
+        )
+        second = first.copy()
+        second["renderPoseId"] = 1
+        result = _aggregate_sparse_relation_rows(
+            np.concatenate([first, second]),
+            centers,
+            radii,
+            np.ones(3, dtype=np.float32) * 10.0,
+            total_pose_count=2,
+            source_k=2,
+        )
+        features = result[4]
+        self.assertTrue(np.isfinite(features).all())
+        self.assertTrue(np.all(features[:, 0] == 2.0))
+        self.assertTrue(np.all(features[:, 1] == 1.0))
+        moments, offsets, depth_values = aggregate_relation_moments(
+            np.concatenate([first, second])
+        )
+        merged = _merge_sparse_relation_moments(
+            [moments],
+            [offsets],
+            [depth_values],
+            centers,
+            radii,
+            np.ones(3, dtype=np.float32) * 10.0,
+            total_pose_count=2,
+            source_k=2,
+        )
+        for dense_value, moment_value in zip(result[:6], merged[:6], strict=True):
+            self.assertTrue(np.allclose(dense_value, moment_value, rtol=1e-6, atol=1e-6))
 
     def test_hierarchy_diameters_are_frozen_from_train_observed_edges(self) -> None:
         centers = np.asarray([[0, 0, 0], [1, 0, 0], [4, 0, 0], [10, 0, 0]], dtype=np.float32)

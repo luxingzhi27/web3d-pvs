@@ -38,6 +38,7 @@ from pvs_model import (  # noqa: E402
     OCCLUSION_REPRESENTATION_MODES,
     QUERY_TAIL_SEPARATOR_FAMILIES,
     SUPPORTED_SURVIVAL_RANKS,
+    VISIBILITY_FUSION_MODES,
     VIEWCELL_REGION_CONDITIONED_VISIBILITY_FUSION_DIM,
     VIEWCELL_REGION_CONDITIONED_VISIBILITY_HEAD_DIM,
     VIEWCELL_REGION_CONDITIONED_VISIBILITY_PROJECTION_DIM,
@@ -1098,13 +1099,18 @@ def _set_refinement_scope(
             )
         runtime_modules = (model.dual_probe_rescue_attenuation_head,)
     elif str(scope) == "runtime_visibility":
-        runtime_modules = (
+        runtime_modules = tuple(
+            module
+            for module in (
             model.moment_query,
             model.relation_condition_head,
             model.boundary_summary_head,
             model.direction_basis_head,
+            model.geometry_modulation_head,
             model.shared_trunk,
             model.visibility_head,
+            )
+            if module is not None
         )
     else:
         runtime_modules = (model.visibility_head,)
@@ -2375,6 +2381,12 @@ def parse_args() -> argparse.Namespace:
         help="number of directional basis channels; each channel keeps seven survival parameters",
     )
     parser.add_argument(
+        "--visibility-fusion-mode",
+        choices=VISIBILITY_FUSION_MODES,
+        default="concat",
+    )
+    parser.add_argument("--geometry-modulation-hidden-dim", type=int, default=64)
+    parser.add_argument(
         "--spectral-mode",
         choices=(
             "moment_envelope",
@@ -3494,6 +3506,8 @@ def main() -> None:
         instance_calibration_mode=args.instance_calibration_mode,
         instance_calibration_max_abs=args.instance_calibration_max_abs,
         sparse_instance_penalty=args.sparse_instance_penalty,
+        visibility_fusion_mode=args.visibility_fusion_mode,
+        geometry_modulation_hidden_dim=args.geometry_modulation_hidden_dim,
         view_residual_max_abs=args.view_residual_max_abs,
         view_residual_hidden_dim=args.view_residual_hidden_dim,
         boundary_opportunity_hidden_dim=args.boundary_opportunity_hidden_dim,

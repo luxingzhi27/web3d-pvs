@@ -63,8 +63,20 @@ def _quantile_bins(values: np.ndarray, requested_bins: int) -> tuple[np.ndarray,
 
 
 def _visible_weight_sums(offsets: np.ndarray, weights: np.ndarray) -> np.ndarray:
-    starts = offsets[:-1].astype(np.int64, copy=False)
-    return np.add.reduceat(weights.astype(np.float64, copy=False), starts)
+    offsets = np.asarray(offsets, dtype=np.int64)
+    values = np.asarray(weights, dtype=np.float64)
+    if (
+        offsets.ndim != 1
+        or offsets.size == 0
+        or int(offsets[0]) != 0
+        or np.any(offsets[1:] < offsets[:-1])
+        or int(offsets[-1]) != int(values.size)
+    ):
+        raise ValueError("visible weight offsets are not a valid CSR index")
+    prefix = np.empty((values.size + 1,), dtype=np.float64)
+    prefix[0] = 0.0
+    np.cumsum(values, dtype=np.float64, out=prefix[1:])
+    return prefix[offsets[1:]] - prefix[offsets[:-1]]
 
 
 def _label_columns(
@@ -206,7 +218,12 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
     meta = json.loads((dataset_dir / "dataset_meta.json").read_text(encoding="utf-8"))
     pose_count = int(meta["poseCount"])
     poses = np.fromfile(dataset_dir / "poses.bin", dtype=POSE_DTYPE)
-    source_split = np.fromfile(args.source_split_ids, dtype=np.uint8)
+    source_split_path = args.source_split_ids.resolve() if args.source_split_ids else None
+    source_split = (
+        np.fromfile(source_split_path, dtype=np.uint8)
+        if source_split_path is not None
+        else np.asarray(poses["split"], dtype=np.uint8)
+    )
     if poses.size != pose_count or source_split.size != pose_count:
         raise ValueError("dataset poses and historical split labels must match poseCount")
     if np.any(~np.isin(source_split, np.asarray(list(SOURCE_SPLIT_IDS.values()), dtype=np.uint8))):
@@ -268,7 +285,11 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
     manifest = {
         "schema": "main-in-scene-stratified-calibration-split-v1",
         "sourceDataset": str(dataset_dir),
-        "sourceHistoricalSplitIds": str(args.source_split_ids.resolve()),
+        "sourceHistoricalSplitIds": (
+            str(source_split_path)
+            if source_split_path is not None
+            else "poses.bin:split"
+        ),
         "poseCount": pose_count,
         "selectionSeed": int(args.seed),
         "calibrationFractionOfHistoricalTrain": float(args.calibration_fraction),
@@ -303,7 +324,15 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-dir", type=Path, required=True)
-    parser.add_argument("--source-split-ids", type=Path, required=True)
+    parser.add_argument(
+        "--source-split-ids",
+        type=Path,
+        default=None,
+        help=(
+            "Optional historical uint8 split file. By default, read the train/validation/test "
+            "labels directly from the input dataset's poses.bin split field."
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--calibration-fraction", type=float, default=0.10)
     parser.add_argument("--yaw-bins", type=int, default=12)

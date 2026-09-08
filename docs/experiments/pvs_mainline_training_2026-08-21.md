@@ -1,180 +1,103 @@
-# V4 综合可见性唯一主线与执行协议
+# V4 综合可见性主线训练协议
 
 日期：2026-08-21
+当前状态：三种子完整模型和核心消融已完成，当前 Full 不包含表征对比损失。
 
 ## 目的
 
-本实验固定论文模型的唯一训练主线，消除近期实验中架构、数据划分和损失口径交叉复用的问题。模型从头训练，保留以下三项核心机制：
+本文固定当前论文模型的训练和消融协议。历史参数扫描、被中止的短训、旧含对比损失的 Full 和中间进度不再保留在当前文档；需要追溯时使用 Git 历史。
 
-1. 分层遮挡关系先验和逐实例校准生存场；
-2. 视点区域矩包络频谱查询；
-3. 面向高加权召回的综合可见性损失。
+当前模型只优化实例可见性。视觉效用、下载优先级、GLB 字节预算和资源调度不进入训练损失，也不参与 checkpoint 排名。
 
-本阶段只研究实例可见性。视觉效用、下载优先级、GLB 字节预算和资源调度不进入训练目标，也不参与参数扫描排名。前端运行结构保持不变，仍只读取固定实例特征表并执行一次轻量视角查询。
-
-## 固定数据协议
+## 数据协议
 
 主实验使用 `pose_csr_hkust_v3_main_stratified_calibration_fov66_v1`：
 
-| split | view-cell 数量 | 用途 |
+| Split | View-cell 数量 | 用途 |
 |---|---:|---|
-| train | 5926 | 参数学习和离线关系编码 |
-| calibration | 659 | 每个 checkpoint 独立冻结安全阈值 |
-| validation | 730 | 选择参数配置和 checkpoint |
-| test | 684 | 全部配置冻结后的一次性正式测试 |
+| train | 5,926 | 参数训练和 train-only 遮挡关系编码 |
+| calibration | 659 | 为每个 checkpoint 独立冻结安全阈值 |
+| validation | 730 | 选择 checkpoint、模型配置和消融结论 |
+| test | 684 | 模型、阈值和结论冻结后执行一次 |
 
-真实渲染 FOV 为 60 度，后退候选、采样和模型查询 FOV 为 66 度。候选、GT、可见权重、查询中心和后退相机字段保持原样。主实验禁止从旧 checkpoint 初始化，禁止在 test 上选择阈值。
+真实显示相机使用垂直 FOV `60°`，采样、后退候选和模型查询使用 `66°`。所有成员使用相同 pose、候选集合、GT、可见权重和关系监督来源，不向候选补入 GT。
 
-原 V4 关系表按旧空间 split 的 2772 个 train view-cell 构建，不能直接配合恢复后的主实验 split。关系表因此按当前 train 标签重建：硬件三角形深度缓存中的非 train 行会被过滤，缓存没有覆盖的 train view-cell 不生成伪造遮挡边。该关系表仍是 train-only 离线输入。
+Calibration 从旧训练集合中按场景类别、候选数、GT 数、观察方向和可见权重分层抽取。旧 validation 和固定 684 test 保持不变；test 不参与参数扫描、阈值或 checkpoint 选择。
 
-## 综合可见性损失
+## 固定完整模型
 
-### 设计原因
+当前 Full 由三个部分组成：
 
-完整旧 RVL 已含高正类权重 BCE、Tversky、预测数量和困难负例排序；Pose Balanced Frontier 又含逐 pose 平衡 BCE 和困难尾部排序。把两者与对比损失直接相加，会重复强化正例和排序梯度，容易重新出现低阈值、过预测和训练越久分类分离越差的问题。
+1. 分层遮挡关系先验和逐实例校准生存场；
+2. 视点区域矩包络频谱查询；
+3. 逐 pose 平衡分类、单侧 RVL weighted-recall 保护和困难边界 logit 间隔。
 
-新目标给每一项分配唯一职责：
+运行时固定表是 `96` 维几何加 `28` 维生存场，共 `124` 个 FP16 数值。离线关系图、层次聚合、删失监督和逐实例残差训练不进入浏览器运行时。
 
-- **逐 pose 平衡分类：** 每个 view-cell 内分别归一化正例和负例，再对 view-cell 等权平均，学习普通可见/不可见判别，避免候选数量大的 pose 支配训练。
-- **RVL 加权召回保护：** 只保留 RVL 对重要可见实例的保护作用。按可见权重计算软加权漏检率，仅在漏检率超过目标时施加单侧平滑约束。该项不再包含第二套 BCE、Tversky、数量预算或负例排序。
-- **共享困难边界：** 每个 pose 只选择当前分数最低的重要正例和分数最高的负例。相同样本同时用于 logit 间隔和训练期表征对比，避免两套困难样本挖掘相互冲突。
-- **生存场监督：** 三角形深度剥离的删失监督、关系一致性和逐实例校准正则保持独立，继续负责遮挡表示本身，不与最终分类损失重复。
-
-整体形式为：
+当前损失固定为：
 
 ```text
-综合可见性损失
-  = 逐 pose 平衡分类
-  + 召回保护权重 × 单侧 RVL 加权召回保护
-  + 边界权重 × 边界渐入系数
-    × [(1 - 对比混合比例) × logit 间隔
-       + 对比混合比例 × 表征间隔]
+逐 pose 平衡分类
++ 0.30 × 单侧 RVL weighted-recall 保护
++ 0.20 × 渐入后的困难边界 logit 间隔
 ```
 
-RVL 保护项以 aggregate weighted recall 为主体，并加入较小的最差 pose 尾部项，防止安全余量全部由少数容易 view-cell 提供。正式安全门仍由 calibration 上的 weighted recall 点估计及其单侧置信下界决定，普通 pose recall 只作诊断。
+`integrated_contrastive_mix=0.0`。旧表征对比投影会稳定降低 precision、accuracy 和 useful cull，已从 Full 移除，也不导出到前端。
 
-表征对比使用最终可见性查询隐藏特征。训练期小投影头把困难正例拉向同 pose 的其余可见实例原型，并推离共享困难负例。只有违反当前间隔的样本产生梯度；间隔满足后停止施压。投影头不保存到运行时模型，也不增加前端特征表和前向算子。
+## 训练配置
 
-## 参数扫描
+| 项目 | 固定值 |
+|---|---|
+| 随机种子 | `20260801/20260802/20260803` |
+| 训练预算 | 每成员 `40 epoch × 900 step` |
+| Batch | 每批 `4` 个 pose |
+| Checkpoint/评价间隔 | 每 `4` epoch |
+| Calibration bootstrap | `10,000` 次 |
+| 学习率 | `2e-4` |
+| 生存场方向秩 | `4` |
+| Test | 训练和 validation 阶段禁止读取 |
 
-单种子快速扫描固定为 8 组，每组从头训练 10 epoch、每 epoch 100 step，四张 GPU 并行。扫描只覆盖以下高影响参数：
+每个 checkpoint 只能使用自己的 calibration split 冻结阈值。当前安全工作点要求 calibration 和 validation 的 aggregate weighted recall 点估计及单侧 95% 下界均大于 `0.99`。Validation 在通过安全门的 checkpoint 中比较 balanced accuracy、precision、accuracy、useful cull 和平均预测数。
 
-- 学习率：`1e-4`、`2e-4`、`3e-4`；
-- 召回保护权重：`0.15`、`0.20`、`0.30`、`0.45`；
-- 共享边界权重：`0.10`、`0.15`、`0.20`、`0.30`；
-- 对比混合比例：`0`、`0.15`、`0.25`、`0.35`、`0.50`；
-- logit 间隔：`0.30`、`0.50`、`0.75`。
+## 核心消融
 
-每个 checkpoint 使用自己的 calibration 阈值。选择顺序固定为：
+当前正式比较包括：
 
-1. calibration 通过 weighted recall 安全门，且 validation weighted recall 大于 0.99；
-2. balanced accuracy；
-3. precision；
-4. instance accuracy；
-5. useful cull；
-6. 平均预测实例数更少。
+| 成员 | 唯一变化 |
+|---|---|
+| Full | 全部当前模块，表征对比关闭 |
+| 去除分层关系 | 用容量匹配的几何路径替代真实关系编码 |
+| 去除生存场 | 删除逐实例生存表和相关监督 |
+| 通用 28 维 | 用同容量可训练实例表示替代结构化生存场 |
+| 去除区域矩包络 | 改为中心视点查询 |
+| 去除 RVL 保护 | 召回保护权重设为零 |
+| 去除困难边界 | logit 间隔权重设为零 |
 
-即使 8 组都未达到安全门，也选择相对最优配置继续正式长训，不允许 pilot 门控取消长训。
+所有成员均完成三种子 `40 × 900` 从头训练。失败成员同样保留完整曲线并如实报告，训练没有被 pilot 指标提前取消。
 
-## 40 epoch 正式长训与矩阵
-
-历史方向代理 `full40` 的每个 epoch 固定为 `900 step`。因此本轮正式长训也固定为 `40 epoch × 900 step = 36000` 次参数更新，不能再用早期 runner 中的 `100 step/epoch` 充当同等级长训。
-
-`s02` 完整模型和以下核心消融均使用 `20260801/02/03` 三个种子从头训练 40 epoch。为充分使用四张 GPU，完整模型与消融可以并行执行；它们使用独立输出目录，最终仍按相同训练预算比较：
-
-| 成员 | 分层关系/生存场 | 区域矩频谱 | RVL 召回保护 | 表征对比 |
-|---|---|---|---|---|
-| 完整模型 | 开启 | 开启 | 开启 | 开启 |
-| 去除分层关系先验 | 改为同容量几何控制，保留逐实例校准 | 开启 | 开启 | 开启 |
-| 去除区域矩频谱 | 开启 | 改为中心点查询 | 开启 | 开启 |
-| 去除 RVL 召回保护 | 开启 | 开启 | 关闭 | 开启 |
-| 去除对比表征分离 | 开启 | 开启 | 开启 | 关闭 |
-
-失败成员也必须完成计划训练，并如实标记为没有合格安全工作点。正式测试只在配置、checkpoint 和 calibration 阈值全部冻结后执行。
-
-## 运行入口
-
-唯一 runner：
+## 执行入口
 
 ```bash
-conda run -n slm_pvs python \
-  neural_instance_culling/benchmark/run_pvs.py \
-  preflight --data-root /mnt/sda/rhyang/slm
+conda run -n slm_pvs python +  neural_instance_culling/benchmark/run_pvs.py +  preflight --data-root /mnt/sda/rhyang/slm
 
-conda run -n slm_pvs python \
-  neural_instance_culling/benchmark/run_pvs.py \
-  smoke --data-root /mnt/sda/rhyang/slm --gpu-ids 0
-
-conda run -n slm_pvs python \
-  neural_instance_culling/benchmark/run_pvs.py \
-  scan --data-root /mnt/sda/rhyang/slm --gpu-ids 0 1 2 3
-
-conda run -n slm_pvs python \
-  neural_instance_culling/benchmark/run_pvs.py \
-  update-budget-check12x300 --data-root /mnt/sda/rhyang/slm --gpu-ids 0 1
-
-conda run -n slm_pvs python \
-  neural_instance_culling/benchmark/run_pvs.py \
-  formal40-s02-full --data-root /mnt/sda/rhyang/slm --gpu-ids 2 3 0
-
-conda run -n slm_pvs python \
-  neural_instance_culling/benchmark/run_pvs.py \
-  formal40-s02-ablation --data-root /mnt/sda/rhyang/slm --gpu-ids 1
+conda run -n slm_pvs python +  neural_instance_culling/benchmark/run_pvs.py +  core-ablation --data-root /mnt/sda/rhyang/slm +  --gpu-ids 0 1 2 3
 ```
 
-## 扫描前代码审计修正
-
-正式扫描前完成了两轮独立代码复核，并修正以下会影响长训可信度的问题：
-
-- 训练期对比投影头只接收可见性梯度，关系、生存和调度目标不拥有该参数。多目标梯度投影现在只在安全目标与辅助目标共同拥有的参数坐标上计算冲突和投影系数，避免投影头的独占梯度稀释修正量并触发整组关系梯度回退清零。完整关系 CUDA smoke 中 `relationGradientProjectionFallbackZeroed = 0`。
-- 最佳安全 checkpoint 的阈值仍只来自该 epoch 的 calibration；通过 calibration 与 validation 双重 weighted recall 安全门后，epoch 按 validation 的 balanced accuracy、precision、accuracy、useful cull 和平均预测数量依次选择，calibration useful cull 只作最后平局项。
-- 独立 validation 重放同时计算 weighted recall 点估计和单侧置信下界，runner 只有在两者都大于 `0.99` 时才把成员列为安全成员。
-- runner 会核对成员的 seed、变体、训练轮数和综合损失参数。不完整或不匹配的本实验成员会从头重跑；完整成员保持不动。
-- 已存在的 validation 结果必须与当前选定 checkpoint、epoch、seed、阈值、模型描述和 calibration 摘要一致，否则强制重评。正式成员的 calibration bootstrap 少于 `10,000` 次时 runner 必须拒绝汇总，不能用较小重采样数生成正式结论。
-
-## 快速扫描结果
-
-八组单种子 10 epoch 扫描均从头完成，并在各自 calibration 冻结阈值后重放完整 validation。八组均满足 calibration 与 validation 的 aggregate weighted recall 点估计及其单侧置信下界大于 `0.99`。
-
-| 配置 | 阈值 | weighted recall | 下界 | balanced accuracy | accuracy | precision | useful cull | 平均预测数 |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| s00 | 0.28 | 0.99549 | 0.99407 | 0.62775 | 0.58565 | 0.03654 | 0.57022 | 2004.8 |
-| s01 | 0.32 | 0.99479 | 0.99329 | **0.73907** | 0.73600 | 0.06195 | 0.71896 | 1306.3 |
-| s02 | 0.34 | 0.99425 | 0.99270 | 0.67646 | **0.84714** | **0.07480** | **0.83572** | **725.2** |
-| s03 | 0.32 | 0.99700 | 0.99596 | 0.64622 | 0.46545 | 0.03489 | 0.44626 | 2611.2 |
-| s04 | 0.30 | 0.99801 | 0.99710 | 0.68124 | 0.48387 | 0.03819 | 0.46347 | 2535.2 |
-| s05 | 0.38 | 0.99661 | 0.99542 | 0.58526 | 0.31817 | 0.02844 | 0.29830 | 3316.9 |
-| s06 | 0.34 | 0.99967 | 0.99953 | 0.50941 | 0.05971 | 0.02340 | 0.03719 | 4569.2 |
-| s07 | 0.22 | 0.99809 | 0.99736 | 0.61655 | 0.33519 | 0.03061 | 0.31426 | 3246.2 |
-
-早期预登记的“安全成员中先比较 balanced accuracy，再比较 precision、accuracy、useful cull 和预测数量”规则曾选择 `s01`：学习率 `2e-4`、召回保护权重 `0.30`、共享边界权重 `0.15`、对比混合比例 `0.15`、logit 间隔 `0.50`。其 pose 宏平均 precision、recall、weighted recall 和 balanced accuracy分别为 `0.12919`、`0.95593`、`0.99590` 和 `0.74738`。
-
-`s02` 在 accuracy、precision、useful cull 和平均预测数上更好，但 balanced accuracy 明显低于 `s01`，说明它通过漏掉更多普通可见实例换取了剔除；其 aggregate recall 为 `0.49755`。进一步审计发现该扫描只有 `10×100=1000` 次更新，而下午的旧方向代理对比学习扫描为 `12×300=3600` 次更新，旧正式 `full40` 更是每个 epoch `900 step`。因此这批短扫描不足以可靠决定正式长训配置。
-
-2026-08-21 已停止刚启动的 `s01 80×100` 正式矩阵，部分输出只作为中止诊断，不能进入正式结果。当前先以独立名称复核 `s01/s02 12×300`，同时将三种子正式完整模型改为 `s02 40×900`。这一调整不修改候选、GT、split、阈值冻结规则或前端资产。
-
-## 当前验证状态
-
-- 正式主 split 关系 CSR 已从已登记的硬件三角形深度缓存完成重建。它以当前 `5926` 个 train view-cell 为规范训练集合，仅保留缓存中属于当前 train 的 `10145` 个渲染行；缓存覆盖 `2029` 个唯一 train view-cell，其余 train view-cell 不合成遮挡关系。
-- 正式关系表包含 `376929` 条保留关系边和 `3038552` 条生存监督记录，其中 `2496487` 条为观测到首遮挡的事件。原生后退视锥候选审计通过，没有补入 GT。
-- 主 split、固定架构、禁止 checkpoint 初始化和关闭非可见性目标的 preflight 已通过。
-- 使用完整正式关系表完成单步 CUDA 前向、反向、校准和 checkpoint 写出；总损失为 `2.0564`，峰值 CUDA 显存约 `3.03 GiB`，未出现非有限数值。
-- 综合损失、多目标梯度投影、关系构建、训练主入口、导出、数据契约、评价器和 runner 共 `152` 项相关 unittest 已通过。
-- 八组 `10×100` 快速扫描已经完成，但不再单独用于冻结正式配置。
-- `s01/s02 12×300` 等更新预算复核使用独立输出；`s02` 三种子完整模型正式长训固定为 `40×900`。
-- 三个 `s02` 正式种子同时运行；seed 03 在快速复核期间与 GPU 0 共享显卡，复核结束后独占该卡。A6000 显存足以容纳两个进程，运行日志仍分别保存。
-- `s02` 快速复核完成后，空闲的 GPU 1 立即承接四个核心消融的三种子 `40×900` 队列；完整模型和消融使用独立 stage 与输出目录，不互相覆盖。
-- `s01 80×100` 矩阵已中止，不得汇入正式表格。正式长训仍不得修改当前默认 checkpoint、阈值和前端资产。
-
-## 2026-08-23 正式评价协议修正
-
-训练完成后审计发现，三种子 Full 在训练期 checkpoint 选择中使用了 `2,000` 次 bootstrap，四组消融使用了 `10,000` 次。网络权重本身有效，但二者不能按正式同口径直接比较。修正入口固定重放 Full 每个种子的 epoch `4, 8, ..., 40` 十个保留 checkpoint，使用各 checkpoint 自己的 calibration 冻结阈值，再在 validation 上选择安全 checkpoint；全过程不读取 test、不补 GT、不改变候选，也不重训模型。
+正式汇总：
 
 ```bash
-conda run -n slm_pvs python \
-  neural_instance_culling/benchmark/reaudit_pvs.py \
-  run --data-root /mnt/sda/rhyang/slm --bootstrap-replicates 10000 \
-  --gpu-ids 0 1 2 3
+conda run -n slm_pvs python +  neural_instance_culling/benchmark/summarize_core_ablation.py +  --core-root neural_instance_culling/benchmark/out/pvs_mainline_core_ablation +  --full-reference-root <no-contrastive-full-members> +  --output neural_instance_culling/benchmark/out/pvs_mainline_core_ablation/core_ablation_summary_v2.json +  --bootstrap-replicates 10000 +  --seed 20260823
 ```
 
-修正后 Full 三种子仍选择 epoch `40/24/32` 和阈值 `0.46/0.60/0.56`，validation weighted recall 下界分别为 `0.99746/0.99636/0.99593`，均通过安全门。五变体三种子使用相同 `730` 个 validation pose 完成 `10,000` 次 paired bootstrap。完整指标和结论见 [`../evaluation/pvs_mainline_validation_2026-08-23.md`](../evaluation/pvs_mainline_validation_2026-08-23.md)。旧 `2,000` 次 Full 汇总不再作为正式结果，runner 也会拒绝再次接受该口径。
+## 完成结果
+
+当前 Full 三个种子选中 epoch `32/36/40`，calibration 阈值为 `0.42/0.68/0.58`，三个 validation 成员均通过 weighted-recall 安全门。当前前端使用 seed `20260802`、epoch `36`、阈值 `0.68`。
+
+完整方法、三种子结果和 10,000 次 paired-bootstrap 消融结论见
+[V4 主线模型与核心消融](../evaluation/pvs_mainline_core_ablation_paper_analysis_2026-08-28.md)。机器可读结果为：
+
+```text
+neural_instance_culling/benchmark/out/pvs_mainline_core_ablation/core_ablation_summary_v2.json
+```
+
+当前证据表明：生存场整体和分层关系是主要有效模块，视点区域矩包络有较小但稳定的分类与剔除收益；RVL 保护主要改善安全工作点下的边界和效率，困难边界项主要改善 balanced accuracy。硬件图像评价、浏览器 WebGPU 延迟和真实移动端性能仍需单独回填。

@@ -74,7 +74,12 @@ def audit_native_aabb_candidates(
     pose and refuses any mismatch.  It does not read visible IDs and cannot
     add a GT instance to the candidate set.
     """
-    from pose_csr_dataset import frustum_candidate_ids_for_pose
+    try:
+        from pose_csr_dataset import frustum_candidate_ids_for_pose
+    except ModuleNotFoundError:
+        from neural_instance_culling.model.pose_csr_dataset import (
+            frustum_candidate_ids_for_pose,
+        )
 
     aabbs = np.asarray(world_aabbs, dtype=np.float32)
     if aabbs.ndim != 2 or aabbs.shape[1] != 6:
@@ -82,19 +87,67 @@ def audit_native_aabb_candidates(
     poses = np.asarray(list(pose_indices), dtype=np.int64).reshape(-1)
     if poses.size and (int(poses.min()) < 0 or int(poses.max()) >= len(dataset.poses)):
         raise ValueError("candidate audit pose index is outside the dataset")
+    metadata = getattr(dataset, "meta", {})
+    semantics = str(metadata.get("candidateSemantics", ""))
+    union_over_subposes = (
+        "union of full aabb candidates" in semantics.lower()
+        and "subpose" in semantics.lower()
+    )
+    subpose_offsets: np.ndarray | None = None
+    subpose_positions: np.ndarray | None = None
+    if union_over_subposes:
+        dataset_dir = getattr(dataset, "dataset_dir", None)
+        if dataset_dir is None:
+            raise ValueError("subpose-union candidate audit requires dataset_dir")
+        files = metadata.get("files") or {}
+        offsets_path = dataset_dir / str(files.get("subposeOffsets", "subpose_offsets.bin"))
+        positions_path = dataset_dir / str(files.get("subposeCameraPos", "subpose_camera_pos.bin"))
+        if not offsets_path.is_file() or not positions_path.is_file():
+            raise FileNotFoundError(
+                "subpose-union candidate audit requires subpose offsets and camera positions"
+            )
+        subpose_offsets = np.fromfile(offsets_path, dtype="<u8")
+        subpose_positions = np.fromfile(positions_path, dtype="<f4").reshape(-1, 3)
+        if (
+            subpose_offsets.size != len(dataset.poses) + 1
+            or int(subpose_offsets[0]) != 0
+            or np.any(subpose_offsets[1:] < subpose_offsets[:-1])
+            or int(subpose_offsets[-1]) != int(subpose_positions.shape[0])
+        ):
+            raise ValueError("subpose-union candidate geometry has invalid CSR dimensions")
+
     mismatch_rows: list[dict[str, int]] = []
     stored_refs = 0
     recomputed_refs = 0
     for pose_index in poses.tolist():
         record = dataset.poses[int(pose_index)]
-        expected = frustum_candidate_ids_for_pose(
-            np.asarray(record["camera_world"], dtype=np.float32),
-            np.asarray(record["camera_forward"], dtype=np.float32),
-            float(record["camera_view"][0]),
-            float(record["camera_view"][1]),
-            aabbs,
-            near=float(near),
-        )
+        if union_over_subposes:
+            assert subpose_offsets is not None and subpose_positions is not None
+            start = int(subpose_offsets[int(pose_index)])
+            end = int(subpose_offsets[int(pose_index) + 1])
+            if end <= start:
+                raise ValueError(f"pose {pose_index} has no subposes for candidate audit")
+            parts = [
+                frustum_candidate_ids_for_pose(
+                    np.asarray(position, dtype=np.float32),
+                    np.asarray(record["camera_forward"], dtype=np.float32),
+                    float(record["camera_view"][0]),
+                    float(record["camera_view"][1]),
+                    aabbs,
+                    near=float(near),
+                )
+                for position in subpose_positions[start:end]
+            ]
+            expected = np.unique(np.concatenate(parts)).astype(np.uint32, copy=False)
+        else:
+            expected = frustum_candidate_ids_for_pose(
+                np.asarray(record["camera_world"], dtype=np.float32),
+                np.asarray(record["camera_forward"], dtype=np.float32),
+                float(record["camera_view"][0]),
+                float(record["camera_view"][1]),
+                aabbs,
+                near=float(near),
+            )
         stored = np.asarray(dataset.frustum_slice(int(pose_index)), dtype=np.uint32)
         stored_refs += int(stored.size)
         recomputed_refs += int(expected.size)
@@ -118,11 +171,15 @@ def audit_native_aabb_candidates(
         )
     return {
         "status": "passed",
-        "source": "recomputed_native_back_camera_aabb",
+        "source": (
+            "recomputed_union_of_native_subpose_aabb_candidates"
+            if union_over_subposes
+            else "recomputed_native_back_camera_aabb"
+        ),
         "poseCount": int(poses.size),
         "storedCandidateRefs": int(stored_refs),
         "recomputedCandidateRefs": int(recomputed_refs),
         "near": float(near),
         "gtUnionUsed": False,
-        "metadataCandidateSemantics": str(getattr(dataset, "meta", {}).get("candidateSemantics", "")),
+        "metadataCandidateSemantics": semantics,
     }

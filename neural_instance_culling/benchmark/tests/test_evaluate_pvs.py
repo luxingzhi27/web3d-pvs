@@ -98,6 +98,10 @@ class BoundedRelationSurvivalMomentV3EvaluatorTests(unittest.TestCase):
                 "maximumAbsoluteResidual": 4.0,
                 "sparseInstancePenalty": 3.0,
             },
+            "visibilityFusion": {
+                "mode": "geometry96_residual_modulation",
+                "modulationHiddenDim": 47,
+            },
             "viewcellRegionConditionedVisibility": {
                 "enabled": True,
                 "regionInputDim": 27,
@@ -150,6 +154,11 @@ class BoundedRelationSurvivalMomentV3EvaluatorTests(unittest.TestCase):
         self.assertEqual(captured["relation_hidden_dim"], 11)
         self.assertEqual(captured["hidden_dim"], 13)
         self.assertEqual(captured["survival_rank"], 4)
+        self.assertEqual(
+            captured["visibility_fusion_mode"],
+            "geometry96_residual_modulation",
+        )
+        self.assertEqual(captured["geometry_modulation_hidden_dim"], 47)
         self.assertTrue(captured["viewcell_region_conditioned_visibility_enabled"])
         self.assertEqual(
             captured["viewcell_region_conditioned_visibility_centering"],

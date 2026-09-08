@@ -28,23 +28,14 @@ for value in (ROOT, MODEL_DIR, DATASET_DIR):
     if str(value) not in sys.path:
         sys.path.insert(0, str(value))
 
-from build_triangle_depth_layer_evidence import (  # noqa: E402
-    BACKGROUND_ID,
-    CACHE_SCHEMA,
-    CACHE_SCHEMA_V2,
-    _camera_for_cache_row,
-    build_survival_evidence_records,
-    load_layer_cache,
-    load_surface_fallback_relations,
-    metric_ray_depths_for_cache_row,
-    spherical_direction_bins,
-)
-from build_ray_context_relation_evidence import (  # noqa: E402
-    _reduce_pose_events,
-    _surface_fallback_pose_rows,
+from compact_triangle_depth_relation_shard import (  # noqa: E402
+    RELATION_MOMENT_DTYPE,
+    RELATION_ROW_DTYPE,
+    SURVIVAL_OBSERVATION_DTYPE,
+    SCHEMA as SPARSE_SHARD_SCHEMA,
+    load_sparse_shard,
 )
 from common.candidate_identity import (  # noqa: E402
-    audit_native_aabb_candidates,
     pose_sequence_for_splits,
 )
 from common.runtime_meta import load_runtime_meta, scene_min_max  # noqa: E402
@@ -57,7 +48,6 @@ from common.train_observed_relation_csr import (  # noqa: E402
     bounded_hierarchy_ids,
     make_relation_metadata_v3,
     normalize_radius_relative_log_depth,
-    radius_relative_log_depth,
     summarize_bounded_hierarchy,
     summarize_candidate_csr,
     train_depth_quantiles,
@@ -91,85 +81,6 @@ def _candidate_summary(dataset: PoseCSRDataset, poses: np.ndarray, num_instances
     else:
         ids = np.zeros((0,), dtype="<u4")
     return summarize_candidate_csr(ids, poses, offsets, num_instances)
-
-
-def _input_hashes(
-    dataset_dir: Path,
-    runtime_meta_path: Path,
-    cache_dir: Path,
-    cache_meta: dict[str, Any],
-    fallback_dir: Path | None,
-) -> dict[str, str]:
-    """Hash the exact provenance envelopes used by the builder."""
-    paths: dict[str, Path] = {
-        "datasetMeta": dataset_dir / "dataset_meta.json",
-        "runtimeMeta": runtime_meta_path,
-        "layerCacheMeta": cache_dir / "layer_cache_meta.json",
-    }
-    for key, name in (cache_meta.get("files") or {}).items():
-        candidate = cache_dir / str(name)
-        if candidate.is_file():
-            paths[f"layerCache:{key}"] = candidate
-    if fallback_dir is not None:
-        evidence_meta = fallback_dir / "evidence_meta.json"
-        if evidence_meta.is_file():
-            paths["surfaceFallbackMeta"] = evidence_meta
-        fallback_files = {}
-        if evidence_meta.is_file():
-            fallback_files = json.loads(evidence_meta.read_text(encoding="utf-8")).get("files") or {}
-        for key, name in fallback_files.items():
-            candidate = fallback_dir / str(name)
-            if candidate.is_file():
-                paths[f"surfaceFallback:{key}"] = candidate
-    missing = [str(path) for path in paths.values() if not path.is_file()]
-    if missing:
-        raise FileNotFoundError(f"relation provenance file(s) are missing: {missing}")
-    return {key: _sha256(path) for key, path in paths.items()}
-
-
-def _update_moment(
-    accumulator: dict[str, Any],
-    *,
-    pose_id: int,
-    pixels: float,
-    gap: float,
-    relative_gap: float,
-    relative_center: np.ndarray,
-    relative_log_scale: float,
-    relative_log_depth: float,
-    source_type: int,
-) -> None:
-    weight = max(float(pixels), 1.0)
-    accumulator["poses"].add(int(pose_id))
-    accumulator["pixels"] += float(max(pixels, 0.0))
-    accumulator["weight"] += weight
-    accumulator["gap_sum"] += weight * float(gap)
-    accumulator["gap_sq_sum"] += weight * float(gap) ** 2
-    accumulator["relative_gap_sum"] += weight * float(relative_gap)
-    accumulator["relative_gap_sq_sum"] += weight * float(relative_gap) ** 2
-    accumulator["center_sum"] += weight * np.asarray(relative_center, dtype=np.float64)
-    accumulator["scale_sum"] += weight * float(relative_log_scale)
-    accumulator["depth_values"].append(float(relative_log_depth))
-    if accumulator["source_type"] < 0:
-        accumulator["source_type"] = int(source_type)
-    elif accumulator["source_type"] != int(source_type):
-        accumulator["source_type"] = SOURCE_TYPES["merged"]
-
-
-def _accumulator() -> dict[str, Any]:
-    return {
-        "poses": set(),
-        "pixels": 0.0,
-        "weight": 0.0,
-        "gap_sum": 0.0,
-        "gap_sq_sum": 0.0,
-        "relative_gap_sum": 0.0,
-        "relative_gap_sq_sum": 0.0,
-        "center_sum": np.zeros((3,), dtype=np.float64),
-        "scale_sum": 0.0,
-        "depth_values": [],
-        "source_type": -1,
-    }
 
 
 def truncate_relation_topk(
@@ -331,362 +242,725 @@ def summarize_topk_diagnostics_for_metadata(
     }
 
 
-def _connected_components(
-    num_nodes: int,
-    target_ids: np.ndarray,
-    source_ids: np.ndarray,
-    confidence: np.ndarray,
-    threshold: float,
-) -> np.ndarray:
-    parent = np.arange(int(num_nodes), dtype=np.int64)
-
-    def find(value: int) -> int:
-        while parent[value] != value:
-            parent[value] = parent[parent[value]]
-            value = int(parent[value])
-        return value
-
-    for target, source, score in zip(target_ids.tolist(), source_ids.tolist(), confidence.tolist(), strict=True):
-        if float(score) < float(threshold):
-            continue
-        left, right = find(int(target)), find(int(source))
-        if left != right:
-            parent[right] = left
-    roots = np.asarray([find(index) for index in range(int(num_nodes))], dtype=np.int64)
-    _, inverse = np.unique(roots, return_inverse=True)
-    return inverse.astype(np.uint32, copy=False)
+def _segment_starts(*columns: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return starts, ends and row-to-segment IDs for sorted key columns."""
+    if not columns:
+        raise ValueError("at least one segment key is required")
+    size = int(np.asarray(columns[0]).size)
+    if any(int(np.asarray(value).size) != size for value in columns):
+        raise ValueError("segment key columns have different lengths")
+    if size == 0:
+        empty = np.zeros((0,), dtype=np.int64)
+        return empty, empty, empty
+    change = np.ones((size,), dtype=np.bool_)
+    change[1:] = False
+    for value in columns:
+        array = np.asarray(value).reshape(-1)
+        change[1:] |= array[1:] != array[:-1]
+    starts = np.flatnonzero(change).astype(np.int64, copy=False)
+    ends = np.r_[starts[1:], size].astype(np.int64, copy=False)
+    segment_ids = np.cumsum(change, dtype=np.int64) - 1
+    return starts, ends, segment_ids
 
 
-def _hierarchy_ids(
-    num_instances: int,
-    target_ids: np.ndarray,
-    source_ids: np.ndarray,
-    confidence: np.ndarray,
-    local_threshold: float,
-    structure_threshold: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Create instance->local and local->structure contiguous mappings."""
-    local = _connected_components(
-        num_instances, target_ids, source_ids, confidence, local_threshold
+def _vectorized_topk(
+    target: np.ndarray,
+    direction: np.ndarray,
+    shell: np.ndarray,
+    source: np.ndarray,
+    features: np.ndarray,
+    *,
+    k: int,
+    worst_cell_limit: int = 64,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Select formal source top-k without constructing a Python dict per cell."""
+    if int(k) <= 0:
+        raise ValueError("relation top-k must be positive")
+    target = np.asarray(target, dtype=np.int64).reshape(-1)
+    direction = np.asarray(direction, dtype=np.int64).reshape(-1)
+    shell = np.asarray(shell, dtype=np.int64).reshape(-1)
+    source = np.asarray(source, dtype=np.uint32).reshape(-1)
+    features = np.asarray(features, dtype=np.float32)
+    if features.ndim != 2 or not (
+        target.size == direction.size == shell.size == source.size == features.shape[0]
+    ):
+        raise ValueError("relation top-k arrays have incompatible shapes")
+
+    pixel_component = np.log1p(np.maximum(features[:, PIXEL_SUPPORT_FEATURE], 0.0))
+    confidence_component = np.maximum(features[:, CONFIDENCE_FEATURE], 0.0)
+    pose_component = np.log1p(1.0 + np.maximum(features[:, 0], 0.0))
+    starts, ends, cell_ids = _segment_starts(target, direction, shell)
+    counts = ends - starts
+
+    def normalized(values: np.ndarray) -> np.ndarray:
+        maxima = np.maximum.reduceat(values, starts)
+        denominator = np.maximum(maxima[cell_ids], 1e-30)
+        result = values / denominator
+        result[maxima[cell_ids] <= 0.0] = 0.0
+        return result
+
+    score = normalized(pixel_component) * normalized(confidence_component) * normalized(pose_component)
+    ranking = np.lexsort(
+        (
+            source.astype(np.int64, copy=False),
+            -score,
+            shell,
+            direction,
+            target,
+        )
     )
-    local_count = int(local.max()) + 1 if local.size else 0
-    if local_count == 0:
-        return local, np.zeros((0,), dtype=np.uint32)
-    local_edges_target = local[target_ids.astype(np.int64, copy=False)]
-    local_edges_source = local[source_ids.astype(np.int64, copy=False)]
-    keep = local_edges_target != local_edges_source
-    structural = _connected_components(
-        local_count,
-        local_edges_target[keep],
-        local_edges_source[keep],
-        confidence[keep],
-        structure_threshold,
+    rt, rd, rs = target[ranking], direction[ranking], shell[ranking]
+    rank_starts, rank_ends, rank_cell_ids = _segment_starts(rt, rd, rs)
+    rank_counts = rank_ends - rank_starts
+    within_rank = np.arange(ranking.size, dtype=np.int64) - rank_starts[rank_cell_ids]
+    selected_in_ranking = within_rank < int(k)
+    total_score = np.add.reduceat(score[ranking].astype(np.float64), rank_starts)
+    retained_score = np.add.reduceat(
+        np.where(selected_in_ranking, score[ranking], 0.0).astype(np.float64),
+        rank_starts,
     )
-    return local, structural
+    quality = np.divide(
+        retained_score,
+        total_score,
+        out=np.ones_like(retained_score),
+        where=total_score > 0.0,
+    )
+    selected = ranking[selected_in_ranking]
+    selected_cell = rank_cell_ids[selected_in_ranking]
+    out_features = features[selected].copy()
+    out_features[:, 13] = quality[selected_cell].astype(np.float32, copy=False)
+    out_features[:, 16] = (rank_counts[selected_cell] > int(k)).astype(np.float32)
+    out_features[:, 19] = rank_counts[selected_cell].astype(np.float32, copy=False)
+
+    canonical = np.lexsort(
+        (
+            source[selected].astype(np.int64, copy=False),
+            shell[selected],
+            direction[selected],
+            target[selected],
+        )
+    )
+    selected = selected[canonical]
+    out_features = out_features[canonical]
+
+    quality_order = np.lexsort((np.arange(quality.size, dtype=np.int64), quality))
+    worst: dict[str, Any] = {}
+    for cell in quality_order[: max(0, int(worst_cell_limit))].tolist():
+        row = int(rank_starts[cell])
+        key = f"{int(rt[row])}:{int(rd[row])}:{int(rs[row])}"
+        worst[key] = {
+            "totalScore": float(total_score[cell]),
+            "retainedScore": float(retained_score[cell]),
+            "retainedQuality": float(quality[cell]),
+            "totalCount": int(rank_counts[cell]),
+            "retainedCount": int(min(int(k), int(rank_counts[cell]))),
+            "truncated": bool(rank_counts[cell] > int(k)),
+        }
+    quantiles = np.quantile(
+        quality if quality.size else np.ones((1,), dtype=np.float64),
+        (0.0, 0.01, 0.05, 0.50, 0.95, 0.99, 1.0),
+    )
+    diagnostics = {
+        "k": int(k),
+        "score": "cell_normalized(evidence_confidence) * cell_normalized(log1p(pixel_support)) * cell_normalized(log1p(1 + pose_support_count))",
+        "cellCount": int(quality.size),
+        "truncatedCellCount": int(np.count_nonzero(rank_counts > int(k))),
+        "retainedQualityQuantiles": {
+            name: float(value)
+            for name, value in zip(
+                ("min", "q01", "q05", "q50", "q95", "q99", "max"),
+                quantiles.tolist(),
+                strict=True,
+            )
+        },
+        "worstCells": worst,
+    }
+    return (
+        target[selected],
+        direction[selected],
+        shell[selected],
+        source[selected],
+        out_features,
+        diagnostics,
+    )
 
 
-def _observations_for_pose(
-    ids: np.ndarray,
-    depths: np.ndarray,
-    candidate_set: set[int],
-    directions: np.ndarray,
+def _aggregate_sparse_relation_rows(
+    rows: np.ndarray,
     centers: np.ndarray,
     radii: np.ndarray,
-    camera_world: np.ndarray,
-    min_depth_gap: float,
+    scene_size: np.ndarray,
     *,
-    pose_id: int,
-) -> list[dict[str, Any]]:
-    """Return independent conserved censor/event records for one subpose."""
-    records, _mass = build_survival_evidence_records(
-        ids, depths, candidate_set, directions, centers, radii, camera_world,
-        min_depth_gap, subpose_id=pose_id,
+    total_pose_count: int,
+    source_k: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any], dict[str, Any]]:
+    """Aggregate sparse per-pose rows into retained relation features."""
+    rows = np.asarray(rows, dtype=RELATION_ROW_DTYPE)
+    if rows.size == 0:
+        raise ValueError("sparse shards contain no relation rows")
+    order = np.lexsort(
+        (
+            rows["renderPoseId"].astype(np.int64, copy=False),
+            rows["source"].astype(np.int64, copy=False),
+            rows["shell"].astype(np.int64, copy=False),
+            rows["direction"].astype(np.int64, copy=False),
+            rows["target"].astype(np.int64, copy=False),
+        )
     )
-    return records
+    values = rows[order]
+    target_row = values["target"].astype(np.int64, copy=False)
+    direction_row = values["direction"].astype(np.int64, copy=False)
+    shell_row = values["shell"].astype(np.int64, copy=False)
+    source_row = values["source"].astype(np.int64, copy=False)
+    starts, ends, group_ids = _segment_starts(
+        target_row, direction_row, shell_row, source_row
+    )
+    group_count = ends - starts
+    weight = np.maximum(values["pixelCount"].astype(np.float64), 1.0)
+    pixel_sum = np.add.reduceat(values["pixelCount"].astype(np.float64), starts)
+    weight_sum = np.add.reduceat(weight, starts)
+
+    def weighted_moment(mean_name: str, std_name: str) -> tuple[np.ndarray, np.ndarray]:
+        mean = values[mean_name].astype(np.float64)
+        std = values[std_name].astype(np.float64)
+        combined_mean = np.add.reduceat(weight * mean, starts) / np.maximum(weight_sum, 1e-12)
+        second = np.add.reduceat(weight * (np.square(std) + np.square(mean)), starts)
+        variance = np.maximum(second / np.maximum(weight_sum, 1e-12) - np.square(combined_mean), 0.0)
+        return combined_mean, np.sqrt(variance)
+
+    gap_mean, gap_std = weighted_moment("gapMean", "gapStd")
+    relative_mean, relative_std = weighted_moment("relativeGapMean", "relativeGapStd")
+    new_pose = np.ones((values.size,), dtype=np.bool_)
+    new_pose[1:] = (
+        (group_ids[1:] != group_ids[:-1])
+        | (values["renderPoseId"][1:] != values["renderPoseId"][:-1])
+    )
+    pose_count = np.add.reduceat(new_pose.astype(np.int64), starts)
+
+    depth_stats = train_depth_quantiles(values["relativeLogDepth"].astype(np.float64))
+    normalized_depth = normalize_radius_relative_log_depth(
+        values["relativeLogDepth"].astype(np.float64), depth_stats
+    ).astype(np.float64)
+    depth_mean = np.add.reduceat(normalized_depth, starts) / np.maximum(group_count, 1)
+    depth_second = np.add.reduceat(np.square(normalized_depth), starts) / np.maximum(group_count, 1)
+    depth_std = np.sqrt(np.maximum(depth_second - np.square(depth_mean), 0.0))
+
+    target = target_row[starts]
+    direction = direction_row[starts]
+    shell = shell_row[starts]
+    source = source_row[starts]
+    source_min = np.minimum.reduceat(values["sourceType"], starts)
+    source_max = np.maximum.reduceat(values["sourceType"], starts)
+    source_types = np.where(
+        source_min == source_max,
+        source_min,
+        np.uint8(SOURCE_TYPES["merged"]),
+    ).astype(np.uint8, copy=False)
+
+    cell_starts, cell_ends, cell_ids = _segment_starts(target, direction, shell)
+    cell_pixels = np.add.reduceat(pixel_sum, cell_starts)
+    pixel_fraction = pixel_sum / np.maximum(cell_pixels[cell_ids], 1.0)
+    pose_rate = pose_count.astype(np.float64) / max(int(total_pose_count), 1)
+    relative_center = (centers[source] - centers[target]) / scene_size[None, :]
+    relative_scale = np.log(
+        np.maximum(radii[source], 1e-5) / np.maximum(radii[target], 1e-5)
+    )
+    edge_features = np.zeros((target.size, 20), dtype=np.float32)
+    edge_features[:, 0] = pose_count
+    edge_features[:, 1] = np.clip(pose_rate, 0.0, 1.0)
+    edge_features[:, 2] = pixel_sum
+    edge_features[:, 3] = np.clip(pixel_fraction, 0.0, 1.0)
+    edge_features[:, 4] = np.maximum(gap_mean, 1e-4)
+    edge_features[:, 5] = gap_std
+    edge_features[:, 6] = np.maximum(
+        relative_mean, 1e-4 / max(float(np.linalg.norm(scene_size)), 1.0)
+    )
+    edge_features[:, 7] = relative_std
+    edge_features[:, 8:11] = np.clip(relative_center, -8.0, 8.0)
+    edge_features[:, 11] = np.clip(relative_scale, -8.0, 8.0)
+    edge_features[:, 12] = np.clip(
+        np.sqrt(np.maximum(pose_rate * pixel_fraction, 0.0)), 0.0, 1.0
+    )
+    edge_features[:, 13] = np.clip(pixel_fraction, 0.0, 1.0)
+    edge_features[:, 14] = 1.0
+    edge_features[:, 15] = np.maximum(1, pose_count)
+    edge_features[:, 16] = 0.0
+    edge_features[:, 17] = depth_mean
+    edge_features[:, 18] = depth_std
+    edge_features[:, 19] = 1.0
+
+    (
+        target,
+        direction,
+        shell,
+        source,
+        edge_features,
+        topk_diagnostics,
+    ) = _vectorized_topk(
+        target,
+        direction,
+        shell,
+        source.astype(np.uint32, copy=False),
+        edge_features,
+        k=int(source_k),
+    )
+    retained_key = np.rec.fromarrays(
+        [target, direction, shell, source], names="target,direction,shell,source"
+    )
+    original_key = np.rec.fromarrays(
+        [target_row[starts], direction_row[starts], shell_row[starts], source_row[starts]],
+        names="target,direction,shell,source",
+    )
+    retained_indices = np.searchsorted(original_key, retained_key)
+    retained_types = source_types[retained_indices]
+    aggregate_stats = {
+        "rawRelationRowCount": int(rows.size),
+        "aggregatedEdgeCount": int(starts.size),
+        "retainedEdgeCount": int(target.size),
+        "cellCountBeforeTopK": int(cell_starts.size),
+    }
+    return (
+        target,
+        direction,
+        shell,
+        source.astype(np.uint32, copy=False),
+        edge_features,
+        retained_types,
+        topk_diagnostics,
+        {"depthNormalization": depth_stats, **aggregate_stats},
+    )
 
 
-def build(args: argparse.Namespace) -> dict[str, Any]:
+def _merge_sparse_relation_moments(
+    moment_chunks: list[np.ndarray],
+    depth_offset_chunks: list[np.ndarray],
+    depth_value_chunks: list[np.ndarray],
+    centers: np.ndarray,
+    radii: np.ndarray,
+    scene_size: np.ndarray,
+    *,
+    total_pose_count: int,
+    source_k: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any], dict[str, Any]]:
+    """Merge exact per-shard moments after freezing train-only depth quantiles."""
+    if not moment_chunks or not (
+        len(moment_chunks) == len(depth_offset_chunks) == len(depth_value_chunks)
+    ):
+        raise ValueError("sparse relation moment shards are incomplete")
+    all_depth_values = np.concatenate(depth_value_chunks).astype(np.float64, copy=False)
+    depth_stats = train_depth_quantiles(all_depth_values)
+    depth_count_chunks: list[np.ndarray] = []
+    depth_sum_chunks: list[np.ndarray] = []
+    depth_square_sum_chunks: list[np.ndarray] = []
+    for moments, offsets, raw_depth in zip(
+        moment_chunks, depth_offset_chunks, depth_value_chunks, strict=True
+    ):
+        offsets = np.asarray(offsets, dtype=np.int64)
+        if offsets.size != moments.size + 1 or int(offsets[-1]) != raw_depth.size:
+            raise ValueError("sparse relation moment/depth segmentation mismatch")
+        counts = np.diff(offsets).astype(np.int64, copy=False)
+        normalized = normalize_radius_relative_log_depth(raw_depth, depth_stats).astype(
+            np.float64
+        )
+        starts = offsets[:-1]
+        depth_count_chunks.append(counts)
+        depth_sum_chunks.append(np.add.reduceat(normalized, starts))
+        depth_square_sum_chunks.append(np.add.reduceat(np.square(normalized), starts))
+
+    moments = np.concatenate(moment_chunks).astype(RELATION_MOMENT_DTYPE, copy=False)
+    depth_count_input = np.concatenate(depth_count_chunks)
+    depth_sum_input = np.concatenate(depth_sum_chunks)
+    depth_square_sum_input = np.concatenate(depth_square_sum_chunks)
+    order = np.lexsort(
+        (
+            moments["source"].astype(np.int64, copy=False),
+            moments["shell"].astype(np.int64, copy=False),
+            moments["direction"].astype(np.int64, copy=False),
+            moments["target"].astype(np.int64, copy=False),
+        )
+    )
+    values = moments[order]
+    depth_count_input = depth_count_input[order]
+    depth_sum_input = depth_sum_input[order]
+    depth_square_sum_input = depth_square_sum_input[order]
+    target_row = values["target"].astype(np.int64, copy=False)
+    direction_row = values["direction"].astype(np.int64, copy=False)
+    shell_row = values["shell"].astype(np.int64, copy=False)
+    source_row = values["source"].astype(np.int64, copy=False)
+    starts, _ends, _group_ids = _segment_starts(
+        target_row, direction_row, shell_row, source_row
+    )
+
+    pixel_sum = np.add.reduceat(values["pixelSum"], starts)
+    weight_sum = np.add.reduceat(values["weightSum"], starts)
+    pose_count = np.add.reduceat(
+        values["poseSupportCount"].astype(np.int64), starts
+    )
+
+    def merged_moment(sum_name: str, second_name: str) -> tuple[np.ndarray, np.ndarray]:
+        total = np.add.reduceat(values[sum_name], starts)
+        second = np.add.reduceat(values[second_name], starts)
+        mean = total / np.maximum(weight_sum, 1e-12)
+        variance = np.maximum(second / np.maximum(weight_sum, 1e-12) - np.square(mean), 0.0)
+        return mean, np.sqrt(variance)
+
+    gap_mean, gap_std = merged_moment("gapWeightedSum", "gapWeightedSecond")
+    relative_mean, relative_std = merged_moment(
+        "relativeGapWeightedSum", "relativeGapWeightedSecond"
+    )
+    depth_count = np.add.reduceat(depth_count_input, starts)
+    depth_sum = np.add.reduceat(depth_sum_input, starts)
+    depth_square_sum = np.add.reduceat(depth_square_sum_input, starts)
+    depth_mean = depth_sum / np.maximum(depth_count, 1)
+    depth_std = np.sqrt(
+        np.maximum(
+            depth_square_sum / np.maximum(depth_count, 1) - np.square(depth_mean),
+            0.0,
+        )
+    )
+
+    target = target_row[starts]
+    direction = direction_row[starts]
+    shell = shell_row[starts]
+    source = source_row[starts]
+    source_min = np.minimum.reduceat(values["sourceType"], starts)
+    source_max = np.maximum.reduceat(values["sourceType"], starts)
+    source_types = np.where(
+        source_min == source_max,
+        source_min,
+        np.uint8(SOURCE_TYPES["merged"]),
+    ).astype(np.uint8, copy=False)
+    cell_starts, _cell_ends, cell_ids = _segment_starts(target, direction, shell)
+    cell_pixels = np.add.reduceat(pixel_sum, cell_starts)
+    pixel_fraction = pixel_sum / np.maximum(cell_pixels[cell_ids], 1.0)
+    pose_rate = pose_count.astype(np.float64) / max(int(total_pose_count), 1)
+    relative_center = (centers[source] - centers[target]) / scene_size[None, :]
+    relative_scale = np.log(
+        np.maximum(radii[source], 1e-5) / np.maximum(radii[target], 1e-5)
+    )
+    edge_features = np.zeros((target.size, 20), dtype=np.float32)
+    edge_features[:, 0] = pose_count
+    edge_features[:, 1] = np.clip(pose_rate, 0.0, 1.0)
+    edge_features[:, 2] = pixel_sum
+    edge_features[:, 3] = np.clip(pixel_fraction, 0.0, 1.0)
+    edge_features[:, 4] = np.maximum(gap_mean, 1e-4)
+    edge_features[:, 5] = gap_std
+    edge_features[:, 6] = np.maximum(
+        relative_mean, 1e-4 / max(float(np.linalg.norm(scene_size)), 1.0)
+    )
+    edge_features[:, 7] = relative_std
+    edge_features[:, 8:11] = np.clip(relative_center, -8.0, 8.0)
+    edge_features[:, 11] = np.clip(relative_scale, -8.0, 8.0)
+    edge_features[:, 12] = np.clip(
+        np.sqrt(np.maximum(pose_rate * pixel_fraction, 0.0)), 0.0, 1.0
+    )
+    edge_features[:, 13] = np.clip(pixel_fraction, 0.0, 1.0)
+    edge_features[:, 14] = 1.0
+    edge_features[:, 15] = np.maximum(1, pose_count)
+    edge_features[:, 16] = 0.0
+    edge_features[:, 17] = depth_mean
+    edge_features[:, 18] = depth_std
+    edge_features[:, 19] = 1.0
+
+    original_target, original_direction = target, direction
+    original_shell, original_source = shell, source
+    (
+        target,
+        direction,
+        shell,
+        source,
+        edge_features,
+        topk_diagnostics,
+    ) = _vectorized_topk(
+        target,
+        direction,
+        shell,
+        source.astype(np.uint32, copy=False),
+        edge_features,
+        k=int(source_k),
+    )
+    retained_key = np.rec.fromarrays(
+        [target, direction, shell, source], names="target,direction,shell,source"
+    )
+    original_key = np.rec.fromarrays(
+        [original_target, original_direction, original_shell, original_source],
+        names="target,direction,shell,source",
+    )
+    retained_indices = np.searchsorted(original_key, retained_key)
+    retained_types = source_types[retained_indices]
+    stats = {
+        "rawRelationRowCount": int(all_depth_values.size),
+        "shardMomentCount": int(moments.size),
+        "aggregatedEdgeCount": int(starts.size),
+        "retainedEdgeCount": int(target.size),
+        "cellCountBeforeTopK": int(cell_starts.size),
+    }
+    return (
+        target,
+        direction,
+        shell,
+        source.astype(np.uint32, copy=False),
+        edge_features,
+        retained_types,
+        topk_diagnostics,
+        {"depthNormalization": depth_stats, **stats},
+    )
+
+
+def _discover_sparse_shards(root: Path) -> list[Path]:
+    candidates = sorted(root.glob("shard_*/sparse"))
+    if not candidates and (root / "sparse_relation_meta.json").is_file():
+        candidates = [root]
+    if not candidates:
+        candidates = sorted(
+            path.parent for path in root.glob("**/sparse_relation_meta.json")
+        )
+    if not candidates:
+        raise FileNotFoundError(f"no sparse relation shards under {root}")
+    return candidates
+
+
+def _load_sparse_shards(
+    root: Path,
+    dataset: PoseCSRDataset,
+    *,
+    num_instances: int,
+) -> tuple[
+    list[np.ndarray],
+    list[np.ndarray],
+    list[np.ndarray],
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    list[dict[str, Any]],
+    list[Path],
+]:
+    moment_chunks: list[np.ndarray] = []
+    depth_offset_chunks: list[np.ndarray] = []
+    depth_value_chunks: list[np.ndarray] = []
+    observation_chunks: list[np.ndarray] = []
+    render_chunks: list[np.ndarray] = []
+    source_pose_chunks: list[np.ndarray] = []
+    metadata_rows: list[dict[str, Any]] = []
+    paths = _discover_sparse_shards(root)
+    canonical_identity: str | None = None
+    for shard_ordinal, path in enumerate(paths, start=1):
+        (
+            meta,
+            moments,
+            depth_offsets,
+            depth_values,
+            observations,
+            render_ids,
+            source_poses,
+        ) = load_sparse_shard(path)
+        if int(meta.get("numInstances", -1)) != int(num_instances):
+            raise ValueError(f"sparse shard instance count mismatch: {path}")
+        if float(meta.get("modelInputFovYDeg", 0.0)) != 66.0:
+            raise ValueError(f"sparse shard model FOV is not 66 degrees: {path}")
+        if meta.get("trainOnly") is not True or meta.get("splitNames") != ["train"]:
+            raise ValueError(f"sparse shard is not train-only: {path}")
+        if np.any(dataset.poses[source_poses.astype(np.int64)]["split"] != int(dataset.split_ids["train"])):
+            raise ValueError(f"sparse shard references a non-train pose: {path}")
+        identity = meta.get("candidateIdentity") or {}
+        canonical = str(identity.get("canonicalCandidateDigest", ""))
+        if not canonical:
+            raise ValueError(f"sparse shard lacks canonical candidate identity: {path}")
+        if canonical_identity is None:
+            canonical_identity = canonical
+        elif canonical != canonical_identity:
+            raise ValueError("sparse shards disagree on canonical candidate identity")
+        expected_render = str(identity.get("renderCandidateDigest", ""))
+        actual_render = _candidate_summary(
+            dataset, source_poses.astype(np.int64), num_instances
+        ).digest
+        if expected_render != actual_render:
+            raise ValueError(f"sparse shard render candidate identity mismatch: {path}")
+        moment_chunks.append(moments)
+        depth_offset_chunks.append(depth_offsets)
+        depth_value_chunks.append(depth_values)
+        observation_chunks.append(observations)
+        render_chunks.append(render_ids)
+        source_pose_chunks.append(source_poses)
+        metadata_rows.append(meta)
+        if shard_ordinal == 1 or shard_ordinal == len(paths) or shard_ordinal % 4 == 0:
+            print(
+                json.dumps(
+                    {
+                        "status": "sparse_relation_load_progress",
+                        "processedShards": shard_ordinal,
+                        "totalShards": len(paths),
+                        "relationMoments": int(
+                            sum(value.size for value in moment_chunks)
+                        ),
+                        "survivalObservations": int(
+                            sum(value.size for value in observation_chunks)
+                        ),
+                    }
+                ),
+                flush=True,
+            )
+
+    render_ids = np.concatenate(render_chunks).astype("<u4", copy=False)
+    source_poses = np.concatenate(source_pose_chunks).astype("<u4", copy=False)
+    if np.unique(render_ids).size != render_ids.size:
+        raise ValueError("sparse shards contain duplicate render pose IDs")
+    order = np.argsort(render_ids, kind="stable")
+    if not np.array_equal(render_ids[order], np.arange(render_ids.size, dtype=np.uint32)):
+        raise ValueError("formal sparse render pose IDs must cover one contiguous sequence")
+    return (
+        moment_chunks,
+        depth_offset_chunks,
+        depth_value_chunks,
+        np.concatenate(observation_chunks),
+        render_ids[order],
+        source_poses[order],
+        metadata_rows,
+        paths,
+    )
+
+
+def _sparse_input_hashes(
+    dataset_dir: Path,
+    runtime_meta_path: Path,
+    sparse_paths: list[Path],
+) -> dict[str, str]:
+    # Only small schema envelopes are hashed.  The 200+ GiB transient pixel
+    # payload is deliberately absent from the sparse protocol.
+    paths = {
+        "datasetMeta": dataset_dir / "dataset_meta.json",
+        "runtimeMeta": runtime_meta_path,
+    }
+    for index, root in enumerate(sparse_paths):
+        paths[f"sparseShardMeta:{index}"] = root / "sparse_relation_meta.json"
+    return {key: _sha256(path) for key, path in paths.items()}
+
+
+def _collapse_hierarchy_edges(
+    target: np.ndarray,
+    source: np.ndarray,
+    confidence: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Keep the strongest edge per unordered pair for union-find packing."""
+    target = np.asarray(target, dtype=np.int64).reshape(-1)
+    source = np.asarray(source, dtype=np.int64).reshape(-1)
+    confidence = np.asarray(confidence, dtype=np.float32).reshape(-1)
+    low = np.minimum(target, source)
+    high = np.maximum(target, source)
+    order = np.lexsort((-confidence, high, low))
+    low_ordered, high_ordered = low[order], high[order]
+    first = np.ones((order.size,), dtype=np.bool_)
+    first[1:] = (low_ordered[1:] != low_ordered[:-1]) | (high_ordered[1:] != high_ordered[:-1])
+    selected = order[first]
+    return target[selected], source[selected], confidence[selected]
+
+
+def build_sparse(args: argparse.Namespace) -> dict[str, Any]:
+    started = time.perf_counter()
+
+    def progress(stage: str, **values: Any) -> None:
+        print(
+            json.dumps(
+                {
+                    "status": "sparse_relation_build_progress",
+                    "stage": stage,
+                    "elapsedSeconds": float(time.perf_counter() - started),
+                    **values,
+                }
+            ),
+            flush=True,
+        )
+
     dataset_dir = Path(args.dataset_dir)
     runtime_meta_path = Path(args.runtime_meta)
-    cache_dir = Path(args.layer_cache_dir)
+    sparse_root = Path(args.sparse_cache_root)
     output_dir = Path(args.output_dir)
     if output_dir.exists() and any(output_dir.iterdir()) and not args.allow_existing:
         raise FileExistsError(f"refusing to write into non-empty output directory: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
-
+    if args.surface_fallback_dir:
+        raise ValueError("the sparse formal path does not accept a separate surface fallback")
     requested = [value.strip() for value in str(args.splits).split(",") if value.strip()]
     if requested != ["train"]:
-        raise ValueError("the hierarchical relation CSR is train-only; use --splits train")
+        raise ValueError("the hierarchical sparse relation CSR is train-only")
 
     world_aabbs, _instance_to_glb, runtime_meta = load_runtime_meta(runtime_meta_path)
     num_instances = int(world_aabbs.shape[0])
     centers = ((world_aabbs[:, :3] + world_aabbs[:, 3:]) * 0.5).astype(np.float32)
     extents = np.maximum(world_aabbs[:, 3:] - world_aabbs[:, :3], 1e-4)
-    radii = np.linalg.norm(extents, axis=1) * 0.5
+    radii = (np.linalg.norm(extents, axis=1) * 0.5).astype(np.float32)
     scene_min, _scene_max, scene_size = scene_min_max(runtime_meta["sceneBounds"])
     scene_size = np.maximum(np.asarray(scene_size, dtype=np.float32), 1e-4)
     dataset = PoseCSRDataset(dataset_dir, num_instances=num_instances)
     canonical_poses = pose_sequence_for_splits(dataset, requested)
-
-    cache_meta, render_ids, source_pose_indices, cache_ids, cache_depths = load_layer_cache(cache_dir)
-    if cache_meta.get("schema") not in (CACHE_SCHEMA, CACHE_SCHEMA_V2):
-        raise ValueError(f"unsupported depth cache schema: {cache_meta.get('schema')!r}")
-    if not np.isclose(float(cache_meta.get("modelInputFovYDeg", 0.0)), 66.0):
-        raise ValueError("observed relation CSR requires the registered model-input FOV of 66 degrees")
-    if int(cache_meta.get("maxLayers", 0)) < 2:
-        raise ValueError("observed relation CSR requires at least two depth layers")
-    if not (cache_meta.get("gpuEvidenceSummary") or {}).get("formalReady", False):
-        raise ValueError("depth cache has no formal hardware-GPU evidence")
-
-    registered_selected = [
-        (row, int(render_ids[row]), int(source_pose_indices[row]))
-        for row in range(int(render_ids.size))
-        if int(dataset.poses[int(source_pose_indices[row])]["split"]) == int(dataset.split_ids["train"])
-    ]
-    selected = registered_selected
-    if args.max_poses > 0:
-        selected = selected[: int(args.max_poses)]
-    if not selected:
-        raise ValueError("depth cache has no train poses")
-    render_poses = np.asarray([entry[2] for entry in selected], dtype="<i8")
-    canonical_summary = _candidate_summary(dataset, canonical_poses, num_instances)
-    render_summary = _candidate_summary(dataset, render_poses, num_instances)
-    # The depth cache is a registered rendering artifact.  Its candidate
-    # identity is part of the provenance contract, so recomputing a summary
-    # is not enough: the builder must reject a cache whose render rows no
-    # longer match the native candidate rows used to produce it.
-    cache_identity = cache_meta.get("candidateIdentity") or {}
-    expected_canonical_digest = str(cache_identity.get("canonicalCandidateDigest", ""))
-    expected_render_digest = str(cache_identity.get("renderCandidateDigest", ""))
-    expected_canonical_count = int(cache_identity.get("canonicalPoseCount", -1))
-    expected_render_count = int(cache_identity.get("renderPoseCount", -1))
-    if not expected_canonical_digest or not expected_render_digest:
-        raise ValueError("depth cache is missing its canonical/render candidate identity")
-    # A split-only PoseCSR view may move poses between train, calibration, and
-    # validation without changing any candidate row.  Validate the immutable
-    # cache against the exact canonical/render pose coverage stored in that
-    # cache, then filter its rows by the current train labels above.  The new
-    # relation metadata still records the complete current train candidate
-    # identity through ``canonical_summary``.
-    cache_canonical_poses = np.unique(source_pose_indices.astype("<i8", copy=False))
-    cache_canonical_summary = _candidate_summary(
-        dataset, cache_canonical_poses, num_instances
-    )
-    cache_render_summary = _candidate_summary(
-        dataset, source_pose_indices.astype("<i8", copy=False), num_instances
-    )
-    if cache_canonical_summary.digest != expected_canonical_digest:
-        raise ValueError(
-            "depth cache canonical candidate digest does not match the registered dataset: "
-            f"{expected_canonical_digest!r} != {cache_canonical_summary.digest!r}"
-        )
-    if cache_render_summary.digest != expected_render_digest:
-        raise ValueError(
-            "depth cache render candidate digest does not match the selected render pose order: "
-            f"{expected_render_digest!r} != {cache_render_summary.digest!r}"
-        )
-    if expected_canonical_count != int(cache_canonical_poses.size):
-        raise ValueError(
-            "depth cache canonical pose count does not match its stored coverage: "
-            f"{expected_canonical_count} != {cache_canonical_poses.size}"
-        )
-    if expected_render_count != int(source_pose_indices.size):
-        raise ValueError(
-            "depth cache render pose count does not match its stored rows: "
-            f"{expected_render_count} != {source_pose_indices.size}"
-        )
-    candidate_audit = audit_native_aabb_candidates(dataset, world_aabbs, canonical_poses)
-
-    fallback_dir = Path(args.surface_fallback_dir) if args.surface_fallback_dir else None
-    fallback = load_surface_fallback_relations(fallback_dir) if fallback_dir else np.zeros((0,), dtype=np.dtype([]))
-    fallback_by_pose: dict[int, np.ndarray] = {}
-    if fallback.size:
-        for pose in np.unique(fallback["renderPoseId"]).tolist():
-            fallback_by_pose[int(pose)] = fallback[fallback["renderPoseId"] == pose]
-
-    accumulators: dict[tuple[int, int, int, int], dict[str, Any]] = {}
-    observations = {key: [] for key in ("instance", "direction", "depth", "event", "weight", "subpose", "rawPixelCount", "confidence", "evidenceLevel")}
-    started = time.perf_counter()
-    width = int(cache_meta["width"])
-    height = int(cache_meta["height"])
-    for ordinal, (cache_row, render_pose_id, pose_index) in enumerate(selected, start=1):
-        ids = np.asarray(cache_ids[cache_row], dtype=np.uint32)
-        encoded_depths = np.asarray(cache_depths[cache_row], dtype=np.float32)
-        candidate = np.asarray(dataset.frustum_slice(pose_index), dtype=np.uint32)
-        candidate_set = set(int(value) for value in candidate.tolist())
-        first_unique = np.unique(ids[0][ids[0] != BACKGROUND_ID])
-        outside = [int(value) for value in first_unique.tolist() if int(value) not in candidate_set]
-        if outside:
-            raise ValueError(f"first depth layer contains IDs outside candidates at pose {pose_index}: {outside[:8]}")
-        camera_world, _camera_forward, camera_view = _camera_for_cache_row(
-            cache_meta, render_pose_id, dataset, pose_index
-        )
-        depths = metric_ray_depths_for_cache_row(cache_meta, encoded_depths, camera_view)
-        directions = spherical_direction_bins(camera_world, centers)
-        pose_records = _observations_for_pose(
-            ids, depths, candidate_set, directions, centers, radii, camera_world,
-            float(args.min_depth_gap), pose_id=render_pose_id,
-        )
-        for record in pose_records:
-            for key in observations:
-                observations[key].append(record[key])
-
-        rows_with_type: list[tuple[np.ndarray, int]] = [
-            (_reduce_pose_events(ids, depths, np.isin(np.arange(num_instances), candidate), float(args.min_depth_gap)), SOURCE_TYPES["depth_peeling"])
-        ]
-        if render_pose_id in fallback_by_pose:
-            extra, _ = _surface_fallback_pose_rows(
-                fallback_by_pose[render_pose_id],
-                np.isin(np.arange(num_instances), candidate),
-                centers,
-                camera_world,
-                float(args.min_depth_gap),
-            )
-            if extra.size:
-                rows_with_type.append((extra, SOURCE_TYPES["surface_fallback"]))
-                for row in extra:
-                    target = int(row[0])
-                    observations["instance"].append(target)
-                    observations["direction"].append(int(directions[target]))
-                    target_distance = float(np.linalg.norm(centers[target] - camera_world))
-                    observations["depth"].append(float(max(target_distance, 0.0) / max(float(radii[target]), 1e-6)))
-                    observations["event"].append(1)
-                    observations["weight"].append(float(max(float(row[3]), 1.0)))
-                    observations["subpose"].append(int(render_pose_id))
-                    observations["rawPixelCount"].append(float(max(float(row[3]), 1.0)))
-                    observations["confidence"].append(float(np.clip(float(row[3]) / max(float(width * height), 1.0), 0.0, 1.0)))
-                    observations["evidenceLevel"].append(1)
-
-        for pose_rows, source_type in rows_with_type:
-            if pose_rows.size == 0:
-                continue
-            for target_value, source_value, shell_value, pixels, gap, gap_std in pose_rows.tolist():
-                target = int(target_value)
-                source = int(source_value)
-                if target not in candidate_set or source not in candidate_set or target == source:
-                    raise ValueError("relation row escaped the stored native candidate set")
-                target_distance = max(float(np.linalg.norm(centers[target] - camera_world)), 1e-4)
-                relative_gap = float(gap) / target_distance
-                relative_log_depth = float(radius_relative_log_depth(
-                    np.asarray([target_distance]), np.asarray([radii[target]])
-                )[0])
-                source_radius = max(float(radii[source]), 1e-5)
-                target_radius = max(float(radii[target]), 1e-5)
-                relative_center = (centers[source] - centers[target]) / scene_size
-                relative_scale = float(np.log(source_radius / target_radius))
-                key = (target, int(directions[target]), int(shell_value), source)
-                state = accumulators.setdefault(key, _accumulator())
-                _update_moment(
-                    state,
-                    pose_id=render_pose_id,
-                    pixels=float(pixels),
-                    gap=float(gap),
-                    relative_gap=relative_gap,
-                    relative_center=relative_center,
-                    relative_log_scale=relative_scale,
-                    relative_log_depth=relative_log_depth,
-                    source_type=source_type,
-                )
-
-        if ordinal == 1 or ordinal == len(selected) or ordinal % max(1, len(selected) // 20) == 0:
-            elapsed = max(time.perf_counter() - started, 1e-6)
-            rate = ordinal / elapsed
-            print(json.dumps({
-                "status": "observed_relation_progress",
-                "processed": ordinal,
-                "total": len(selected),
-                "relationEdges": len(accumulators),
-                "ratePosesPerSecond": rate,
-                "etaSeconds": (len(selected) - ordinal) / max(rate, 1e-6),
-            }, ensure_ascii=False), flush=True)
-
-    if observations["subpose"]:
-        subpose_values = np.asarray(observations["subpose"], dtype=np.int64)
-        raw_values = np.asarray(observations["rawPixelCount"], dtype=np.float64)
-        weights = np.zeros_like(raw_values)
-        for subpose in np.unique(subpose_values):
-            mask = subpose_values == subpose
-            weights[mask] = raw_values[mask] / max(float(raw_values[mask].sum()), 1.0)
-        observations["weight"] = weights.tolist()
-    if not accumulators:
-        raise ValueError("no observed relation rows were generated")
-    keys = sorted(accumulators)
-    target_ids = np.asarray([key[0] for key in keys], dtype=np.int64)
-    direction_ids = np.asarray([key[1] for key in keys], dtype=np.int64)
-    shell_ids = np.asarray([key[2] for key in keys], dtype=np.int64)
-    source_ids = np.asarray([key[3] for key in keys], dtype=np.uint32)
-    total_pose_count = max(len(selected), 1)
-    all_depth_values = np.asarray(
-        [value for state in accumulators.values() for value in state["depth_values"]],
-        dtype=np.float64,
-    )
-    depth_stats = train_depth_quantiles(all_depth_values)
-    edge_features = np.zeros((len(keys), 20), dtype=np.float32)
-    source_types = np.zeros((len(keys),), dtype=np.uint8)
-    group_totals: dict[tuple[int, int, int], float] = defaultdict(float)
-    for key, state in accumulators.items():
-        group_totals[key[:3]] += float(state["pixels"])
-    for index, key in enumerate(keys):
-        state = accumulators[key]
-        weight = max(float(state["weight"]), 1e-6)
-        pose_count = len(state["poses"])
-        gap_mean = state["gap_sum"] / weight
-        gap_variance = max(state["gap_sq_sum"] / weight - gap_mean * gap_mean, 0.0)
-        rel_mean = state["relative_gap_sum"] / weight
-        rel_variance = max(state["relative_gap_sq_sum"] / weight - rel_mean * rel_mean, 0.0)
-        pixel_fraction = float(state["pixels"]) / max(group_totals[key[:3]], 1.0)
-        pose_rate = pose_count / total_pose_count
-        depth_values = np.asarray(state["depth_values"], dtype=np.float64)
-        normalized_depth = normalize_radius_relative_log_depth(
-            depth_values, depth_stats
-        )
-        edge_features[index] = np.asarray([
-            float(pose_count),
-            np.clip(pose_rate, 0.0, 1.0),
-            float(state["pixels"]),
-            np.clip(pixel_fraction, 0.0, 1.0),
-            max(gap_mean, float(args.min_depth_gap)),
-            np.sqrt(gap_variance),
-            max(rel_mean, float(args.min_depth_gap) / max(float(np.linalg.norm(scene_size)), 1.0)),
-            np.sqrt(rel_variance),
-            *np.clip(state["center_sum"] / weight, -8.0, 8.0),
-            np.clip(state["scale_sum"] / weight, -8.0, 8.0),
-            np.clip(np.sqrt(max(pose_rate * pixel_fraction, 0.0)), 0.0, 1.0),
-            np.clip(pixel_fraction, 0.0, 1.0),
-            1.0,
-            float(max(1, len(state["poses"]))),
-            0.0,
-            float(np.mean(normalized_depth)),
-            float(np.std(normalized_depth)),
-            1.0,
-        ], dtype=np.float32)
-        source_types[index] = np.uint8(state["source_type"])
+    progress("preflight_complete", trainPoseCount=int(canonical_poses.size))
 
     (
-        target_ids, direction_ids, shell_ids, source_ids, edge_features,
-        topk_diagnostics,
-    ) = truncate_relation_topk(
-        target_ids, direction_ids, shell_ids, source_ids, edge_features,
-        k=int(args.source_k),
+        relation_moment_chunks,
+        relation_depth_offset_chunks,
+        relation_depth_value_chunks,
+        observations,
+        render_ids,
+        source_poses,
+        shard_metadata,
+        sparse_paths,
+    ) = _load_sparse_shards(sparse_root, dataset, num_instances=num_instances)
+    progress(
+        "sparse_shards_loaded",
+        shardCount=len(sparse_paths),
+        renderPoseCount=int(render_ids.size),
+        survivalObservationCount=int(observations.size),
     )
-    # Re-index source types with the same stable retained-row order.
-    retained_type = []
-    for target, direction, shell, source in zip(
-        target_ids.tolist(), direction_ids.tolist(), shell_ids.tolist(), source_ids.tolist(), strict=True
-    ):
-        state = accumulators[(int(target), int(direction), int(shell), int(source))]
-        retained_type.append(int(state["source_type"]))
-    source_types = np.asarray(retained_type, dtype=np.uint8)
-    retained_qualities = [float(value["retainedQuality"]) for value in topk_diagnostics["cells"].values()]
-    min_retained_quality = min(retained_qualities) if retained_qualities else 1.0
-    compact_topk_diagnostics = summarize_topk_diagnostics_for_metadata(topk_diagnostics)
+    if int(args.max_poses) > 0:
+        raise ValueError("formal sparse moment shards do not support partial-pose truncation")
+
+    canonical_summary = _candidate_summary(dataset, canonical_poses, num_instances)
+    render_summary = _candidate_summary(dataset, source_poses.astype(np.int64), num_instances)
+    expected_canonical = str(
+        (shard_metadata[0].get("candidateIdentity") or {}).get(
+            "canonicalCandidateDigest", ""
+        )
+    )
+    if canonical_summary.digest != expected_canonical:
+        raise ValueError("sparse relation canonical candidate identity changed")
+    candidate_audit = dict(shard_metadata[0].get("candidateAudit") or {})
+    if candidate_audit.get("status") != "passed" or candidate_audit.get("gtUnionUsed") is not False:
+        raise ValueError("sparse relation requires the registered native-candidate audit")
+
+    (
+        target_ids,
+        direction_ids,
+        shell_ids,
+        source_ids,
+        edge_features,
+        source_types,
+        topk_diagnostics,
+        aggregate_stats,
+    ) = _merge_sparse_relation_moments(
+        relation_moment_chunks,
+        relation_depth_offset_chunks,
+        relation_depth_value_chunks,
+        centers,
+        radii,
+        scene_size,
+        total_pose_count=int(render_ids.size),
+        source_k=int(args.source_k),
+    )
+    progress(
+        "relation_moments_merged",
+        retainedEdgeCount=int(target_ids.size),
+        sourceK=int(args.source_k),
+    )
+    depth_stats = aggregate_stats.pop("depthNormalization")
+    min_retained_quality = float(
+        topk_diagnostics["retainedQualityQuantiles"]["min"]
+    )
     if min_retained_quality < float(args.min_retained_quality):
         raise ValueError(
             f"relation top-k retained quality {min_retained_quality:.6f} is below "
             f"the registered floor {float(args.min_retained_quality):.6f}"
         )
 
-    input_sha256 = _input_hashes(dataset_dir, runtime_meta_path, cache_dir, cache_meta, fallback_dir)
     local_diameter, structural_diameter, diameter_derivation = derive_hierarchy_diameter_limits(
         centers,
         target_ids,
@@ -694,11 +968,14 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         local_override=float(args.local_group_diameter),
         structural_override=float(args.structural_group_diameter),
     )
+    hierarchy_target, hierarchy_source, hierarchy_confidence = _collapse_hierarchy_edges(
+        target_ids, source_ids, edge_features[:, 12]
+    )
     local_groups, structural_groups = bounded_hierarchy_ids(
         num_instances,
-        target_ids,
-        source_ids,
-        edge_features[:, 12],
+        hierarchy_target,
+        hierarchy_source,
+        hierarchy_confidence,
         centers,
         local_max_size=32,
         local_diameter=local_diameter,
@@ -708,9 +985,16 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         local_threshold=float(args.local_group_score),
         structural_threshold=float(args.structure_group_score),
     )
-    hierarchy_stats = summarize_bounded_hierarchy(local_groups, structural_groups, centers)
+    hierarchy_stats = summarize_bounded_hierarchy(
+        local_groups, structural_groups, centers
+    )
+    progress(
+        "hierarchy_built",
+        localGroupCount=int(hierarchy_stats["localGroupCount"]),
+        structuralGroupCount=int(hierarchy_stats["structuralGroupCount"]),
+    )
     hierarchy_metadata = {
-        "construction": "confidence-ordered bounded relation packing; no KNN and no unbounded connected components",
+        "construction": "confidence-ordered bounded relation packing from unique instance pairs",
         "diameterMetric": "world-space instance-center AABB diagonal upper bound",
         "diameterDerivation": diameter_derivation,
         "localMaxSize": 32,
@@ -720,12 +1004,19 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "maxStructuralFraction": 0.10,
         "localThreshold": float(args.local_group_score),
         "structureThreshold": float(args.structure_group_score),
+        "uniqueHierarchyEdgeCount": int(hierarchy_target.size),
         **hierarchy_stats,
         "files": {
             "localGroupIds": "instance_local_group_ids_uint32.bin",
             "structuralGroupIds": "local_structural_group_ids_uint32.bin",
         },
     }
+    max_layers = {int(meta["maxLayers"]) for meta in shard_metadata}
+    if len(max_layers) != 1:
+        raise ValueError("sparse shards disagree on depth layer count")
+    input_sha256 = _sparse_input_hashes(
+        dataset_dir, runtime_meta_path, sparse_paths
+    )
     metadata = make_relation_metadata_v3(
         num_instances=num_instances,
         direction_bins=DIRECTION_BINS,
@@ -733,8 +1024,8 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         canonical_candidate_summary=canonical_summary,
         render_candidate_summary=render_summary,
         input_sha256=input_sha256,
-        cache_schema=str(cache_meta["schema"]),
-        max_layers=int(cache_meta["maxLayers"]),
+        cache_schema=SPARSE_SHARD_SCHEMA,
+        max_layers=max_layers.pop(),
         model_input_fov_y_deg=66.0,
         depth_normalization=depth_stats,
         hierarchy=hierarchy_metadata,
@@ -743,31 +1034,23 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             "ranking": "cell-normalized confidence * log pixel support * log pose support",
             "retainedQuality": "retainedEvidenceMass / totalEvidenceMass",
             "score": topk_diagnostics["score"],
-            "cellCount": len(topk_diagnostics["cells"]),
-            "minRetainedQuality": float(min_retained_quality),
+            "cellCount": int(topk_diagnostics["cellCount"]),
+            "minRetainedQuality": min_retained_quality,
             "qualityFloor": float(args.min_retained_quality),
-            "diagnostics": compact_topk_diagnostics,
+            "diagnostics": topk_diagnostics,
         },
-        surface_fallback={
-            "included": bool(fallback_dir and fallback.size),
-            "relationCount": int(fallback.size),
-            "directory": str(fallback_dir.resolve()) if fallback_dir else None,
-        },
+        surface_fallback={"included": False, "relationCount": 0, "directory": None},
     )
     metadata["candidateAudit"] = candidate_audit
-    selected_unique_pose_count = int(np.unique(render_poses).size)
     metadata["cacheCoverage"] = {
-        "cacheCanonicalPoseCount": int(cache_canonical_poses.size),
+        "sparseShardCount": len(sparse_paths),
         "currentTrainPoseCount": int(canonical_poses.size),
-        "selectedTrainRenderRowCount": int(render_poses.size),
-        "selectedTrainUniquePoseCount": selected_unique_pose_count,
+        "selectedTrainRenderRowCount": int(render_ids.size),
+        "selectedTrainUniquePoseCount": int(np.unique(source_poses).size),
         "uncoveredCurrentTrainPoseCount": int(
-            canonical_poses.size - selected_unique_pose_count
+            canonical_poses.size - np.unique(source_poses).size
         ),
-        "policy": (
-            "filter the registered hardware depth cache to current train labels; "
-            "never synthesize relations for uncovered train poses"
-        ),
+        "policy": "merge registered train-only sparse render shards; never synthesize relations",
     }
     metadata["scene"] = {
         "sceneMin": scene_min.astype(float).tolist(),
@@ -775,6 +1058,12 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "directionAnchorCount": DIRECTION_BINS,
     }
     metadata["sourceTypeIds"] = {key: int(value) for key, value in SOURCE_TYPES.items()}
+    metadata["sparsePreprocessing"] = {
+        "schema": SPARSE_SHARD_SCHEMA,
+        "shardCount": len(sparse_paths),
+        "denseLayersRequiredByRelationBuild": False,
+        **aggregate_stats,
+    }
 
     relation = ObservedRelationCSR.from_rows(
         num_instances=num_instances,
@@ -788,38 +1077,36 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         source_types=source_types,
         metadata=metadata,
     )
-    depth_observations = np.asarray(observations["depth"], dtype=np.float64)
-    if depth_observations.size == 0:
-        depth_observations = np.asarray(all_depth_values, dtype=np.float64)
-    normalized_observations = normalize_radius_relative_log_depth(np.log1p(depth_observations), depth_stats)
+
+    raw_depth = observations["rawDepth"].astype(np.float64)
+    normalized_depth = normalize_radius_relative_log_depth(
+        np.log1p(raw_depth), depth_stats
+    )
     observation_arrays = {
-        key: np.asarray(values, dtype=dtype)
-        for key, dtype, values in (
-            ("instance", "<u4", observations["instance"]),
-            ("direction", "<u1", observations["direction"]),
-            ("normalizedDepth", "<f2", normalized_observations),
-            ("rawDepth", "<f4", depth_observations),
-            ("event", "<u1", observations["event"]),
-            ("weight", "<f2", observations["weight"]),
-            ("subpose", "<u4", observations["subpose"]),
-            ("rawPixelCount", "<f4", observations["rawPixelCount"]),
-            ("confidence", "<f2", observations["confidence"]),
-            ("evidenceLevel", "<u1", observations["evidenceLevel"]),
-        )
+        "instance": observations["instance"].astype("<u4", copy=False),
+        "direction": observations["direction"].astype("<u1", copy=False),
+        "normalizedDepth": normalized_depth.astype("<f2"),
+        "rawDepth": observations["rawDepth"].astype("<f4", copy=False),
+        "event": observations["event"].astype("<u1", copy=False),
+        "weight": observations["weight"].astype("<f2"),
+        "subpose": observations["renderPoseId"].astype("<u4", copy=False),
+        "rawPixelCount": observations["rawPixelCount"].astype("<f4"),
+        "confidence": observations["confidence"].astype("<f2"),
+        "evidenceLevel": observations["evidenceLevel"].astype("<u1", copy=False),
     }
-    validate_survival_observations_v3(
+    observation_validation = validate_survival_observations_v3(
         observation_arrays,
         num_instances=num_instances,
         direction_bins=DIRECTION_BINS,
     )
-    metadata["hierarchy"] = hierarchy_metadata
     metadata["survivalObservations"] = {
         "schema": "pvs-viewcell-train-observed-survival-censoring-v3",
         "depthField": "normalizedDepth",
         "rawDepthDefinition": "metric camera-ray range / max(target radius, epsilon)",
         "normalization": metadata["depthNormalization"],
-        "count": int(observation_arrays["instance"].size),
-        "eventCount": int(np.sum(observation_arrays["event"] == 1)),
+        "count": int(observations.size),
+        "eventCount": int(np.count_nonzero(observations["event"] == 1)),
+        "validation": observation_validation,
         "files": {
             "instance": "survival_observation_instances_uint32.bin",
             "direction": "survival_observation_directions_uint8.bin",
@@ -838,23 +1125,27 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "rowCount": int(relation.row_count),
         "sourceTruncation": True,
         "sourceTopK": int(args.source_k),
-        "topKCellCount": len(topk_diagnostics["cells"]),
-        "topKMinRetainedQuality": float(min_retained_quality),
-        "renderPoseCount": int(len(selected)),
-        "survivalObservationCount": int(observation_arrays["instance"].size),
-        "survivalEventCount": int(np.sum(observation_arrays["event"] == 1)),
+        "topKCellCount": int(topk_diagnostics["cellCount"]),
+        "topKMinRetainedQuality": min_retained_quality,
+        "renderPoseCount": int(render_ids.size),
+        "survivalObservationCount": int(observations.size),
+        "survivalEventCount": int(np.count_nonzero(observations["event"] == 1)),
     }
     relation.metadata = metadata
     relation.save(output_dir)
-    local_groups.tofile(output_dir / metadata["hierarchy"]["files"]["localGroupIds"])
-    structural_groups.tofile(output_dir / metadata["hierarchy"]["files"]["structuralGroupIds"])
+    local_groups.tofile(output_dir / hierarchy_metadata["files"]["localGroupIds"])
+    structural_groups.tofile(
+        output_dir / hierarchy_metadata["files"]["structuralGroupIds"]
+    )
     for key, values in observation_arrays.items():
         values.tofile(output_dir / metadata["survivalObservations"]["files"][key])
-    # Rewrite metadata after the optional hierarchy and censoring fields have
-    # been attached; the strict loader ignores unknown fields but preserves
-    # them for the independent training entry point.
     relation.metadata = metadata
     relation.save(output_dir)
+    progress(
+        "complete",
+        edgeCount=int(relation.edge_count),
+        survivalObservationCount=int(observations.size),
+    )
     return metadata
 
 
@@ -862,7 +1153,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-dir", required=True)
     parser.add_argument("--runtime-meta", required=True)
-    parser.add_argument("--layer-cache-dir", required=True)
+    parser.add_argument("--sparse-cache-root", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--surface-fallback-dir", default="")
     parser.add_argument("--splits", default="train")
@@ -886,7 +1177,7 @@ def main() -> None:
     parser.add_argument("--max-poses", type=int, default=0)
     parser.add_argument("--allow-existing", action="store_true")
     args = parser.parse_args()
-    print(json.dumps(build(args), ensure_ascii=False, indent=2), flush=True)
+    print(json.dumps(build_sparse(args), ensure_ascii=False, indent=2), flush=True)
 
 
 if __name__ == "__main__":

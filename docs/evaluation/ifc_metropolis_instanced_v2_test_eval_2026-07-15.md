@@ -1,5 +1,7 @@
 # IFC Metropolis Instanced V2 Test 评测
 
+> 历史方向代理基线，不是当前 IFCBench V4 长训结果。保留用于实例化场景和旧 test 口径对照。
+
 ## 日期与口径
 
 2026-07-15，2026-07-31 按统一规则补充阈值校准。评测遍历 test split 的 2684 个唯一 viewcell，候选集合、真实可见集合和权重口径与旧 metropolis 模型一致。当前工作点先满足严格 `weighted recall > 0.99`，再选择 `pose precision` 最高；普通 pose recall、F1 和平均预测数量继续报告。

@@ -113,12 +113,28 @@ def build_survival_evidence_records(
     depths = np.asarray(depths, dtype=np.float32)
     visible: dict[int, int] = {}
     visible_depth: dict[int, float] = {}
-    values, counts = np.unique(ids[0][ids[0] != BACKGROUND_ID], return_counts=True)
-    for value, count in zip(values.tolist(), counts.tolist(), strict=True):
-        if int(value) in candidate_set:
-            visible[int(value)] = int(count)
-            pixel_mask = ids[0] == np.uint32(value)
-            visible_depth[int(value)] = float(np.median(depths[0][pixel_mask]))
+    first_ids = ids[0].reshape(-1)
+    first_depth = depths[0].reshape(-1)
+    first_valid = (first_ids != BACKGROUND_ID) & np.isfinite(first_depth)
+    if bool(first_valid.any()):
+        valid_ids = first_ids[first_valid]
+        valid_depth = first_depth[first_valid]
+        order = np.lexsort((valid_depth, valid_ids))
+        sorted_ids = valid_ids[order]
+        sorted_depth = valid_depth[order]
+        starts = np.r_[0, np.flatnonzero(sorted_ids[1:] != sorted_ids[:-1]) + 1]
+        ends = np.r_[starts[1:], sorted_ids.size]
+        values = sorted_ids[starts]
+        counts = ends - starts
+        low = starts + (counts - 1) // 2
+        high = starts + counts // 2
+        medians = (sorted_depth[low] + sorted_depth[high]) * 0.5
+        for value, count, median in zip(
+            values.tolist(), counts.tolist(), medians.tolist(), strict=True
+        ):
+            if int(value) in candidate_set:
+                visible[int(value)] = int(count)
+                visible_depth[int(value)] = float(median)
     events: dict[int, int] = defaultdict(int)
     event_depth_sum: dict[int, float] = defaultdict(float)
     for layer in range(max(0, int(ids.shape[0]) - 1)):
@@ -128,12 +144,22 @@ def build_survival_evidence_records(
         mask = (front != BACKGROUND_ID) & (back != BACKGROUND_ID) & (front != back) & np.isfinite(gap) & (gap > float(min_depth_gap))
         if not bool(mask.any()):
             continue
-        back_values, back_counts = np.unique(back[mask], return_counts=True)
-        for value, count in zip(back_values.tolist(), back_counts.tolist(), strict=True):
+        selected_back = back[mask]
+        selected_depth = depths[layer + 1].reshape(-1)[mask]
+        back_values, inverse, back_counts = np.unique(
+            selected_back, return_inverse=True, return_counts=True
+        )
+        depth_sums = np.bincount(
+            inverse,
+            weights=selected_depth.astype(np.float64, copy=False),
+            minlength=back_values.size,
+        )
+        for value, count, depth_sum in zip(
+            back_values.tolist(), back_counts.tolist(), depth_sums.tolist(), strict=True
+        ):
             if int(value) in candidate_set:
                 events[int(value)] += int(count)
-                pixels = mask & (back == np.uint32(value))
-                event_depth_sum[int(value)] += float(np.sum(depths[layer + 1].reshape(-1)[pixels]))
+                event_depth_sum[int(value)] += float(depth_sum)
     raw_total = float(sum(visible.values()) + sum(events.values()))
     if raw_total <= 0.0:
         return [], {"rawEvidenceMass": 0.0, "weightSum": 0.0}

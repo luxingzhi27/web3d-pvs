@@ -909,8 +909,21 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         query_tail_separator_family,
         query_tail_separator_hidden_dim,
         query_tail_separator_max_abs,
-        query_tail_separator_centering,
+    query_tail_separator_centering,
     ) = _query_tail_separator_constructor_values(config)
+    visibility_fusion = config.get("visibilityFusion")
+    if visibility_fusion is not None and not isinstance(visibility_fusion, Mapping):
+        raise ValueError("checkpoint visibility fusion config is invalid")
+    visibility_fusion_mode = (
+        str(visibility_fusion.get("mode", "concat"))
+        if isinstance(visibility_fusion, Mapping)
+        else "concat"
+    )
+    geometry_modulation_hidden_dim = (
+        int(visibility_fusion.get("modulationHiddenDim", 64))
+        if isinstance(visibility_fusion, Mapping)
+        else 64
+    )
     device = torch.device("cuda" if args.device == "cuda" or (args.device == "auto" and torch.cuda.is_available()) else "cpu")
     model = BoundedRelationSurvivalMomentModel(
         num_instances=num_instances,
@@ -932,6 +945,8 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         sparse_instance_penalty=float(
             instance_calibration.get("sparseInstancePenalty")
         ),
+        visibility_fusion_mode=visibility_fusion_mode,
+        geometry_modulation_hidden_dim=geometry_modulation_hidden_dim,
         cull_certificate_max_suppression=(
             float(certificate.get("maximumSuppressionLogit"))
             if certificate_enabled

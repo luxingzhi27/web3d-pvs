@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
 from pathlib import Path
@@ -17,7 +18,10 @@ from typing import Any
 
 import numpy as np
 
-from build_directional_viewcell_split import POSE_DTYPE, SPLIT_IDS, sha256_file
+try:
+    from .build_directional_viewcell_split import POSE_DTYPE, SPLIT_IDS, sha256_file
+except ImportError:  # Direct script execution.
+    from build_directional_viewcell_split import POSE_DTYPE, SPLIT_IDS, sha256_file
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,6 +29,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--split-manifest", type=Path, required=True)
+    parser.add_argument(
+        "--viewcell-source",
+        type=Path,
+        default=None,
+        help=(
+            "Optional aligned view-cell source. When supplied, materialize only the V4 "
+            "query center, candidate camera and radius arrays without rebuilding candidates or GT."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -35,6 +48,127 @@ def _link_or_copy(source: Path, destination: Path) -> str:
     except OSError:
         shutil.copy2(source, destination)
         return "copy"
+
+
+def _write_array_atomic(path: Path, values: np.ndarray) -> None:
+    temporary = path.with_name(f".{path.name}.partial")
+    np.ascontiguousarray(values).tofile(temporary)
+    temporary.replace(path)
+
+
+def _materialize_viewcell_query_geometry(
+    source_dir: Path,
+    output_dir: Path,
+    poses: np.ndarray,
+) -> dict[str, Any]:
+    required = {
+        "centers": source_dir / "viewcell_centers.bin",
+        "forwards": source_dir / "viewcell_forwards.bin",
+        "params": source_dir / "viewcell_params.bin",
+    }
+    missing = [str(path) for path in required.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"view-cell source is missing required geometry: {missing}")
+    pose_count = int(poses.shape[0])
+    centers = np.fromfile(required["centers"], dtype="<f4").reshape(-1, 3)
+    forwards = np.fromfile(required["forwards"], dtype="<f4").reshape(-1, 3)
+    params = np.fromfile(required["params"], dtype="<f4").reshape(-1, 8)
+    if centers.shape[0] != pose_count or forwards.shape[0] != pose_count or params.shape[0] != pose_count:
+        raise ValueError("view-cell query geometry row count does not match PoseCSR")
+    if not np.isfinite(centers).all() or not np.isfinite(forwards).all() or not np.isfinite(params).all():
+        raise ValueError("view-cell query geometry contains non-finite values")
+    pose_forward = np.asarray(poses["camera_forward"], dtype=np.float32)
+    if not np.allclose(forwards, pose_forward, rtol=1e-5, atol=2e-4):
+        raise ValueError("view-cell source forward vectors do not align with PoseCSR rows")
+    radii = np.asarray(params[:, 0], dtype=np.float32)
+    if np.any(radii <= 0.0):
+        raise ValueError("view-cell source contains a non-positive radius")
+    forward_norm = np.linalg.norm(forwards, axis=1, keepdims=True)
+    if np.any(forward_norm <= 1e-6):
+        raise ValueError("view-cell source contains a zero camera-forward vector")
+    normalized_forward = forwards / forward_norm
+    # The real 60-degree view from any point in the horizontal disk is
+    # enclosed by backing the 66-degree candidate anchor away from the disk
+    # center by radius / tan(60 / 2).  The stored candidate CSR remains the
+    # authoritative union over subposes and is never regenerated here.
+    back_offsets = radii / math.tan(math.radians(60.0 * 0.5))
+    candidate_camera = centers - normalized_forward * back_offsets[:, None]
+    if np.allclose(centers, candidate_camera, rtol=0.0, atol=1e-6):
+        raise ValueError("candidate camera must be distinct from the view-cell query center")
+    if not poses.flags.writeable:
+        raise ValueError("view-cell geometry materialization requires a writable pose array")
+    poses["camera_world"] = candidate_camera.astype(np.float32, copy=False)
+    _write_array_atomic(
+        output_dir / "query_center_world.bin", centers.astype("<f4", copy=False)
+    )
+    _write_array_atomic(
+        output_dir / "candidate_camera_world.bin",
+        candidate_camera.astype("<f4", copy=False),
+    )
+    _write_array_atomic(
+        output_dir / "viewcell_radius_m.bin", radii.astype("<f4", copy=False)
+    )
+    return {
+        "source": str(source_dir),
+        "poseCount": pose_count,
+        "radiusRangeM": [float(radii.min()), float(radii.max())],
+        "candidateBackOffsetRangeM": [
+            float(back_offsets.min()),
+            float(back_offsets.max()),
+        ],
+        "candidateBackOffsetDefinition": "viewcell_radius / tan(frontend_render_fov_y_deg / 2), frontend_render_fov_y_deg=60",
+        "candidateAndGtPreserved": True,
+        "files": {
+            "queryCenterWorld": "query_center_world.bin",
+            "candidateCameraWorld": "candidate_camera_world.bin",
+            "viewcellRadiusM": "viewcell_radius_m.bin",
+        },
+    }
+
+
+def repair_existing_viewcell_query_geometry(
+    dataset_dir: Path,
+    viewcell_source: Path,
+) -> dict[str, Any]:
+    """Repair only derived query geometry; candidates, GT and split stay byte-identical."""
+    dataset_dir = dataset_dir.resolve()
+    viewcell_source = viewcell_source.resolve()
+    meta_path = dataset_dir / "dataset_meta.json"
+    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    pose_count = int(metadata["poseCount"])
+    source_poses = np.memmap(
+        dataset_dir / "poses.bin",
+        dtype=POSE_DTYPE,
+        mode="r",
+        shape=(pose_count,),
+    )
+    poses = np.asarray(source_poses, dtype=POSE_DTYPE).copy()
+    geometry = _materialize_viewcell_query_geometry(
+        viewcell_source, dataset_dir, poses
+    )
+    _write_array_atomic(dataset_dir / "poses.bin", poses)
+    metadata.update(
+        {
+            "queryCenterSemantics": "canonical center of the aligned same-direction view-cell",
+            "candidateCameraSemantics": "66-degree candidate anchor backed from the query center by viewcell_radius/tan(30deg); stored candidate CSR remains the native subpose union",
+            "cameraSemantics": "poses.camera_world is candidate_camera_world = query_center_world - normalize(viewcell_forward) * candidate_back_offset",
+            "viewcellGeometryMaterialization": geometry,
+            "files": {**(metadata.get("files") or {}), **geometry["files"]},
+        }
+    )
+    temporary_meta = meta_path.with_name(f".{meta_path.name}.partial")
+    temporary_meta.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary_meta.replace(meta_path)
+    return {
+        "datasetDir": str(dataset_dir),
+        "viewcellSource": str(viewcell_source),
+        "poseCount": pose_count,
+        "candidateAndGtPreserved": True,
+        "geometry": geometry,
+    }
 
 
 def apply_manifest(args: argparse.Namespace) -> dict[str, Any]:
@@ -80,7 +214,12 @@ def apply_manifest(args: argparse.Namespace) -> dict[str, Any]:
     )
     poses_out = np.asarray(poses, dtype=POSE_DTYPE).copy()
     poses_out["split"] = split_ids
-    poses_out.tofile(output_dir / "poses.bin")
+    viewcell_geometry = None
+    if args.viewcell_source is not None:
+        viewcell_geometry = _materialize_viewcell_query_geometry(
+            args.viewcell_source.resolve(), output_dir, poses_out
+        )
+    _write_array_atomic(output_dir / "poses.bin", poses_out)
     shutil.copy2(manifest_dir / "manifest.json", output_dir / "split_manifest.json")
     if (manifest_dir / "pose_group_ids.bin").exists():
         shutil.copy2(manifest_dir / "pose_group_ids.bin", output_dir / "pose_group_ids.bin")
@@ -107,6 +246,19 @@ def apply_manifest(args: argparse.Namespace) -> dict[str, Any]:
             "stats": {**(input_meta.get("stats") or {}), "explicitSplitPoseCounts": split_counts},
         }
     )
+    if viewcell_geometry is not None:
+        output_meta.update(
+            {
+                "queryCenterSemantics": "canonical center of the aligned same-direction view-cell",
+                "candidateCameraSemantics": "66-degree candidate anchor backed from the query center by viewcell_radius/tan(30deg); stored candidate CSR remains the native subpose union",
+                "cameraSemantics": "poses.camera_world is candidate_camera_world = query_center_world - normalize(viewcell_forward) * candidate_back_offset",
+                "viewcellGeometryMaterialization": viewcell_geometry,
+                "files": {
+                    **output_meta["files"],
+                    **viewcell_geometry["files"],
+                },
+            }
+        )
     (output_dir / "dataset_meta.json").write_text(
         json.dumps(output_meta, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -119,6 +271,7 @@ def apply_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "hardlinkedFiles": linked,
         "copiedFiles": copied,
         "candidateSemanticsPreserved": output_meta.get("candidateSemantics"),
+        "viewcellGeometryMaterialized": viewcell_geometry is not None,
     }
 
 

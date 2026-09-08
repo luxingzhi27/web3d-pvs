@@ -178,7 +178,7 @@ conda run -n slm_pvs python \
 - summary：`neural_instance_culling/benchmark/out/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_formal_summary.json`；
 - validator：`neural_instance_culling/benchmark/validate_ray_context_survival_owrb_supplement.py`；
 - schema validation：`neural_instance_culling/benchmark/out/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812/formal_supplement_schema_validation.json`；
-- 明细报告：[`pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_formal_validation.md`](../evaluation/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_formal_validation.md)；
-- 结论报告：[`pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_conclusion.md`](../evaluation/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_conclusion.md)。
+- 结论报告：[视线关系场与生存场补充矩阵结论](../evaluation/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_conclusion.md)；
+- 完整逐成员结果：`neural_instance_culling/benchmark/out/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_formal_summary.json`。
 
 补充矩阵不生成核心 2×2×2 因子效应；只对预注册的四组机制差值执行 10,000 次 paired bootstrap。Playwright 无头 Chrome 的硬件 GPU 规则保持不变：Color-ID 图像评价必须通过 NVIDIA Vulkan/ANGLE WebGL 门；WebGPU 数值 parity 单独记录，当前软件适配器结果不能宣称硬件 WebGPU 性能。

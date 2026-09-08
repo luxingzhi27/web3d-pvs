@@ -14,9 +14,9 @@
 
 1. **分层遮挡关系与逐实例校准生存场**：离线关系编码器读取 train split 的真实三角形遮挡边、实例几何和层次分组，生成每个实例的共享关系先验；逐实例残差再校准该实例的 28 个生存系数。导出时两者融合，因此浏览器只需读取固定实例表，不执行图传播或邻居查询。
 2. **视点区域矩包络频谱查询**：浏览器以当前 view-cell 锚点、区域轴和实例深度查询固定生存系数。频谱矩描述区域内方向变化，避免前端展开多个 subpose；每个 view-cell 仍只执行一次候选批量推理。
-3. **综合可见性损失**：逐 pose 平衡 BCE 负责普通正负分类，单侧 RVL 项只约束重要可见实例的加权召回，共享困难边界项同时作用于 logit 和训练期表示。对比投影头不导出到运行时。
+3. **综合可见性损失**：逐 pose 平衡 BCE 负责普通正负分类，单侧 RVL 项约束重要可见实例的加权召回，共享困难边界项只作用于最终 logit。当前 Full 已关闭表征对比投影头，不再训练或导出该分支。
 
-运行时每个实例保存 `96` 维几何特征和 `28` 维融合生存系数，共 `124` 个半精度值。关系图、层次分组、逐实例校准残差和训练期投影头均不进入前端资产。
+运行时每个实例保存 `96` 维几何特征和 `28` 维融合生存系数，共 `124` 个半精度值。关系图、层次分组和逐实例校准残差均不进入前端资产。
 
 ## 代码入口
 
@@ -33,7 +33,7 @@
 | 三种子汇总 | `neural_instance_culling/benchmark/summarize_pvs.py` |
 | 正式协议重审计 | `neural_instance_culling/benchmark/reaudit_pvs.py` |
 
-正式 runner 固定使用 `5926 train / 659 calibration / 730 validation / 684 test` 的主 split、三个随机种子和五个变体。当前实验输出前缀保持 `pvs_v4_integrated_visibility_mainline_v1`，用于继续读取已完成的数 GB checkpoint 和评价结果；代码文件名不再重复携带架构版本和日期。
+正式 runner 固定使用 `5926 train / 659 calibration / 730 validation / 684 test` 的主 split 和三个随机种子。当前核心比较包括无对比 Full、无分层关系、无生存场、通用 28 维、无视点区域矩包络、无 RVL 保护和无困难边界七个变体。当前实验输出前缀保持 `pvs_v4_integrated_visibility_mainline_v1`，用于继续读取已完成的 checkpoint 和评价结果。
 
 ## 运行命令
 
@@ -59,23 +59,23 @@ conda run -n slm_pvs python \
 
 ## 正式 validation 结果
 
-三个 Full 种子分别冻结 epoch `40/24/32`，阈值为 `0.46/0.60/0.56`。所有阈值只来自各自 calibration；随后在相同 `730` 个 validation pose 上评价。
+当前 Full 关闭表征对比损失。三个种子分别冻结 epoch `32/36/40`，阈值为 `0.42/0.68/0.58`。所有阈值只来自各自 calibration；随后在相同 `730` 个 validation pose 上评价。
 
 | 指标 | Full |
 |---|---:|
-| Pose precision | 0.48291 |
-| Pose recall | 0.97543 |
-| Aggregate precision | 0.19799 |
-| Aggregate recall | 0.98063 |
-| Weighted recall | 0.99797 |
-| Weighted recall 单侧 95% 下界 | 0.99658 |
-| Aggregate accuracy | 0.90827 |
-| Aggregate balanced accuracy | 0.94360 |
-| Useful cull | 0.88575 |
-| Bad cull | 0.000445 |
-| 平均预测实例数 | 540.34 |
+| Pose precision | 0.48463 |
+| Pose recall | 0.97722 |
+| Aggregate precision | 0.21353 |
+| Aggregate recall | 0.97934 |
+| Weighted recall | 0.99729 |
+| Weighted recall 单侧 95% 下界 | 0.99535 |
+| Aggregate accuracy | 0.91646 |
+| Aggregate balanced accuracy | 0.94716 |
+| Useful cull | 0.89397 |
+| Bad cull | 0.000474 |
+| 平均预测实例数 | 501.17 |
 
-消融显示分层关系先验具有稳定贡献：相对移除关系先验，aggregate precision 提高 `0.03757`、balanced accuracy 提高 `0.01545`、useful cull 提高 `0.02785`，平均少预测 `131.98` 个实例，相关 95% 区间均不跨零。区域矩包络尚未形成稳定收益；RVL 的主要分类差值跨零；当前对比分离项对 precision、accuracy 和 useful cull 有稳定负面影响，因此不能作为已验证贡献。完整置信区间见 `docs/evaluation/pvs_mainline_validation_2026-08-23.md`。
+消融显示生存场整体贡献最大，分层关系具有稳定贡献，结构化生存场优于同容量通用 28 维实例记忆；视点区域矩包络带来较小但稳定的分类和剔除收益。RVL 保护在各自安全阈值下主要改善边界和有效剔除，困难边界间隔主要改善 balanced accuracy、资源量和分数分布。旧表征对比项对 precision、accuracy 和 useful cull 有稳定负面影响，因此已从当前 Full 移除。完整方法和置信区间见 `docs/evaluation/pvs_mainline_core_ablation_paper_analysis_2026-08-28.md`。
 
 ## 2026-08-23 代码清理记录
 

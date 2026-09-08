@@ -2,6 +2,8 @@
 
 日期：2026-08-12
 
+> 历史机制补充矩阵，不是当前 V4 Full。保留 Fourier、上下文容量和生存参数化的对照证据。
+
 ## 评价范围
 
 本补充实验用于拆分当前轻量可见性模型中的四个实现因素：上下文表容量、相机查询编码、遮挡生存参数化和离线遮挡证据来源。它与核心 2×2×2 formal matrix 使用独立名称和独立输出目录，不能把补充对照解释为核心因子主效应。
@@ -13,7 +15,12 @@
 - 使用 10,000 次按 seed 聚类、seed 内按 pose 重采样的 paired bootstrap；
 - 15 个成员均完成 Playwright 无头 Chrome 的 Color-ID 图像评价，并通过 NVIDIA Vulkan/ANGLE 硬件 WebGL 门。
 
-逐成员指标、全部成对差值和图像指标见[正式 validation 明细](pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_formal_validation.md)。
+逐成员指标、全部成对差值和图像指标保存在机器可读结果：
+
+```text
+neural_instance_culling/benchmark/out/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812/
+  pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_formal_summary.json
+```
 
 ## 成员概览
 
@@ -91,7 +98,7 @@ conda run -n slm_pvs python \
   neural_instance_culling/benchmark/summarize_ray_context_survival_owrb.py \
   --manifest neural_instance_culling/benchmark/out/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_formal_matrix_manifest.json \
   --output neural_instance_culling/benchmark/out/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_formal_summary.json \
-  --report docs/evaluation/pvs_ray_context_survival_owrb_supplement_v1_formal40_20260812_formal_validation.md \
+  --report /tmp/pvs_ray_context_survival_owrb_supplement_validation.md \
   --bootstrap-replicates 10000
 
 conda run -n slm_pvs python \

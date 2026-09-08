@@ -46,6 +46,7 @@ class BoundedRelationSurvivalMomentModelContractTest(unittest.TestCase):
         query_tail_separator_family: str = "disabled",
         query_tail_separator_hidden_dim: int = 8,
         survival_rank: int = 4,
+        visibility_fusion_mode: str = "concat",
     ) -> BoundedRelationSurvivalMomentModel:
         model = BoundedRelationSurvivalMomentModel(
             4,
@@ -84,6 +85,7 @@ class BoundedRelationSurvivalMomentModelContractTest(unittest.TestCase):
             ),
             query_tail_separator_family=query_tail_separator_family,
             query_tail_separator_hidden_dim=query_tail_separator_hidden_dim,
+            visibility_fusion_mode=visibility_fusion_mode,
         )
         model.set_instance_world_aabbs(
             torch.tensor(
@@ -194,6 +196,61 @@ class BoundedRelationSurvivalMomentModelContractTest(unittest.TestCase):
         for name, value in default.state_dict().items():
             torch.testing.assert_close(
                 value, explicit.state_dict()[name], rtol=0.0, atol=0.0
+            )
+
+    def test_geometry96_residual_modulation_has_identity_initialization(self) -> None:
+        model = self._model(
+            visibility_fusion_mode="geometry96_residual_modulation"
+        )
+        self.assertEqual(model.runtime_feature_dim, 124)
+        self.assertEqual(model.runtime_head_input_dim, 105)
+        self.assertEqual(model.geometry_modulation_dynamic_input_dim, 34)
+        self.assertIsNotNone(model.geometry_modulation_head)
+        self.assertEqual(
+            model.config["visibilityFusion"],
+            {
+                "mode": "geometry96_residual_modulation",
+                "dynamicInputDim": 34,
+                "modulationHiddenDim": 64,
+                "modulationDim": 96,
+                "trunkInputDim": 105,
+                "fusion": "geometry * (1 + tanh(dynamic_delta))",
+                "trunkLayout": [105, 64, 64, 1],
+            },
+        )
+        geometry = torch.randn((4, 96), dtype=torch.float32)
+        coefficients = torch.randn((4, 28), dtype=torch.float32) * 0.05
+        runtime = torch.cat([geometry, coefficients], dim=-1)
+        inputs = self._inputs()
+        logits, auxiliary = model.compute_logits_with_aux(
+            inputs["camera"],
+            inputs["camera_view"],
+            inputs["candidate_camera"],
+            inputs["instance_ids"],
+            runtime_features=runtime,
+            query_center_world=inputs["query_center"],
+            viewcell_radius_m=inputs["radius"],
+        )
+        self.assertEqual(tuple(logits.shape), (4, 1))
+        torch.testing.assert_close(
+            auxiliary["geometry_modulation_delta"],
+            torch.zeros_like(auxiliary["geometry_modulation_delta"]),
+            rtol=0.0,
+            atol=0.0,
+        )
+        logits.square().mean().backward()
+        assert model.geometry_modulation_head is not None
+        self.assertIsNotNone(model.geometry_modulation_head[-1].weight.grad)
+        self.assertGreater(
+            float(model.geometry_modulation_head[-1].weight.grad.abs().sum()),
+            0.0,
+        )
+
+    def test_geometry96_residual_modulation_requires_survival(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires the survival representation"):
+            self._model(
+                occlusion_representation="none",
+                visibility_fusion_mode="geometry96_residual_modulation",
             )
 
     def test_saved_model_config_declares_runtime_and_offline_widths(self) -> None:

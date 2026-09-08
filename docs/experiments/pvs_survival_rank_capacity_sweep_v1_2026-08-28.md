@@ -1,6 +1,8 @@
-# 遮挡生存场方向秩容量实验计划
+# 遮挡生存场方向秩容量实验
 
 日期：2026-08-28
+
+状态：四种方向秩、三种子、每成员 `40 epoch × 900 step` 已全部完成。
 
 ## 实验目的
 
@@ -52,4 +54,25 @@ runner 同时运行四个成员，每张 GPU 保持一个训练进程；一个�
 
 ## 代码与前端边界
 
-训练模型、checkpoint 配置和评价器必须支持 rank 自描述；当前默认 rank 仍为 4。容量实验完成前不修改默认 checkpoint、前端固定表 schema、WebGPU/WASM 推理内核或部署资产。若最终选择非 4 的 rank，再单独更新导出器并完成 WebGPU/WASM parity 和移动端性能测试。
+训练模型、checkpoint 配置和评价器必须支持 rank 自描述；当前默认 rank 仍为 4。只有选择非 4 的 rank 时，才需要单独更新导出器并完成 WebGPU/WASM parity 和移动端性能测试。
+
+## 正式结果
+
+所有 12 个成员均完成训练，并使用各 checkpoint 自己的 calibration 阈值回放相同的 730 个 validation pose；三个种子全部通过 weighted-recall 安全门，test 未读取。
+
+| 方向秩 | 生存维度 | 固定表 | Pose precision | Pose recall | Aggregate precision | Aggregate recall | Aggregate weighted recall | Aggregate accuracy | Aggregate balanced accuracy | Aggregate useful cull | Aggregate bad cull | 平均预测数 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 14 | 3.95 MiB | 0.4621 | 0.9802 | 0.1998 | 0.9801 | 0.99848 | 0.9081 | 0.9432 | 0.8856 | 0.000458 | 540.9 |
+| **4** | **28** | **4.45 MiB** | **0.5101** | 0.9691 | **0.2163** | 0.9725 | 0.99772 | **0.9177** | 0.9445 | **0.8954** | 0.000631 | **493.7** |
+| 8 | 56 | 5.46 MiB | 0.4729 | 0.9802 | 0.1891 | 0.9849 | 0.99794 | 0.9024 | 0.9427 | 0.8798 | **0.000347** | 569.2 |
+| 12 | 84 | 6.47 MiB | 0.4905 | 0.9809 | 0.2119 | 0.9829 | 0.99678 | 0.9156 | **0.9485** | 0.8931 | 0.000392 | 505.9 |
+
+表中分类和剔除指标为三个种子的 validation 均值。所有 rank 均满足安全门，因此可以在相同安全条件下比较效率。
+
+Rank 4 在 pose/aggregate precision、aggregate accuracy、useful cull 和平均预测数上最好。Rank 12 的 balanced accuracy 略高，但固定表增加到 6.47 MiB，且没有带来对应的 precision 或剔除收益；rank 2 虽节省约 0.50 MiB，但分类和有效剔除下降；rank 8 同时增加资产并降低主要效率指标。因此当前 28 维 rank-4 生存场继续作为论文和前端默认容量。
+
+机器可读结果：
+
+```text
+neural_instance_culling/benchmark/out/pvs_survival_rank_capacity_sweep_v1/capacity_summary.json
+```

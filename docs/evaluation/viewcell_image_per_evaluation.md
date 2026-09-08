@@ -1,112 +1,61 @@
-# Viewcell Image PER Evaluation
+# View-cell 图像级评价协议
 
-Date: 2026-08-10
+更新时间：2026-09-05
 
-图像级评价用于回答：模型在实例集合上满足安全约束后，真实 GLB 渲染画面仍会损失多少像素。它不是新的 PVS 模型，也不能替代集合 precision / recall / useful cull / bad cull。
+图像级评价回答：模型在实例集合上满足安全约束后，使用前端真实相机渲染时仍会损失多少可见像素。它不能替代集合 precision、recall、useful cull、bad cull 或 GLB 资源指标。
 
-## Inputs
+## 输入契约
 
-当前默认输入：
+每次正式评价必须固定：
 
-```text
-view-cell source: neural_instance_culling/dataset/out/hkust_v3_viewcell_colorid_fov66_source
-pose CSR:     neural_instance_culling/dataset/out/pose_csr_hkust_v3_spatial_raw_subpose_aabb_fov66_v1
-runtime meta: hkust-v3/assets/runtimeVisibilityMeta.json
-glb index:    hkust-v3/assets/glbIndex.json
-glb root:     hkust-v3/assets
-```
+- 已冻结 checkpoint 及其 calibration 阈值；
+- 与实例评价相同的 validation 或最终 test pose；
+- 同一 view-cell 的真实 `60°` 显示相机和离线 subpose；
+- 完整 reference 实例集合和模型预测实例集合；
+- 实例级 `componentGlobalId`，不能先压缩为 GLB 可见集合；
+- 同一版本的场景 GLB、实例变换和运行时元数据。
 
-`--viewcell-dataset` 和 `--pose-csr` 是两个不同语义的输入：前者必须包含
-view-cell/subpose 文件，后者包含模型推理用的 pose、候选和 MVP CSR。不能把只有
-`poses.bin` 的 Pose CSR 目录作为 view-cell source。
+后退 `66°` 相机只用于生成模型候选，不能作为最终图像对比相机。Validation 图像结果用于模型比较；test 图像结果只能在 checkpoint、阈值和评价协议全部冻结后执行一次。
 
-当前建议评价模型：
+## 硬件要求
 
-```text
-pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_best
-```
+正式 Color-ID 图像必须通过 Playwright 无头 Chrome 的 NVIDIA Vulkan/ANGLE WebGL 硬件门，并保存页面后端字段、Chrome 参数及同一运行窗口的 `nvidia-smi` 和 `pmon` 证据。
 
-`visible_weights` 继续解释为 rvcServer 的重要性权重，不是严格像素覆盖率。
+SwiftShader、llvmpipe、softpipe、swrast 或无法确认后端的结果只能用于语义 smoke，不能进入论文图像指标。完整硬件规则见[硬件 GPU 执行政策](../current/hardware_gpu_execution_policy.md)。
 
-validation/calibration 开发运行可以使用 `weighted_precision` 选择工作点；正式 test
-必须读取 frozen calibration threshold，不能在 test 上扫描或覆盖阈值。图像 PER 仍然是
-画面损失评价，不能替代安全筛选或 useful cull / bad cull 报告。
+## 评价流程
 
-## Process
+1. 使用模型 checkpoint 自己的 calibration 冻结阈值，在后退候选集合上得到实例级预测集合。
+2. 对同一 view-cell 的每个真实 `60°` subpose 加载完整场景，渲染 reference Color-ID 图。
+3. 在同一相机、分辨率、深度和场景版本下，只保留模型预测实例，渲染 prediction Color-ID 图。
+4. 逐像素比较 reference 和 prediction 的实例 ID。
+5. 先在每个 subpose 计算指标，再报告 pose/view-cell 宏平均、p95 和 aggregate 像素统计。
+6. 同时关联该 pose 的实例集合、GLB 字节和运行时指标，不能只输出图像误差。
 
-1. 从 validation/calibration split 选择 viewcell（正式 test 仍需冻结后单独执行）。
-2. 对每个 viewcell，用后退扩大视锥相机和同一候选集合调用模型，得到预测实例集合。
-3. 将预测实例保留为 `predictionComponentIds`，不压缩成 GLB 级预测集合。
-4. 用真实 60°相机 subpose 渲染完整实例 reference Color-ID 图和 prediction Color-ID 图。
-5. reference 使用完整本地 GLB 场景并按深度得到可见 `componentGlobalId`。
-6. prediction 在同一场景中只打开模型预测的实例掩码；同一 GLB 内的实例可以独立显示或剔除。
-7. 比较两张 ID 图，输出 PER、miss pixel rate、wrong ID pixel rate、extra pixel rate 和主要错误 component。
+浏览器页面和完整 GLB 场景应在一个批次内复用，避免把重复页面初始化或完整场景重载误计为每 pose 推理成本。页面复用范围、GLB 加载次数和 reference/prediction 渲染时间必须记录。
 
-当前渲染器衡量实例级 component-ID 画面损失；GLB 数量和字节收益仍需由集合/调度指标单独报告，不能从图像 ID 差异中反推 GLB 级结论。
+## 图像指标
 
-## 批量页面复用
+| 指标 | 定义 | 作用 |
+|---|---|---|
+| Image PER | reference 非背景像素中 prediction 实例 ID 不一致的比例 | 总体可见像素错误 |
+| Miss-pixel rate | reference 为实例、prediction 为背景的比例 | 模型漏掉实例造成的空洞 |
+| Wrong-ID pixel rate | 两张图均非背景但实例 ID 不同的比例 | 遮挡次序或实例选择错误 |
+| Extra-pixel rate | reference 为背景、prediction 出现实例的比例 | 额外显示实例造成的画面差异 |
+| p95 miss-pixel rate | 各 pose 漏检像素率的 95 分位数 | 困难视点尾部风险 |
 
-一次 `evaluate_viewcell_image_per.py` 调用会把多个 subpose 放入一个 manifest，
-浏览器在样本循环前加载完整 GLB 清单一次。若 validation/calibration 被外部脚本
-拆成多个独立 manifest，应使用：
+报告必须注明分母。Image PER、miss 和 wrong-ID 通常以 reference 非背景像素为主要分母；extra-pixel 使用 reference 背景区域或全图像素时必须明确写出。
 
-```bash
-PYTHONDONTWRITEBYTECODE=1 python \
-  neural_instance_culling/benchmark/run_m5_component_image_batch.py \
-  --input validation=/path/to/validation_manifest.json \
-  --input calibration=/path/to/calibration_manifest.json \
-  --output-dir /tmp/m5_component_image_batch \
-  --chrome-exe /usr/bin/google-chrome
-```
+## 论文报告
 
-该 runner 只合并已有 component-level prediction，不运行模型、不扫描或修改阈值，
-并在一个 Chrome 页面中复用已加载的 GLB。它会在 summary 中记录
-`browserPageCount`、`glbLoadPasses`、`glbLoaderCalls`、加载耗时和页面内重载次数。
-独立 Node/Chrome 调用之间仍没有常驻对象缓存；正式浏览器硬件门统一遵循
-`../current/hardware_gpu_execution_policy.md`。
+图像表必须同时给出：
 
-## Metrics
+- mean、median、p95 的 PER、miss-pixel 和 wrong-ID pixel；
+- extra-pixel rate 及其分母；
+- 实际评价 pose、view-cell 和 subpose 数；
+- 相同工作点的 pose/aggregate precision、recall 和 weighted recall；
+- useful cull、bad cull、平均预测实例数；
+- 预测 GLB 数、预测 GLB 字节和相对完整候选的削减；
+- 浏览器后端、GPU、分辨率、页面复用和运行时间。
 
-- `PER`: reference 非背景像素中，test ID 不一致的比例。
-- `miss pixel rate`: reference 有 GLB 但 test 是背景的像素比例。
-- `wrong ID pixel rate`: reference 和 test 都非背景，但 GLB ID 不一致的像素比例。
-- `extra pixel rate`: reference 是背景但 test 画出 GLB 的像素比例。
-- `weighted recall`: 按 `visible_weights` 统计 GT 被找回比例；它不惩罚 false positive，不能单独作为主结论。
-
-## Example Command
-
-下面命令仅用于 validation smoke，显式使用历史 exploratory 阈值 `0.64`。正式运行
-不得照搬该阈值到 test；应使用完成冻结协议的 `eval_summary.json`，并保持 test
-一次性、全量且不扫描阈值。
-
-```bash
-conda run --no-capture-output -n slm_pvs python -u neural_instance_culling/benchmark/evaluate_viewcell_image_per.py \
-  --model-name pvs_directional_occlusion_proxy_encoder_rvl_w042_full40_best \
-  --viewcell-dataset neural_instance_culling/dataset/out/hkust_v3_viewcell_colorid_fov66_source \
-  --pose-csr neural_instance_culling/dataset/out/pose_csr_hkust_v3_spatial_raw_subpose_aabb_fov66_v1 \
-  --runtime-meta hkust-v3/assets/runtimeVisibilityMeta.json \
-  --glb-index hkust-v3/assets/glbIndex.json \
-  --glb-root hkust-v3/assets \
-  --output-dir neural_instance_culling/benchmark/out/viewcell_image_per_pvs_directional_occlusion_proxy_encoder_full40_best \
-  --max-viewcells 256 \
-  --subposes-per-viewcell 4 \
-  --split val \
-  --width 960 \
-  --height 540 \
-  --device cuda \
-  --threshold 0.64 \
-  --target-weighted-recall 0.99 \
-  > neural_instance_culling/benchmark/out/viewcell_image_per_pvs_directional_occlusion_proxy_encoder_full40_best_stdout.log \
-  2> neural_instance_culling/benchmark/out/viewcell_image_per_pvs_directional_occlusion_proxy_encoder_full40_best_stderr.log
-```
-
-## Reporting Rule
-
-正式报告必须同时给出：
-
-- 图像 PER / miss pixel / wrong ID pixel。
-- pose-level 和 aggregate precision / recall / F1 / Jaccard。
-- useful cull 和 bad cull。
-- 平均预测实例数、GLB 数量和 GLB 字节削减。
-- 前端 Worker/WebGPU 推理耗时和实际 drawn instance 数。
-- 浏览器真实 GLB 加载耗时、页面复用范围和每个 sample 的 reference/prediction 渲染耗时。
+当前 V4 主线的 validation 图像指标尚未完成正式回填，应标记为 `not_available`。历史方向代理和 2026-08-11/12 矩阵的图像结果只能作为历史基线，不能改写成当前 V4 Full 的图像结论。

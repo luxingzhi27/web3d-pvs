@@ -1,40 +1,52 @@
-# Test Split Benchmark Protocol
+# 冻结 Test Split 评价协议
 
-日期：2026-05-25
+更新时间：2026-09-05
 
-## 变更目的
+## Split 职责
 
-修正历史固定数量 benchmark 的默认评价口径。旧脚本默认从 test split 中有放回抽样固定数量 pose/viewcell，容易被误写成唯一测试样本。从本次变更开始，当前入口默认遍历 test split 中全部唯一可见 pose/viewcell；如果需要复现旧的抽样口径，必须显式传入 `--sample-with-replacement` 和正数 `--max-eval-poses`。
+| Split | 允许用途 | 禁止用途 |
+|---|---|---|
+| train | 参数训练和 train-only 离线关系编码 | 阈值安全结论 |
+| calibration | 为每个 checkpoint 冻结安全阈值 | 比较论文模型优劣 |
+| validation | 选择 checkpoint、配置和消融结论 | 重新选择阈值 |
+| test | 对已冻结最终模型执行一次正式评价 | 选择阈值、模型、超参数或评价口径 |
 
-## 修改文件
+主实验固定使用 `5926 train / 659 calibration / 730 validation / 684 test`。Test 的实际数量必须从数据集 split 读取并写入报告，不能在脚本或文档中假定所有场景都是 684。
 
-- `neural_instance_culling/benchmark/compare_test_split.py`
-- `docs/evaluation/test_split_benchmark_protocol.md`
+## 正式遍历
 
-## 当前口径
+正式 test 默认遍历 split 中全部唯一且有 GT 可见实例的 pose/view-cell，每个样本只评价一次，不做有放回抽样，不通过 `max-eval-poses` 截断，也不按结果补抽样本。
 
-- 默认模式：`all_unique_visible_poses`
-- 含义：对指定 split 中每个有 GT 可见实例的 pose/viewcell 只评估一次，不重复抽样。
-- 对当前 `pose_csr_hkust_v3_viewcell_colorid_fov66` 数据集，test split 的唯一可见 viewcell 数量为 `684`，因此严格 test 结果应写作 `684 unique test viewcells`，不能写作固定数量 test。
+对于当前 HKUST 主数据集，严格 test 应写作：
 
-## 兼容旧口径
-
-如需复现历史 sampled-with-replacement 结果，使用：
-
-```bash
-python compare_test_split.py --sample-with-replacement --max-eval-poses <positive_count>
+```text
+684 unique test view-cells
 ```
 
-该结果只能标注为 `sampled_with_replacement`，不能作为严格 test split 结论。
+如果某场景存在零 GT pose，必须在评价前登记纳入或排除规则，并单独报告数量。
 
-## 指标解释
+## 冻结内容
 
-- `pose precision/recall/F1/Jaccard`：每个 pose/viewcell 单独计算集合指标，再对所有样本求平均。
-- `agg precision/recall/F1`：把全部样本的 TP/FP/FN 合并后再计算，容易受大候选或大 GT viewcell 支配。
-- `weighted recall`：按 rvcServer `component_weights` 对 GT 命中加权，只说明重要 GT 是否被找回，不惩罚 false positive。
-- `avg pred / avg GT / avg candidate`：分别表示平均预测实例数、平均 GT 实例数和平均候选实例数，用于判断模型是否靠大量误报换召回。
+读取 test 前必须冻结：
 
-## 注意事项
+- 模型架构、三个 seed 和每个 seed 的 checkpoint epoch；
+- 每个 checkpoint 自己的 calibration 阈值；
+- 候选生成、FOV、view-cell 和 subpose 并集语义；
+- 实例 GT、`visible_weights` 来源和 GLB 映射；
+- 图像评价分辨率、硬件后端和运行时测试条件；
+- 论文主指标、统计方法和结果表结构。
 
-- 不建议在严格 test split 评估时使用 `--max-candidates-per-pose` 做投影相关候选裁剪，因为该裁剪会在 CPU 上执行大量候选和 GT 的屏幕重叠比较，并且改变前端真实候选口径。
-- 若需要裁剪候选进行消融，报告必须明确写出 `maxCandidatesPerPose`，不能与完整候选结果混用。
+Test 结果不能反向修改上述内容。发现实现错误时，应修复协议并将受影响的 test 结果作废，而不是在同一结果上继续调参。
+
+## 必须报告
+
+- 实际 test pose/view-cell 数和是否全部唯一遍历；
+- pose-macro 与 aggregate 的 precision、recall、F1、Jaccard、accuracy、balanced accuracy 和 specificity；
+- pose-macro 与 aggregate PR-AUC，以及各自同口径正样本比例；
+- weighted recall、单侧置信下界、useful cull 和 bad cull；
+- 平均候选、GT、预测实例和 GLB 数/字节；
+- 同位姿硬件 Color-ID 图像指标；
+- 浏览器运行资产、推理延迟和渲染成本；
+- `testRead=true` 的明确 provenance。
+
+完整指标定义见[统一 PVS 论文评价与指标报告协议](unified_pvs_metrics_evaluation.md)。

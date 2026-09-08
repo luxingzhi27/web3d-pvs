@@ -87,6 +87,11 @@ def main() -> None:
             raise ValueError("view-cell subpose arrays are inconsistent")
         split_id = int(dataset.split_ids[args.split])
         canonical_set = set(int(value) for value in canonical_split_indices.tolist())
+        camera_semantics = str(dataset.meta.get("cameraSemantics", "")).lower()
+        canonical_center_semantics = (
+            "canonical viewcell" in camera_semantics
+            or "canonical plan center" in camera_semantics
+        )
         if not np.array_equal(viewcell_ids, np.arange(viewcell_ids.size, dtype=np.uint32)):
             raise ValueError("formal view-cell source must use contiguous IDs matching its row order")
 
@@ -107,11 +112,17 @@ def main() -> None:
             source_forward = np.asarray(subpose_forwards[int(offsets[row])], dtype=np.float64)
             source_forward /= max(float(np.linalg.norm(source_forward)), 1e-12)
             forward_error = 1.0 - float(np.dot(pose_forward, source_forward))
-            if residual > 1e-2 or forward_offset <= 0.0 or forward_error > 1e-5:
+            invalid_offset = (
+                forward_offset < -1e-3
+                if canonical_center_semantics
+                else forward_offset <= 0.0
+            )
+            if residual > 1e-2 or invalid_offset or forward_error > 1e-5:
                 raise ValueError(
                     "view-cell/PoseCSR row alignment failed at row "
                     f"{row}: residual={residual:.6g}, offset={forward_offset:.6g}, "
-                    f"forwardError={forward_error:.6g}"
+                    f"forwardError={forward_error:.6g}, "
+                    f"canonicalCenterSemantics={canonical_center_semantics}"
                 )
             source_pose_by_viewcell[row] = row
 

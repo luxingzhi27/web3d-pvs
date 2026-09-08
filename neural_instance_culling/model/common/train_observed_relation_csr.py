@@ -623,16 +623,30 @@ def validate_survival_observations_v3(
         raise RelationSchemaError("v3 subpose and raw pixels are invalid")
     if np.any(weight < 0) or np.any(~np.isfinite(weight)):
         raise RelationSchemaError("v3 pixel weights must be finite and non-negative")
-    if require_conservation:
-        for pose in np.unique(subpose):
-            pose_weight = float(weight[subpose == pose].sum())
-            if not np.isclose(pose_weight, 1.0, rtol=1e-4, atol=2e-3):
-                raise RelationSchemaError(f"v3 pixel weights do not conserve subpose {pose}: {pose_weight}")
+    if require_conservation and subpose.size:
+        order = np.argsort(subpose, kind="stable")
+        sorted_pose = subpose[order]
+        sorted_weight = weight[order]
+        starts = np.r_[
+            0,
+            np.flatnonzero(sorted_pose[1:] != sorted_pose[:-1]) + 1,
+        ]
+        pose_weights = np.add.reduceat(sorted_weight, starts)
+        valid = np.isclose(pose_weights, 1.0, rtol=1e-4, atol=2e-3)
+        if not bool(np.all(valid)):
+            failed = int(np.flatnonzero(~valid)[0])
+            raise RelationSchemaError(
+                "v3 pixel weights do not conserve subpose "
+                f"{int(sorted_pose[starts[failed]])}: {float(pose_weights[failed])}"
+            )
+        unique_subpose_count = int(starts.size)
+    else:
+        unique_subpose_count = int(np.unique(subpose).size)
     return {
         "observationCount": int(instance.size),
         "eventCount": int(np.sum(event == 1)),
         "rightCensoredCount": int(np.sum(event == 0)),
-        "subposeCount": int(np.unique(subpose).size),
+        "subposeCount": unique_subpose_count,
         "weightSum": float(weight.sum()),
     }
 

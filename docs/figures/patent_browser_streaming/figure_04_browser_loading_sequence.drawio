@@ -1,0 +1,211 @@
+<mxfile host="65bd71144e" scale="1" border="10">
+    <diagram id="patent-figure-4" name="图 4 浏览器启动、可见性推理与资源加载时序图">
+        <mxGraphModel dx="1531" dy="1469" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1800" pageHeight="1300" background="#FFFFFF" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="f4_start_phase" value="启动阶段" style="swimlane;startSize=48;horizontal=1;rounded=1;arcSize=8;collapsible=0;container=0;whiteSpace=wrap;html=1;fillColor=#E8F6EF;swimlaneFillColor=#FFFFFF;strokeColor=#2E7D62;separatorColor=#2E7D62;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=23;fontStyle=1;strokeWidth=2;spacingLeft=14;align=left;" parent="1" vertex="1">
+                    <mxGeometry x="45" y="105" width="1710" height="300" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_predict_phase" value="首次区域查询" style="swimlane;startSize=48;horizontal=1;rounded=1;arcSize=8;collapsible=0;container=0;whiteSpace=wrap;html=1;fillColor=#F0ECF8;swimlaneFillColor=#FFFFFF;strokeColor=#7563A8;separatorColor=#7563A8;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=23;fontStyle=1;strokeWidth=2;spacingLeft=14;align=left;" parent="1" vertex="1">
+                    <mxGeometry x="45" y="430" width="1710" height="315" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_stream_phase" value="持续调度与区域复用" style="swimlane;startSize=48;horizontal=1;rounded=1;arcSize=8;collapsible=0;container=0;whiteSpace=wrap;html=1;fillColor=#FFF3DF;swimlaneFillColor=#FFFFFF;strokeColor=#B97824;separatorColor=#B97824;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=23;fontStyle=1;strokeWidth=2;spacingLeft=14;align=left;" parent="1" vertex="1">
+                    <mxGeometry x="45" y="770" width="1710" height="445" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_main" value="300  页面主线程" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#E8F3F7;strokeColor=#3E7B91;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=19;fontStyle=1;strokeWidth=2;dashed=0;align=center;verticalAlign=middle;spacing=9;" parent="1" vertex="1">
+                    <mxGeometry x="85" y="25" width="220" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_worker" value="330  可见性工作线程" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#F0ECF8;strokeColor=#7563A8;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=19;fontStyle=1;strokeWidth=2;dashed=0;align=center;verticalAlign=middle;spacing=9;" parent="1" vertex="1">
+                    <mxGeometry x="515" y="25" width="240" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_scheduler" value="340/350  资源状态调度与流水线" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#FFF3DF;strokeColor=#B97824;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=19;fontStyle=1;strokeWidth=2;dashed=0;align=center;verticalAlign=middle;spacing=9;" parent="1" vertex="1">
+                    <mxGeometry x="985" y="25" width="290" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_server" value="200  资源服务端" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#E8F6EF;strokeColor=#2E7D62;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=19;fontStyle=1;strokeWidth=2;dashed=0;align=center;verticalAlign=middle;spacing=9;" parent="1" vertex="1">
+                    <mxGeometry x="1495" y="25" width="220" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_main_top" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="195" y="85" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_main_bottom" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="195" y="1215" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_main_life" value="" style="edgeStyle=none;orthogonalLoop=1;jettySize=18;html=1;rounded=1;strokeColor=#506176;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=16;strokeWidth=1;dashed=1;endArrow=none;endFill=0;endSize=9;labelBackgroundColor=#FFFFFF;" parent="1" source="f4_main_top" target="f4_main_bottom" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_worker_top" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="635" y="85" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_worker_bottom" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="635" y="1215" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_worker_life" value="" style="edgeStyle=none;orthogonalLoop=1;jettySize=18;html=1;rounded=1;strokeColor=#506176;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=16;strokeWidth=1;dashed=1;endArrow=none;endFill=0;endSize=9;labelBackgroundColor=#FFFFFF;" parent="1" source="f4_worker_top" target="f4_worker_bottom" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_scheduler_top" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="1130" y="85" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_scheduler_bottom" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="1130" y="1215" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_scheduler_life" value="" style="edgeStyle=none;orthogonalLoop=1;jettySize=18;html=1;rounded=1;strokeColor=#506176;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=16;strokeWidth=1;dashed=1;endArrow=none;endFill=0;endSize=9;labelBackgroundColor=#FFFFFF;" parent="1" source="f4_scheduler_top" target="f4_scheduler_bottom" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_server_top" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="1605" y="85" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_server_bottom" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="1605" y="1215" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_server_life" value="" style="edgeStyle=none;orthogonalLoop=1;jettySize=18;html=1;rounded=1;strokeColor=#506176;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=16;strokeWidth=1;dashed=1;endArrow=none;endFill=0;endSize=9;labelBackgroundColor=#FFFFFF;" parent="1" source="f4_server_top" target="f4_server_bottom" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m1_source" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="195" y="165" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m1_target" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="1130" y="165" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m1" value="提交资源索引与首屏资源顺序" style="edgeStyle=none;orthogonalLoop=1;jettySize=18;html=1;rounded=1;strokeColor=#506176;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=16;strokeWidth=2;dashed=0;endArrow=blockThin;endFill=1;endSize=9;labelBackgroundColor=#FFFFFF;" parent="1" source="f4_m1_source" target="f4_m1_target" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m2_source" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="1130" y="220" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m2_target" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="1605" y="220" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m2" value="请求首屏主体模型资源" style="edgeStyle=none;orthogonalLoop=1;jettySize=18;html=1;rounded=1;strokeColor=#506176;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=16;strokeWidth=2;dashed=0;endArrow=blockThin;endFill=1;endSize=9;labelBackgroundColor=#FFFFFF;" parent="1" source="f4_m2_source" target="f4_m2_target" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m3_source" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="195" y="275" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m3_target" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="635" y="275" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m3" value="初始化并加载实例运行数据" style="edgeStyle=none;orthogonalLoop=1;jettySize=18;html=1;rounded=1;strokeColor=#506176;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=16;strokeWidth=2;dashed=0;endArrow=blockThin;endFill=1;endSize=9;labelBackgroundColor=#FFFFFF;" parent="1" source="f4_m3_source" target="f4_m3_target" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m4_source" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="635" y="330" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m4_target" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="1605" y="330" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m4" value="请求固定特征、包围体、映射与权重" style="edgeStyle=none;orthogonalLoop=1;jettySize=18;html=1;rounded=1;strokeColor=#506176;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=16;strokeWidth=2;dashed=0;endArrow=blockThin;endFill=1;endSize=9;labelBackgroundColor=#FFFFFF;" parent="1" source="f4_m4_source" target="f4_m4_target" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m5_source" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="1605" y="375" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m5_target" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="635" y="375" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m5" value="返回实例运行数据" style="edgeStyle=none;orthogonalLoop=1;jettySize=18;html=1;rounded=1;strokeColor=#506176;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=16;strokeWidth=2;dashed=1;endArrow=blockThin;endFill=1;endSize=9;labelBackgroundColor=#FFFFFF;" parent="1" source="f4_m5_source" target="f4_m5_target" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m6_source" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="1605" y="485" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m6_target" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="1130" y="485" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m6" value="首屏资源逐个返回" style="edgeStyle=none;orthogonalLoop=1;jettySize=18;html=1;rounded=1;strokeColor=#506176;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=16;strokeWidth=2;dashed=1;endArrow=blockThin;endFill=1;endSize=9;labelBackgroundColor=#FFFFFF;" parent="1" source="f4_m6_source" target="f4_m6_target" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m7_source" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="195" y="540" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m7_target" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="635" y="540" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m7" value="发送当前相机与视点区域" style="edgeStyle=none;orthogonalLoop=1;jettySize=18;html=1;rounded=1;strokeColor=#506176;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=16;strokeWidth=2;dashed=0;endArrow=blockThin;endFill=1;endSize=9;labelBackgroundColor=#FFFFFF;" parent="1" source="f4_m7_source" target="f4_m7_target" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_worker_compute" value="候选生成 → 可见性推理&#xa;→ 当前视锥过滤 → GLB 汇总" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#F0ECF8;strokeColor=#7563A8;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=17;fontStyle=1;strokeWidth=2;dashed=0;align=center;verticalAlign=middle;spacing=9;" parent="1" vertex="1">
+                    <mxGeometry x="500" y="575" width="270" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m8_source" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="635" y="690" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m8_target" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="195" y="690" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m8" value="返回实例编号、区域资源得分、当前显示资源及低阈值预取资源" style="edgeStyle=none;orthogonalLoop=1;jettySize=18;html=1;rounded=1;strokeColor=#506176;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=16;strokeWidth=2;dashed=1;endArrow=blockThin;endFill=1;endSize=9;labelBackgroundColor=#FFFFFF;" parent="1" source="f4_m8_source" target="f4_m8_target" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m9_source" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="195" y="730" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m9_target" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="1130" y="730" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m9" value="完成需求分级并更新统一状态表" style="edgeStyle=none;orthogonalLoop=1;jettySize=18;html=1;rounded=1;strokeColor=#506176;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=16;strokeWidth=2;dashed=0;endArrow=blockThin;endFill=1;endSize=9;labelBackgroundColor=#FFFFFF;" parent="1" source="f4_m9_source" target="f4_m9_target" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m10_source" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="1130" y="835" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m10_target" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="1605" y="835" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m10" value="按可执行时间、需求等级和得分请求资源" style="edgeStyle=none;orthogonalLoop=1;jettySize=18;html=1;rounded=1;strokeColor=#506176;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=16;strokeWidth=2;dashed=0;endArrow=blockThin;endFill=1;endSize=9;labelBackgroundColor=#FFFFFF;" parent="1" source="f4_m10_source" target="f4_m10_target" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m11_source" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="1605" y="890" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m11_target" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="1130" y="890" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m11" value="资源数据逐个返回" style="edgeStyle=none;orthogonalLoop=1;jettySize=18;html=1;rounded=1;strokeColor=#506176;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=16;strokeWidth=2;dashed=1;endArrow=blockThin;endFill=1;endSize=9;labelBackgroundColor=#FFFFFF;" parent="1" source="f4_m11_source" target="f4_m11_target" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_pipeline" value="排队 → 下载 → 解析 → 挂载 → 驻留&#xa;失败任务按等待时间有限重试" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#FFF3DF;strokeColor=#B97824;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=17;fontStyle=1;strokeWidth=2;dashed=0;align=center;verticalAlign=middle;spacing=9;" parent="1" vertex="1">
+                    <mxGeometry x="980" y="925" width="300" height="85" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m12_source" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="1130" y="1040" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m12_target" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="195" y="1040" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m12" value="通知驻留资源及实例映射" style="edgeStyle=none;orthogonalLoop=1;jettySize=18;html=1;rounded=1;strokeColor=#506176;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=16;strokeWidth=2;dashed=0;endArrow=blockThin;endFill=1;endSize=9;labelBackgroundColor=#FFFFFF;" parent="1" source="f4_m12_source" target="f4_m12_target" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m13_source" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="195" y="1095" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m13_target" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="635" y="1095" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m13" value="相机移动：提交新的当前显示视锥" style="edgeStyle=none;orthogonalLoop=1;jettySize=18;html=1;rounded=1;strokeColor=#506176;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=16;strokeWidth=2;dashed=0;endArrow=blockThin;endFill=1;endSize=9;labelBackgroundColor=#FFFFFF;" parent="1" source="f4_m13_source" target="f4_m13_target" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m14_source" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="635" y="1145" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m14_target" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="195" y="1145" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m14" value="复用区域结果并返回实例与资源差量" style="edgeStyle=none;orthogonalLoop=1;jettySize=18;html=1;rounded=1;strokeColor=#506176;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=16;strokeWidth=2;dashed=1;endArrow=blockThin;endFill=1;endSize=9;labelBackgroundColor=#FFFFFF;" parent="1" source="f4_m14_source" target="f4_m14_target" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m15_source" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="195" y="1190" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m15_target" value="" style="ellipse;html=1;fillColor=none;strokeColor=none;opacity=0;" parent="1" vertex="1">
+                    <mxGeometry x="1130" y="1190" width="2" height="2" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4_m15" value="提升新进入画面的资源，降级离开画面的区域资源" style="edgeStyle=none;orthogonalLoop=1;jettySize=18;html=1;rounded=1;strokeColor=#506176;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=16;strokeWidth=2;dashed=0;endArrow=blockThin;endFill=1;endSize=9;labelBackgroundColor=#FFFFFF;" parent="1" source="f4_m15_source" target="f4_m15_target" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="figure_4_number" value="图 4" style="text;html=1;strokeColor=none;fillColor=none;whiteSpace=wrap;fontColor=#243244;fontFamily=Noto Sans CJK SC;fontSize=24;fontStyle=1;align=center;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="820" y="1248" width="160" height="34" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>
