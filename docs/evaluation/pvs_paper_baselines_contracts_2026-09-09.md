@@ -2,7 +2,7 @@
 
 日期：2026-09-09
 
-状态：评价接口、sidecar、场景统计和 AABB+Ray MLP 正式入口已完成。AABB 长训暂缓，等待主线程统一安排 GPU；未将未完成成员当作实验结果。
+状态：评价接口、sidecar、场景统计和 AABB+Ray MLP 正式入口已完成。两场景快速扫描正在执行，随后按计划完成三种子 `40 x 900`；未将未完成成员当作实验结果。
 
 ## 目的
 
@@ -15,6 +15,8 @@
 - `evaluate_unified_pvs_metrics.py` 使用 aggregate weighted recall 及其 bootstrap 下界作为安全工作点门，支持 frozen threshold、同分 AP、零 GT pose 和 sidecar；test 不允许 threshold scan、抽样或候选截断。
 - `scene_statistics.py` 统计场景范围、原型/展开三角形、GLB 字节分布、实例到 GLB 复用率，以及四个 split 的 candidate、GT、visible weight 分布。
 - `train_aabb_ray_baseline.py` 与 `run_aabb_ray_baseline.py` 注册 18 维 AABB+ray/MVP MLP，采用 pose-balanced BCE、单侧 RVL recall guard 和共享困难尾部分离目标。扫描固定为两个 LR 的 `6 x 300`，确认训练固定为三种子 `40 x 900`，每个成员保存 stdout/stderr。
+
+2026-09-09 协议复核修正：统一阈值行直接提供 `TP/FP/FN/TN`，但旧汇总代码读取了不存在的 `agg_useful_cull/agg_bad_cull`，使 aggregate useful/bad cull 变成空值。现按 `TN/candidate` 与 `FN/candidate` 从混淆计数计算；安全池内先最大化 useful cull，再比较 balanced accuracy、specificity 和 precision，weighted-recall 下界仅在成员均已严格通过 `0.99` 门后作后续平局项。若没有安全成员，诊断选择仍优先选择 weighted-recall 下界最高者。扫描 checkpoint 不重训，只需用修正后的评价代码重新完成 calibration/validation 选择。
 - `generate_paper_tables.py` 只接收 `testRead=true` 且一次 test 读取的结果，生成 Table 1/2 CSV 和 Markdown。
 
 ## 运行与产物

@@ -18,6 +18,8 @@ from aabb_ray_baseline_config import (  # noqa: E402
     SCAN_STEPS_PER_EPOCH,
 )
 from run_aabb_ray_baseline import (  # noqa: E402
+    _aggregate_cull_rates,
+    _row_key,
     _selected_threshold,
     build_train_command,
     formal_test_allowed,
@@ -25,6 +27,41 @@ from run_aabb_ray_baseline import (  # noqa: E402
 
 
 class AabbRayFormalRunnerTests(unittest.TestCase):
+    def test_aggregate_cull_rates_are_derived_from_confusion_counts(self) -> None:
+        useful, bad = _aggregate_cull_rates({"tp": 5, "fp": 3, "fn": 2, "tn": 10})
+        self.assertAlmostEqual(useful, 0.5)
+        self.assertAlmostEqual(bad, 0.1)
+
+    def test_safe_pool_ranks_useful_cull_before_recall_lcb(self) -> None:
+        common = {
+            "aggregateWeightedRecall": 0.995,
+            "agg_balanced_accuracy": 0.9,
+            "agg_specificity": 0.9,
+            "agg_precision": 0.2,
+            "avg_pred_count": 100,
+        }
+        more_cull = {
+            **common,
+            "aggregateWeightedRecallLowerConfidenceBound": 0.991,
+            "tp": 10,
+            "fp": 10,
+            "fn": 0,
+            "tn": 80,
+        }
+        higher_lcb = {
+            **common,
+            "aggregateWeightedRecallLowerConfidenceBound": 0.999,
+            "tp": 10,
+            "fp": 30,
+            "fn": 0,
+            "tn": 60,
+        }
+        self.assertGreater(_row_key(more_cull), _row_key(higher_lcb))
+        self.assertGreater(
+            _row_key(higher_lcb, safe_first=False),
+            _row_key(more_cull, safe_first=False),
+        )
+
     def test_registered_scan_and_confirmation_matrix_is_fixed(self) -> None:
         self.assertEqual(SCAN_LEARNING_RATES, (2e-4, 1e-3))
         self.assertEqual((SCAN_EPOCHS, SCAN_STEPS_PER_EPOCH), (6, 300))

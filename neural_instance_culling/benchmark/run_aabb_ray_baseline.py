@@ -343,13 +343,39 @@ def _calibration_safe(row: Mapping[str, Any]) -> bool:
     )
 
 
+def _aggregate_cull_rates(row: Mapping[str, Any]) -> tuple[float | None, float | None]:
+    useful = row.get("agg_useful_cull")
+    bad = row.get("agg_bad_cull")
+    if useful is not None and bad is not None:
+        return float(useful), float(bad)
+    counts = [row.get(key) for key in ("tp", "fp", "fn", "tn")]
+    if any(value is None for value in counts):
+        return None, None
+    total = sum(float(value) for value in counts)
+    if total <= 0:
+        return 0.0, 0.0
+    return float(row["tn"]) / total, float(row["fn"]) / total
+
+
 def _row_key(row: Mapping[str, Any], *, safe_first: bool = True) -> tuple[float, ...]:
+    useful_cull, _ = _aggregate_cull_rates(row)
+    recall_lcb = float(row.get("aggregateWeightedRecallLowerConfidenceBound") or -1.0)
+    if not safe_first:
+        return (
+            recall_lcb,
+            float(useful_cull if useful_cull is not None else -1.0),
+            float(row.get("agg_balanced_accuracy", 0.0)),
+            float(row.get("agg_specificity", 0.0)),
+            float(row.get("agg_precision", 0.0)),
+            -float(row.get("avg_pred_count", 0.0)),
+        )
     return (
-        float(_calibration_safe(row)) if safe_first else 0.0,
-        float(row.get("aggregateWeightedRecallLowerConfidenceBound") or -1.0),
-        float(row.get("agg_useful_cull", 0.0)),
+        float(_calibration_safe(row)),
+        float(useful_cull if useful_cull is not None else -1.0),
         float(row.get("agg_balanced_accuracy", 0.0)),
+        float(row.get("agg_specificity", 0.0)),
         float(row.get("agg_precision", 0.0)),
+        recall_lcb,
         -float(row.get("avg_pred_count", 0.0)),
     )
 
@@ -388,6 +414,7 @@ def calibrate_checkpoint(data_root: Path, scene: str, checkpoint: Path, output: 
 
 
 def _metric_payload(raw: Mapping[str, Any], *, threshold: float) -> dict[str, Any]:
+    useful_cull, bad_cull = _aggregate_cull_rates(raw)
     aggregate = {
         "precision": raw.get("agg_precision"),
         "recall": raw.get("agg_recall"),
@@ -397,8 +424,8 @@ def _metric_payload(raw: Mapping[str, Any], *, threshold: float) -> dict[str, An
         "accuracy": raw.get("agg_accuracy"),
         "balancedAccuracy": raw.get("agg_balanced_accuracy"),
         "specificity": raw.get("agg_specificity"),
-        "usefulCull": raw.get("agg_useful_cull"),
-        "badCull": raw.get("agg_bad_cull"),
+        "usefulCull": useful_cull,
+        "badCull": bad_cull,
         "avgCandidateCount": raw.get("avg_candidate_count"),
         "avgGtCount": raw.get("avg_gt_count"),
         "avgPredCount": raw.get("avg_pred_count"),
