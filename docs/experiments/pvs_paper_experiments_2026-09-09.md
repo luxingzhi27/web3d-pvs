@@ -158,3 +158,22 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 执行顺序：第1天完成共享评价、校准、微调/基线扫描和外壳导出；第2-3天完成三种子确认、基线训练、HZB和streaming；第4天冻结并执行test与图像评价；第5-6天完成设备、HZB、streaming和GT收敛；第7天统一表图和论文数据包。
 
 验收覆盖同分AP、零GT统计、阈值边界、checkpoint和固定表一致性、HZB深度/近裁剪面、区域并集、GLB原子到达、覆盖不可达、像素直方图与重渲染一致性，以及硬件计时边界。禁止新增兼容层、前端历史模型路径或手工哈希步骤。
+
+## 执行进度（2026-09-09）
+
+| 项目 | 状态 | 已有产物 / 下一动作 |
+|---|---|---|
+| 场景统计 | 完成 | 两场景规模、三角形、GLB 字节、split、候选/GT 分布已进入 Table 1 |
+| HKUST Full test | 完成 | 三种子均通过安全门；WR `0.997082 +/- 0.001634`，LCB `0.994334 +/- 0.003271`，useful cull `0.901758 +/- 0.007830` |
+| IFCBench 微调 | 运行中 | 四个 `4 x 900` 扫描成员已安全完成，第五个高学习率成员运行中；随后自动精确校准和三种子 `8 x 900` 确认 |
+| AABB + Ray MLP | 运行中 | 两场景 `6 x 300` checkpoint 已开始生成；修正 aggregate useful/bad cull 回填及安全池排名后重新做 calibration/validation 选择，随后自动三种子 `40 x 900` 与 frozen test |
+| HZB 外壳与运行时 | 代码和资产完成 | lossless/equal-asset 四套资产、WebGPU HZB、Point60 同点 GT、Region `1/5/9/all` 标签无关抽样和评价器已完成；正式 calibration/test 等 GPU 独占窗口 |
+| 资产与容量 | 完成 | 神经资产为 lossless shell 的 `1.37%`（HKUST）和 `19.78%`（IFCBench）；rank Pareto、Table 4 及 PDF/SVG/PNG 已生成 |
+| 端侧模型前向 | 部分完成 | HKUST M2 与 vivo 各五 session 正式完成；IFCBench 移动端和 A6000 独占结果仍缺失，不以并发 smoke 代替 |
+| Safety-efficiency | 完成 | 六个核心变体的 calibration-safe validation 曲线及论文图已生成 |
+| Streaming | 部分完成 | 两场景 Full/启发式/oracle 的全 test 冷缓存结果已生成；AABB MLP 与 HZB visible-first 待正式结果后替换占位并重跑 |
+| Test 图像 | 部分完成 | HKUST Full 的 684 view-cell formal-v2 manifest 已冻结；HZB manifest 转换入口已完成；硬件渲染、IFCBench 最终成员和 AABB/HZB 图像结果待 GPU 独占窗口 |
+| GT 收敛 | 部分完成 | 两场景各 100 cell x 128 点计划已生成；正式 Vulkan Color-ID 采样和 128 点收敛汇总待执行 |
+| 离线成本 / 结果包 | 完成当前可得项 | 六阶段成本、artifact registry、三种子 Table 2 汇总已生成；未记录时间保持 unavailable，不作推算 |
+
+当前执行顺序不变：完成 IFCBench 确认和 AABB 长训；冻结两场景最终成员并各读取一次 test；在无训练并发的窗口依次完成 HZB、真实图像、GT 收敛和 A6000 计时；最后替换 streaming 基线、重建全部表图与结果包。任何中间指标都不取消已登记长训。
