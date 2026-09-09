@@ -787,6 +787,7 @@ def main(argv: list[str] | None = None) -> None:
             args.poses_per_batch, rng, args.steps_per_epoch
         )
         for step, poses in enumerate(batches):
+            step_started = time.perf_counter()
             batch = train_split.build_pose_set_batch(
                 poses, world_aabbs, rng,
                 max_candidates_per_pose=0,
@@ -909,12 +910,17 @@ def main(argv: list[str] | None = None) -> None:
                 elif isinstance(value, (int, float)):
                     epoch_values.setdefault(key, []).append(float(value))
             if step == 0 or (step + 1) % max(1, args.steps_per_epoch // 5) == 0:
+                elapsed = time.time() - started
+                steps_per_second = global_step / max(elapsed, 1e-8)
                 print(json.dumps({
                     "epoch": epoch + 1,
                     "step": step + 1,
                     "globalStep": global_step,
                     "loss": float(loss.detach().cpu()),
-                    "elapsedSeconds": time.time() - started,
+                    "stepSeconds": time.perf_counter() - step_started,
+                    "stepsPerSecond": steps_per_second,
+                    "etaSeconds": max(0.0, (total_steps - global_step) / max(steps_per_second, 1e-8)),
+                    "elapsedSeconds": elapsed,
                 }), flush=True)
         scheduler.step()
 
