@@ -13,7 +13,7 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -24,13 +24,23 @@ MODEL_DIR = ROOT / "model"
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
 
-from model_runners import load_runner, load_runtime_meta, selected_default_specs, select_device  # noqa: E402
+from model_runners import DEFAULT_MODEL_SPECS, load_runner, load_runtime_meta, selected_default_specs, select_device  # noqa: E402
 from pose_csr_dataset import PoseCSRDataset  # noqa: E402
 from common.threshold_selection import (
-    select_weighted_precision_workpoint,
+    aggregate_weighted_recall_safe_rows,
     weighted_precision_selection_rule,
-    weighted_recall_safe_rows,
 )  # noqa: E402
+
+from pvs_threshold_metrics import weighted_recall_lower_confidence_bound  # noqa: E402
+
+try:
+    from .score_sidecar import ScoreSidecarWriter, average_precision  # noqa: E402
+except ImportError:  # Direct script execution.
+    from score_sidecar import ScoreSidecarWriter, average_precision  # noqa: E402
+
+
+DEFAULT_DATA_ROOT = Path("/mnt/sda/rhyang/slm")
+DEFAULT_MODEL_NAMES = frozenset(DEFAULT_MODEL_SPECS)
 
 
 def threshold_grid() -> np.ndarray:
@@ -55,19 +65,134 @@ def load_frozen_thresholds(path: str | Path, model_names: list[str]) -> dict[str
     values = payload.get("thresholds", payload) if isinstance(payload, dict) else None
     if not isinstance(values, dict):
         raise ValueError(f"Frozen threshold file {path} must contain a model-to-threshold mapping.")
+    if isinstance(payload, dict) and payload.get("testRead") is True:
+        raise ValueError("frozen threshold registration must be created before test is read")
     result: dict[str, float] = {}
     for name in model_names:
         if name not in values:
             raise ValueError(f"Frozen threshold file {path} has no threshold for model {name!r}.")
-        threshold = float(values[name])
+        registered = values[name]
+        if isinstance(registered, dict):
+            if registered.get("selectionSplit") not in (None, "calibration"):
+                raise ValueError(f"Frozen threshold for {name!r} was not selected on calibration.")
+            threshold = float(registered.get("threshold", np.nan))
+        else:
+            threshold = float(registered)
         if not 0.0 <= threshold <= 1.0:
             raise ValueError(f"Frozen threshold for {name!r} must be in [0, 1], got {threshold}.")
         result[name] = threshold
     return result
 
 
+_FORMAL_TEST_FIXED_KINDS = frozenset(
+    {
+        "keep_all",
+        "static_frequency_train",
+        "camera_distance",
+        "projected_aabb_area",
+        "aabb_ray",
+        "viewcell_bitset_train",
+    }
+)
+_FORMAL_TEST_LEARNED_KINDS = frozenset(
+    {"learned_aabb_ray", "bounded_relation_survival_moment_v4"}
+)
+
+
+def validate_formal_test_specs(
+    specs: Mapping[str, Mapping[str, str]],
+    frozen_threshold_file: str | Path,
+    frozen_thresholds: Mapping[str, float],
+) -> None:
+    """Require each learned test runner to name its frozen calibration inputs."""
+    payload = json.loads(Path(frozen_threshold_file).read_text(encoding="utf-8"))
+    values = payload.get("thresholds", payload) if isinstance(payload, Mapping) else None
+    if not isinstance(values, Mapping):
+        raise ValueError("formal test threshold registration must contain thresholds")
+    for name, spec in specs.items():
+        kind = str(spec.get("kind", ""))
+        registered = values.get(name)
+        if registered is None:
+            raise ValueError(f"formal test threshold registration is missing model {name!r}")
+        if kind in _FORMAL_TEST_FIXED_KINDS:
+            if isinstance(registered, Mapping) and registered.get("testRead") is not False:
+                raise ValueError(f"formal test model {name!r} threshold registration is test-tainted")
+            continue
+        if kind not in _FORMAL_TEST_LEARNED_KINDS:
+            raise ValueError(f"formal test runner kind is not registered: {kind!r}")
+        checkpoint_value = spec.get("checkpoint")
+        calibration_value = spec.get("calibration") or spec.get("eval_summary")
+        if not checkpoint_value or not calibration_value:
+            raise ValueError(
+                f"formal test model {name!r} requires explicit checkpoint and calibration"
+            )
+        checkpoint_path = Path(checkpoint_value).resolve()
+        calibration_path = Path(calibration_value).resolve()
+        if not checkpoint_path.is_file() or not calibration_path.is_file():
+            raise FileNotFoundError(
+                f"formal test model {name!r} checkpoint/calibration is missing"
+            )
+        calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
+        if not isinstance(calibration, Mapping) or calibration.get("testRead") is not False:
+            raise ValueError(f"formal test model {name!r} calibration is not test-free")
+        test_evaluation_count = calibration.get("testEvaluationCount", 0)
+        if test_evaluation_count is None:
+            test_evaluation_count = 0
+        if int(test_evaluation_count) != 0:
+            raise ValueError(f"formal test model {name!r} calibration already read test")
+        if calibration.get("status") != "safe":
+            raise ValueError(f"formal test model {name!r} has no safe calibration workpoint")
+        best = calibration.get("bestSafe")
+        selection = best.get("selection", best) if isinstance(best, Mapping) else None
+        if not isinstance(selection, Mapping):
+            raise ValueError(f"formal test model {name!r} has no frozen calibration threshold")
+        selected_threshold = float(selection.get("threshold", np.nan))
+        if not np.isfinite(selected_threshold) or not 0.0 <= selected_threshold <= 1.0:
+            raise ValueError(f"formal test model {name!r} calibration threshold is invalid")
+        if not isinstance(registered, Mapping):
+            raise ValueError(
+                f"formal test model {name!r} must register threshold provenance from calibration"
+            )
+        if registered.get("selectionSplit") != "calibration":
+            raise ValueError(f"formal test model {name!r} threshold was not selected on calibration")
+        if registered.get("testRead") is not False:
+            raise ValueError(f"formal test model {name!r} threshold registration is test-tainted")
+        registered_threshold = float(registered.get("threshold", np.nan))
+        if not np.isclose(registered_threshold, selected_threshold, rtol=0.0, atol=1e-7):
+            raise ValueError(f"formal test model {name!r} threshold disagrees with calibration")
+        declared_checkpoint = registered.get("checkpoint")
+        declared_calibration = registered.get("calibration")
+        if declared_checkpoint is not None and Path(str(declared_checkpoint)).resolve() != checkpoint_path:
+            raise ValueError(f"formal test model {name!r} checkpoint provenance disagrees")
+        if declared_calibration is not None and Path(str(declared_calibration)).resolve() != calibration_path:
+            raise ValueError(f"formal test model {name!r} calibration provenance disagrees")
+        if name not in frozen_thresholds or not np.isclose(
+            float(frozen_thresholds[name]), selected_threshold, rtol=0.0, atol=1e-7
+        ):
+            raise ValueError(f"formal test model {name!r} has no matching frozen threshold")
+
+
 def safe_div(a: float, b: float, default: float = 0.0) -> float:
     return float(a / b) if b > 0 else float(default)
+
+
+def aggregate_weighted_recall_lcb(
+    weighted_tp: Sequence[float],
+    weighted_gt: Sequence[float],
+    replicates: int,
+    seed: int,
+) -> float | None:
+    """Return the pose-bootstrap lower bound without using test for selection."""
+    if int(replicates) <= 0:
+        return None
+    return float(
+        weighted_recall_lower_confidence_bound(
+            np.asarray(weighted_tp, dtype=np.float64),
+            np.asarray(weighted_gt, dtype=np.float64),
+            replicates=int(replicates),
+            seed=int(seed),
+        )
+    )
 
 
 def load_glb_byte_costs(
@@ -190,7 +315,11 @@ def select_workpoints(
 ) -> dict[str, Any]:
     if not rows:
         return {}
-    weighted_safe = weighted_recall_safe_rows(rows, target_weighted_recall)
+    weighted_safe = aggregate_weighted_recall_safe_rows(
+        rows,
+        target_weighted_recall,
+        minimum_lower_confidence_bound=target_weighted_recall,
+    )
     utility_safe = [
         r
         for r in weighted_safe
@@ -198,7 +327,15 @@ def select_workpoints(
     ]
     any_high_recall = [r for r in rows if r["pose_recall"] >= target_recall]
     return {
-        "primaryWeightedPrecision": select_weighted_precision_workpoint(rows, target_weighted_recall),
+        "primaryWeightedPrecision": max(
+            weighted_safe,
+            key=lambda row: (
+                float(row.get("pose_precision", 0.0)),
+                float(row.get("pose_f1", 0.0)),
+                float(row.get("aggregateWeightedRecall", 0.0)),
+                -float(row.get("avg_pred_count", 0.0)),
+            ),
+        ) if weighted_safe else None,
         "primarySetSafeUsefulCull": max(weighted_safe, key=lambda r: (r["pose_useful_cull_candidate_ratio"], -r["avg_pred_count"])) if weighted_safe else None,
         "primaryUtilitySafeUsefulCull": max(utility_safe, key=lambda r: (r["pose_useful_cull_candidate_ratio"], -r["avg_pred_glb_bytes"])) if utility_safe else None,
         "bestPrecisionAtRecall": max(any_high_recall, key=lambda r: r["pose_precision"]) if any_high_recall else None,
@@ -224,7 +361,12 @@ def evaluate_runner(
     target_utility_recall: float,
     sample_with_replacement: bool,
     allow_candidate_visible_union: bool = False,
+    bootstrap_replicates: int = 0,
+    sidecar_writer: ScoreSidecarWriter | None = None,
+    collect_score_stats: bool = False,
 ) -> dict[str, Any]:
+    if sidecar_writer is not None and sample_with_replacement:
+        raise ValueError("score sidecar requires one ordered pass without replacement")
     rng = np.random.default_rng(seed)
     if sample_with_replacement:
         steps = max(1, int(np.ceil(max(1, max_eval_poses) / max(1, poses_per_batch))))
@@ -254,6 +396,14 @@ def evaluate_runner(
     pose_bad_cull = np.zeros((n_th,), dtype=np.float64)
     pose_negative_fpr = np.zeros((n_th,), dtype=np.float64)
     pose_candidate_byte_reduction = np.zeros((n_th,), dtype=np.float64)
+    aggregate_weighted_tp = np.zeros((n_th,), dtype=np.float64)
+    aggregate_weighted_gt = 0.0
+    pose_weighted_tp_values: list[list[float]] = [[] for _ in range(n_th)]
+    pose_weighted_gt_values: list[list[float]] = [[] for _ in range(n_th)]
+    pose_ap_values: list[float] = []
+    pose_positive_rates: list[float] = []
+    score_values: list[np.ndarray] = []
+    score_targets: list[np.ndarray] = []
 
     budget_acc = {
         b: {"utilityRecall": 0.0, "requiredRecall": 0.0, "precision": 0.0, "selectedGlbCount": 0.0, "selectedBytes": 0.0, "byteReductionVsCandidate": 0.0}
@@ -268,12 +418,20 @@ def evaluate_runner(
     pose_count = 0
     empty_gt_pose_count = 0
     empty_candidate_pose_count = 0
+    zero_gt_pose_count = 0
     forward_ms: list[float] = []
     total_ms: list[float] = []
     diagnostics: dict[str, list[float]] = {}
 
+    if sidecar_writer is not None and not sample_with_replacement:
+        ordered_batches = (
+            split.pose_indices[start : min(split.pose_indices.size, start + max(1, poses_per_batch))]
+            for start in range(0, split.pose_indices.size, max(1, poses_per_batch))
+        )
+    else:
+        ordered_batches = split.pose_set_batches(poses_per_batch, rng, steps, include_empty=True)
     for pose_indices in tqdm(
-        split.pose_set_batches(poses_per_batch, rng, steps, include_empty=True),
+        ordered_batches,
         total=total_steps,
         desc=runner.name,
         ascii=True,
@@ -287,6 +445,7 @@ def evaluate_runner(
             include_empty=True,
         )
 
+        sidecar_batch_records: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
         # Empty candidate rows are valid only for empty-GT poses. Count them
         # explicitly instead of dropping them from a nominally complete split.
         batch_offsets = np.asarray(batch["pose_offsets"], dtype=np.int64)
@@ -301,6 +460,7 @@ def evaluate_runner(
                 )
             empty_gt_pose_count += 1
             empty_candidate_pose_count += 1
+            zero_gt_pose_count += 1
             pose_accuracy += 1.0
             pose_balanced_accuracy += 1.0
             pose_precision += 1.0
@@ -311,7 +471,21 @@ def evaluate_runner(
             pose_weighted_recall += 1.0
             pose_utility_recall += 1.0
             pose_count += 1
+            if sidecar_writer is not None:
+                sidecar_batch_records[int(pose_indices[row_index])] = (
+                    np.zeros((0,), dtype=np.uint32),
+                    np.zeros((0,), dtype=np.float32),
+                    np.zeros((0,), dtype=np.uint8),
+                    np.zeros((0,), dtype=np.float32),
+                    np.zeros((0,), dtype=np.uint32),
+                )
+            for threshold_index in range(n_th):
+                pose_weighted_tp_values[threshold_index].append(0.0)
+                pose_weighted_gt_values[threshold_index].append(0.0)
         if batch["instance"].size == 0:
+            if sidecar_writer is not None:
+                for pose_index in pose_indices.tolist():
+                    sidecar_writer.append_pose(int(pose_index), *sidecar_batch_records[int(pose_index)])
             continue
         result = runner.score_batch(batch)
         forward_ms.append(float(result.forward_ms))
@@ -358,7 +532,8 @@ def evaluate_runner(
             pred_counts = pred.sum(axis=0).astype(np.float64)
 
             weighted_tp = (np.logical_and(pred, truth_col) * weights[:, None]).sum(axis=0)
-            weighted_gt = max(1.0, float((truth * weights).sum()))
+            weighted_gt_scalar = float((truth * weights).sum())
+            weighted_gt = np.full((n_th,), weighted_gt_scalar, dtype=np.float64)
             hit_utility = (np.logical_and(pred, truth_col) * utility[:, None]).sum(axis=0)
 
             precision = np.divide(
@@ -399,6 +574,22 @@ def evaluate_runner(
             )
             util_recall = hit_utility / total_utility if total_utility > 0.0 else np.ones_like(hit_utility)
 
+            positive_count = int(truth.sum())
+            if positive_count > 0:
+                pose_ap = average_precision(scores, truth.astype(np.uint8, copy=False))
+                if pose_ap is None:
+                    raise ValueError("a pose with positive labels produced no AP")
+                pose_ap_values.append(float(pose_ap))
+                pose_positive_rates.append(float(positive_count / max(1, truth.size)))
+            else:
+                zero_gt_pose_count += 1
+            if collect_score_stats:
+                score_values.append(scores.astype(np.float32, copy=True))
+                score_targets.append(truth.astype(np.uint8, copy=True))
+            for threshold_index in range(n_th):
+                pose_weighted_tp_values[threshold_index].append(float(weighted_tp[threshold_index]))
+                pose_weighted_gt_values[threshold_index].append(weighted_gt_scalar)
+
             for th_i in range(n_th):
                 pred_mask = pred[:, th_i]
                 pred_glbs = np.unique(glbs[pred_mask])
@@ -407,10 +598,22 @@ def evaluate_runner(
                 pose_pred_bytes[th_i] += pred_bytes
                 pose_candidate_byte_reduction[th_i] += 1.0 - pred_bytes / candidate_bytes
 
+            if sidecar_writer is not None:
+                sidecar_batch_records[int(pose_indices[pose_i])] = (
+                    ids_all[start:end].astype(np.uint32, copy=False),
+                    scores.astype(np.float32, copy=False),
+                    truth.astype(np.uint8, copy=False),
+                    weights.astype(np.float32, copy=False),
+                    ids_all[start:end][pred[:, 0]].astype(np.uint32, copy=False)
+                    if n_th == 1 else np.zeros((0,), dtype=np.uint32),
+                )
+
             agg_tp += local_tp
             agg_fp += local_fp
             agg_fn += local_fn
             agg_tn += local_tn
+            aggregate_weighted_tp += weighted_tp
+            aggregate_weighted_gt += weighted_gt_scalar
             pose_precision += precision
             pose_recall += recall
             pose_specificity += specificity
@@ -437,12 +640,24 @@ def evaluate_runner(
             for key, value in prefix_row.items():
                 prefix_acc[key] += float(value)
             pose_count += 1
+        if sidecar_writer is not None:
+            for pose_index in pose_indices.tolist():
+                sidecar_writer.append_pose(int(pose_index), *sidecar_batch_records[int(pose_index)])
 
     rows: list[dict[str, Any]] = []
     avg_gt = gt_count_sum / max(1, pose_count)
     avg_candidate = candidate_count_sum / max(1, pose_count)
     avg_candidate_glb = candidate_glb_count_sum / max(1, pose_count)
     avg_candidate_bytes = candidate_bytes_sum / max(1, pose_count)
+    aggregate_ap = None
+    aggregate_positive_rate = 0.0
+    if collect_score_stats:
+        all_scores = np.concatenate(score_values) if score_values else np.zeros((0,), dtype=np.float32)
+        all_targets = np.concatenate(score_targets) if score_targets else np.zeros((0,), dtype=np.uint8)
+        aggregate_ap = average_precision(all_scores, all_targets)
+        aggregate_positive_rate = float(all_targets.mean()) if all_targets.size else 0.0
+    pose_ap = float(np.mean(pose_ap_values)) if pose_ap_values else None
+    pose_positive_rate = float(np.mean(pose_positive_rates)) if pose_positive_rates else None
     for i, threshold in enumerate(thresholds):
         agg_precision = safe_div(agg_tp[i], agg_tp[i] + agg_fp[i])
         agg_recall = safe_div(agg_tp[i], agg_tp[i] + agg_fn[i])
@@ -457,6 +672,16 @@ def evaluate_runner(
         bad_cull_ratio = pose_bad_cull[i] / max(1, pose_count)
         pose_rec = pose_recall[i] / max(1, pose_count)
         pose_weighted = pose_weighted_recall[i] / max(1, pose_count)
+        aggregate_weighted = (
+            float(aggregate_weighted_tp[i] / aggregate_weighted_gt)
+            if aggregate_weighted_gt > 1e-12 else 1.0
+        )
+        aggregate_lcb = aggregate_weighted_recall_lcb(
+            pose_weighted_tp_values[i],
+            pose_weighted_gt_values[i],
+            bootstrap_replicates,
+            seed + i,
+        )
         safety_multiplier = min(1.0, pose_rec / max(1e-8, target_recall)) * min(1.0, pose_weighted / max(1e-8, target_weighted_recall))
         rows.append(
             {
@@ -469,6 +694,22 @@ def evaluate_runner(
                 "pose_f1": float(pose_f1[i] / max(1, pose_count)),
                 "pose_jaccard": float(pose_jaccard[i] / max(1, pose_count)),
                 "pose_weighted_recall": float(pose_weighted),
+                "aggregate_weighted_recall": aggregate_weighted,
+                "aggregateWeightedRecall": aggregate_weighted,
+                "aggregate_weighted_recall_lower_confidence_bound": aggregate_lcb,
+                "aggregateWeightedRecallLowerConfidenceBound": aggregate_lcb,
+                "poseMacroAveragePrecision": pose_ap,
+                "aggregateAveragePrecision": aggregate_ap,
+                "poseMacroPositiveRate": pose_positive_rate,
+                "aggregatePositiveRate": aggregate_positive_rate,
+                "poseMacroApLift": (
+                    None if pose_ap is None or pose_positive_rate is None or pose_positive_rate <= 0.0
+                    else float(pose_ap / pose_positive_rate)
+                ),
+                "aggregateApLift": (
+                    None if aggregate_ap is None or aggregate_positive_rate <= 0.0
+                    else float(aggregate_ap / aggregate_positive_rate)
+                ),
                 "pose_visual_utility_recall": float(pose_utility_recall[i] / max(1, pose_count)),
                 "pose_miss_visual_utility_rate": float(1.0 - pose_utility_recall[i] / max(1, pose_count)),
                 "pose_negative_fpr": float(pose_negative_fpr[i] / max(1, pose_count)),
@@ -543,6 +784,17 @@ def evaluate_runner(
         "emptyGtPoseCount": int(empty_gt_pose_count),
         "emptyCandidatePoseCount": int(empty_candidate_pose_count),
         "runnerDiagnostics": {key: float(np.mean(values)) for key, values in diagnostics.items() if values},
+        "aggregateWeightedRecall": (
+            float(aggregate_weighted_tp[0] / aggregate_weighted_gt)
+            if n_th == 1 and aggregate_weighted_gt > 1e-12 else None
+        ),
+        "aggregateWeightedRecallLowerConfidenceBound": (
+            aggregate_weighted_recall_lcb(
+                pose_weighted_tp_values[0], pose_weighted_gt_values[0], bootstrap_replicates, seed
+            ) if n_th == 1 else None
+        ),
+        "zeroGtPoseCount": int(zero_gt_pose_count),
+        "testRead": False,
     }
 
 
@@ -566,7 +818,7 @@ def write_markdown(path: Path, payload: dict[str, Any]) -> None:
         f"- Candidate semantics: `{meta['candidateSemanticsMode']}`",
         f"- Evaluated poses: `{meta['evaluatedPoses']}`",
         f"- Max candidates per pose: `{meta['maxCandidatesPerPose']}`",
-        f"- Primary threshold rule: `weighted recall > {meta['targetWeightedRecall']}`; choose highest pose precision",
+        f"- Primary threshold rule: `aggregate weighted recall > {meta['targetWeightedRecall']}` and its LCB > target; choose highest pose precision",
         f"- Pose recall target is reported as a diagnostic: `pose recall >= {meta['targetRecall']}`",
         f"- Utility target: `weak utility recall >= {meta['targetUtilityRecall']}`",
         "",
@@ -657,10 +909,13 @@ def write_markdown(path: Path, payload: dict[str, Any]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate PVS accuracy, visual safety, useful culling, and GLB utility on a CSR split.")
     parser.add_argument("--models", default="baseline_keep_all,baseline_aabb_ray")
-    parser.add_argument("--dataset-dir", default=str(ROOT / "dataset/out/pose_csr_hkust_v3_viewcell_colorid_fov66"))
-    parser.add_argument("--runtime-meta", default="hkust-v3/assets/runtimeVisibilityMeta.json")
-    parser.add_argument("--glb-index", default="hkust-v3/assets/glbIndex.json")
-    parser.add_argument("--glb-root", default="hkust-v3/assets")
+    parser.add_argument(
+        "--dataset-dir",
+        default=str(DEFAULT_DATA_ROOT / "neural_instance_culling/dataset/out/pose_csr_hkust_v3_main_stratified_calibration_fov66_v1"),
+    )
+    parser.add_argument("--runtime-meta", default=str(DEFAULT_DATA_ROOT / "hkust-v3/assets/runtimeVisibilityMeta.json"))
+    parser.add_argument("--glb-index", default=str(DEFAULT_DATA_ROOT / "hkust-v3/assets/glbIndex.json"))
+    parser.add_argument("--glb-root", default=str(DEFAULT_DATA_ROOT / "hkust-v3/assets"))
     parser.add_argument("--output-dir", default=str(ROOT / "benchmark/out/unified_pvs_metrics"))
     parser.add_argument("--split", choices=["train", "val", "validation", "calibration", "test"], default="test")
     parser.add_argument("--target-recall", type=float, default=0.95)
@@ -679,7 +934,7 @@ def main() -> None:
     parser.add_argument(
         "--exploratory-test-threshold-scan",
         action="store_true",
-        help="Explicitly allow the historical test threshold scan. Its output is exploratory and must not be used as a formal test result.",
+        help="Retained as a rejected historical option; test-time threshold scanning is disabled.",
     )
     parser.add_argument(
         "--allow-candidate-visible-union",
@@ -688,6 +943,11 @@ def main() -> None:
     )
     parser.add_argument("--seed", type=int, default=20260603)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument("--bootstrap-replicates", type=int, default=0)
+    parser.add_argument("--sidecar-dir", type=Path, default=None)
+    parser.add_argument("--model-spec-file", type=Path, default=None)
+    parser.add_argument("--scene-name", default="")
+    parser.add_argument("--collect-score-stats", action="store_true")
     parser.add_argument(
         "--allow-missing-glb-cost",
         action="store_true",
@@ -696,23 +956,47 @@ def main() -> None:
     args = parser.parse_args()
     if args.sample_with_replacement and int(args.max_eval_poses) <= 0:
         parser.error("--sample-with-replacement requires --max-eval-poses > 0")
-    if args.split == "test" and not args.exploratory_test_threshold_scan:
+    if args.split == "test":
+        if args.exploratory_test_threshold_scan:
+            parser.error("test-time threshold scanning is disabled; use an explicit frozen threshold file")
         if not args.frozen_threshold_file:
             parser.error(
-                "Formal test evaluation requires --frozen-threshold-file. "
-                "Use --exploratory-test-threshold-scan only for explicitly labelled exploratory results."
+                "Formal test evaluation requires --frozen-threshold-file."
             )
         if args.sample_with_replacement or int(args.max_eval_poses) > 0:
             parser.error("Formal test evaluation must traverse all unique test poses without replacement.")
-    if args.allow_candidate_visible_union and args.split == "test" and not args.exploratory_test_threshold_scan:
+        if int(args.max_candidates_per_pose) > 0:
+            parser.error("Formal test evaluation must use the stored full candidate set.")
+    if args.allow_candidate_visible_union and args.split == "test":
         parser.error("--allow-candidate-visible-union cannot be used in a formal test evaluation.")
 
     device = select_device(args.device)
-    specs = selected_default_specs(args.models)
+    spec_file_values: Mapping[str, Any] = {}
+    if args.model_spec_file is not None:
+        spec_payload = json.loads(args.model_spec_file.read_text(encoding="utf-8"))
+        values = spec_payload.get("models", spec_payload) if isinstance(spec_payload, dict) else None
+        if not isinstance(values, Mapping):
+            parser.error("--model-spec-file must contain a model-to-spec mapping")
+        spec_file_values = values
+    requested_models = [name.strip() for name in str(args.models).split(",") if name.strip()]
+    defaults = selected_default_specs(",".join(name for name in requested_models if name in DEFAULT_MODEL_NAMES))
+    specs: dict[str, dict[str, str]] = {}
+    for name in requested_models:
+        if name in defaults:
+            specs[name] = dict(defaults[name])
+        elif name in spec_file_values and isinstance(spec_file_values[name], Mapping):
+            specs[name] = {str(key): str(value) for key, value in spec_file_values[name].items()}
+        else:
+            raise KeyError(f"Unknown model '{name}'. Supply it in --model-spec-file or use a registered default.")
+        if name in spec_file_values and isinstance(spec_file_values[name], Mapping):
+            specs[name].update({str(key): str(value) for key, value in spec_file_values[name].items()})
     first = next(iter(specs.values()))
     if first.get("checkpoint"):
         checkpoint = torch.load(first["checkpoint"], map_location="cpu")
-        num_instances = int(checkpoint["config"]["numInstances"])
+        checkpoint_config = checkpoint.get("config") or checkpoint.get("modelConfig")
+        if not isinstance(checkpoint_config, Mapping):
+            parser.error("checkpoint spec has no config or modelConfig")
+        num_instances = int(checkpoint_config["numInstances"])
     else:
         world_aabbs, _instance_to_glb, _runtime = load_runtime_meta(args.runtime_meta)
         num_instances = int(world_aabbs.shape[0])
@@ -728,8 +1012,14 @@ def main() -> None:
         if args.frozen_threshold_file
         else {}
     )
+    if args.split == "test":
+        validate_formal_test_specs(
+            specs, args.frozen_threshold_file, frozen_thresholds
+        )
     scan_thresholds = threshold_grid() if not frozen_thresholds else None
 
+    output_dir = Path(args.output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
     summaries = []
     for name, spec in specs.items():
         runner = load_runner(name, spec, args.runtime_meta, device, dataset_dir=args.dataset_dir)
@@ -748,27 +1038,48 @@ def main() -> None:
             if str(getattr(runner, "decision_mode", "threshold")).startswith("fixed_")
             else scan_thresholds
         )
-        summaries.append(
-            evaluate_runner(
-                runner,
-                split,
-                thresholds,
-                budgets,
-                glb_byte_cost,
-                poses_per_batch=args.poses_per_batch,
-                max_eval_poses=args.max_eval_poses,
-                max_candidates_per_pose=args.max_candidates_per_pose,
-                seed=args.seed,
-                target_recall=args.target_recall,
-                target_weighted_recall=args.target_weighted_recall,
-                target_utility_recall=args.target_utility_recall,
-                sample_with_replacement=args.sample_with_replacement,
-                allow_candidate_visible_union=args.allow_candidate_visible_union,
+        sidecar_writer = None
+        if args.split == "test" or args.sidecar_dir is not None:
+            sidecar_root = (
+                Path(args.sidecar_dir).resolve() / name
+                if args.sidecar_dir is not None
+                else output_dir / "score_sidecars" / name
             )
+            sidecar_writer = ScoreSidecarWriter(
+                sidecar_root,
+                split=requested_split,
+                threshold=float(thresholds[0]) if thresholds.size == 1 else None,
+                checkpoint=spec.get("checkpoint"),
+                calibration=spec.get("calibration") or spec.get("eval_summary"),
+            )
+        summary = evaluate_runner(
+            runner,
+            split,
+            thresholds,
+            budgets,
+            glb_byte_cost,
+            poses_per_batch=args.poses_per_batch,
+            max_eval_poses=args.max_eval_poses,
+            max_candidates_per_pose=args.max_candidates_per_pose,
+            seed=args.seed,
+            target_recall=args.target_recall,
+            target_weighted_recall=args.target_weighted_recall,
+            target_utility_recall=args.target_utility_recall,
+            sample_with_replacement=args.sample_with_replacement,
+            allow_candidate_visible_union=args.allow_candidate_visible_union,
+            bootstrap_replicates=(
+                int(args.bootstrap_replicates)
+                if int(args.bootstrap_replicates) > 0
+                else 10000 if args.split == "test" else 0
+            ),
+            sidecar_writer=sidecar_writer,
+            collect_score_stats=args.split == "test" or args.collect_score_stats,
         )
+        if sidecar_writer is not None:
+            summary["scoreSidecar"] = str(sidecar_writer.close())
+        summary["testRead"] = args.split == "test"
+        summaries.append(summary)
 
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
     first_summary = summaries[0] if summaries else {}
     first_row = first_summary.get("best") or ((first_summary.get("thresholdRows") or [None])[0] or {})
     evaluated = int(first_row.get("eval_pose_count", 0))
@@ -780,9 +1091,10 @@ def main() -> None:
             "split": requested_split,
             "requestedSplit": args.split,
             "evalMode": "sampled_with_replacement" if args.sample_with_replacement else "all_unique_visible_poses",
-            "thresholdMode": "exploratory_test_scan" if args.exploratory_test_threshold_scan else ("frozen_one_shot" if frozen_thresholds else "split_threshold_scan"),
+            "thresholdMode": "frozen_one_shot" if frozen_thresholds else "split_threshold_scan",
             "frozenThresholdFile": args.frozen_threshold_file or None,
-            "testEvaluationCount": 1 if args.split == "test" and not args.exploratory_test_threshold_scan else None,
+            "testEvaluationCount": 1 if args.split == "test" else 0,
+            "testRead": args.split == "test",
             "candidateSemanticsMode": "exploratory_visible_union" if args.allow_candidate_visible_union else "stored_candidate_set_strict",
             "glbByteCostMode": "imputed_exploratory" if args.allow_missing_glb_cost else "strict_filesystem_bytes",
             "evaluatedPoses": evaluated,
@@ -797,8 +1109,13 @@ def main() -> None:
             "primaryMetric": "maximize pose precision only where weighted recall is strictly above the safety target",
         },
         "summaries": summaries,
+        "testRead": args.split == "test",
+        "scene": str(args.scene_name) or None,
     }
-    (output_dir / "summary.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output_dir / "summary.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
     write_markdown(output_dir / "summary.md", payload)
     print(json.dumps({"outputDir": str(output_dir), "evaluatedPoses": evaluated, "models": [s["name"] for s in summaries]}, ensure_ascii=False, indent=2))
 

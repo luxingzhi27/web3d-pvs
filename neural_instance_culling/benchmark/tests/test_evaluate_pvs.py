@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import math
 from pathlib import Path
 import sys
@@ -20,19 +21,93 @@ class PvsV4EvaluatorTests(unittest.TestCase):
     def test_replay_splits_allow_train_diagnostics_but_never_test(self) -> None:
         self.assertEqual(
             evaluator.REPLAY_SPLITS,
-            ("train", "calibration", "validation"),
+            ("train", "calibration", "validation", "test"),
         )
-        self.assertNotIn("test", evaluator.REPLAY_SPLITS)
+        self.assertIn("test", evaluator.REPLAY_SPLITS)
+
+    def test_formal_test_requires_explicit_calibration_and_rejects_selection_flags(self) -> None:
+        base = argparse.Namespace(
+            split="test",
+            calibration=None,
+            allow_unsafe_diagnostic=False,
+            diagnostic_recalibrate=False,
+        )
+        with self.assertRaisesRegex(ValueError, "explicit --calibration"):
+            evaluator.validate_evaluation_mode(base)
+
+        base.calibration = Path("calibration_ready_summary.json")
+        base.allow_unsafe_diagnostic = True
+        with self.assertRaisesRegex(ValueError, "unsafe"):
+            evaluator.validate_evaluation_mode(base)
+
+        base.allow_unsafe_diagnostic = False
+        base.diagnostic_recalibrate = True
+        with self.assertRaisesRegex(ValueError, "recalibration"):
+            evaluator.validate_evaluation_mode(base)
+
+    def test_validation_mode_remains_test_free(self) -> None:
+        args = argparse.Namespace(
+            split="validation",
+            calibration=None,
+            allow_unsafe_diagnostic=False,
+            diagnostic_recalibrate=False,
+        )
+        self.assertFalse(evaluator.validate_evaluation_mode(args))
 
     def test_legacy_fingerprint_filter_preserves_shape_fields(self) -> None:
         value = evaluator._strip_fingerprint_fields(
-            {"shape": [18831, 96], "dtype": "float16", "geometrySha256": "legacy"}
+            {
+                "shape": [18831, 96],
+                "dtype": "float16",
+                "geometrySha256": "legacy",
+                "artifactFiles": {"weights.bin": "legacy"},
+            }
         )
         self.assertEqual(value, {"shape": [18831, 96], "dtype": "float16"})
 
     def test_json_safe_metadata_represents_open_sampler_bounds_as_null(self) -> None:
         value = evaluator._json_safe_metadata({"depthEdges": [-math.inf, 0.5, math.inf]})
         self.assertEqual(value, {"depthEdges": [None, 0.5, None]})
+        self.assertIs(evaluator._json_safe_metadata({"testRead": False})["testRead"], False)
+
+    def test_model_meta_provenance_is_strict_after_json_scalar_normalization(self) -> None:
+        config = {
+            "runtimeSchema": "runtime-v4",
+            "runtimeFeatureDim": 124,
+            "frequency": {"count": 16, "maxNormCycles": 8.0},
+        }
+        checkpoint_protocol = {
+            "schema": "training-v4",
+            "experiment": "registered-experiment-name",
+            "lossVariant": "pose_balanced_rvl_contrastive",
+            "splitPoseCounts": {"train": 2, "calibration": 1, "validation": 1},
+            "testRead": False,
+            "legacySha256": "ignored",
+        }
+        model_meta = {
+            "modelConfig": {
+                "runtimeSchema": "runtime-v4",
+                "runtimeFeatureDim": 124.0,
+                "frequency": {"count": 16.0, "maxNormCycles": 8},
+            },
+            "protocol": {
+                "schema": "training-v4",
+                "experiment": "/output/run-directory",
+                "lossVariant": "pose_balanced_rvl_contrastive",
+                "splitPoseCounts": {"train": 2.0, "calibration": 1.0, "validation": 1.0},
+                "testRead": False,
+            },
+        }
+        evaluator._validate_model_meta_provenance(
+            model_meta, config, checkpoint_protocol
+        )
+
+        changed = copy.deepcopy(model_meta)
+        changed["modelConfig"]["runtimeFeatureDim"] = 130
+        with self.assertRaisesRegex(ValueError, "modelConfig"):
+            evaluator._validate_model_meta_provenance(
+                changed, config, checkpoint_protocol
+            )
 
     def test_frequency_contract_requires_explicit_registered_upper_bound(self) -> None:
         self.assertEqual(
@@ -70,6 +145,33 @@ class PvsV4EvaluatorTests(unittest.TestCase):
         self.assertEqual(source["protocol"], "checkpoint_own_calibration_only")
         self.assertFalse(source["selectedFromTest"])
         self.assertEqual(source["testEvaluationCount"], 0)
+
+    def test_frozen_threshold_source_drops_pose_arrays(self) -> None:
+        selection = {
+            "threshold": 0.125,
+            "aggregateWeightedRecall": 0.996,
+            "aggregateWeightedRecallLowerConfidenceBound": 0.995,
+            "_pose_weighted_recall_values": [0.99] * 100,
+        }
+        summary = {
+            "schema": evaluator.CALIBRATION_SCHEMA,
+            "status": "safe",
+            "bestSafe": {"selection": selection},
+            "calibration": {"thresholdRows": [{"threshold": 0.125}]},
+            "testRead": False,
+        }
+        checkpoint = {"best": {"selection": selection}}
+        _threshold, source = evaluator._frozen_threshold(
+            checkpoint, summary, allow_unsafe=False
+        )
+        self.assertEqual(
+            source["selection"],
+            {
+                "threshold": 0.125,
+                "aggregateWeightedRecall": 0.996,
+                "aggregateWeightedRecallLowerConfidenceBound": 0.995,
+            },
+        )
 
     def test_validation_replay_does_not_promote_diagnostic_to_safe(self) -> None:
         selection = {"threshold": 0.2}

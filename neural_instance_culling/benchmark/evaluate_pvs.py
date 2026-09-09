@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Replay one calibrated relation-prior checkpoint on train/calibration/validation.
+"""Replay one calibrated relation-prior checkpoint on declared replay splits.
 
 This entry point owns the v4 replay contract.  It reads the checkpoint's
 calibration-frozen threshold, queries the fixed geometry and survival table,
 and writes per-pose instance/resource metrics.  Train replay is diagnostic-only:
 it consumes the checkpoint-owned threshold and cannot replace it.  This entry
-point never reads the test split and does not import a legacy evaluator.
+Train/calibration/validation replay remains test-free.  A formal test replay is
+available only with an explicit checkpoint-owned calibration threshold and does
+not import a legacy evaluator.
 """
 from __future__ import annotations
 
@@ -39,9 +41,14 @@ from pvs_model import (  # noqa: E402
 from pvs_threshold_metrics import evaluate_thresholds, threshold_grid  # noqa: E402
 from pose_csr_dataset import PoseCSRDataset  # noqa: E402
 
+try:
+    from .score_sidecar import average_precision, ScoreSidecarWriter  # noqa: E402
+except ImportError:  # Direct script execution.
+    from score_sidecar import average_precision, ScoreSidecarWriter  # noqa: E402
+
 
 CHECKPOINT_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-checkpoint-v4"
-REPLAY_SPLITS = ("train", "calibration", "validation")
+REPLAY_SPLITS = ("train", "calibration", "validation", "test")
 TRAINING_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-training-v4"
 CALIBRATION_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-calibration-summary-v4"
 EVALUATION_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-v4-evaluation-v1"
@@ -79,6 +86,22 @@ CORE_METRICS = (
     "downloadUtilityRecall",
     "glbBytesAtAchievedVisualUtility",
 )
+
+
+def validate_evaluation_mode(args: argparse.Namespace) -> bool:
+    """Validate split ownership before any checkpoint or dataset is opened."""
+    split = str(getattr(args, "split", "validation")).lower()
+    if split not in REPLAY_SPLITS:
+        raise ValueError(f"unsupported evaluation split: {split}")
+    if split != "test":
+        return False
+    if getattr(args, "calibration", None) is None:
+        raise ValueError("formal test evaluation requires explicit --calibration")
+    if bool(getattr(args, "allow_unsafe_diagnostic", False)):
+        raise ValueError("formal test evaluation cannot use an unsafe diagnostic workpoint")
+    if bool(getattr(args, "diagnostic_recalibrate", False)):
+        raise ValueError("formal test evaluation cannot use calibration recalibration")
+    return True
 
 
 def _max_frequency_norm_cycles_from_config(config: Mapping[str, Any]) -> float:
@@ -128,7 +151,21 @@ def _json_safe_metadata(value: Any) -> Any:
         return [_json_safe_metadata(item) for item in value]
     if isinstance(value, (float, np.floating)):
         return float(value) if np.isfinite(value) else None
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, np.integer)):
+        return int(value)
     return value
+
+
+def _compact_threshold_selection(selection: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep only scalar calibration metrics in replay JSON metadata."""
+    return {
+        str(key): _json_safe_metadata(value)
+        for key, value in selection.items()
+        if not str(key).startswith("_")
+        and not isinstance(value, (Mapping, list, tuple))
+    }
 
 
 def _load_geometry(path: Path, num_instances: int) -> np.ndarray:
@@ -165,6 +202,7 @@ def _strip_fingerprint_fields(value: Any) -> Any:
         normalized = str(key).lower()
         return (
             normalized in {"sha", "sha1", "sha256", "digest", "hash", "checksum"}
+            or normalized in {"artifactfiles", "filedigests", "filefingerprints"}
             or normalized.endswith("sha1")
             or normalized.endswith("sha256")
             or normalized.endswith("digest")
@@ -184,6 +222,71 @@ def _strip_fingerprint_fields(value: Any) -> Any:
     if isinstance(value, tuple):
         return [_strip_fingerprint_fields(item) for item in value]
     return value
+
+
+def _canonical_provenance(value: Any, path: tuple[str, ...] = ()) -> Any:
+    """Canonicalize JSON scalar representation for strict provenance checks.
+
+    Checkpoint metadata is written by torch while ``model_meta.json`` is
+    written as JSON, so integral floats can change Python's scalar type.  The
+    values still have to agree exactly after that representation normalization.
+    ``protocol.experiment`` is an output/run label in historical model-meta
+    files and is intentionally excluded from the model contract; every other
+    field remains part of the comparison.
+    """
+    if isinstance(value, Mapping):
+        result = {
+            str(key): _canonical_provenance(item, path + (str(key),))
+            for key, item in value.items()
+            if not (path == ("protocol",) and str(key) == "experiment")
+        }
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_canonical_provenance(item, path + (str(index),)) for index, item in enumerate(value)]
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        number = float(value)
+        if not np.isfinite(number):
+            raise ValueError(f"non-finite provenance value at {'.'.join(path)}")
+        return int(number) if number.is_integer() else number
+    return value
+
+
+def _validate_model_meta_provenance(
+    model_meta: Mapping[str, Any],
+    checkpoint_config: Mapping[str, Any],
+    checkpoint_protocol: Mapping[str, Any],
+) -> None:
+    """Require model metadata to match the frozen checkpoint contract.
+
+    This is deliberately a full structural comparison after removing only
+    legacy fingerprint fields and the non-semantic experiment run label.  It
+    therefore catches changed architecture, dimensions, objective, split
+    semantics, data paths, and test provenance without computing hashes.
+    """
+    meta_config = model_meta.get("modelConfig")
+    meta_protocol = model_meta.get("protocol")
+    if not isinstance(meta_config, Mapping) or not isinstance(meta_protocol, Mapping):
+        raise ValueError("v4 model_meta must contain modelConfig and protocol mappings")
+    canonical_meta_config = _canonical_provenance(
+        _strip_fingerprint_fields(meta_config), ("modelConfig",)
+    )
+    canonical_checkpoint_config = _canonical_provenance(
+        _strip_fingerprint_fields(checkpoint_config), ("modelConfig",)
+    )
+    if canonical_meta_config != canonical_checkpoint_config:
+        raise ValueError("v4 model_meta modelConfig does not match checkpoint contract")
+    canonical_meta_protocol = _canonical_provenance(
+        _strip_fingerprint_fields(meta_protocol), ("protocol",)
+    )
+    canonical_checkpoint_protocol = _canonical_provenance(
+        _strip_fingerprint_fields(checkpoint_protocol), ("protocol",)
+    )
+    if canonical_meta_protocol != canonical_checkpoint_protocol:
+        raise ValueError("v4 model_meta protocol does not match checkpoint contract")
 
 
 def _frozen_threshold(
@@ -246,7 +349,7 @@ def _frozen_threshold(
         "selectedFromTest": False,
         "testEvaluationCount": 0,
         "safeWorkpoint": safe,
-        "selection": dict(selection),
+        "selection": _compact_threshold_selection(selection),
     }
 
 
@@ -455,6 +558,55 @@ def _summarize_pose_rows(rows: list[dict[str, Any]], lcb_replicates: int = 0, se
     }
 
 
+def _raw_score_summary(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
+    """Compute tie-aware aggregate and pose-macro AP from one raw score pass."""
+    all_scores: list[np.ndarray] = []
+    all_targets: list[np.ndarray] = []
+    pose_aps: list[float] = []
+    pose_positive_rates: list[float] = []
+    zero_gt_pose_count = 0
+    for row in rows:
+        scores = np.asarray(row.get("candidateScores", []), dtype=np.float32).reshape(-1)
+        targets = np.asarray(row.get("targets", []), dtype=np.uint8).reshape(-1)
+        if scores.size != targets.size:
+            raise ValueError("raw score and target rows are misaligned")
+        if not np.isfinite(scores).all() or np.any(targets > 1):
+            raise ValueError("raw score sidecar inputs are invalid")
+        all_scores.append(scores)
+        all_targets.append(targets)
+        positive_count = int(targets.sum())
+        if positive_count == 0:
+            zero_gt_pose_count += 1
+            continue
+        pose_ap = average_precision(scores, targets)
+        if pose_ap is None:
+            raise ValueError("a pose with positive labels produced no AP")
+        pose_aps.append(float(pose_ap))
+        pose_positive_rates.append(float(positive_count / max(1, targets.size)))
+    scores = np.concatenate(all_scores) if all_scores else np.zeros((0,), dtype=np.float32)
+    targets = np.concatenate(all_targets) if all_targets else np.zeros((0,), dtype=np.uint8)
+    aggregate_ap = average_precision(scores, targets)
+    aggregate_positive_rate = float(targets.mean()) if targets.size else 0.0
+    pose_ap_value = float(np.mean(pose_aps)) if pose_aps else None
+    pose_positive_rate = float(np.mean(pose_positive_rates)) if pose_positive_rates else None
+    return {
+        "aggregateAveragePrecision": aggregate_ap,
+        "poseMacroAveragePrecision": pose_ap_value,
+        "aggregatePositiveRate": aggregate_positive_rate,
+        "poseMacroPositiveRate": pose_positive_rate,
+        "aggregateApLift": (
+            None if aggregate_ap is None or aggregate_positive_rate <= 0.0
+            else float(aggregate_ap / aggregate_positive_rate)
+        ),
+        "poseMacroApLift": (
+            None if pose_ap_value is None or pose_positive_rate is None or pose_positive_rate <= 0.0
+            else float(pose_ap_value / pose_positive_rate)
+        ),
+        "poseMacroApPoseCount": len(pose_aps),
+        "zeroGtPoseCount": zero_gt_pose_count,
+    }
+
+
 def _diagnostic_workpoint(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not rows:
         return None
@@ -570,6 +722,7 @@ def _diagnostic_recalibration(
 
 @torch.no_grad()
 def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any], checkpoint_path: Path) -> dict[str, Any]:
+    is_test = validate_evaluation_mode(args)
     if checkpoint.get("schema") != CHECKPOINT_SCHEMA:
         raise ValueError("v4 evaluator received a non-v4 checkpoint")
     if checkpoint.get("runtimeSchema") != MODEL_SCHEMA or checkpoint.get("testRead") is not False:
@@ -746,15 +899,15 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
             glb_bytes,
             device,
         )
-    split_name = str(args.split)
-    if split_name.lower() == "test":
-        raise ValueError("test is not allowed in the v4 evaluator")
+    split_name = str(args.split).lower()
     if split_name not in dataset.split_ids:
         raise ValueError(f"dataset has no explicit split {split_name!r}")
     split = dataset.split(split_name)
     if int(split.pose_indices.size) <= 0:
         raise ValueError("v4 replay split is empty")
 
+    if is_test and args.calibration is None:
+        raise ValueError("formal test evaluation requires explicit --calibration")
     calibration_path = Path(args.calibration).resolve() if args.calibration else checkpoint_path.parent / "calibration_ready_summary.json"
     expected_calibration = (checkpoint_path.parent / "calibration_ready_summary.json").resolve()
     if calibration_path != expected_calibration:
@@ -771,8 +924,7 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
     model_meta = json.loads(model_meta_path.read_text(encoding="utf-8"))
     if model_meta.get("schema") != MODEL_SCHEMA or model_meta.get("testRead") is not False:
         raise ValueError("v4 model_meta schema or test provenance is invalid")
-    if model_meta.get("modelConfig") != dict(config) or model_meta.get("protocol") != dict(protocol):
-        raise ValueError("v4 model_meta does not match checkpoint")
+    _validate_model_meta_provenance(model_meta, config, protocol)
 
     relation = checkpoint.get("relation")
     if not isinstance(relation, Mapping):
@@ -788,6 +940,12 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         if int(relation_meta.get("numInstances", -1)) != num_instances:
             raise ValueError("v4 replay relation instance count disagrees with checkpoint")
 
+    sidecar_requested = bool(
+        is_test
+        or getattr(args, "sidecar_dir", None) is not None
+        or bool(getattr(args, "persist_ids", False))
+        or bool(getattr(args, "persist_scores", False))
+    )
     started = time.perf_counter()
     rows = evaluate_thresholds(
         model,
@@ -805,7 +963,7 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         bootstrap_replicates=0,
         collect_score_stats=True,
         collect_per_pose=True,
-        collect_raw_scores=bool(getattr(args, "persist_scores", False)),
+        collect_raw_scores=sidecar_requested,
     )
     if len(rows) != 1 or not isinstance(rows[0].get("_per_pose"), list):
         raise ValueError("v4 evaluator did not produce per-pose rows")
@@ -813,6 +971,22 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
     pose_indices = [int(value) for value in split.pose_indices.tolist()]
     if [int(row["poseIndex"]) for row in raw_rows] != pose_indices:
         raise ValueError("v4 evaluation pose order does not match the split")
+    sidecar_writer = None
+    sidecar_manifest_path: Path | None = None
+    if sidecar_requested:
+        requested_sidecar_dir = getattr(args, "sidecar_dir", None)
+        sidecar_dir = (
+            Path(requested_sidecar_dir).resolve()
+            if requested_sidecar_dir is not None
+            else Path(args.output).resolve().with_suffix(".sidecar")
+        )
+        sidecar_writer = ScoreSidecarWriter(
+            sidecar_dir,
+            split=split_name,
+            threshold=threshold,
+            checkpoint=checkpoint_path,
+            calibration=calibration_path,
+        )
     per_pose: list[dict[str, Any]] = []
     for raw in raw_rows:
         pose = int(raw["poseIndex"])
@@ -834,41 +1008,67 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
             "fn": float(np.logical_and(~predicted_mask, target_mask).sum()),
             "tn": float(np.logical_and(~predicted_mask, ~target_mask).sum()),
         })
-        per_pose.append({
-            "poseIndex": pose,
-            "candidateCount": int(candidate_ids.size),
-            "candidateIds": candidate_ids.astype(int).tolist() if args.persist_ids else None,
-            "predictedIds": predicted_ids.astype(int).tolist() if args.persist_ids else None,
-            "candidateScores": (
-                raw.get("candidateScores")
-                if bool(getattr(args, "persist_scores", False))
-                else None
-            ),
-            "targets": (
-                raw.get("targets")
-                if bool(getattr(args, "persist_scores", False))
-                else None
-            ),
-            "visibleWeights": (
-                raw.get("visibleWeights")
-                if bool(getattr(args, "persist_scores", False))
-                else None
-            ),
-            "metrics": metrics,
-        })
+        if sidecar_writer is not None:
+            sidecar_writer.append_pose(
+                pose,
+                candidate_ids,
+                np.asarray(raw.get("candidateScores", []), dtype=np.float32),
+                np.asarray(raw.get("targets", []), dtype=np.uint8),
+                np.asarray(raw.get("visibleWeights", []), dtype=np.float32),
+                predicted_ids,
+            )
+            per_pose.append({
+                "poseIndex": pose,
+                "candidateCount": int(candidate_ids.size),
+                "gtCount": int(visible_ids.size),
+                "predCount": int(predicted_ids.size),
+                "metrics": metrics,
+            })
+        else:
+            per_pose.append({
+                "poseIndex": pose,
+                "candidateCount": int(candidate_ids.size),
+                "candidateIds": candidate_ids.astype(int).tolist() if args.persist_ids else None,
+                "predictedIds": predicted_ids.astype(int).tolist() if args.persist_ids else None,
+                "candidateScores": None,
+                "targets": None,
+                "visibleWeights": None,
+                "metrics": metrics,
+            })
+    if sidecar_writer is not None:
+        sidecar_manifest_path = sidecar_writer.close()
     pose_array = np.asarray(split.pose_indices, dtype="<i8")
     summary = _summarize_pose_rows(
         per_pose,
         lcb_replicates=(
-            10000 if split_name in {"calibration", "validation"} else 0
+            10000 if split_name in {"calibration", "validation"}
+            else int(getattr(args, "test_bootstrap_replicates", 10000)) if is_test else 0
         ),
         seed=int(args.seed),
     )
+    score_summary = _raw_score_summary(raw_rows) if sidecar_requested else {}
+    if score_summary:
+        distribution = dict(rows[0].get("scoreDistribution") or {})
+        distribution.update(score_summary)
+        rows[0]["scoreDistribution"] = distribution
+        summary["poseMacro"].update({
+            "averagePrecision": score_summary["poseMacroAveragePrecision"],
+            "positiveRate": score_summary["poseMacroPositiveRate"],
+            "apLift": score_summary["poseMacroApLift"],
+        })
+        summary["aggregate"].update({
+            "averagePrecision": score_summary["aggregateAveragePrecision"],
+            "positiveRate": score_summary["aggregatePositiveRate"],
+            "apLift": score_summary["aggregateApLift"],
+        })
     return {
         "schema": EVALUATION_SCHEMA,
         "version": 1,
         "split": split_name,
-        "testRead": False,
+        "testRead": is_test,
+        "testEvaluationCount": 1 if is_test else 0,
+        "scene": str(getattr(args, "scene_name", "")) or None,
+        "method": str(getattr(args, "method_name", "full_v4")),
         "variant": str(protocol.get("variant", "")),
         "variantSpec": {
             "relationSource": config.get("relationSource"),
@@ -882,7 +1082,7 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         "modelMeta": str(model_meta_path),
         "calibrationSummary": str(calibration_path),
         "epoch": int(checkpoint.get("epoch", 0)),
-        "poseIndices": pose_indices,
+        "poseIndices": None if sidecar_requested else pose_indices,
         "poseCount": len(pose_indices),
         "threshold": threshold,
         "thresholdSource": threshold_source,
@@ -895,18 +1095,20 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
         "aggregate": summary["aggregate"],
         "scoreDistribution": rows[0].get("scoreDistribution"),
         "perPose": per_pose,
+        "zeroGtPoseCount": int(score_summary.get("zeroGtPoseCount", 0)),
+        "scoreSidecar": None if sidecar_manifest_path is None else str(sidecar_manifest_path),
         "runtime": {
             "device": str(device),
             "elapsedSeconds": float(time.perf_counter() - started),
             "runtimeFeatureBytes": int(runtime_features.numel() * 2),
             "runtimeFeatureDim": int(runtime_features.shape[1]),
             "inferenceInputDim": int(config.get("runtimeHeadInputDim", -1)),
-            "testRead": False,
+            "testRead": is_test,
         },
         "imageMetrics": {
             "status": "not_available",
             "reason": "Color-ID image evaluation is a separate formal stage",
-            "testRead": False,
+            "testRead": is_test,
         },
         "unavailableMetrics": {
             "missPixelRate": "not_available: Color-ID image evaluation not attached",
@@ -928,7 +1130,7 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
             },
             "glbIndex": str(Path(args.glb_index).resolve()),
             "candidateSemantics": "stored native back-camera candidates; GT union disabled",
-            "testRead": False,
+            "testRead": is_test,
         },
     }
 
@@ -954,10 +1156,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--allow-unsafe-diagnostic", action="store_true")
     parser.add_argument("--persist-ids", action="store_true")
     parser.add_argument("--persist-scores", action="store_true")
+    parser.add_argument(
+        "--sidecar-dir",
+        type=Path,
+        default=None,
+        help="Directory for typed pose-aligned score/ID arrays; mandatory implicitly for formal test.",
+    )
+    parser.add_argument("--test-bootstrap-replicates", type=int, default=10000)
     parser.add_argument("--relation-dir", type=Path, default=None)
     parser.add_argument("--model-meta", type=Path, default=None)
     parser.add_argument("--calibration", type=Path, default=None)
     parser.add_argument("--diagnostic-recalibrate", action="store_true")
+    parser.add_argument("--scene-name", default="")
+    parser.add_argument("--method-name", default="full_v4")
     parser.add_argument("--recalibration-bootstrap-replicates", type=int, default=2000)
     parser.add_argument("--recalibration-validation-seed", type=int, default=None)
     return parser.parse_args(argv)
@@ -974,7 +1185,8 @@ def main(argv: list[str] | None = None) -> None:
                 "poseCount": payload.get("poseCount"),
                 "calibrationPoseCount": payload.get("calibrationPoseCount"),
                 "validationPoseCount": payload.get("validationPoseCount"),
-                "testRead": False,
+                "testRead": payload.get("testRead"),
+                "scoreSidecar": payload.get("scoreSidecar"),
             },
             ensure_ascii=False,
         )
