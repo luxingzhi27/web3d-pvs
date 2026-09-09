@@ -28,6 +28,7 @@ export class InstancePVSWasm extends InstancePVSBase {
     this.wasmInstance = null;
     this.wasm = null;
     this.wasmMemory = null;
+    this.candidateBenchmarkEnabled = Boolean(options.candidateBenchmark);
     this.allocations = [];
     this.pointers = null;
     this.cachedVisibleCount = 0;
@@ -70,7 +71,8 @@ export class InstancePVSWasm extends InstancePVSBase {
     }
     for (const name of [
       'allocate', 'deallocate', 'decode_fp16', 'configure_runtime',
-      'precompute_relations', 'predict_v4', 'refilter_v4', 'wasm_simd_enabled',
+      'precompute_relations', 'benchmark_candidates_v4', 'predict_v4', 'refilter_v4',
+      'wasm_simd_enabled',
     ]) requiredExport(this.wasm, name);
     if (this.wasm.wasm_simd_enabled() !== 1) {
       throw new Error('V4 compatibility backend was not compiled with WASM SIMD enabled.');
@@ -151,6 +153,10 @@ export class InstancePVSWasm extends InstancePVSBase {
     pointers.instanceBits = this._allocate(pointers.instanceBitWords * 4);
     pointers.glbBits = this._allocate(pointers.glbBitWords * 4);
     pointers.filterCounters = this._allocate(2 * 4);
+    if (this.candidateBenchmarkEnabled) {
+      pointers.benchmarkCandidateIds = this._allocate(numInstances * 4);
+      pointers.benchmarkScores = this._allocate(numInstances * 4);
+    }
     this.pointers = pointers;
     this.instanceAabbs = null;
     this.instanceToGlobalGlbArray = null;
@@ -194,6 +200,62 @@ export class InstancePVSWasm extends InstancePVSBase {
 
   _copyFloat32(pointer, count) {
     return new Float32Array(this.wasmMemory.buffer, pointer, count).slice();
+  }
+
+  async benchmarkCandidates(queryCamera, candidateIds) {
+    if (!this.isReady || !this.candidateBenchmarkEnabled) {
+      throw new Error('Candidate-only WASM benchmark mode is not initialized.');
+    }
+    const ids = candidateIds instanceof Uint32Array
+      ? candidateIds
+      : Uint32Array.from(candidateIds || []);
+    const numInstances = Number(this.meta.numInstances);
+    if (ids.length > numInstances) {
+      throw new Error(`Candidate count ${ids.length} exceeds the runtime instance count.`);
+    }
+    for (const instanceId of ids) {
+      if (instanceId >= numInstances) {
+        throw new Error(`Candidate instance ID ${instanceId} is out of range.`);
+      }
+    }
+    if (ids.length === 0) {
+      return { candidateCount: 0, gpuKernelMs: null, submitCompletionMs: 0, timingSource: 'empty' };
+    }
+
+    const query = this._cameraQuery(queryCamera);
+    const depth = this.meta.depth;
+    this._writeFloat32(this.pointers.query, Float32Array.of(
+      ...query.center,
+      ...query.forward,
+      query.tanX,
+      query.tanY,
+      Number(this.meta.query.viewcellRadiusM),
+      Number(depth.q01),
+      Number(depth.q99),
+      Number(depth.epsilon),
+    ));
+    new Uint32Array(
+      this.wasmMemory.buffer,
+      this.pointers.benchmarkCandidateIds,
+      ids.length,
+    ).set(ids);
+
+    const startedAt = nowMs();
+    const status = this.wasm.benchmark_candidates_v4(
+      this.pointers.query,
+      this.pointers.benchmarkCandidateIds,
+      ids.length,
+      this.pointers.benchmarkScores,
+    );
+    const wasmCallMs = nowMs() - startedAt;
+    if (status !== 0) throw new Error(`V4 WASM candidate benchmark failed with status ${status}.`);
+    return {
+      candidateCount: ids.length,
+      gpuKernelMs: null,
+      submitCompletionMs: wasmCallMs,
+      wasmCallMs,
+      timingSource: 'wasm-simd-call',
+    };
   }
 
   async _predictUnlocked(queryCamera, options = {}) {

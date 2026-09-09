@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light">
-  <title>PVS V4 WebGPU 推理测试</title>
+  <title>PVS V4 前端推理测试</title>
   <link rel="shortcut icon" href="assets/favicon.ico">
   <link rel="stylesheet" href="runtime-benchmark.css">
   <script src="src/PVSRuntimeBenchmark.js"></script>
@@ -14,7 +14,7 @@
     <header class="page-header">
       <div>
         <p class="eyebrow">PVS V4 Runtime Benchmark</p>
-        <h1>WebGPU 候选推理测试</h1>
+        <h1>候选模型前向测试</h1>
       </div>
       <span id="secure-status" class="status-badge">环境检查中</span>
     </header>
@@ -22,6 +22,17 @@
     <section class="controls" aria-labelledby="setup-title">
       <h2 id="setup-title">设备登记</h2>
       <div class="form-grid">
+        <label>
+          <span>场景</span>
+          <select id="scene-id" disabled></select>
+        </label>
+        <label>
+          <span>推理后端</span>
+          <select id="runtime-backend">
+            <option value="webgpu" selected>WebGPU</option>
+            <option value="wasm">WASM SIMD</option>
+          </select>
+        </label>
         <label>
           <span>设备名称</span>
           <input id="device-label" autocomplete="off" placeholder="例如 MacBook Air M2" required>
@@ -49,7 +60,7 @@
       <h2 id="runtime-title">运行状态</h2>
       <dl class="status-grid">
         <div><dt>后端</dt><dd id="backend-value">-</dd></div>
-        <div><dt>WebGPU Adapter</dt><dd id="adapter-value">-</dd></div>
+        <div><dt>硬件信息</dt><dd id="adapter-value">-</dd></div>
         <div><dt>计时源</dt><dd id="timing-source-value">-</dd></div>
         <div><dt>固定负载</dt><dd id="workload-value">加载中</dd></div>
         <div><dt>模型资产初始化</dt><dd id="init-value">尚未开始</dd></div>

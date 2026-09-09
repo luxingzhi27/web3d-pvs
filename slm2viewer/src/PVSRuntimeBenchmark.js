@@ -1,8 +1,7 @@
 import { PerspectiveCamera, Quaternion, Vector3 } from 'three';
-import { InstancePVSWebGPU } from './InstancePVSWebGPU.js';
+import { InstancePVSRuntime } from './InstancePVSRuntime.js';
 
-const WORKLOAD_URL = './assets/benchmark/pvs_v4_frontend_inference_latency_v1/workload.json';
-const MODEL_ASSET_URL = './assets/neural_instance_culling/pvs_mainline_v4';
+const SCENE_MANIFEST_URL = './assets/benchmark/pvs_paper_runtime/scenes.json';
 const RESULT_SCHEMA = 'pvs-v4-browser-runtime-result-v1';
 const SOFTWARE_ADAPTER_TOKENS = ['swiftshader', 'llvmpipe', 'softpipe', 'swrast', 'software'];
 const FORWARD_AXIS = new Vector3(0, 0, -1);
@@ -67,7 +66,7 @@ function makeCamera(pose, workload) {
   const quaternion = new Quaternion().setFromUnitVectors(FORWARD_AXIS, forward);
   const camera = new PerspectiveCamera(
     Number(workload.fovYDeg),
-    Number(workload.aspect),
+    Number(pose.aspect),
     Number(workload.near),
     Number(workload.far),
   );
@@ -102,11 +101,14 @@ class BenchmarkPage {
   constructor() {
     this.elements = Object.fromEntries([
       'secure-status', 'device-label', 'device-model', 'session-count', 'start-button',
-      'stop-button', 'download-button', 'backend-value', 'adapter-value',
+      'stop-button', 'download-button', 'scene-id', 'runtime-backend',
+      'backend-value', 'adapter-value',
       'timing-source-value', 'workload-value', 'init-value', 'upload-value',
       'progress', 'progress-text', 'results-body', 'message',
     ].map((id) => [id, document.getElementById(id)]));
     this.workload = null;
+    this.scenes = new Map();
+    this.selectedScene = null;
     this.candidateIds = null;
     this.result = null;
     this.runtime = null;
@@ -119,6 +121,7 @@ class BenchmarkPage {
     this.elements['start-button'].addEventListener('click', () => this.start());
     this.elements['stop-button'].addEventListener('click', () => { this.abortRequested = true; });
     this.elements['download-button'].addEventListener('click', () => this.downloadResult());
+    this.elements['scene-id'].addEventListener('change', () => this.loadSelectedScene());
     document.addEventListener('visibilitychange', () => {
       if (document.hidden && this.runtime) {
         this.visibilityViolations += 1;
@@ -126,20 +129,53 @@ class BenchmarkPage {
       }
     });
 
-    if (!window.isSecureContext || !navigator.gpu) {
-      this.setEnvironment(false, '需要 HTTPS 和支持 WebGPU 的浏览器');
-      this.setMessage('请使用本站 HTTPS 地址和最新版 Chrome/Safari。', true);
+    if (!window.isSecureContext) {
+      this.setEnvironment(false, '需要 HTTPS 安全环境');
+      this.setMessage('请使用本站 HTTPS 地址。', true);
       return;
     }
     this.setEnvironment(true, '安全环境可用');
     try {
+      const response = await fetch(SCENE_MANIFEST_URL, { cache: 'no-cache' });
+      if (!response.ok) throw new Error(`场景清单 HTTP ${response.status}`);
+      const manifest = await response.json();
+      if (manifest.schema !== 'pvs-paper-runtime-scenes-v1' || !Array.isArray(manifest.scenes)) {
+        throw new Error('场景清单 schema 不正确');
+      }
+      for (const scene of manifest.scenes) {
+        if (!scene?.id || !scene?.workloadUrl) throw new Error('场景清单条目不完整');
+        this.scenes.set(String(scene.id), scene);
+        const option = document.createElement('option');
+        option.value = String(scene.id);
+        option.textContent = String(scene.label || scene.id);
+        this.elements['scene-id'].appendChild(option);
+      }
+      if (!this.scenes.size) throw new Error('场景清单为空');
+      this.elements['scene-id'].disabled = false;
+      await this.loadSelectedScene();
+    } catch (error) {
+      this.setEnvironment(false, '工作负载加载失败');
+      this.setMessage(error.message, true);
+    }
+  }
+
+  async loadSelectedScene() {
+    this.elements['start-button'].disabled = true;
+    this.workload = null;
+    this.candidateIds = null;
+    try {
       const startedAt = nowMs();
-      const response = await fetch(WORKLOAD_URL, { cache: 'force-cache' });
+      const scene = this.scenes.get(this.elements['scene-id'].value)
+        || this.scenes.values().next().value;
+      this.selectedScene = scene;
+      const response = await fetch(scene.workloadUrl, { cache: 'force-cache' });
       if (!response.ok) throw new Error(`工作负载 HTTP ${response.status}`);
       this.workload = await response.json();
       if (this.workload.schema !== 'pvs-v4-browser-runtime-workload-v1'
-          || this.workload.poseCount !== 684) {
-        throw new Error('工作负载 schema 或 pose 数量不正确');
+          || !Number.isInteger(this.workload.poseCount)
+          || this.workload.poseCount <= 0
+          || this.workload.poses?.length !== this.workload.poseCount) {
+        throw new Error('工作负载 schema 或 pose 列表不正确');
       }
       const candidateResponse = await fetch(
         new URL(this.workload.candidateFile, response.url),
@@ -151,7 +187,7 @@ class BenchmarkPage {
         throw new Error('候选文件长度与工作负载不一致');
       }
       this.workloadLoadMs = nowMs() - startedAt;
-      this.elements['workload-value'].textContent = `684 poses / ${this.candidateIds.length.toLocaleString()} candidates`;
+      this.elements['workload-value'].textContent = `${this.workload.poseCount.toLocaleString()} poses / ${this.candidateIds.length.toLocaleString()} candidates`;
       this.elements['start-button'].disabled = false;
       this.setMessage('工作负载已加载。模型资产会在点击开始后加载，但加载时间不计入推理。');
     } catch (error) {
@@ -188,26 +224,33 @@ class BenchmarkPage {
 
   async initializeRuntime() {
     const startedAt = nowMs();
-    const runtime = new InstancePVSWebGPU(MODEL_ASSET_URL, {
+    const backendPreference = this.elements['runtime-backend'].value;
+    if (backendPreference === 'webgpu' && !navigator.gpu) {
+      throw new Error('当前浏览器不支持 WebGPU；请选择 WASM SIMD。');
+    }
+    const runtime = new InstancePVSRuntime(this.workload.modelAssetUrl, {
       candidateBenchmark: true,
       debugLogging: false,
+      backendPreference,
+      wasmUrl: this.workload.wasmUrl,
     });
     await runtime.init();
     const initMs = nowMs() - startedAt;
-    const adapter = runtime.webgpuInfo?.adapter || {};
-    const gate = adapterHardwareGate(adapter);
-    if (!gate.hardware) {
+    const active = runtime.active;
+    const adapter = active?.webgpuInfo?.adapter || {};
+    const gate = backendPreference === 'webgpu' ? adapterHardwareGate(adapter) : null;
+    if (gate && !gate.hardware) {
       runtime.dispose();
       throw new Error(`WebGPU 硬件门失败：${gate.description}`);
     }
     this.runtime = runtime;
     this.elements['backend-value'].textContent = runtime.backend;
-    this.elements['adapter-value'].textContent = gate.description;
-    this.elements['timing-source-value'].textContent = runtime.timestampQuerySupported
+    this.elements['adapter-value'].textContent = gate?.description || 'WASM SIMD / CPU';
+    this.elements['timing-source-value'].textContent = active?.timestampQuerySupported
       ? 'WebGPU timestamp-query（主指标）'
-      : 'queue submit-to-completion（timestamp 不可用）';
+      : (backendPreference === 'wasm' ? 'WASM SIMD 函数调用' : 'queue submit-to-completion');
     this.elements['init-value'].textContent = `${formatMs(initMs)}（不计入推理）`;
-    return { runtime, initMs, adapter, gate };
+    return { runtime, initMs, adapter, gate, backendPreference };
   }
 
   async runPose(pose) {
@@ -216,7 +259,7 @@ class BenchmarkPage {
       this.candidatesForPose(pose),
     );
     const primary = result.gpuKernelMs == null ? result.submitCompletionMs : result.gpuKernelMs;
-    if (!Number.isFinite(primary) || primary < 0) throw new Error('WebGPU 返回了无效计时。');
+    if (!Number.isFinite(primary) || primary < 0) throw new Error('推理后端返回了无效计时。');
     return {
       poseId: Number(pose.poseId),
       ordinal: Number(pose.ordinal),
@@ -296,10 +339,12 @@ class BenchmarkPage {
     this.elements['start-button'].disabled = true;
     this.elements['stop-button'].disabled = false;
     this.elements['download-button'].disabled = true;
+    this.elements['scene-id'].disabled = true;
+    this.elements['runtime-backend'].disabled = true;
     this.elements['upload-value'].textContent = '等待测试完成';
     this.elements.progress.max = totalSessions * this.workload.poseCount;
     this.elements.progress.value = 0;
-    this.setMessage('正在加载模型资产并初始化 WebGPU；该阶段不计入模型推理时间。');
+    this.setMessage('正在加载模型资产并初始化推理后端；该阶段不计入模型推理时间。');
     await this.requestWakeLock();
 
     try {
@@ -331,7 +376,8 @@ class BenchmarkPage {
           backend: this.runtime.backend,
           adapter: runtimeInfo.adapter,
           hardwareGate: runtimeInfo.gate,
-          timestampQuery: this.runtime.timestampQuerySupported,
+          wasmSimd: runtimeInfo.backendPreference === 'wasm',
+          timestampQuery: Boolean(this.runtime.active?.timestampQuerySupported),
           visibilityViolations: this.visibilityViolations,
         },
         model: {
@@ -349,14 +395,14 @@ class BenchmarkPage {
           candidateCount: this.workload.candidateCount,
           fovYDeg: this.workload.fovYDeg,
           modelFovYDeg: this.workload.modelFovYDeg,
-          aspect: this.workload.aspect,
+          aspects: this.workload.aspects,
         },
         excludedSetupTimings: {
           workloadDownloadMs: this.workloadLoadMs,
           modelAssetAndPipelineInitMs: runtimeInfo.initMs,
         },
         timingDefinition: {
-          primary: this.runtime.timestampQuerySupported ? 'gpuKernelMs' : 'submitCompletionMs',
+          primary: this.runtime.active?.timestampQuerySupported ? 'gpuKernelMs' : 'submitCompletionMs',
           includes: 'V4 neural visibility forward for pre-supplied candidate IDs',
           excludes: [
             'model and workload download', 'GPU buffer initialization', 'candidate generation',
@@ -380,6 +426,8 @@ class BenchmarkPage {
       this.wakeLock = null;
       this.elements['start-button'].disabled = false;
       this.elements['stop-button'].disabled = true;
+      this.elements['scene-id'].disabled = false;
+      this.elements['runtime-backend'].disabled = false;
     }
   }
 
@@ -417,7 +465,8 @@ class BenchmarkPage {
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
     const label = this.result.device.label.replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 48) || 'device';
-    link.download = `pvs_v4_webgpu_${label}_${Date.now()}.json`;
+    const backend = String(this.result.environment.backend || 'runtime').replace(/[^a-z0-9_-]+/gi, '_');
+    link.download = `pvs_v4_${backend}_${label}_${Date.now()}.json`;
     link.click();
     URL.revokeObjectURL(link.href);
   }

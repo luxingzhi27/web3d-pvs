@@ -45,6 +45,7 @@ let runtime;
 try {
   runtime = new InstancePVSWasm(`${baseUrl}/model`, {
     wasmUrl: `${baseUrl}/assets/wasm/instance_pvs_v4.wasm`,
+    candidateBenchmark: true,
   });
   await runtime.init();
   assert.equal(runtime.backend, 'wasm-simd-v4');
@@ -63,6 +64,14 @@ try {
   candidateCamera.quaternion.copy(camera.quaternion);
   candidateCamera.updateProjectionMatrix();
   candidateCamera.updateMatrixWorld(true);
+
+  const benchmark = await runtime.benchmarkCandidates(
+    camera,
+    Uint32Array.from({ length: 128 }, (_, index) => index),
+  );
+  assert.equal(benchmark.candidateCount, 128);
+  assert.equal(benchmark.timingSource, 'wasm-simd-call');
+  assert.ok(Number.isFinite(benchmark.wasmCallMs) && benchmark.wasmCallMs >= 0);
 
   const prediction = await runtime.predict(camera, {
     candidateCamera,

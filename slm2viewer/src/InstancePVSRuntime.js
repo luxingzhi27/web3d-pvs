@@ -120,6 +120,13 @@ export class InstancePVSRuntime {
     }
   }
 
+  async benchmarkCandidates(queryCamera, candidateIds) {
+    if (typeof this.active?.benchmarkCandidates !== 'function') {
+      throw new Error(`Backend ${this.backend} does not support candidate-only benchmarking.`);
+    }
+    return this.active.benchmarkCandidates(queryCamera, candidateIds);
+  }
+
   dispose() {
     this.active?.dispose();
     this.active = null;

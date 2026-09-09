@@ -14,14 +14,13 @@ const viewerDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const publicDir = resolve(viewerDir, 'public');
 const outputDir = resolve(viewerDir, 'public_runtime_benchmark');
 const htmlName = 'runtime-benchmark.html';
-const modelAssetDir = 'assets/neural_instance_culling/pvs_mainline_v4';
-const workloadAssetDir = 'assets/benchmark/pvs_v4_frontend_inference_latency_v1';
+const workloadAssetDir = 'assets/benchmark/pvs_paper_runtime';
 
 if (!existsSync(resolve(publicDir, htmlName))) {
   throw new Error('Build the frontend before packaging the runtime benchmark.');
 }
-if (!existsSync(resolve(publicDir, workloadAssetDir, 'workload.json'))) {
-  throw new Error('Build the frozen runtime workload before packaging.');
+if (!existsSync(resolve(publicDir, workloadAssetDir, 'scenes.json'))) {
+  throw new Error('Build the paper runtime workloads before packaging.');
 }
 
 rmSync(outputDir, { recursive: true, force: true });
@@ -40,8 +39,20 @@ for (const relative of references) {
   copyFileSync(source, destination);
 }
 
-for (const relative of [modelAssetDir, workloadAssetDir]) {
-  cpSync(resolve(publicDir, relative), resolve(outputDir, relative), { recursive: true });
+const manifest = JSON.parse(readFileSync(resolve(publicDir, workloadAssetDir, 'scenes.json'), 'utf8'));
+const runtimeAssets = new Set([workloadAssetDir, 'assets/wasm/instance_pvs_v4.wasm']);
+for (const scene of manifest.scenes || []) {
+  const modelPath = String(scene.modelAssetPath || '').replace(/^\.\//, '');
+  if (!modelPath) throw new Error(`Scene ${scene.id || '?'} has no modelAssetPath.`);
+  runtimeAssets.add(modelPath);
+}
+for (const relative of runtimeAssets) {
+  if (!existsSync(resolve(publicDir, relative))) {
+    throw new Error(`Runtime benchmark asset is missing: ${relative}`);
+  }
+  const destination = resolve(outputDir, relative);
+  mkdirSync(dirname(destination), { recursive: true });
+  cpSync(resolve(publicDir, relative), destination, { recursive: true });
 }
 
 console.log(`Packaged PVS runtime benchmark: ${outputDir}`);

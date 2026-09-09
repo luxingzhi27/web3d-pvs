@@ -72,21 +72,28 @@ function validateResult(payload) {
   }
   const label = String(payload.device?.label || '').trim();
   if (!label || label.length > 120) throw new Error('device label is missing or too long');
-  if (payload.workload?.poseCount !== 684 || payload.workload?.split !== 'test') {
-    throw new Error('result does not use the frozen 684-pose test workload');
+  const poseCount = Number(payload.workload?.poseCount);
+  const numInstances = Number(payload.model?.numInstances);
+  if (!Number.isInteger(poseCount) || poseCount <= 0 || payload.workload?.split !== 'test') {
+    throw new Error('result does not use a frozen test workload');
+  }
+  if (!String(payload.workload?.scene || '').trim()
+      || !Number.isInteger(numInstances)
+      || numInstances <= 0) {
+    throw new Error('result has no valid scene or model instance count');
   }
   if (!Array.isArray(payload.sessions) || payload.sessions.length < 1 || payload.sessions.length > 5) {
     throw new Error('result must contain one to five sessions');
   }
   for (const session of payload.sessions) {
-    if (!Array.isArray(session.samples) || session.samples.length !== 684) {
-      throw new Error('every completed session must contain 684 samples');
+    if (!Array.isArray(session.samples) || session.samples.length !== poseCount) {
+      throw new Error('every completed session must contain the declared test poses');
     }
     for (const sample of session.samples) {
       if (!Number.isInteger(sample.poseId)
           || !Number.isInteger(sample.candidateCount)
           || sample.candidateCount < 0
-          || sample.candidateCount > 18831
+          || sample.candidateCount > numInstances
           || !finiteNonnegative(sample.modelInferenceMs)
           || !finiteNonnegative(sample.submitCompletionMs)
           || (sample.gpuKernelMs != null && !finiteNonnegative(sample.gpuKernelMs))) {
@@ -94,10 +101,14 @@ function validateResult(payload) {
       }
     }
   }
+  const backend = String(payload.environment?.backend || '');
+  const backendReady = backend.includes('webgpu')
+    ? payload.environment?.hardwareGate?.hardware === true
+    : backend.includes('wasm-simd') && payload.environment?.wasmSimd === true;
   return {
     label,
     formalReady: payload.environment?.secureContext === true
-      && payload.environment?.hardwareGate?.hardware === true
+      && backendReady
       && Number(payload.environment?.visibilityViolations || 0) === 0,
   };
 }

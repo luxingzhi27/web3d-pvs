@@ -204,6 +204,54 @@ pub unsafe extern "C" fn precompute_relations() -> i32 {
     0
 }
 
+#[no_mangle]
+/// Score a caller-supplied candidate list without candidate generation,
+/// thresholding, GLB aggregation, or result compaction.
+///
+/// # Safety
+/// `query_parameters` contains 12 floats, `candidate_ids` contains
+/// `candidate_count` IDs, and `scores` has room for the same count.
+pub unsafe extern "C" fn benchmark_candidates_v4(
+    query_parameters: *const f32,
+    candidate_ids: *const u32,
+    candidate_count: usize,
+    scores: *mut f32,
+) -> i32 {
+    let state = current_state();
+    if state.num_instances == 0
+        || query_parameters.is_null()
+        || candidate_ids.is_null()
+        || scores.is_null()
+        || candidate_count > state.num_instances
+    {
+        return -1;
+    }
+    let query = std::slice::from_raw_parts(query_parameters, 12);
+    let ids = std::slice::from_raw_parts(candidate_ids, candidate_count);
+    let output = std::slice::from_raw_parts_mut(scores, candidate_count);
+    let camera_center = [query[0], query[1], query[2]];
+    let camera_forward = [query[3], query[4], query[5]];
+    for (index, &raw_instance_id) in ids.iter().enumerate() {
+        let instance_id = raw_instance_id as usize;
+        if instance_id >= state.num_instances {
+            return -2;
+        }
+        output[index] = score_instance(
+            state,
+            instance_id,
+            camera_center,
+            camera_forward,
+            query[6],
+            query[7],
+            query[8],
+            query[9],
+            query[10],
+            query[11],
+        );
+    }
+    0
+}
+
 #[allow(clippy::too_many_arguments)]
 #[no_mangle]
 /// # Safety

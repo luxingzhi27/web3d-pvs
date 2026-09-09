@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export the frozen HKUST test poses and their existing candidate lists."""
+"""Export one scene's frozen test poses and precomputed candidate lists."""
 from __future__ import annotations
 
 import argparse
@@ -44,6 +44,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset-dir", type=Path, default=default_dataset)
     parser.add_argument("--output-dir", type=Path, default=default_output)
+    parser.add_argument("--scene", default="hkust-v3")
+    parser.add_argument("--experiment-name", default="pvs_v4_frontend_inference_latency_v1")
+    parser.add_argument("--model-asset-url", default="./assets/neural_instance_culling/pvs_mainline_v4")
+    parser.add_argument("--wasm-url", default="./assets/wasm/instance_pvs_v4.wasm")
+    parser.add_argument("--fov-y-deg", type=float, default=60.0)
+    parser.add_argument("--model-fov-y-deg", type=float, default=66.0)
+    parser.add_argument("--expected-test-count", type=int, default=0)
     return parser.parse_args()
 
 
@@ -84,8 +91,14 @@ def main() -> None:
 
     test_indices = np.flatnonzero(poses["split"] == test_split_id)
     expected_test_count = int((meta.get("splitCounts") or {}).get("test", -1))
-    if test_indices.size != expected_test_count or test_indices.size != 684:
-        raise ValueError(f"expected 684 frozen test poses, found {test_indices.size}")
+    if test_indices.size != expected_test_count:
+        raise ValueError(
+            f"dataset declares {expected_test_count} test poses, found {test_indices.size}"
+        )
+    if args.expected_test_count and test_indices.size != args.expected_test_count:
+        raise ValueError(
+            f"expected {args.expected_test_count} frozen test poses, found {test_indices.size}"
+        )
 
     exported_ids: list[np.ndarray] = []
     rows: list[dict[str, object]] = []
@@ -102,12 +115,16 @@ def main() -> None:
         if not np.isfinite(norm) or norm < 1e-8:
             raise ValueError(f"pose {pose_index} has an invalid camera direction")
         forward /= norm
+        tangent = np.asarray(poses["camera_view"][pose_index], dtype=np.float64)
+        if not bool(np.isfinite(tangent).all()) or tangent[0] <= 0 or tangent[1] <= 0:
+            raise ValueError(f"pose {pose_index} has invalid camera tangents")
         rows.append(
             {
                 "ordinal": ordinal,
                 "poseId": pose_index,
                 "position": query_centers[pose_index].astype(float).tolist(),
                 "forward": forward.astype(float).tolist(),
+                "aspect": float(tangent[0] / tangent[1]),
                 "candidateOffset": cursor,
                 "candidateCount": int(ids.size),
                 "category": int(poses["category"][pose_index]),
@@ -129,18 +146,20 @@ def main() -> None:
     flat_ids.tofile(output_dir / candidate_file)
     workload = {
         "schema": "pvs-v4-browser-runtime-workload-v1",
-        "experimentName": "pvs_v4_frontend_inference_latency_v1",
-        "scene": "hkust-v3",
+        "experimentName": args.experiment_name,
+        "scene": args.scene,
         "split": "test",
         "poseCount": int(test_indices.size),
         "candidateCount": int(flat_ids.size),
         "candidateFile": candidate_file,
         "candidateDtype": "uint32-little-endian",
-        "fovYDeg": 60,
-        "modelFovYDeg": 66,
-        "aspect": 16 / 9,
+        "fovYDeg": args.fov_y_deg,
+        "modelFovYDeg": args.model_fov_y_deg,
+        "aspects": sorted({float(row["aspect"]) for row in rows}),
         "near": 0.1,
         "far": 20000,
+        "modelAssetUrl": args.model_asset_url,
+        "wasmUrl": args.wasm_url,
         "warmupOrdinals": warmup_ordinals,
         "sessionOrderSeed": 20260909,
         "source": {
@@ -160,7 +179,11 @@ def main() -> None:
     (output_dir / "workload.json").write_text(
         json.dumps(workload, ensure_ascii=True, indent=2) + "\n", encoding="utf-8"
     )
-    print(json.dumps({"output": str(output_dir), **workload["candidateStats"], "poses": 684}, indent=2))
+    print(json.dumps({
+        "output": str(output_dir),
+        **workload["candidateStats"],
+        "poses": int(test_indices.size),
+    }, indent=2))
 
 
 if __name__ == "__main__":

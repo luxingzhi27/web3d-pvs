@@ -2,7 +2,7 @@
 
 ## 目标与口径
 
-本实验测量当前 PVS V4 模型在桌面和真实移动设备上的 WebGPU 前向耗时。论文主指标是：一个 pose 的候选实例 ID 已经确定并上传 GPU 后，V4 网络对这些候选完成可见性分数计算所需的时间。
+本实验测量当前 PVS V4 模型在桌面和真实移动设备上的 WebGPU 与 WASM SIMD 前向耗时。论文主指标是：一个 pose 的候选实例 ID 已经确定并进入被测后端后，V4 网络对这些候选完成可见性分数计算所需的时间。
 
 主指标不包含以下工作：
 
@@ -35,6 +35,7 @@
 |---|---|---|
 | `gpuKernelMs` | WebGPU timestamp-query 记录的 compute pass 起止时间 | adapter 支持时的首选模型前向指标 |
 | `submitCompletionMs` | `queue.submit()` 到 `queue.onSubmittedWorkDone()` 完成 | timestamp-query 不可用时的模型 dispatch 墙钟指标 |
+| `wasmCallMs` | 预先写入 query 和 candidate ID 后，单次 SIMD 网络函数的墙钟时间 | WASM SIMD 主指标 |
 | `modelInferenceMs` | `gpuKernelMs` 可用时取前者，否则取 `submitCompletionMs` | 页面显示和设备内汇总字段 |
 | `modelAssetAndPipelineInitMs` | 下载资产、上传权重和创建管线 | 单独记录，不进入前向时间 |
 | `workloadDownloadMs` | 下载 pose 元数据和候选 ID | 单独记录，不进入前向时间 |
@@ -43,21 +44,22 @@
 
 ## 固定工作负载
 
-工作负载来自：
+工作负载来自两个场景的冻结 test split：
 
 ```text
 neural_instance_culling/dataset/out/
 pose_csr_hkust_v3_main_stratified_calibration_fov66_v1/
+pose_csr_ifcbench_fantasy_metropolis_main_stratified_calibration_fov66_v1/
 ```
 
-使用全部 `684` 个冻结 test view-cell。test 这里只提供固定性能负载，不选择模型、checkpoint 或阈值。每条记录包含：
+HKUST 使用全部 `684` 个冻结 test view-cell；IFCBench 使用全部 `2710` 个。test 这里只提供固定性能负载，不选择模型、checkpoint 或阈值。每条记录包含：
 
 - 原始 pose ID；
 - view-cell 查询中心和归一化观察方向；
-- 固定 `60` 度垂直 FOV、`16:9` aspect、near/far；
+- 固定 `60` 度垂直 FOV、该 pose 的实际 aspect、near/far；
 - 原数据集已有的后退 `66` 度候选实例 ID。
 
-候选列表从 CSR 原样导出，不补入 GT，不由测试页重新生成。当前工作负载共 `3,174,148` 个候选引用，每 pose 平均 `4,640.57` 个，最少 `8` 个，最多 `18,831` 个。
+候选列表从 CSR 原样导出，不补入 GT，不由测试页重新生成。HKUST 共 `3,174,148` 个候选引用，每 pose 平均 `4,640.57` 个，最少 `8` 个，最多 `18,831` 个。IFCBench 每 pose 平均 `9,985.79` 个，p95 为 `25,008.6`，最大 `41,243` 个。
 
 生成命令：
 
@@ -76,11 +78,11 @@ https://139.196.34.161/pvs-runtime/
 
 手机和电脑直接打开该 HTTPS 页面，不需要 ADB、CDP 或安装应用。页面流程如下：
 
-1. 填写设备名称和设备型号/GPU。
+1. 选择场景和 WebGPU/WASM SIMD 后端，填写设备名称和设备型号/GPU。
 2. 选择 `5` 轮论文正式测试并开始。
 3. 页面先下载工作负载和模型资产，初始化 WebGPU；这些时间单列。
 4. 每轮先执行覆盖候选规模的 `50` 个预热 pose，不计入结果。
-5. 按固定种子打乱顺序，串行执行全部 `684` 个 pose。
+5. 按固定种子打乱顺序，串行执行该场景全部 test pose。
 6. 页面完成本机 p50/p95 汇总后，一次性上传全部样本。
 7. 上传失败时点击“下载结果”，保留同一 JSON 供人工回收。
 
@@ -99,7 +101,7 @@ Linux 桌面无头自动化继续使用 `chrome_gpu_flags.mjs` 的 NVIDIA Vulkan
 
 ## 重复次数与统计
 
-每个设备执行五轮，每轮 `50` 次预热和 `684` 次正式查询，共 `3,420` 个正式样本。不得裁掉最慢 1%，不得只挑最快一轮。浏览器崩溃、adapter 丢失或页面进入后台时整轮作废。
+每个设备、场景和后端执行五轮，每轮 `50` 次预热和该场景全部 test pose。不得裁掉最慢 1%，不得只挑最快一轮。浏览器崩溃、adapter 丢失或页面进入后台时整轮作废。
 
 每个设备至少报告：
 
@@ -129,7 +131,7 @@ POST /api/pvs-runtime-session
 POST /api/pvs-runtime-results
 ```
 
-服务端签发短期上传 token，限制请求来源和 8 MiB payload，校验 schema、设备名称、`684` pose 数量、候选范围和数值有限性。文件名与 receipt ID 只由服务端生成，不接受客户端路径。正式部署结果保存在 `/var/lib/pvs-runtime-benchmark/results/`，页面显示回执编号。
+服务端签发短期上传 token，限制请求来源和 8 MiB payload，并依据结果声明的冻结 workload pose 数、模型实例数、候选范围和后端类型校验数值。文件名与 receipt ID 只由服务端生成，不接受客户端路径。正式部署结果保存在 `/var/lib/pvs-runtime-benchmark/results/`，页面显示回执编号。
 
 ## 当前验证
 
@@ -143,3 +145,5 @@ POST /api/pvs-runtime-results
 | vivo X200 Pro mini | 3.473 ms | [3.080, 3.801] | 18.350 ms | [17.826, 18.747] | 13.261 ms |
 
 这里的 p50 是一半查询不超过的中位延迟，代表典型响应；p95 是 95% 查询不超过的尾部延迟，代表卡顿风险。两者都比算术平均值更不容易被少数极端样本混淆，论文应同时报告 p50 和 p95，而不能只给平均耗时。
+
+同日完成双场景、双后端实现 smoke。A6000 页面完整执行了 HKUST `684` 和 IFCBench `2710` 个 test pose，WebGPU adapter 为 NVIDIA Ampere，WASM 明确调用新的预给候选 SIMD 前向函数，四组均无浏览器错误。该窗口与 IFCBench 参数扫描并行，只证明协议和代码可运行，不进入正式性能表；正式 A6000 五轮必须在 GPU 和 CPU 数据加载均空闲时独占重跑。

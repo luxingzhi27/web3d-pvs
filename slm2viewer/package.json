@@ -20,7 +20,7 @@
   },
   "scripts": {
     "build:wasm": "node ./scripts/build_instance_pvs_wasm.mjs",
-    "build:benchmark-workload": "conda run -n slm_pvs python ./scripts/build_pvs_runtime_workload.py",
+    "build:benchmark-workload": "conda run -n slm_pvs python ./scripts/build_paper_runtime_workloads.py",
     "build": "npm run build:wasm && node ./scripts/build_parcel.mjs",
     "package:deploy": "npm run build && node ./scripts/package_deploy.mjs",
     "package:runtime-benchmark": "npm run build:benchmark-workload && npm run build && node ./scripts/package_pvs_runtime_benchmark.mjs",
