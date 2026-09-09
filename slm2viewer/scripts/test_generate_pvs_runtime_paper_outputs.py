@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from generate_pvs_runtime_paper_outputs import build_outputs
+from generate_pvs_runtime_paper_outputs import build_outputs, formal_exclusion_reason
 
 
 def upload(label: str, scene: str, backend: str, session_count: int) -> dict:
@@ -53,6 +53,21 @@ def upload(label: str, scene: str, backend: str, session_count: int) -> dict:
 
 
 class RuntimePaperOutputTest(unittest.TestCase):
+    def test_a6000_requires_automation_hardware_evidence(self) -> None:
+        payload = upload("RTX A6000", "hkust", "webgpu-v4", 5)
+        self.assertIn(
+            "automation hardware evidence failed",
+            formal_exclusion_reason(Path("formal.json"), payload),
+        )
+        payload["automationEvidence"] = {
+            "formalReady": True,
+            "gate": {
+                "formalReady": True,
+                "concurrentComputeDetected": False,
+            },
+        }
+        self.assertIsNone(formal_exclusion_reason(Path("formal.json"), payload))
+
     def test_formal_filter_stats_bins_and_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             input_dir = Path(directory) / "uploads"

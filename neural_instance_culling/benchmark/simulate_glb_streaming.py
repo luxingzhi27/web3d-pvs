@@ -9,11 +9,12 @@ is never used to compute ranking curves.
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -23,6 +24,8 @@ if str(BENCHMARK_DIR) not in sys.path:
 
 from glb_streaming import (  # noqa: E402
     BANDWIDTHS_MBPS,
+    GlbAsset,
+    PoseRecord,
     RANKING_METHODS,
     TARGET_COVERAGES,
     StreamingContractError,
@@ -38,6 +41,14 @@ from glb_streaming_io import (  # noqa: E402
     load_pose_inputs,
     load_score_sidecar,
 )
+from pose_csr_dataset import PoseCSRDataset  # noqa: E402
+
+
+FORMAL_HZB_RESULT_SCHEMA = "geometry-shell-hzb-browser-result-v1"
+FORMAL_HZB_WORKLOAD_SCHEMA = "geometry-shell-hzb-browser-workload-v1"
+FORMAL_HZB_MODE = "Region66"
+FORMAL_HZB_REGION_FOV_DEG = 66.0
+FORMAL_HZB_RENDER_FOV_DEG = 60.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,7 +72,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="JSONL sidecar from build_reference_frontmost_histogram.py",
     )
-    parser.add_argument("--hzb-visible", type=Path, default=None, help="per-pose HZB visible GLB sidecar")
+    parser.add_argument(
+        "--hzb-region66-result",
+        dest="hzb_region66_result",
+        type=Path,
+        default=None,
+        help="formal Region66 test result JSON; visibleInstanceIds are mapped to GLBs",
+    )
     parser.add_argument(
         "--methods",
         default=",".join(RANKING_METHODS),
@@ -95,9 +112,19 @@ def _read_thresholds(path: Path) -> dict[str, float]:
 def _load_manifest_thresholds(manifest: dict[str, Any], include_fallback: bool) -> dict[str, float]:
     thresholds = manifest.get("thresholds", {})
     sources = manifest.get("thresholdSources", {})
+    score_sources = manifest.get("scoreSources", {})
     result: dict[str, float] = {}
     for name, value in thresholds.items():
         source = str(sources.get(name, ""))
+        if name == "aabb":
+            aabb_source = score_sources.get("aabb") if isinstance(score_sources, dict) else None
+            if (
+                not isinstance(aabb_source, dict)
+                or aabb_source.get("kind") != "formal_aabb_test_sidecar"
+                or aabb_source.get("split") != "test"
+                or aabb_source.get("testRead") is not True
+            ):
+                continue
         if include_fallback or source == "checkpoint calibration":
             result[str(name)] = float(value)
     return result
@@ -115,6 +142,315 @@ def _coverage_source_name(utility_source: str) -> str:
         "visible_weights": "visible_weights_utility_not_pixel_coverage",
         "reference_frontmost_pixels": "reference-frontmost-pixel-histogram-v1",
     }[utility_source]
+
+
+def _formal_aabb_source(source: Any) -> bool:
+    return (
+        isinstance(source, dict)
+        and source.get("kind") == "formal_aabb_test_sidecar"
+        and source.get("split") == "test"
+        and source.get("testRead") is True
+    )
+
+
+def _read_json_object(path: str | Path, label: str) -> dict[str, Any]:
+    resolved = Path(path).expanduser().resolve()
+    try:
+        value = json.loads(resolved.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise StreamingContractError(f"missing {label}: {resolved}") from error
+    except json.JSONDecodeError as error:
+        raise StreamingContractError(f"invalid {label}: {resolved}") from error
+    if not isinstance(value, dict):
+        raise StreamingContractError(f"{label} must be a JSON object: {resolved}")
+    return value
+
+
+def _formal_integer_list(value: Any, label: str) -> tuple[int, ...]:
+    if not isinstance(value, list):
+        raise StreamingContractError(f"{label} must be a list of instance IDs")
+    result: list[int] = []
+    for index, item in enumerate(value):
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+            raise StreamingContractError(f"{label}[{index}] is not a non-negative integer")
+        result.append(int(item))
+    if len(result) != len(set(result)):
+        raise StreamingContractError(f"{label} contains duplicate IDs")
+    return tuple(result)
+
+
+def _finite_equal(value: Any, expected: float, label: str) -> None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as error:
+        raise StreamingContractError(f"{label} must be {expected:g}") from error
+    if not np.isfinite(numeric) or not np.isclose(numeric, expected, rtol=0.0, atol=1e-6):
+        raise StreamingContractError(f"{label} must be {expected:g}, got {value!r}")
+
+
+def load_formal_region66_test_result(
+    path: str | Path,
+    selected_pose_ids: Iterable[int],
+    *,
+    expected_scene: str | None = None,
+    expected_candidate_counts: Mapping[int, int] | None = None,
+) -> tuple[dict[int, tuple[int, ...]], dict[str, Any]]:
+    """Load the formal Region66 visible-instance set without inventing scores."""
+
+    resolved = Path(path).expanduser().resolve()
+    result = _read_json_object(resolved, "Region66 HZB result")
+    if result.get("schema") != FORMAL_HZB_RESULT_SCHEMA:
+        raise StreamingContractError(
+            "Region66 HZB input must use geometry-shell-hzb-browser-result-v1"
+        )
+    if result.get("mode") != FORMAL_HZB_MODE:
+        raise StreamingContractError("HZB visible-first requires mode=Region66")
+    if result.get("error"):
+        raise StreamingContractError("Region66 HZB result records an execution error")
+    if result.get("formalReady") is not True:
+        raise StreamingContractError("Region66 HZB result is not formalReady=true")
+    if result.get("executionClass") != "formal-hardware-gpu":
+        raise StreamingContractError(
+            "Region66 HZB result must declare executionClass=formal-hardware-gpu"
+        )
+    gpu_gate = result.get("gpuGate")
+    if not isinstance(gpu_gate, dict) or gpu_gate.get("required") is not True or gpu_gate.get("hardware") is not True:
+        raise StreamingContractError("Region66 HZB result did not pass its formal hardware GPU gate")
+
+    workload = result.get("workload")
+    if (
+        not isinstance(workload, dict)
+        or workload.get("schema") != FORMAL_HZB_WORKLOAD_SCHEMA
+        or workload.get("split") != "test"
+    ):
+        raise StreamingContractError("Region66 HZB result must contain a test browser workload")
+    workload_scene = workload.get("scene")
+    if not isinstance(workload_scene, str) or not workload_scene:
+        raise StreamingContractError("Region66 HZB workload must declare a scene")
+    if expected_scene is not None and workload_scene != str(expected_scene):
+        raise StreamingContractError(
+            f"Region66 HZB scene disagrees with runtime metadata: {workload_scene!r} != {expected_scene!r}"
+        )
+    _finite_equal(workload.get("fovYDeg"), FORMAL_HZB_REGION_FOV_DEG, "HZB workload fovYDeg")
+
+    provenance = workload.get("provenance")
+    if not isinstance(provenance, dict):
+        raise StreamingContractError("Region66 HZB workload is missing provenance")
+    configuration = provenance.get("configuration")
+    if not isinstance(configuration, dict):
+        raise StreamingContractError("Region66 HZB workload provenance is missing configuration")
+    _finite_equal(configuration.get("fovYDeg"), FORMAL_HZB_RENDER_FOV_DEG, "HZB render fovYDeg")
+    _finite_equal(configuration.get("regionFovYDeg"), FORMAL_HZB_REGION_FOV_DEG, "HZB regionFovYDeg")
+
+    pose_selection = workload.get("poseSelection")
+    if not isinstance(pose_selection, dict):
+        pose_selection = provenance.get("poseSelection")
+    if not isinstance(pose_selection, dict):
+        raise StreamingContractError("Region66 HZB workload is missing pose selection provenance")
+    if pose_selection.get("split") != "test":
+        raise StreamingContractError("Region66 HZB pose selection must declare split=test")
+    selected_in_result = pose_selection.get("selectedPoseIndices")
+    if not isinstance(selected_in_result, list):
+        raise StreamingContractError("Region66 HZB pose selection must list selectedPoseIndices")
+    selected_in_result = _formal_integer_list(
+        selected_in_result,
+        "Region66 poseSelection.selectedPoseIndices",
+    )
+    if pose_selection.get("selectedPoseCount") != len(selected_in_result):
+        raise StreamingContractError("Region66 HZB pose selection count is inconsistent")
+    if pose_selection.get("limit") not in (None, 0):
+        raise StreamingContractError("formal Region66 HZB result must not truncate test poses")
+    if pose_selection.get("representative") is not True:
+        raise StreamingContractError("formal Region66 HZB result must be representative of the test split")
+
+    samples = result.get("samples")
+    if not isinstance(samples, list) or not samples:
+        raise StreamingContractError("Region66 HZB result has no pose samples")
+    if workload.get("poseCount") != len(samples):
+        raise StreamingContractError("Region66 HZB workload poseCount disagrees with result samples")
+    visible_by_pose: dict[int, tuple[int, ...]] = {}
+    for index, sample in enumerate(samples):
+        if not isinstance(sample, dict):
+            raise StreamingContractError(f"Region66 HZB sample {index} is not an object")
+        pose_id = sample.get("poseId")
+        if isinstance(pose_id, bool) or not isinstance(pose_id, int) or pose_id < 0:
+            raise StreamingContractError(f"Region66 HZB sample {index} has an invalid poseId")
+        if pose_id in visible_by_pose:
+            raise StreamingContractError(f"Region66 HZB result has duplicate poseId {pose_id}")
+        candidate_count = sample.get("candidateCount")
+        if isinstance(candidate_count, bool) or not isinstance(candidate_count, int) or candidate_count < 0:
+            raise StreamingContractError(f"Region66 HZB pose {pose_id} has an invalid candidateCount")
+        if expected_candidate_counts is not None:
+            expected_count = expected_candidate_counts.get(int(pose_id))
+            if expected_count is None:
+                raise StreamingContractError(
+                    f"Region66 HZB pose {pose_id} is outside the expected CSR test split"
+                )
+            if candidate_count != int(expected_count):
+                raise StreamingContractError(
+                    f"Region66 HZB pose {pose_id} candidateCount {candidate_count} "
+                    f"does not match CSR row length {expected_count}"
+                )
+        visible_by_pose[int(pose_id)] = _formal_integer_list(
+            sample.get("visibleInstanceIds"),
+            f"Region66 HZB pose {pose_id} visibleInstanceIds",
+        )
+    if set(visible_by_pose) != set(selected_in_result):
+        raise StreamingContractError(
+            "Region66 HZB samples do not exactly cover poseSelection.selectedPoseIndices"
+        )
+
+    requested = [int(value) for value in selected_pose_ids]
+    if len(requested) != len(set(requested)):
+        raise StreamingContractError("expected Region66 test pose IDs must be unique")
+    missing = sorted(set(requested) - set(visible_by_pose))
+    extra = sorted(set(visible_by_pose) - set(requested))
+    if missing or extra:
+        raise StreamingContractError(
+            "formal Region66 HZB pose set does not equal the complete CSR test split: "
+            f"missing={missing[:8]}, extra={extra[:8]}"
+        )
+    source = {
+        "kind": "formal_region66_test_result",
+        "schema": FORMAL_HZB_RESULT_SCHEMA,
+        "path": str(resolved),
+        "scene": workload_scene,
+        "mode": FORMAL_HZB_MODE,
+        "split": "test",
+        "testRead": True,
+        "formalReady": True,
+        "executionClass": "formal-hardware-gpu",
+        "visibleUnit": "instance_ids",
+        "continuousScore": False,
+        "poseCount": len(visible_by_pose),
+        "selectedPoseCount": len(selected_in_result),
+    }
+    return visible_by_pose, source
+
+
+def attach_formal_region66_visible_glbs(
+    records: Sequence[PoseRecord],
+    loaded_poses: Sequence[Any],
+    visible_instance_ids_by_pose: Mapping[int, Sequence[int]],
+    instance_to_glb: Mapping[int, int],
+) -> list[PoseRecord]:
+    """Map formal Region66 instance IDs to each pose's existing GLB candidate set."""
+
+    loaded_by_pose = {int(loaded.record.pose_id): loaded for loaded in loaded_poses}
+    result: list[PoseRecord] = []
+    for pose in records:
+        loaded = loaded_by_pose.get(int(pose.pose_id))
+        if loaded is None:
+            raise StreamingContractError(f"no CSR input row for pose {pose.pose_id}")
+        if pose.pose_id not in visible_instance_ids_by_pose:
+            raise StreamingContractError(f"Region66 result has no visible set for pose {pose.pose_id}")
+        candidate_instances = set(int(value) for value in loaded.candidate_instance_ids.tolist())
+        visible_instances = tuple(int(value) for value in visible_instance_ids_by_pose[pose.pose_id])
+        unknown_instances = sorted(set(visible_instances) - set(instance_to_glb))
+        if unknown_instances:
+            raise StreamingContractError(
+                f"Region66 pose {pose.pose_id} contains unknown instance IDs: {unknown_instances[:8]}"
+            )
+        outside = sorted(set(visible_instances) - candidate_instances)
+        if outside:
+            raise StreamingContractError(
+                f"Region66 pose {pose.pose_id} visible instances are outside its CSR candidates: {outside[:8]}"
+            )
+        visible_glbs = tuple(sorted({int(instance_to_glb[instance_id]) for instance_id in visible_instances}))
+        if not set(visible_glbs).issubset(set(pose.candidate_glb_ids)):
+            raise StreamingContractError(
+                f"Region66 pose {pose.pose_id} visible GLBs are outside its candidate GLB set"
+            )
+        result.append(replace(pose, hzb_visible_glb_ids=visible_glbs))
+    return result
+
+
+def ordered_hzb_glb_ids_for_pose(pose: PoseRecord, assets: Mapping[int, GlbAsset]) -> tuple[int, ...]:
+    """Return the formal HZB visible-first permutation without HZB scores."""
+
+    if pose.hzb_visible_glb_ids is None:
+        raise StreamingContractError(f"pose {pose.pose_id} has no formal Region66 visible set")
+    candidate = set(pose.candidate_glb_ids)
+    visible = set(pose.hzb_visible_glb_ids)
+    unknown = visible - candidate
+    if unknown:
+        raise StreamingContractError(
+            f"pose {pose.pose_id} HZB visible set contains non-candidate GLBs: {sorted(unknown)[:8]}"
+        )
+
+    visible_order_rule = None
+    visible_scores: Mapping[int, Any] = {}
+    for rule in ("projected_area_per_byte", "projected_area"):
+        values = pose.rank_scores.get(rule)
+        finite_visible_scores = False
+        if isinstance(values, Mapping) and visible.issubset(values):
+            try:
+                finite_visible_scores = all(
+                    np.isfinite(float(values[glb_id])) for glb_id in visible
+                )
+            except (TypeError, ValueError):
+                finite_visible_scores = False
+        if (
+            isinstance(values, Mapping)
+            and visible.issubset(values)
+            and finite_visible_scores
+        ):
+            visible_order_rule = rule
+            visible_scores = values
+            break
+    if visible and visible_order_rule is None:
+        raise StreamingContractError(
+            f"pose {pose.pose_id} has no registered projected-area score for HZB visible-first ordering"
+        )
+
+    visible_order = sorted(
+        visible,
+        key=lambda glb_id: (-float(visible_scores.get(glb_id, 0.0)), int(glb_id)),
+    )
+    invisible_order = sorted(
+        candidate - visible,
+        key=lambda glb_id: (int(assets[glb_id].original_rank), int(glb_id)),
+    )
+    return tuple(visible_order + invisible_order)
+
+
+def simulate_hzb_ranked_pose(
+    pose: PoseRecord,
+    assets: Mapping[int, GlbAsset],
+    *,
+    target_coverages: Sequence[float] = TARGET_COVERAGES,
+    bandwidths_mbps: Sequence[int] = BANDWIDTHS_MBPS,
+) -> dict[str, Any]:
+    """Replay the formal HZB permutation using the common cold-cache metrics."""
+
+    ordered = ordered_hzb_glb_ids_for_pose(pose, assets)
+    # ``simulate_ranked_pose`` already implements the atomic-GLB accounting.
+    # Reusing its original-order branch through a private asset view preserves
+    # the exact permutation without manufacturing a continuous HZB score map.
+    permutation_assets = {
+        int(glb_id): replace(assets[int(glb_id)], original_rank=index)
+        for index, glb_id in enumerate(ordered)
+    }
+    result = simulate_ranked_pose(
+        pose,
+        permutation_assets,
+        "original",
+        target_coverages=target_coverages,
+        bandwidths_mbps=bandwidths_mbps,
+    )
+    result["method"] = "hzb_visible_first"
+    result["rankingInput"] = hzb_ordering_metadata()
+    return result
+
+
+def hzb_ordering_metadata() -> dict[str, Any]:
+    return {
+        "kind": "formal_region66_visible_set",
+        "continuousScore": False,
+        "visibleGroup": "formal Region66 visibleInstanceIds mapped to GLBs",
+        "visibleGroupOrder": "projected_area_per_byte descending, globalGlbId ascending; projected_area fallback",
+        "nonVisibleGroupOrder": "original GLB index ascending, globalGlbId ascending",
+    }
 
 
 def main() -> None:
@@ -146,7 +482,6 @@ def main() -> None:
         pose_limit=args.pose_limit,
         utility_source=args.utility_source,
         reference_frontmost_path=args.reference_frontmost,
-        hzb_visible_path=args.hzb_visible,
     )
     selected_pose_ids = [pose.record.pose_id for pose in loaded_poses]
     score_by_pose, score_manifest = load_score_sidecar(
@@ -156,22 +491,98 @@ def main() -> None:
     )
     records = attach_geometry_scores(loaded_poses, assets, score_by_pose, instance_to_glb)
 
+    hzb_source: dict[str, Any] | None = None
+    hzb_unavailable_reason: str | None = None
+    if args.hzb_region66_result is None:
+        hzb_unavailable_reason = "formal Region66 test result was not supplied"
+    elif args.split != "test":
+        hzb_unavailable_reason = "formal Region66 visible-first input is test-only"
+    else:
+        try:
+            test_dataset = PoseCSRDataset(args.dataset_dir, num_instances=len(instance_to_glb))
+            complete_test_pose_ids = test_dataset.split("test").pose_indices.astype(np.int64, copy=False).tolist()
+            expected_candidate_counts = {
+                int(pose_id): int(test_dataset.candidate_slice(int(pose_id)).size)
+                for pose_id in complete_test_pose_ids
+            }
+            hzb_instances, hzb_source = load_formal_region66_test_result(
+                args.hzb_region66_result,
+                complete_test_pose_ids,
+                expected_scene=str(asset_meta.get("sceneName", "")),
+                expected_candidate_counts=expected_candidate_counts,
+            )
+            records = attach_formal_region66_visible_glbs(
+                records,
+                loaded_poses,
+                hzb_instances,
+                instance_to_glb,
+            )
+        except (FileNotFoundError, OSError, StreamingContractError, ValueError) as error:
+            hzb_source = None
+            hzb_unavailable_reason = f"formal Region66 result unavailable: {error}"
+
     ranking_rows: list[dict[str, Any]] = []
-    unavailable_reasons: dict[str, str] = {}
+    unavailable_reasons: dict[str, str] = {
+        str(name): str(reason)
+        for name, reason in (score_manifest.get("unavailableSources", {}) or {}).items()
+    }
+    score_sources = score_manifest.get("scoreSources", {})
+    if "aabb" in methods and not _formal_aabb_source(
+        score_sources.get("aabb") if isinstance(score_sources, dict) else None
+    ):
+        unavailable_reasons["aabb"] = (
+            "formal AABB test sidecar is unavailable; legacy runner/fallback scores are not accepted"
+        )
+    if hzb_unavailable_reason is not None:
+        unavailable_reasons["hzb_visible_first"] = hzb_unavailable_reason
     fractional_bounds: dict[str, list[int | None]] = {
         str(target): [] for target in TARGET_COVERAGES
     }
+    hzb_ordering_ready = hzb_source is not None
+    if hzb_source is not None and "hzb_visible_first" in methods:
+        try:
+            for pose in records:
+                ordered_hzb_glb_ids_for_pose(pose, assets)
+        except StreamingContractError as error:
+            hzb_ordering_ready = False
+            unavailable_reasons["hzb_visible_first"] = f"formal Region66 ordering unavailable: {error}"
+
+    required_score_methods = {
+        "full",
+        "aabb",
+        "distance",
+        "projected_area",
+        "projected_area_per_byte",
+    }
+    for method in methods:
+        if method in required_score_methods and any(method not in pose.rank_scores for pose in records):
+            unavailable_reasons.setdefault(
+                method,
+                f"continuous score input for {method} is unavailable for one or more selected poses",
+            )
+        if method == "hzb_visible_first" and not hzb_ordering_ready:
+            unavailable_reasons.setdefault(
+                method,
+                hzb_unavailable_reason or "formal Region66 visible-first ordering is unavailable",
+            )
+
     simulation_started = time.perf_counter()
     for ordinal, pose in enumerate(records, start=1):
         method_rows: dict[str, dict[str, Any]] = {}
+        ranking_inputs: dict[str, dict[str, Any]] = {}
         for method in methods:
-            if method == "hzb_visible_first" and pose.hzb_visible_glb_ids is None:
-                unavailable_reasons[method] = "no --hzb-visible sidecar was supplied"
+            if method in unavailable_reasons:
                 continue
             try:
-                method_rows[method] = simulate_ranked_pose(pose, assets, method)
-            except StreamingContractError as error:
+                method_rows[method] = (
+                    simulate_hzb_ranked_pose(pose, assets)
+                    if method == "hzb_visible_first"
+                    else simulate_ranked_pose(pose, assets, method)
+                )
                 if method == "hzb_visible_first":
+                    ranking_inputs[method] = hzb_ordering_metadata()
+            except StreamingContractError as error:
+                if method in required_score_methods or method == "hzb_visible_first":
                     unavailable_reasons[method] = str(error)
                     continue
                 raise
@@ -182,6 +593,7 @@ def main() -> None:
                 "candidateGlbIds": list(pose.candidate_glb_ids),
                 "gtGlbIds": list(pose.gt_glb_ids),
                 "methods": method_rows,
+                "rankingInputs": ranking_inputs,
             }
         )
         for target in TARGET_COVERAGES:
@@ -201,10 +613,28 @@ def main() -> None:
         target_coverages=TARGET_COVERAGES,
         bandwidths_mbps=BANDWIDTHS_MBPS,
     )
+    for method, reason in unavailable_reasons.items():
+        method_summary = ranking_summary.get("methods", {}).get(method)
+        if isinstance(method_summary, dict) and method_summary.get("status") != "available":
+            method_summary["reason"] = reason
     ranking_summary["scene"] = asset_meta
     ranking_summary["split"] = args.split
     ranking_summary["poseCount"] = len(records)
     ranking_summary["coverageSource"] = _coverage_source_name(args.utility_source)
+    ranking_summary["scoreSources"] = score_sources if isinstance(score_sources, dict) else {}
+    formal_aabb_input = (
+        score_sources.get("aabb")
+        if isinstance(score_sources, dict) and _formal_aabb_source(score_sources.get("aabb"))
+        else None
+    )
+    ranking_summary["rankingInputs"] = {
+        "aabb": formal_aabb_input
+        or {"kind": "unavailable", "reason": unavailable_reasons.get("aabb", "no formal AABB score input")},
+        "hzb_visible_first": hzb_source or {
+            "kind": "unavailable",
+            "reason": unavailable_reasons.get("hzb_visible_first", "no formal Region66 test result"),
+        },
+    }
     ranking_summary["source"] = {
         "datasetDir": str(Path(args.dataset_dir).expanduser().resolve()),
         "runtimeMeta": str(Path(args.runtime_meta).expanduser().resolve()),
@@ -212,7 +642,7 @@ def main() -> None:
         "glbRoot": str(Path(args.glb_root).expanduser().resolve()),
         "scoreResultDir": str(Path(args.result_dir).expanduser().resolve()),
         "referenceFrontmost": str(args.reference_frontmost.expanduser().resolve()) if args.reference_frontmost else None,
-        "hzbVisible": str(args.hzb_visible.expanduser().resolve()) if args.hzb_visible else None,
+        "hzbRegion66Result": str(args.hzb_region66_result.expanduser().resolve()) if args.hzb_region66_result else None,
     }
     ranking_summary["unavailableReasons"] = unavailable_reasons
     ranking_summary["fractionalUtilityByteLowerBound"] = {
@@ -237,12 +667,13 @@ def main() -> None:
             args.include_runner_fallback_thresholds,
         )
     filter_rows: list[dict[str, Any]] = []
-    filter_methods: list[str] = []
+    filter_methods: list[str] = list(filter_thresholds)
+    filter_unavailable_reasons: dict[str, str] = {}
     by_pose_loaded = {pose.record.pose_id: pose for pose in loaded_poses}
     for method, threshold in filter_thresholds.items():
         if not any(method in fields for fields in score_by_pose.values()):
+            filter_unavailable_reasons[method] = f"no continuous score field for {method}"
             continue
-        filter_methods.append(method)
     for pose in records:
         loaded = by_pose_loaded[pose.pose_id]
         method_rows: dict[str, dict[str, Any]] = {}
@@ -277,6 +708,13 @@ def main() -> None:
     filtering_summary["coverageSource"] = _coverage_source_name(args.utility_source)
     filtering_summary["source"] = ranking_summary["source"]
     filtering_summary["thresholdSources"] = score_manifest.get("thresholdSources", {})
+    filtering_summary["scoreSources"] = ranking_summary["scoreSources"]
+    filtering_summary["rankingInputs"] = ranking_summary["rankingInputs"]
+    filtering_summary["unavailableReasons"] = filter_unavailable_reasons
+    for method, reason in filter_unavailable_reasons.items():
+        method_summary = filtering_summary.get("methods", {}).get(method)
+        if isinstance(method_summary, dict) and method_summary.get("status") != "available":
+            method_summary["reason"] = reason
     filtering_summary["note"] = (
         "Threshold filtering is a separate decision mode; its predicted subset is not used by ranking metrics."
     )
@@ -304,6 +742,8 @@ def main() -> None:
         "filterMethods": filter_methods,
         "filterThresholds": filter_thresholds,
         "coverageSource": _coverage_source_name(args.utility_source),
+        "scoreSources": ranking_summary["scoreSources"],
+        "rankingInputs": ranking_summary["rankingInputs"],
         "rankingSummary": "ranking_summary.json",
         "filteringSummary": "filtering_summary.json",
         "rankingPerPose": "ranking_per_pose.jsonl",

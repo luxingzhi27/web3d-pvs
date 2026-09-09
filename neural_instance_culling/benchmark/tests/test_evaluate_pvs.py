@@ -189,6 +189,39 @@ class PvsV4EvaluatorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             evaluator._frozen_threshold(checkpoint, summary, allow_unsafe=False)
 
+    def test_exact_calibration_is_checkpoint_specific_and_safe(self) -> None:
+        checkpoint = Path("/tmp/member/last.pt")
+        selected = {
+            "threshold": 0.5945902,
+            "aggregateWeightedRecall": 0.99043,
+            "aggregateWeightedRecallLowerConfidenceBound": 0.99001,
+            "agg_precision": 0.30,
+        }
+        summary = {
+            "schema": evaluator.EXACT_CALIBRATION_SCHEMA,
+            "split": "calibration",
+            "checkpoint": str(checkpoint),
+            "predictionRule": "score >= threshold",
+            "status": "safe",
+            "selection": {"threshold": selected["threshold"]},
+            "selected": selected,
+            "testRead": False,
+        }
+        threshold, source = evaluator._exact_frozen_threshold(checkpoint, summary)
+        self.assertAlmostEqual(threshold, selected["threshold"])
+        self.assertEqual(source["protocol"], "checkpoint_specific_exact_calibration")
+        self.assertTrue(source["safeWorkpoint"])
+
+        wrong = copy.deepcopy(summary)
+        wrong["checkpoint"] = "/tmp/member/other.pt"
+        with self.assertRaisesRegex(ValueError, "different checkpoint"):
+            evaluator._exact_frozen_threshold(checkpoint, wrong)
+
+        unsafe = copy.deepcopy(summary)
+        unsafe["selected"]["aggregateWeightedRecallLowerConfidenceBound"] = 0.99
+        with self.assertRaisesRegex(ValueError, "safety gate"):
+            evaluator._exact_frozen_threshold(checkpoint, unsafe)
+
     def test_v4_evaluator_rejects_a_legacy_checkpoint_before_asset_access(self) -> None:
         args = argparse.Namespace()
         with self.assertRaisesRegex(ValueError, "non-v4 checkpoint"):

@@ -9,9 +9,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { MODEL_FOV_Y_DEG } from './neuralpvs_fov_protocol.mjs';
 
-const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const HOST_GPU_EVIDENCE_FIELDS = ['hostGpuBefore', 'hostGpuDuring', 'hostGpuAfter'];
 
 function parseArgs(argv) {
   const args = {
@@ -75,6 +77,13 @@ function gpuEvidencePath(outputPath) {
   return `${outputPath}.gpu_evidence.json`;
 }
 
+function hasHostGpuEvidence(value) {
+  return value !== null
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.keys(value).length > 0;
+}
+
 function makeJobs(args) {
   const outputDir = args.outputDir;
   const logDir = path.join(outputDir, 'logs');
@@ -127,6 +136,9 @@ function writeGpuExecutionSummary(args, jobs) {
       throw new Error(`Missing sampler GPU evidence: ${evidencePath}`);
     }
     const record = JSON.parse(fs.readFileSync(evidencePath, 'utf8'));
+    const missingHostGpuEvidence = HOST_GPU_EVIDENCE_FIELDS.filter(
+      (field) => !hasHostGpuEvidence(record[field]),
+    );
     return {
       output: job.output,
       evidencePath,
@@ -137,18 +149,25 @@ function writeGpuExecutionSummary(args, jobs) {
       formalReady: Boolean(record.formalReady),
       gpuBackend: record.gpuBackend || null,
       gpuGate: record.gpuGate || null,
+      hostGpuBefore: record.hostGpuBefore || null,
       hostGpuDuring: record.hostGpuDuring || null,
+      hostGpuAfter: record.hostGpuAfter || null,
+      hostGpuEvidenceComplete: missingHostGpuEvidence.length === 0,
+      missingHostGpuEvidence,
       error: record.error || null,
     };
   });
-  const failed = evidence.filter((record) => !record.formalReady || record.error);
+  const failed = evidence.filter(
+    (record) => !record.formalReady || record.error || !record.hostGpuEvidenceComplete,
+  );
   const summary = {
-    schema: 'viewcell-color-id-sampler-gpu-execution-v1',
+    schema: 'viewcell-color-id-sampler-gpu-execution-v2',
     formalReady: failed.length === 0,
     scene: args.scene,
     posePlan: args.posePlan,
     outputDir: args.outputDir,
     requireHardwareGpu: true,
+    hostGpuEvidenceFields: HOST_GPU_EVIDENCE_FIELDS,
     jobs: evidence,
     failureCount: failed.length,
     capturedAt: new Date().toISOString(),
@@ -156,7 +175,9 @@ function writeGpuExecutionSummary(args, jobs) {
   const output = path.join(args.outputDir, 'gpu_execution_summary.json');
   fs.writeFileSync(output, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
   if (!summary.formalReady) {
-    throw new Error(`Formal sampler GPU evidence failed for ${failed.length} shard(s); see ${output}`);
+    const missing = failed.filter((record) => !record.hostGpuEvidenceComplete).length;
+    const missingMessage = missing ? `; ${missing} shard(s) are missing host GPU phase evidence` : '';
+    throw new Error(`Formal sampler GPU evidence failed for ${failed.length} shard(s)${missingMessage}; see ${output}`);
   }
   return summary;
 }
@@ -232,7 +253,17 @@ async function main() {
   console.log(JSON.stringify(gpuSummary, null, 2));
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+export {
+  HOST_GPU_EVIDENCE_FIELDS,
+  gpuEvidencePath,
+  makeJobs,
+  parseArgs,
+  writeGpuExecutionSummary,
+};
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}

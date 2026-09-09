@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import math
+import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +25,12 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RENDERER = ROOT / "benchmark" / "render_local_glb_color_id_browser.mjs"
+GPU_EVIDENCE_SCHEMA = "pvs-browser-hardware-gpu-evidence-v1"
+HZB_RESULT_SCHEMA = "geometry-shell-hzb-browser-result-v1"
+SOFTWARE_GPU_PATTERN = re.compile(
+    r"swiftshader|llvmpipe|softpipe|swrast|software|no-webgl",
+    re.IGNORECASE,
+)
 
 
 def read_json(path: Path) -> Any:
@@ -31,6 +40,277 @@ def read_json(path: Path) -> Any:
         raise FileNotFoundError(f"missing JSON input: {path}") from error
     except json.JSONDecodeError as error:
         raise ValueError(f"invalid JSON input {path}: {error}") from error
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _capture_gpu_snapshot(evidence_dir: Path, phase: str) -> dict[str, Any]:
+    """Capture both host GPU commands into one formal render window."""
+
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    commands = {
+        "nvidiaSmi": (
+            ["nvidia-smi"],
+            evidence_dir / f"nvidia_smi_{phase}.txt",
+        ),
+        "nvidiaSmiPmon": (
+            ["nvidia-smi", "pmon", "-c", "1", "-s", "um"],
+            evidence_dir / f"nvidia_smi_pmon_{phase}.txt",
+        ),
+    }
+    snapshot: dict[str, Any] = {
+        "schema": "pvs-gpu-host-snapshot-v1",
+        "phase": phase,
+        "capturedAt": _utc_now(),
+        "complete": True,
+        "observations": {},
+    }
+    for name, (command, path) in commands.items():
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=ROOT.parent,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            output = (completed.stdout or "") + (completed.stderr or "")
+            path.write_text(output, encoding="utf-8")
+            available = completed.returncode == 0 and bool(output.strip())
+            observation: dict[str, Any] = {
+                "command": command,
+                "path": str(path.resolve()),
+                "returnCode": int(completed.returncode),
+                "available": bool(available),
+            }
+            if name == "nvidiaSmiPmon":
+                observation["sampleCount"] = sum(
+                    1
+                    for line in output.splitlines()
+                    if re.match(r"^\s*\d+\s+\S+", line)
+                )
+            snapshot["observations"][name] = observation
+            snapshot["complete"] = bool(snapshot["complete"] and available)
+        except (OSError, subprocess.SubprocessError) as error:
+            path.write_text(str(error), encoding="utf-8")
+            snapshot["observations"][name] = {
+                "command": command,
+                "path": str(path.resolve()),
+                "returnCode": None,
+                "available": False,
+                "error": str(error),
+            }
+            snapshot["complete"] = False
+    return snapshot
+
+
+def _classify_gpu_backend(backend: Any) -> dict[str, Any]:
+    values = backend if isinstance(backend, dict) else {}
+    text = " ".join(str(values.get(key) or "") for key in ("vendor", "renderer", "version"))
+    marker = SOFTWARE_GPU_PATTERN.search(text)
+    return {
+        "vendor": str(values.get("vendor") or ""),
+        "renderer": str(values.get("renderer") or ""),
+        "version": str(values.get("version") or ""),
+        "hardware": bool(text.strip()) and marker is None,
+        "softwareMarkers": marker.group(0) if marker else None,
+    }
+
+
+def _host_evidence_complete(evidence: dict[str, Any]) -> bool:
+    phases = evidence.get("phases")
+    if not isinstance(phases, dict) or set(phases) != {"before", "during", "after"}:
+        return False
+    for phase_name, phase in phases.items():
+        if not isinstance(phase, dict) or phase.get("complete") is not True:
+            return False
+        observations = phase.get("observations")
+        if not isinstance(observations, dict):
+            return False
+        if any(
+            not isinstance(observations.get(name), dict)
+            or observations[name].get("available") is not True
+            for name in ("nvidiaSmi", "nvidiaSmiPmon")
+        ):
+            return False
+        if phase_name == "during" and phase.get("rendererProcessAlive") is not True:
+            return False
+        try:
+            sample_count = int(observations["nvidiaSmiPmon"].get("sampleCount", 0))
+        except (TypeError, ValueError):
+            return False
+        if sample_count <= 0:
+            return False
+    return True
+
+
+def _validate_formal_render_summary(
+    summary: dict[str, Any], manifest: dict[str, Any], gpu_evidence: dict[str, Any]
+) -> None:
+    if summary.get("error"):
+        raise RuntimeError(f"formal image renderer reported an error: {summary['error']}")
+    if summary.get("formalImageEvaluationReady") is not True:
+        raise RuntimeError("formal image renderer did not report formalImageEvaluationReady=true")
+    if "formalReady" in summary and summary.get("formalReady") is not True:
+        raise RuntimeError("formal image renderer reported formalReady=false")
+    if summary.get("componentIdShaderImplemented") is not True:
+        raise RuntimeError("formal image renderer did not report component-ID shader completion")
+    if summary.get("renderStatus") != "rendered_component_id_buffers":
+        raise RuntimeError("formal image renderer did not report complete component-ID buffers")
+    if int(summary.get("sampleCount", -1)) != len(manifest.get("samples") or []):
+        raise RuntimeError("formal image renderer did not evaluate every manifest sample")
+
+    backend = _classify_gpu_backend(summary.get("gpuBackend"))
+    raw_backend = summary.get("gpuBackend")
+    if (
+        not isinstance(raw_backend, dict)
+        or raw_backend.get("api") != "WebGL"
+        or not backend["vendor"]
+        or not backend["renderer"]
+        or backend["hardware"] is not True
+    ):
+        raise RuntimeError(
+            "formal image evaluation requires a hardware WebGL backend; "
+            f"reported renderer={backend['renderer'] or 'missing'}"
+        )
+    gate = summary.get("gpuGate")
+    if (
+        not isinstance(gate, dict)
+        or gate.get("required") is not True
+        or gate.get("hardware") is not True
+    ):
+        raise RuntimeError("formal image renderer did not pass its hardware GPU gate")
+    if gpu_evidence.get("complete") is not True or not _host_evidence_complete(gpu_evidence):
+        raise RuntimeError(
+            "formal image evaluation requires complete before/during/after nvidia-smi/pmon evidence"
+        )
+
+
+def run_formal_renderer(
+    command: list[str],
+    output_dir: Path,
+    manifest: dict[str, Any],
+    timeout_ms: int | None,
+) -> dict[str, Any]:
+    """Run the browser and attach host evidence from this exact process window."""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = output_dir / "render_summary.json"
+    summary_path.unlink(missing_ok=True)
+    evidence_dir = output_dir / "gpu_evidence"
+    evidence: dict[str, Any] = {
+        "schema": GPU_EVIDENCE_SCHEMA,
+        "required": True,
+        "formalReady": False,
+        "command": command,
+        "phases": {},
+        "startedAt": _utc_now(),
+    }
+    evidence["phases"]["before"] = _capture_gpu_snapshot(evidence_dir, "before")
+    process: subprocess.Popen[str] | None = None
+    timed_out = False
+    process_error: Exception | None = None
+    stdout_log = (output_dir / "renderer_stdout.log").open("w", encoding="utf-8")
+    stderr_log = (output_dir / "renderer_stderr.log").open("w", encoding="utf-8")
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=ROOT.parent,
+            stdout=stdout_log,
+            stderr=stderr_log,
+            text=True,
+        )
+        evidence["pid"] = int(process.pid)
+        # A formal render is long enough to observe the browser while this
+        # Node process is still alive. The alive bit makes the window auditable.
+        time.sleep(0.5)
+        during = _capture_gpu_snapshot(evidence_dir, "during")
+        during["rendererProcessAlive"] = process.poll() is None
+        during["complete"] = bool(during["complete"] and during["rendererProcessAlive"])
+        evidence["phases"]["during"] = during
+        communicate_timeout = None if timeout_ms is None else max(1.0, timeout_ms / 1000.0 + 10.0)
+        try:
+            process.communicate(timeout=communicate_timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            process.kill()
+            process.wait()
+    except Exception as error:
+        process_error = error
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+        stdout_log.close()
+        stderr_log.close()
+        evidence["phases"]["after"] = _capture_gpu_snapshot(evidence_dir, "after")
+        evidence["finishedAt"] = _utc_now()
+        evidence["returnCode"] = int(process.returncode) if process is not None and process.returncode is not None else None
+        evidence["timedOut"] = timed_out
+        evidence["phaseComplete"] = {
+            phase: bool(
+                details.get("complete", False)
+                and (phase != "during" or details.get("rendererProcessAlive") is True)
+            )
+            for phase, details in evidence["phases"].items()
+            if isinstance(details, dict)
+        }
+        evidence["complete"] = _host_evidence_complete(evidence)
+        for alias, phase in (
+            ("hostGpuBefore", "before"),
+            ("hostGpuDuring", "during"),
+            ("hostGpuAfter", "after"),
+        ):
+            snapshot = evidence["phases"].get(phase) or {}
+            evidence[alias] = {
+                "schema": snapshot.get("schema"),
+                "phase": phase,
+                "capturedAt": snapshot.get("capturedAt"),
+                "complete": snapshot.get("complete") is True,
+                "nvidiaSmi": (snapshot.get("observations") or {}).get("nvidiaSmi"),
+                "nvidiaSmiPmon": (snapshot.get("observations") or {}).get("nvidiaSmiPmon"),
+            }
+        evidence_json = json.dumps(evidence, ensure_ascii=False, indent=2) + "\n"
+        (evidence_dir / "hardware_gpu_evidence.json").write_text(evidence_json, encoding="utf-8")
+        (output_dir / "gpu_evidence.json").write_text(evidence_json, encoding="utf-8")
+
+    if summary_path.is_file():
+        summary_value = read_json(summary_path)
+        if not isinstance(summary_value, dict):
+            raise ValueError(f"renderer summary must be an object: {summary_path}")
+        summary = summary_value
+        summary["hardwareEvidence"] = evidence
+        gate = summary.get("gpuGate")
+        if isinstance(gate, dict):
+            summary["gpuGate"] = {
+                **gate,
+                "hostEvidenceRequired": True,
+                "hostEvidenceComplete": bool(evidence["complete"]),
+            }
+        summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    else:
+        summary = None
+
+    if process_error is not None:
+        raise RuntimeError(f"failed to run formal image renderer: {process_error}") from process_error
+    if timed_out or process is None or process.returncode != 0:
+        raise RuntimeError(
+            "formal image renderer failed; see renderer_stdout.log and renderer_stderr.log "
+            f"(return code: {None if process is None else process.returncode})"
+        )
+    if summary is None:
+        raise FileNotFoundError(f"formal image renderer did not write {summary_path}")
+    _validate_formal_render_summary(summary, manifest, evidence)
+    evidence["formalReady"] = True
+    evidence_json = json.dumps(evidence, ensure_ascii=False, indent=2) + "\n"
+    (evidence_dir / "hardware_gpu_evidence.json").write_text(evidence_json, encoding="utf-8")
+    (output_dir / "gpu_evidence.json").write_text(evidence_json, encoding="utf-8")
+    summary["hardwareEvidence"] = evidence
+    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return summary
 
 
 def validate_test_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -106,8 +386,31 @@ def validate_test_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
             or baseline["regionSampleCount"] < 0
         ):
             raise ValueError("formal test image baseline regionSampleCount must be non-negative")
-        if not isinstance(baseline["sourceResult"], str) or not baseline["sourceResult"]:
+        source_result = baseline["sourceResult"]
+        if not isinstance(source_result, str) or not source_result:
             raise ValueError("formal test image baseline sourceResult must be non-empty")
+        source_path = Path(source_result).expanduser()
+        if not source_path.is_absolute():
+            raise ValueError("formal test image baseline sourceResult must be an absolute path")
+        try:
+            source_payload = read_json(source_path)
+        except (FileNotFoundError, ValueError) as error:
+            raise ValueError(
+                "formal test image baseline sourceResult must point to parseable JSON"
+            ) from error
+        if (
+            not isinstance(source_payload, dict)
+            or source_payload.get("schema") != HZB_RESULT_SCHEMA
+            or source_payload.get("mode") != "Region66"
+            or source_payload.get("formalReady") is not True
+            or source_payload.get("executionClass") != "formal-hardware-gpu"
+            or not isinstance(source_payload.get("gpuGate"), dict)
+            or source_payload["gpuGate"].get("required") is not True
+            or source_payload["gpuGate"].get("hardware") is not True
+        ):
+            raise ValueError(
+                "formal test image baseline sourceResult must be a formal Region66 HZB result"
+            )
         selection_method = "geometry-shell-hzb"
 
     coverage = manifest.get("testCoverage")
@@ -216,9 +519,12 @@ def main() -> None:
             indent=2,
         )
     )
-    result = subprocess.run(command, check=False)
-    if result.returncode != 0:
-        raise RuntimeError(f"formal image renderer failed with exit code {result.returncode}")
+    if args.render_schema_only:
+        result = subprocess.run(command, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(f"formal image renderer failed with exit code {result.returncode}")
+        return
+    run_formal_renderer(command, output_dir, manifest, args.timeout_ms)
 
 
 if __name__ == "__main__":

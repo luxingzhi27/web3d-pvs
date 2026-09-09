@@ -31,6 +31,7 @@ MODEL_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-envelope-v
 CHECKPOINT_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-checkpoint-v4"
 TRAINING_PROTOCOL_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-training-v4"
 CALIBRATION_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-calibration-v4"
+EXACT_CALIBRATION_SCHEMA = "pvs-ifcbench-v4-exact-calibration-v1"
 EXPORT_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-runtime-v4"
 QUERY_WEIGHTS_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-query-weights-v4"
 
@@ -96,6 +97,10 @@ V4_VARIANT_CONTRACTS: dict[str, tuple[str, str]] = {
     "core_no_moment": ("pose_balanced_rvl_contrastive", "residual"),
     "core_no_recall_guard": ("pose_balanced_rvl_contrastive", "residual"),
     "core_no_tail_margin": ("pose_balanced_rvl_contrastive", "residual"),
+    "ifcbench_warm_start_boundary_removed_rvl030_boundary000_margin050_temp025_lr2e-5": (
+        "pose_balanced_rvl_contrastive",
+        "residual",
+    ),
 }
 
 def _as_mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -189,6 +194,53 @@ def _load_checkpoint(path: Path) -> dict[str, Any]:
     if not isinstance(payload, Mapping):
         raise ValueError("checkpoint must contain a mapping")
     return dict(payload)
+
+
+def _inherited_source_checkpoint(
+    checkpoint: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    initialization = checkpoint.get("initialization")
+    if not isinstance(initialization, Mapping):
+        protocol = checkpoint.get("protocol")
+        initialization = (
+            protocol.get("initialization") if isinstance(protocol, Mapping) else None
+        )
+    if (
+        not isinstance(initialization, Mapping)
+        or initialization.get("mode") != "from-checkpoint"
+    ):
+        return None
+    source_path = initialization.get("checkpoint")
+    if not source_path:
+        raise ValueError("warm-start checkpoint has no initialization checkpoint path")
+    source = _load_checkpoint(Path(str(source_path)).expanduser().resolve())
+    if (
+        source.get("schema") != CHECKPOINT_SCHEMA
+        or source.get("runtimeSchema") != MODEL_SCHEMA
+        or source.get("testRead") is not False
+    ):
+        raise ValueError("warm-start source checkpoint has an invalid V4 contract")
+    return source
+
+
+def _effective_protocol(
+    checkpoint: Mapping[str, Any], source: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    protocol = dict(_as_mapping(checkpoint.get("protocol"), "checkpoint.protocol"))
+    if source is None:
+        return protocol
+    source_protocol = _as_mapping(source.get("protocol"), "source checkpoint.protocol")
+    for key in (
+        "dataset",
+        "runtimeMeta",
+        "sampler",
+        "fov",
+        "viewcell",
+        "occlusionRepresentation",
+    ):
+        if key not in protocol and key in source_protocol:
+            protocol[key] = source_protocol[key]
+    return protocol
 
 
 def _validate_checkpoint_schema(checkpoint: Mapping[str, Any]) -> None:
@@ -823,7 +875,9 @@ def _find_nested_value(containers: list[Mapping[str, Any]], keys: tuple[str, ...
 
 
 def _training_provenance(
-    checkpoint: Mapping[str, Any], representation_mode: str
+    checkpoint: Mapping[str, Any],
+    representation_mode: str,
+    protocol: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate checkpoint provenance with explainable structural fields only.
 
@@ -839,7 +893,11 @@ def _training_provenance(
                 return _positive_int(container[name], f"relation.{name}", allow_zero=True)
         return None
 
-    protocol = _as_mapping(checkpoint.get("protocol"), "checkpoint.protocol")
+    protocol = (
+        _as_mapping(protocol, "effective checkpoint.protocol")
+        if protocol is not None
+        else _as_mapping(checkpoint.get("protocol"), "checkpoint.protocol")
+    )
     relation = _as_mapping(checkpoint.get("relation"), "checkpoint.relation")
     if representation_mode == "survival":
         if relation.get("schema") != RELATION_SCHEMA_V3:
@@ -1076,13 +1134,101 @@ def _resolve_threshold(
     }
 
 
-def _viewcell_contract(checkpoint: Mapping[str, Any], config: Mapping[str, Any]) -> dict[str, Any]:
+def _resolve_exact_threshold(
+    checkpoint_path: Path,
+    calibration_path: Path,
+    requested: float | None = None,
+) -> tuple[float, dict[str, Any]]:
+    calibration = _as_mapping(
+        json.loads(calibration_path.read_text(encoding="utf-8")),
+        "exact calibration",
+    )
+    if calibration.get("schema") != EXACT_CALIBRATION_SCHEMA:
+        raise ValueError(
+            f"external calibration schema must be {EXACT_CALIBRATION_SCHEMA!r}"
+        )
+    if (
+        calibration.get("split") != "calibration"
+        or calibration.get("testRead") is not False
+    ):
+        raise ValueError("external calibration must be test-free calibration data")
+    declared_checkpoint = calibration.get("checkpoint")
+    if (
+        declared_checkpoint is None
+        or Path(str(declared_checkpoint)).resolve() != checkpoint_path
+    ):
+        raise ValueError("external calibration belongs to a different checkpoint")
+    if calibration.get("predictionRule") != "score >= threshold":
+        raise ValueError("external calibration prediction rule is invalid")
+    if calibration.get("status") != "safe":
+        raise ValueError("external calibration has no safe workpoint")
+    selection = _as_mapping(
+        calibration.get("selection"), "exact calibration.selection"
+    )
+    selected = _as_mapping(calibration.get("selected"), "exact calibration.selected")
+    threshold = _threshold_value(selection, "threshold")
+    selected_threshold = _threshold_value(selected, "threshold")
+    if not 0.0 <= threshold <= 1.0 or abs(selected_threshold - threshold) > 1e-7:
+        raise ValueError("external calibration threshold fields disagree")
+    weighted_recall = _threshold_value(selected, "aggregateWeightedRecall")
+    lower_bound = _threshold_value(
+        selected, "aggregateWeightedRecallLowerConfidenceBound"
+    )
+    if (
+        weighted_recall <= TARGET_WEIGHTED_RECALL
+        or lower_bound <= MINIMUM_WEIGHTED_RECALL_LCB
+    ):
+        raise ValueError("external calibration workpoint fails the weighted-recall safety gate")
+    if (
+        requested is not None
+        and abs(_finite_float(requested, "--threshold") - threshold) > 1e-7
+    ):
+        raise ValueError("--threshold must equal the external calibration threshold")
+    return threshold, {
+        "source": str(calibration_path),
+        "protocol": "checkpoint_specific_exact_calibration",
+        "thresholdSpace": "visibility_probability",
+        "targetWeightedRecall": TARGET_WEIGHTED_RECALL,
+        "minimumWeightedRecallLowerConfidenceBound": MINIMUM_WEIGHTED_RECALL_LCB,
+        "weightedRecallField": "aggregateWeightedRecall",
+        "weightedRecallLowerConfidenceBoundField": "aggregateWeightedRecallLowerConfidenceBound",
+        "safe": True,
+        "status": "safe",
+        "selected": _compact_workpoint(selected),
+        "testEvaluationCount": 0,
+    }
+
+
+def _viewcell_contract(
+    checkpoint: Mapping[str, Any],
+    config: Mapping[str, Any],
+    *,
+    protocol: Mapping[str, Any] | None = None,
+    source_checkpoint: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     candidates: list[Mapping[str, Any]] = []
-    protocol = checkpoint.get("protocol")
+    protocol = protocol or checkpoint.get("protocol")
+    source_protocol = (
+        source_checkpoint.get("protocol")
+        if isinstance(source_checkpoint, Mapping)
+        else None
+    )
     for value in (
-        checkpoint.get("viewcell"),
-        checkpoint.get("viewCell"),
-        checkpoint.get("queryContract"),
+        source_checkpoint.get("viewcell")
+        if isinstance(source_checkpoint, Mapping)
+        else checkpoint.get("viewcell"),
+        source_checkpoint.get("viewCell")
+        if isinstance(source_checkpoint, Mapping)
+        else checkpoint.get("viewCell"),
+        source_checkpoint.get("queryContract")
+        if isinstance(source_checkpoint, Mapping)
+        else checkpoint.get("queryContract"),
+        source_protocol.get("viewcell")
+        if isinstance(source_protocol, Mapping)
+        else None,
+        source_protocol.get("viewCell")
+        if isinstance(source_protocol, Mapping)
+        else None,
         config.get("viewcell") if isinstance(config, Mapping) else None,
         config.get("viewCell") if isinstance(config, Mapping) else None,
         protocol.get("viewcell") if isinstance(protocol, Mapping) else None,
@@ -1105,7 +1251,7 @@ def _viewcell_contract(checkpoint: Mapping[str, Any], config: Mapping[str, Any])
     if radius <= 0.0:
         raise ValueError("viewcell radius must be positive")
 
-    protocol = _as_mapping(checkpoint.get("protocol"), "checkpoint.protocol")
+    protocol = _as_mapping(protocol, "effective checkpoint.protocol")
     dataset = _as_mapping(protocol.get("dataset"), "checkpoint.protocol.dataset")
     dataset_path = Path(str(dataset.get("path", ""))).expanduser().resolve()
     dataset_meta_path = dataset_path / "dataset_meta.json"
@@ -1478,13 +1624,30 @@ def _prepare_export(args: argparse.Namespace) -> tuple[Path, dict[str, bytes], d
     checkpoint = _load_checkpoint(checkpoint_path)
     runtime_config = _validate_model_config(checkpoint)
     representation_mode = str(runtime_config["occlusionRepresentation"]["mode"])
+    source_checkpoint = _inherited_source_checkpoint(checkpoint)
+    effective_protocol = _effective_protocol(checkpoint, source_checkpoint)
     viewcell = _viewcell_contract(
-        checkpoint, checkpoint.get("config", checkpoint.get("modelConfig", {}))
+        checkpoint,
+        checkpoint.get("config", checkpoint.get("modelConfig", {})),
+        protocol=effective_protocol,
+        source_checkpoint=source_checkpoint,
     )
-    provenance = _training_provenance(checkpoint, representation_mode)
-    threshold, threshold_info = _resolve_threshold(
-        checkpoint, args.threshold, bool(args.allow_unsafe_threshold)
+    provenance = _training_provenance(
+        checkpoint, representation_mode, effective_protocol
     )
+    if args.calibration is not None:
+        if bool(args.allow_unsafe_threshold):
+            raise ValueError("external exact calibration cannot be exported as unsafe")
+        calibration_path = Path(args.calibration).expanduser().resolve()
+        if not calibration_path.is_file():
+            raise FileNotFoundError(f"missing external calibration: {calibration_path}")
+        threshold, threshold_info = _resolve_exact_threshold(
+            checkpoint_path, calibration_path, args.threshold
+        )
+    else:
+        threshold, threshold_info = _resolve_threshold(
+            checkpoint, args.threshold, bool(args.allow_unsafe_threshold)
+        )
     num_instances = int(runtime_config["numInstances"])
     num_glbs = int(runtime_config["numGlbs"])
     runtime_features, runtime_feature_info = _load_runtime_features(
@@ -1588,6 +1751,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--runtime-meta", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--calibration",
+        default=None,
+        help="Checkpoint-specific exact calibration summary used by the IFCBench final model.",
+    )
     parser.add_argument(
         "--threshold",
         type=float,

@@ -25,7 +25,7 @@ validator 负责。
 
 入口：`neural_instance_culling/benchmark/run_test_image_evaluation.py`。
 
-Runner 不加载模型、不选择阈值、不重算预测，不复制 manifest validator，不抓取 `nvidia-smi`，也不写入 renderer 的 GPU evidence。它完成最小字段门控后直接调用现有正式 renderer；选择门接受校准冻结的神经阈值或 HZB 基线二选一：
+Runner 不加载模型、不选择阈值、不重算预测，也不复制 manifest validator。它完成最小字段门控后调用现有正式 renderer；实际渲染时由 runner 在同一个 Node renderer 执行窗口采集宿主机 `nvidia-smi`/`pmon` 的 before/during/after 证据，并写入 `<output-dir>/gpu_evidence/`、`gpu_evidence.json` 和 `render_summary.json`。选择门接受校准冻结的神经阈值或 HZB 基线二选一：
 
 ```bash
 conda run --no-capture-output -n slm_pvs \
@@ -35,7 +35,13 @@ conda run --no-capture-output -n slm_pvs \
   --require-hardware-gpu
 ```
 
-当前 renderer 的参数和证据门必须保持唯一来源：正式调用使用 `--require-hardware-gpu`，由 `render_local_glb_color_id_browser.mjs` 负责 Chrome Vulkan/ANGLE 参数、页面 `gpuBackend`/`gpuGate`、浏览器日志和同一执行窗口的主机证据。HKUST 与 IFCBench 分别执行一次，不能把两个场景的 component ID 或资产清单合并。
+当前 renderer 的参数和浏览器证据门必须保持唯一来源：正式调用使用
+`--require-hardware-gpu`，由 `render_local_glb_color_id_browser.mjs` 负责 Chrome
+Vulkan/ANGLE 参数、页面 `gpuBackend`/`gpuGate` 和浏览器日志；runner 负责同一
+Node 执行窗口的宿主机证据。正式运行只有在 WebGL 后端不是软件实现、三阶段
+`nvidia-smi`/`pmon` 均可解析且 during 阶段确实处于 renderer 进程存活期间、并且
+summary 报告 `formalImageEvaluationReady=true` 时才成功。HKUST 与 IFCBench 分别
+执行一次，不能把两个场景的 component ID 或资产清单合并。
 
 不启动浏览器的 schema 检查：
 
@@ -48,7 +54,10 @@ CUDA_VISIBLE_DEVICES= conda run --no-capture-output -n slm_pvs \
   --render-schema-only
 ```
 
-`--render-schema-only` 只调用现有 Node renderer 的 `--validate-only`，输出由 renderer 写入 `render_summary.json`；它不是正式图像结果。
+`--render-schema-only` 只调用现有 Node renderer 的 `--validate-only`，输出由 renderer
+写入 `render_summary.json`；它不会启动 Chrome、不会生成 GPU evidence，也不是正式
+图像结果。正式运行缺少任一阶段证据、后端被判定为软件或 summary 的
+`formalImageEvaluationReady` 为 false 时都会失败。
 
 ## 定性样本清单
 
@@ -84,9 +93,21 @@ conda run --no-capture-output -n slm_pvs \
 本次追加提交收敛 HZB formal-v2 转换入口：
 
 - `build_hzb_image_manifest.py`：将 Region66 实例预测转换为 formal-v2 keyed manifest；
+- `run_test_image_evaluation.py`：正式浏览器执行的同窗口 host GPU evidence 和
+  `formalImageEvaluationReady`/WebGL 硬件门；
 - `test_build_hzb_image_manifest.py`：转换契约和 schema-only renderer；
+- `test_run_test_image_evaluation.py`：host evidence 完整性、软件后端和 formal-ready
+  失败路径；
 - 本文档、HZB 转换契约文档和 `docs/README.md` 索引。
 
-验证命令为 benchmark tests 全集；使用 `CUDA_VISIBLE_DEVICES=` 的 `slm_pvs`
-环境，不启动 GPU、Chrome 或正式 Color-ID 渲染。正式 test 图像数值结果需在硬件
-空闲且所有输入冻结后，通过上述单场景入口执行。
+相关单测命令为：
+
+```bash
+python -m unittest \
+  neural_instance_culling.benchmark.tests.test_run_test_image_evaluation \
+  neural_instance_culling.benchmark.tests.test_build_hzb_image_manifest
+```
+
+结果：`16 tests`、`OK`。测试使用 schema-only Node renderer、fake renderer 和
+fake `nvidia-smi`，不启动 GPU、Chrome 或正式 Color-ID 渲染。正式 test 图像数值
+结果需在硬件空闲且所有输入冻结后，通过上述单场景入口执行。

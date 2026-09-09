@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 
@@ -22,7 +23,17 @@ from glb_streaming import (  # noqa: E402
     summarize_ranking_results,
 )
 from build_reference_frontmost_histogram import build_reference_histogram  # noqa: E402
+from export_glb_streaming_scores import load_formal_aabb_test_sidecar  # noqa: E402
+from export_glb_streaming_scores import _model_sources  # noqa: E402
 from generate_streaming_paper_outputs import scene_display_name, summary_row  # noqa: E402
+from score_sidecar import ScoreSidecarWriter  # noqa: E402
+from simulate_glb_streaming import (  # noqa: E402
+    attach_formal_region66_visible_glbs,
+    hzb_ordering_metadata,
+    load_formal_region66_test_result,
+    ordered_hzb_glb_ids_for_pose,
+    simulate_hzb_ranked_pose,
+)
 
 
 def assets() -> dict[int, GlbAsset]:
@@ -219,6 +230,168 @@ class GlbStreamingContractTests(unittest.TestCase):
         self.assertEqual(row["predicted_bytes_mean"], 100)
         self.assertAlmostEqual(row["predicted_byte_ratio_mean"], 1 / 3)
         self.assertIsNone(row["bytes_at_99_mean"])
+
+    def test_formal_aabb_sidecar_is_loaded_as_continuous_candidate_aligned_scores(self) -> None:
+        class DatasetFixture:
+            def candidate_slice(self, pose_id: int) -> np.ndarray:
+                return np.asarray({10: [0, 2]}[pose_id], dtype=np.uint32)
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            sidecar = Path(directory) / "aabb_test.sidecar"
+            with ScoreSidecarWriter(sidecar, split="test", threshold=0.73) as writer:
+                writer.append_pose(
+                    10,
+                    np.asarray([0, 2], dtype=np.uint32),
+                    np.asarray([0.21, 0.89], dtype=np.float32),
+                    np.asarray([0, 1], dtype=np.uint8),
+                    np.asarray([0.0, 1.0], dtype=np.float32),
+                )
+            scores, source = load_formal_aabb_test_sidecar(
+                sidecar,
+                DatasetFixture(),
+                np.asarray([10], dtype=np.int64),
+            )
+
+        np.testing.assert_allclose(scores[10], [0.21, 0.89])
+        self.assertEqual(source["kind"], "formal_aabb_test_sidecar")
+        self.assertTrue(source["testRead"])
+        self.assertEqual(source["continuousScoreField"], "scores")
+
+    def test_formal_region66_result_maps_instances_and_uses_projected_area_per_byte(self) -> None:
+        import json
+        import tempfile
+
+        payload = {
+            "schema": "geometry-shell-hzb-browser-result-v1",
+            "mode": "Region66",
+            "formalReady": True,
+            "executionClass": "formal-hardware-gpu",
+            "gpuGate": {"required": True, "hardware": True},
+            "workload": {
+                "schema": "geometry-shell-hzb-browser-workload-v1",
+                "scene": "fixture-scene",
+                "split": "test",
+                "poseCount": 1,
+                "fovYDeg": 66,
+                "poseSelection": {
+                    "split": "test",
+                    "selectedPoseIndices": [10],
+                    "selectedPoseCount": 1,
+                    "limit": 0,
+                    "representative": True,
+                },
+                "provenance": {
+                    "configuration": {"fovYDeg": 60, "regionFovYDeg": 66},
+                },
+            },
+            "samples": [
+                {"poseId": 10, "candidateCount": 3, "visibleInstanceIds": [0, 2]},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            result_path = Path(directory) / "region66.json"
+            result_path.write_text(json.dumps(payload), encoding="utf-8")
+            visible, source = load_formal_region66_test_result(
+                result_path,
+                [10],
+                expected_scene="fixture-scene",
+                expected_candidate_counts={10: 3},
+            )
+
+        self.assertEqual(visible, {10: (0, 2)})
+        self.assertEqual(source["kind"], "formal_region66_test_result")
+        self.assertFalse(source["continuousScore"])
+
+        pose = PoseRecord(
+            pose_id=10,
+            ordinal=0,
+            candidate_glb_ids=(0, 1, 2),
+            gt_glb_ids=(0, 2),
+            rank_scores={"projected_area_per_byte": {0: 0.2, 1: 0.99, 2: 0.5}},
+        )
+        loaded = SimpleNamespace(
+            record=SimpleNamespace(pose_id=10),
+            candidate_instance_ids=np.asarray([0, 1, 2], dtype=np.uint32),
+        )
+        mapped = attach_formal_region66_visible_glbs(
+            [pose], [loaded], visible, {0: 0, 1: 1, 2: 2}
+        )[0]
+        self.assertNotIn("hzb_visible_first", mapped.rank_scores)
+        self.assertEqual(ordered_hzb_glb_ids_for_pose(mapped, assets()), (2, 0, 1))
+        ranking = simulate_hzb_ranked_pose(mapped, assets())
+        self.assertEqual(ranking["method"], "hzb_visible_first")
+        self.assertEqual(ranking["rankingInput"], hzb_ordering_metadata())
+        self.assertFalse(ranking["rankingInput"]["continuousScore"])
+
+    def test_formal_region66_result_rejects_candidate_count_mismatch(self) -> None:
+        import json
+        import tempfile
+
+        payload = {
+            "schema": "geometry-shell-hzb-browser-result-v1",
+            "mode": "Region66",
+            "formalReady": True,
+            "executionClass": "formal-hardware-gpu",
+            "gpuGate": {"required": True, "hardware": True},
+            "workload": {
+                "schema": "geometry-shell-hzb-browser-workload-v1",
+                "scene": "fixture-scene",
+                "split": "test",
+                "poseCount": 1,
+                "fovYDeg": 66,
+                "poseSelection": {
+                    "split": "test",
+                    "selectedPoseIndices": [10],
+                    "selectedPoseCount": 1,
+                    "limit": 0,
+                    "representative": True,
+                },
+                "provenance": {
+                    "configuration": {"fovYDeg": 60, "regionFovYDeg": 66},
+                },
+            },
+            "samples": [
+                {"poseId": 10, "candidateCount": 2, "visibleInstanceIds": [0]},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            result_path = Path(directory) / "region66.json"
+            result_path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(StreamingContractError, "does not match CSR row length"):
+                load_formal_region66_test_result(
+                    result_path,
+                    [10],
+                    expected_scene="fixture-scene",
+                    expected_candidate_counts={10: 3},
+                )
+
+    def test_legacy_aabb_summary_is_unavailable_in_paper_outputs(self) -> None:
+        row = summary_row(
+            {
+                "coverageSource": "gt_glb_presence",
+                "methods": {},
+            },
+            Path("fixture/ranking_summary.json"),
+            "aabb",
+            {
+                "status": "available",
+                "decisionMode": "threshold_free_ranking",
+                "poseCount": 1,
+            },
+        )
+        self.assertEqual(row["status"], "unavailable")
+        self.assertIn("formal test score sidecar", row["availability_reason"])
+
+    def test_aabb_runner_spec_never_turns_into_a_fallback_source(self) -> None:
+        runner_specs, sidecar, requested = _model_sources(
+            [("aabb", {"kind": "aabb_ray", "checkpoint": "-"})],
+            None,
+        )
+        self.assertEqual(runner_specs, [])
+        self.assertIsNone(sidecar)
+        self.assertTrue(requested)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,8 @@
  * 重要参数：
  *   --grid-step 控制 XZ 采样密度；--width/--height 控制离屏 tile 分辨率；
  *   --yaws/--pitches 控制每个位置采样多少方向；--smoke 用于小规模测试。
+ *   默认模型采样严格使用 66 度；--point60-gt 只用于 canonical subpose=0 的
+ *   真实 60 度 Color-ID GT，并强制使用硬件 GPU 证据。
  *   默认要求浏览器回报硬件 WebGL 后端；只有显式传入 --allow-software-gpu
  *   才允许软件后端进行非正式语义调试。
  *   完整参数表见 INSTANCE_PVS_SCENE_MIGRATION_GUIDE.md 的“14.2 GPU Color-ID 备用采样器参数”。
@@ -26,6 +28,7 @@ import { MODEL_FOV_Y_DEG } from './neuralpvs_fov_protocol.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const POINT60_GT_FOV_Y_DEG = 60;
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const WEB_ROOT = path.join(__dirname, 'web');
 const DEFAULT_ASSETS_DIR = path.join(REPO_ROOT, 'hkust-v3', 'assets');
@@ -47,6 +50,8 @@ function parseArgs(argv) {
     width: 256,
     height: 144,
     fovYDeg: MODEL_FOV_Y_DEG,
+    fovYExplicit: false,
+    point60Gt: false,
     poseStart: 0,
     poseCount: 0,
     gridStep: 25,
@@ -99,6 +104,14 @@ function parseArgs(argv) {
       args.directionTilesPerAtlas = 36;
       continue;
     }
+    if (key === '--point60-gt') {
+      if (args.fovYExplicit && Math.abs(Number(args.fovYDeg) - POINT60_GT_FOV_Y_DEG) > 1e-6) {
+        throw new Error(`--point60-gt only supports a ${POINT60_GT_FOV_Y_DEG} degree FOV.`);
+      }
+      args.point60Gt = true;
+      args.fovYDeg = POINT60_GT_FOV_Y_DEG;
+      continue;
+    }
     if (key === '--require-hardware-gpu' || key === '--no-allow-software-gpu') {
       args.requireHardwareGpu = true;
       continue;
@@ -117,7 +130,10 @@ function parseArgs(argv) {
     else if (name === 'port') args.port = Number(value);
     else if (name === 'width') args.width = Number(value);
     else if (name === 'height') args.height = Number(value);
-    else if (name === 'fov-y-deg') args.fovYDeg = Number(value);
+    else if (name === 'fov-y-deg') {
+      args.fovYExplicit = true;
+      args.fovYDeg = Number(value);
+    }
     else if (name === 'pose-start') args.poseStart = Number(value);
     else if (name === 'pose-count') args.poseCount = Number(value);
     else if (name === 'grid-step') args.gridStep = Number(value);
@@ -142,10 +158,95 @@ function parseArgs(argv) {
     else if (name === 'road-search-cells') args.roadSearchCells = Number(value);
     else if (name === 'road-min-neighbors') args.roadMinNeighbors = Number(value);
   }
-  if (Math.abs(Number(args.fovYDeg) - MODEL_FOV_Y_DEG) > 1e-6) {
+  const expectedFovY = args.point60Gt ? POINT60_GT_FOV_Y_DEG : MODEL_FOV_Y_DEG;
+  if (Math.abs(Number(args.fovYDeg) - expectedFovY) > 1e-6) {
+    if (args.point60Gt) {
+      throw new Error(`--point60-gt only supports a ${POINT60_GT_FOV_Y_DEG} degree FOV.`);
+    }
     throw new Error(`The current sampler only supports the model FOV of ${MODEL_FOV_Y_DEG} degrees.`);
   }
+  if (args.point60Gt && !args.requireHardwareGpu) {
+    throw new Error('--point60-gt requires the hardware GPU gate; software GPU mode is not allowed.');
+  }
   return args;
+}
+
+function finitePlanVector(value, field, index, requireNonZero = false) {
+  if (!Array.isArray(value) || value.length !== 3 || value.some((item) => !Number.isFinite(Number(item)))) {
+    throw new Error(`Point60 pose ${index} has an invalid ${field}.`);
+  }
+  if (requireNonZero && Math.hypot(...value.map(Number)) <= 1e-8) {
+    throw new Error(`Point60 pose ${index} has a zero ${field}.`);
+  }
+}
+
+function validatePoint60Plan(posePlan) {
+  if (!Array.isArray(posePlan) || posePlan.length === 0) {
+    throw new Error('--point60-gt requires a non-empty canonical --pose-plan.');
+  }
+  const seenViewcellIds = new Set();
+  let viewport = null;
+  for (let index = 0; index < posePlan.length; index += 1) {
+    const pose = posePlan[index];
+    const viewcellId = Number(pose?.viewcell_id);
+    const subposeId = Number(pose?.subpose_id);
+    if (!Number.isInteger(viewcellId) || viewcellId < 0) {
+      throw new Error(`Point60 pose ${index} must have a non-negative integer viewcell_id.`);
+    }
+    if (pose?.pose_index !== undefined) {
+      const poseIndex = Number(pose.pose_index);
+      if (!Number.isInteger(poseIndex) || poseIndex < 0) {
+        throw new Error(`Point60 pose ${index} has an invalid pose_index.`);
+      }
+    }
+    if (seenViewcellIds.has(viewcellId)) {
+      throw new Error(`Point60 pose plan contains duplicate viewcell_id ${viewcellId}.`);
+    }
+    seenViewcellIds.add(viewcellId);
+    if (subposeId !== 0) {
+      throw new Error(`Point60 pose ${index} must use canonical subpose_id=0.`);
+    }
+    finitePlanVector(pose.camera_pos, 'camera_pos');
+    finitePlanVector(pose.camera_forward, 'camera_forward', true);
+
+    const fovY = Number(pose.fov_y);
+    if (!Number.isFinite(fovY) || Math.abs(fovY - POINT60_GT_FOV_Y_DEG) > 1e-6) {
+      throw new Error(`Point60 pose ${index} must have fov_y=${POINT60_GT_FOV_Y_DEG}.`);
+    }
+    if (pose.render_fov_y !== undefined
+      && Math.abs(Number(pose.render_fov_y) - POINT60_GT_FOV_Y_DEG) > 1e-6) {
+      throw new Error(`Point60 pose ${index} must have render_fov_y=${POINT60_GT_FOV_Y_DEG}.`);
+    }
+    const aspect = Number(pose.aspect);
+    const width = Number(pose.width);
+    const height = Number(pose.height);
+    if (!Number.isFinite(aspect) || aspect <= 0
+      || !Number.isInteger(width) || width <= 0
+      || !Number.isInteger(height) || height <= 0) {
+      throw new Error(`Point60 pose ${index} must have a positive aspect, width, and height.`);
+    }
+    if (Math.max(1, Math.round(height * aspect)) !== width) {
+      throw new Error(`Point60 pose ${index} width/height/aspect cannot reproduce one viewport.`);
+    }
+    if (viewport === null) {
+      viewport = { width, height, aspect };
+    } else if (viewport.width !== width || viewport.height !== height || Math.abs(viewport.aspect - aspect) > 1e-9) {
+      throw new Error('--point60-gt requires one plan per exact width/height/aspect viewport group.');
+    }
+  }
+  return viewport;
+}
+
+function validateModel66Plan(posePlan) {
+  if (!Array.isArray(posePlan)) return;
+  for (let index = 0; index < posePlan.length; index += 1) {
+    const pose = posePlan[index];
+    if (pose?.fov_y === undefined) continue;
+    const fovY = Number(pose.fov_y);
+    if (!Number.isFinite(fovY) || Math.abs(fovY - MODEL_FOV_Y_DEG) > 1e-6) {
+      throw new Error(`The default sampler requires pose ${index} to use fov_y=${MODEL_FOV_Y_DEG}.`);
+    }
+  }
 }
 
 function contentType(filePath) {
@@ -307,6 +408,17 @@ function writeGpuEvidence(outputPath, evidence) {
 async function main() {
   const args = parseArgs(process.argv);
   const posePlan = await readJsonl(args.posePlan, args.poseStart, args.poseCount);
+  if (args.point60Gt && !args.posePlan) {
+    throw new Error('--point60-gt requires --pose-plan; fallback poses are not formal Point60 GT.');
+  }
+  if (!args.point60Gt) validateModel66Plan(posePlan);
+  const point60Viewport = args.point60Gt ? validatePoint60Plan(posePlan) : null;
+  if (point60Viewport) {
+    // The browser camera currently derives the render width from height*aspect.
+    // Use the plan group dimensions so the evidence records the actual viewport.
+    args.width = point60Viewport.width;
+    args.height = point60Viewport.height;
+  }
   const glbIdList = readNumericIdList(args.glbIdList);
   fs.mkdirSync(path.dirname(args.output), { recursive: true });
   const output = fs.createWriteStream(args.output, { encoding: 'utf8' });
@@ -326,6 +438,10 @@ async function main() {
   const hostGpuBefore = captureHostGpuEvidence();
   let browser = null;
   let result = null;
+  let hostGpuDuring = null;
+  let hostGpuAfter = null;
+  let evidence = null;
+  let failure = null;
   try {
     if (args.requireHardwareGpu && !executablePath) {
       throw new Error('hardware GPU required, but no system Chrome executable was found');
@@ -380,6 +496,7 @@ async function main() {
     result = await page.evaluate((options) => window.runInstanceSampler(options), {
       width: args.width,
       height: args.height,
+      point60Gt: args.point60Gt,
       fovYDeg: args.fovYDeg,
       posePlan,
       glbIdList,
@@ -417,23 +534,20 @@ async function main() {
     if (args.requireHardwareGpu && !gpuGate.hardware) {
       throw new Error(`hardware GPU required, sampler reported ${gpuGate.renderer || 'no WebGL renderer'}`);
     }
-    const hostGpuDuring = captureHostGpuEvidence();
+    hostGpuDuring = captureHostGpuEvidence();
     if (args.requireHardwareGpu && (!hostGpuDuring.nvidiaSmi.available || !hostGpuDuring.nvidiaSmiPmon.available)) {
       throw new Error('hardware GPU required, but nvidia-smi/pmon evidence was unavailable');
     }
-    const gpuEvidence = {
+    evidence = {
       schema: 'color-id-sampler-gpu-evidence-v1',
-      formalReady: Boolean(
-        args.requireHardwareGpu
-        && gpuGate.hardware
-        && hostGpuDuring.nvidiaSmi.available
-        && hostGpuDuring.nvidiaSmiPmon.available,
-      ),
+      formalReady: false,
       output: args.output,
       posePlan: args.posePlan || null,
       poseStart: args.poseStart,
       poseCount: args.poseCount,
       fovYDeg: args.fovYDeg,
+      mode: args.point60Gt ? 'Point60' : 'Model66',
+      point60Gt: args.point60Gt,
       width: args.width,
       height: args.height,
       chrome: {
@@ -444,13 +558,13 @@ async function main() {
       gpuGate,
       hostGpuBefore,
       hostGpuDuring,
-      capturedAt: new Date().toISOString(),
+      hostGpuAfter: null,
     };
-    writeGpuEvidence(args.output, gpuEvidence);
     console.log(JSON.stringify({ output: args.output, ...result }, null, 2));
   } catch (error) {
-    const hostGpuFailure = captureHostGpuEvidence();
-    writeGpuEvidence(args.output, {
+    failure = error;
+    if (!hostGpuDuring) hostGpuDuring = captureHostGpuEvidence();
+    evidence = {
       schema: 'color-id-sampler-gpu-evidence-v1',
       formalReady: false,
       output: args.output,
@@ -458,6 +572,8 @@ async function main() {
       poseStart: args.poseStart,
       poseCount: args.poseCount,
       fovYDeg: args.fovYDeg,
+      mode: args.point60Gt ? 'Point60' : 'Model66',
+      point60Gt: args.point60Gt,
       width: args.width,
       height: args.height,
       chrome: {
@@ -467,19 +583,68 @@ async function main() {
       gpuBackend: result?.gpuBackend || null,
       gpuGate: result?.gpuGate || null,
       hostGpuBefore,
-      hostGpuDuring: hostGpuFailure,
+      hostGpuDuring,
+      hostGpuAfter: null,
       error: String(error?.message || error),
-      capturedAt: new Date().toISOString(),
-    });
-    throw error;
+    };
   } finally {
     await new Promise((resolve) => output.end(resolve));
     if (browser) await browser.close().catch(() => {});
     await new Promise((resolve) => server.close(resolve));
+    hostGpuAfter = captureHostGpuEvidence();
+    if (!evidence) {
+      evidence = {
+        schema: 'color-id-sampler-gpu-evidence-v1',
+        formalReady: false,
+        output: args.output,
+        posePlan: args.posePlan || null,
+        poseStart: args.poseStart,
+        poseCount: args.poseCount,
+        fovYDeg: args.fovYDeg,
+        mode: args.point60Gt ? 'Point60' : 'Model66',
+        point60Gt: args.point60Gt,
+        width: args.width,
+        height: args.height,
+        chrome: {
+          executablePath: executablePath || null,
+          args: chromeArgs,
+        },
+        gpuBackend: result?.gpuBackend || null,
+        gpuGate: result?.gpuGate || null,
+        hostGpuBefore,
+        hostGpuDuring: hostGpuDuring || captureHostGpuEvidence(),
+        hostGpuAfter: null,
+      };
+    }
+    evidence.hostGpuAfter = hostGpuAfter;
+    const hostEvidenceReady = (hostEvidence) => Boolean(
+      hostEvidence?.nvidiaSmi?.available && hostEvidence?.nvidiaSmiPmon?.available,
+    );
+    evidence.formalReady = Boolean(
+      !failure
+      && args.requireHardwareGpu
+      && evidence.gpuGate?.hardware
+      && hostEvidenceReady(hostGpuBefore)
+      && hostEvidenceReady(evidence.hostGpuDuring)
+      && hostEvidenceReady(hostGpuAfter),
+    );
+    evidence.capturedAt = new Date().toISOString();
+    writeGpuEvidence(args.output, evidence);
   }
+  if (failure) throw failure;
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
+
+export {
+  POINT60_GT_FOV_Y_DEG,
+  classifyGpuBackend,
+  parseArgs,
+  validateModel66Plan,
+  validatePoint60Plan,
+};

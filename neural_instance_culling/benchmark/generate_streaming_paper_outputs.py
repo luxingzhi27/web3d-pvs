@@ -22,6 +22,8 @@ TABLE_FIELDS = [
     "method",
     "label",
     "status",
+    "input_kind",
+    "availability_reason",
     "decision_mode",
     "pose_count",
     "coverage_source",
@@ -96,13 +98,69 @@ def stat_mean(value: Any) -> float | None:
     return value.get("mean") if isinstance(value, dict) else None
 
 
+PAPER_LABEL_OVERRIDES = {
+    "aabb": "AABB MLP",
+}
+
+
+def _ranking_input(summary: dict[str, Any], method_name: str) -> dict[str, Any] | None:
+    inputs = summary.get("rankingInputs")
+    if isinstance(inputs, dict) and isinstance(inputs.get(method_name), dict):
+        return inputs[method_name]
+    sources = summary.get("scoreSources")
+    if method_name == "aabb" and isinstance(sources, dict) and isinstance(sources.get("aabb"), dict):
+        return sources["aabb"]
+    return None
+
+
+def _paper_method_view(
+    summary: dict[str, Any], method_name: str, method: dict[str, Any]
+) -> dict[str, Any]:
+    """Hide legacy placeholder rows from paper tables and curves."""
+
+    view = dict(method)
+    if method_name in PAPER_LABEL_OVERRIDES:
+        view["label"] = PAPER_LABEL_OVERRIDES[method_name]
+    if method_name == "aabb" and view.get("status") == "available":
+        source = _ranking_input(summary, method_name)
+        if (
+            not isinstance(source, dict)
+            or source.get("kind") != "formal_aabb_test_sidecar"
+            or source.get("split") != "test"
+            or source.get("testRead") is not True
+        ):
+            view["status"] = "unavailable"
+            view["reason"] = (
+                "legacy or missing AABB input: a formal test score sidecar is required"
+            )
+    if method_name == "hzb_visible_first" and view.get("status") == "available":
+        source = _ranking_input(summary, method_name)
+        if (
+            not isinstance(source, dict)
+            or source.get("kind") != "formal_region66_test_result"
+            or source.get("mode") != "Region66"
+            or source.get("split") != "test"
+            or source.get("formalReady") is not True
+            or source.get("continuousScore") is not False
+        ):
+            view["status"] = "unavailable"
+            view["reason"] = (
+                "legacy or missing HZB input: a formal Region66 test visible-instance result is required"
+            )
+    return view
+
+
 def summary_row(summary: dict[str, Any], source_path: Path, method_name: str, method: dict[str, Any]) -> dict[str, Any]:
+    method = _paper_method_view(summary, method_name, method)
     filtering = method.get("decisionMode") == "threshold_filtering"
+    ranking_input = _ranking_input(summary, method_name)
     row: dict[str, Any] = {
         "scene": scene_name(summary, source_path),
         "method": method_name,
         "label": method.get("label", RANKING_METHOD_LABELS.get(method_name, method_name)),
         "status": method.get("status", "unavailable"),
+        "input_kind": ranking_input.get("kind") if isinstance(ranking_input, dict) else None,
+        "availability_reason": method.get("reason"),
         "decision_mode": method.get("decisionMode", "threshold_free_ranking"),
         "pose_count": method.get("poseCount", 0),
         "coverage_source": summary.get("coverageSource", "unknown"),
@@ -155,6 +213,9 @@ def write_markdown(path: Path, rows: list[dict[str, Any]]) -> None:
     columns = [
         ("Scene", "scene"),
         ("Method", "label"),
+        ("Status", "status"),
+        ("Input", "input_kind"),
+        ("Reason", "availability_reason"),
         ("Mode", "decision_mode"),
         ("Pred GLBs", "predicted_glb_mean"),
         ("Pred bytes", "predicted_bytes_mean"),
@@ -209,6 +270,7 @@ def curve_rows(summary: dict[str, Any], source_path: Path) -> list[dict[str, Any
     scene = scene_name(summary, source_path)
     rows: list[dict[str, Any]] = []
     for method_name, method in summary.get("methods", {}).items():
+        method = _paper_method_view(summary, method_name, method)
         if method.get("status") != "available":
             continue
         for point in method.get("coverageCurve", []):
@@ -270,7 +332,10 @@ def plot_curves(path_prefix: Path, summaries: list[tuple[Path, dict[str, Any]]])
         methods = summary.get("methods", {})
         for method_name in plot_methods:
             method = methods.get(method_name)
-            if not isinstance(method, dict) or method.get("status") != "available":
+            if not isinstance(method, dict):
+                continue
+            method = _paper_method_view(summary, method_name, method)
+            if method.get("status") != "available":
                 continue
             points = method.get("coverageCurve", [])
             if not points:

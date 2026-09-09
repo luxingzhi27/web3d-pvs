@@ -618,11 +618,11 @@ export class GeometryShellHZB {
   }
 
   async _renderAndBuildHzb(camera) {
-    const startedAt = nowMs();
     this._ensureTargets(camera);
     this._writeRenderUniform(camera);
-    const encoder = this.device.createCommandEncoder();
-    const pass = encoder.beginRenderPass({
+    const depthStartedAt = nowMs();
+    const depthEncoder = this.device.createCommandEncoder();
+    const pass = depthEncoder.beginRenderPass({
       colorAttachments: [{
         view: this.targets.renderDepthView,
         clearValue: { r: camera.far, g: 0, b: 0, a: 1 },
@@ -651,7 +651,12 @@ export class GeometryShellHZB {
       );
     }
     pass.end();
-    const mipPass = encoder.beginComputePass();
+    await this._submitAndWait(depthEncoder, 'depth raster');
+    const depthRasterMs = nowMs() - depthStartedAt;
+
+    const hzbStartedAt = nowMs();
+    const hzbEncoder = this.device.createCommandEncoder();
+    const mipPass = hzbEncoder.beginComputePass();
     mipPass.setPipeline(this.mipPipeline);
     for (let index = 0; index < this.targets.mipBindGroups.length; index += 1) {
       const mip = index + 1;
@@ -661,8 +666,13 @@ export class GeometryShellHZB {
       mipPass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
     }
     mipPass.end();
-    await this._submitAndWait(encoder, 'depth raster and HZB mip');
-    return nowMs() - startedAt;
+    await this._submitAndWait(hzbEncoder, 'HZB build');
+    const hzbBuildMs = nowMs() - hzbStartedAt;
+    return {
+      depthRasterMs,
+      hzbBuildMs,
+      depthRasterAndMipMs: depthRasterMs + hzbBuildMs,
+    };
   }
 
   async _queryCurrent(camera, candidateIds, options = {}) {
@@ -682,19 +692,24 @@ export class GeometryShellHZB {
     if (ids.length > 0) this.device.queue.writeBuffer(this.candidateBuffer, 0, ids);
     this._ensureQueryBindGroup();
     this._writeQueryUniform(camera, ids.length, depthBiasM);
-    const startedAt = nowMs();
-    const encoder = this.device.createCommandEncoder();
-    encoder.clearBuffer(this.queryResultBuffer);
-    encoder.clearBuffer(this.visibleIdsBuffer);
-    encoder.clearBuffer(this.glbFlagsBuffer);
-    const pass = encoder.beginComputePass();
+    const aabbStartedAt = nowMs();
+    const queryEncoder = this.device.createCommandEncoder();
+    queryEncoder.clearBuffer(this.queryResultBuffer);
+    queryEncoder.clearBuffer(this.visibleIdsBuffer);
+    queryEncoder.clearBuffer(this.glbFlagsBuffer);
+    const pass = queryEncoder.beginComputePass();
     pass.setPipeline(this.queryPipeline);
     pass.setBindGroup(0, this.queryBindGroup);
     if (ids.length > 0) pass.dispatchWorkgroups(Math.ceil(ids.length / 64));
     pass.end();
-    encoder.copyBufferToBuffer(this.queryResultBuffer, 0, this.queryReadbackBuffer, 0, 16);
+    await this._submitAndWait(queryEncoder, 'AABB/HZB candidate test');
+    const aabbTestMs = nowMs() - aabbStartedAt;
+
+    const compactionStartedAt = nowMs();
+    const copyEncoder = this.device.createCommandEncoder();
+    copyEncoder.copyBufferToBuffer(this.queryResultBuffer, 0, this.queryReadbackBuffer, 0, 16);
     if (ids.length > 0) {
-      encoder.copyBufferToBuffer(
+      copyEncoder.copyBufferToBuffer(
         this.visibleIdsBuffer,
         0,
         this.visibleIdsReadbackBuffer,
@@ -702,15 +717,15 @@ export class GeometryShellHZB {
         align4(ids.length * 4),
       );
     }
-    encoder.copyBufferToBuffer(
+    copyEncoder.copyBufferToBuffer(
       this.glbFlagsBuffer,
       0,
       this.glbFlagsReadbackBuffer,
       0,
       Math.max(4, align4(Number(this.meta.globalGlbCount) * 4)),
     );
-    await this._submitAndWait(encoder, 'HZB candidate query');
-    const queryFinishedAt = nowMs();
+    await this._submitAndWait(copyEncoder, 'HZB result compaction');
+    const readbackStartedAt = nowMs();
     await this.queryReadbackBuffer.mapAsync(GPUMapMode.READ, 0, 16);
     const resultBytes = this.queryReadbackBuffer.getMappedRange(0, 16).slice(0);
     this.queryReadbackBuffer.unmap();
@@ -721,6 +736,7 @@ export class GeometryShellHZB {
     await this.glbFlagsReadbackBuffer.mapAsync(GPUMapMode.READ, 0, Math.max(4, align4(Number(this.meta.globalGlbCount) * 4)));
     const flagsBytes = this.glbFlagsReadbackBuffer.getMappedRange(0, Math.max(4, align4(Number(this.meta.globalGlbCount) * 4))).slice(0);
     this.glbFlagsReadbackBuffer.unmap();
+    const readbackMs = nowMs() - readbackStartedAt;
     const words = new Uint32Array(resultBytes);
     const counter = Number(words[0] || 0);
     const uncertainCount = Number(words[1] || 0);
@@ -744,6 +760,7 @@ export class GeometryShellHZB {
       downloadPriority: 1,
       prioritySource: 'geometry-shell-hzb-visible-instance-aggregation',
     }));
+    const compactionMs = nowMs() - compactionStartedAt;
     return {
       mode: options.mode || 'Point60',
       idMode: 'component',
@@ -756,9 +773,11 @@ export class GeometryShellHZB {
       uncertainCount,
       overflowCount,
       timings: {
-        queryMs: queryFinishedAt - startedAt,
-        readbackMs: nowMs() - queryFinishedAt,
-        totalMs: nowMs() - startedAt,
+        aabbTestMs,
+        compactionMs,
+        queryMs: aabbTestMs,
+        readbackMs,
+        totalMs: aabbTestMs + compactionMs,
         depthEncoding: LINEAR_DEPTH_ENCODING,
         sampleCount: GEOMETRY_SHELL_HZB_SAMPLE_COUNT,
         depthBiasM,
@@ -773,10 +792,12 @@ export class GeometryShellHZB {
     if (!this.ready) await this.init();
     const camera = cameraState(cameraInput);
     if (Math.abs(camera.fovYDeg - 60) > 1e-3) throw new Error('Point60 requires a 60-degree camera.');
-    const depthMs = await this._renderAndBuildHzb(camera);
+    const renderTiming = await this._renderAndBuildHzb(camera);
     const result = await this._queryCurrent(camera, candidateIds, { ...options, mode: 'Point60' });
-    result.timings.depthRasterAndMipMs = depthMs;
-    result.timings.totalMs += depthMs;
+    result.timings.depthRasterMs = renderTiming.depthRasterMs;
+    result.timings.hzbBuildMs = renderTiming.hzbBuildMs;
+    result.timings.depthRasterAndMipMs = renderTiming.depthRasterAndMipMs;
+    result.timings.totalMs = renderTiming.depthRasterAndMipMs + result.timings.aabbTestMs + result.timings.compactionMs;
     result.backend = 'geometry-shell-hzb-webgpu';
     return result;
   }
@@ -787,27 +808,42 @@ export class GeometryShellHZB {
     const ids = Uint32Array.from(candidateIds || []);
     const union = new Set();
     const perPose = [];
-    let depthMs = 0;
+    let depthRasterMs = 0;
+    let hzbBuildMs = 0;
     let queryMs = 0;
     let readbackMs = 0;
-    let queryTotalMs = 0;
+    let aabbTestMs = 0;
+    let compactionMs = 0;
+    let regionUnionCompactionMs = 0;
     let uncertainCount = 0;
     for (const camera of cameras) {
       const state = cameraState(camera);
       if (Math.abs(state.fovYDeg - 66) > 1e-3) throw new Error('Region66 requires 66-degree cameras.');
-      depthMs += await this._renderAndBuildHzb(state);
+      const renderTiming = await this._renderAndBuildHzb(state);
       const result = await this._queryCurrent(state, ids, { ...options, mode: 'Region66' });
+      result.timings.depthRasterMs = renderTiming.depthRasterMs;
+      result.timings.hzbBuildMs = renderTiming.hzbBuildMs;
+      result.timings.depthRasterAndMipMs = renderTiming.depthRasterAndMipMs;
+      result.timings.totalMs = renderTiming.depthRasterAndMipMs + result.timings.aabbTestMs + result.timings.compactionMs;
       queryMs += Number(result.timings.queryMs || 0);
       readbackMs += Number(result.timings.readbackMs || 0);
-      queryTotalMs += Number(result.timings.totalMs || 0);
+      depthRasterMs += Number(result.timings.depthRasterMs || 0);
+      hzbBuildMs += Number(result.timings.hzbBuildMs || 0);
+      aabbTestMs += Number(result.timings.aabbTestMs || 0);
+      compactionMs += Number(result.timings.compactionMs || 0);
       uncertainCount += Number(result.uncertainCount || 0);
       perPose.push(result);
+      const unionStartedAt = nowMs();
       for (const id of result.visibleIds) union.add(Number(id));
+      regionUnionCompactionMs += nowMs() - unionStartedAt;
     }
+    const finalCompactionStartedAt = nowMs();
     const visibleIds = Uint32Array.from([...union].sort((a, b) => a - b));
     const glbSet = new Set();
     for (const id of visibleIds) glbSet.add(Number(this.instanceToGlb[id]));
     const modelList = [...glbSet].sort((a, b) => a - b);
+    regionUnionCompactionMs += nowMs() - finalCompactionStartedAt;
+    compactionMs += regionUnionCompactionMs;
     return {
       mode: 'Region66',
       idMode: 'component',
@@ -830,10 +866,15 @@ export class GeometryShellHZB {
       perPose,
       backend: 'geometry-shell-hzb-webgpu',
       timings: {
-        depthRasterAndMipMs: depthMs,
+        depthRasterMs,
+        hzbBuildMs,
+        depthRasterAndMipMs: depthRasterMs + hzbBuildMs,
+        aabbTestMs,
+        compactionMs,
+        regionUnionCompactionMs,
         queryMs,
         readbackMs,
-        totalMs: depthMs + queryTotalMs,
+        totalMs: depthRasterMs + hzbBuildMs + aabbTestMs + compactionMs,
         depthEncoding: LINEAR_DEPTH_ENCODING,
         sampleCount: GEOMETRY_SHELL_HZB_SAMPLE_COUNT,
         depthBiasM: Number(options.depthBiasM ?? 0.001),

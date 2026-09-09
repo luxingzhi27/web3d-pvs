@@ -32,6 +32,13 @@ from glb_streaming_io import (  # noqa: E402
     load_score_sidecar,
 )
 from pose_csr_dataset import PoseCSRDataset  # noqa: E402
+from simulate_glb_streaming import (  # noqa: E402
+    _formal_aabb_source,
+    attach_formal_region66_visible_glbs,
+    hzb_ordering_metadata,
+    load_formal_region66_test_result,
+    ordered_hzb_glb_ids_for_pose,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,14 +58,20 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--methods",
-        default="full,aabb",
+        default="full,aabb,hzb_visible_first",
         help="comma-separated threshold-free ranking methods",
     )
     parser.add_argument("--urgent-fraction", type=float, default=0.10)
     parser.add_argument("--warm-fraction", type=float, default=0.45)
     parser.add_argument("--utility-source", choices=["binary_gt", "visible_weights", "reference_frontmost_pixels"], default="binary_gt")
     parser.add_argument("--reference-frontmost", type=Path, default=None)
-    parser.add_argument("--hzb-visible", type=Path, default=None)
+    parser.add_argument(
+        "--hzb-region66-result",
+        dest="hzb_region66_result",
+        type=Path,
+        default=None,
+        help="formal Region66 test result JSON; visibleInstanceIds are mapped to GLBs",
+    )
     return parser.parse_args()
 
 
@@ -137,21 +150,126 @@ def main() -> None:
         pose_ids=pose_ids,
         utility_source=args.utility_source,
         reference_frontmost_path=args.reference_frontmost,
-        hzb_visible_path=args.hzb_visible,
     )
     score_by_pose, score_manifest = load_score_sidecar(args.result_dir, args.dataset_dir, pose_ids)
     records = attach_geometry_scores(loaded, assets, score_by_pose, instance_to_glb)
 
+    hzb_source: dict[str, Any] | None = None
+    hzb_unavailable_reason: str | None = None
+    if args.hzb_region66_result is None:
+        hzb_unavailable_reason = "formal Region66 test result was not supplied"
+    elif args.split != "test":
+        hzb_unavailable_reason = "formal Region66 visible-first input is test-only"
+    else:
+        try:
+            complete_test_pose_ids = dataset.split("test").pose_indices.astype(np.int64, copy=False).tolist()
+            expected_candidate_counts = {
+                int(pose_id): int(dataset.candidate_slice(int(pose_id)).size)
+                for pose_id in complete_test_pose_ids
+            }
+            hzb_instances, hzb_source = load_formal_region66_test_result(
+                args.hzb_region66_result,
+                complete_test_pose_ids,
+                expected_scene=str(asset_meta.get("sceneName", "")),
+                expected_candidate_counts=expected_candidate_counts,
+            )
+            records = attach_formal_region66_visible_glbs(
+                records,
+                loaded,
+                hzb_instances,
+                instance_to_glb,
+            )
+        except (FileNotFoundError, OSError, StreamingContractError, ValueError) as error:
+            hzb_source = None
+            hzb_unavailable_reason = f"formal Region66 result unavailable: {error}"
+
     method_plans: dict[str, dict[str, Any]] = {}
-    unavailable: dict[str, str] = {}
+    unavailable: dict[str, str] = {
+        str(name): str(reason)
+        for name, reason in (score_manifest.get("unavailableSources", {}) or {}).items()
+    }
+    score_sources = score_manifest.get("scoreSources", {})
+    if "aabb" in methods and not _formal_aabb_source(
+        score_sources.get("aabb") if isinstance(score_sources, dict) else None
+    ):
+        unavailable["aabb"] = (
+            "formal AABB test sidecar is unavailable; legacy runner/fallback scores are not accepted"
+        )
+    if hzb_unavailable_reason is not None:
+        unavailable["hzb_visible_first"] = hzb_unavailable_reason
     for method in methods:
         pose_rows: list[dict[str, Any]] = []
-        for pose in records:
-            if method == "hzb_visible_first" and pose.hzb_visible_glb_ids is None:
-                unavailable[method] = "no --hzb-visible sidecar was supplied"
+        if method == "hzb_visible_first":
+            if hzb_source is None:
+                method_plans[method] = {
+                    "method": method,
+                    "decisionMode": "threshold_free_ranking",
+                    "thresholdApplied": False,
+                    "poseCount": 0,
+                    "poses": [],
+                    "status": "unavailable",
+                    "reason": unavailable.get(method, "formal Region66 visible-first input is unavailable"),
+                    "rankingInput": {
+                        "kind": "unavailable",
+                        "reason": unavailable.get(method, "formal Region66 visible-first input is unavailable"),
+                    },
+                }
                 continue
             try:
-                order = ordered_glb_ids_for_pose(pose, assets, method)
+                for pose in records:
+                    ordered_hzb_glb_ids_for_pose(pose, assets)
+            except StreamingContractError as error:
+                unavailable[method] = f"formal Region66 ordering unavailable: {error}"
+                method_plans[method] = {
+                    "method": method,
+                    "decisionMode": "threshold_free_ranking",
+                    "thresholdApplied": False,
+                    "poseCount": 0,
+                    "poses": [],
+                    "status": "unavailable",
+                    "reason": unavailable[method],
+                    "rankingInput": {"kind": "unavailable", "reason": unavailable[method]},
+                }
+                continue
+        if method in unavailable:
+            method_plans[method] = {
+                "method": method,
+                "decisionMode": "threshold_free_ranking",
+                "thresholdApplied": False,
+                "poseCount": 0,
+                "poses": [],
+                "status": "unavailable",
+                "reason": unavailable[method],
+                "rankingInput": {
+                    "kind": "unavailable",
+                    "reason": unavailable[method],
+                },
+            }
+            continue
+        if method in {"full", "aabb", "distance", "projected_area", "projected_area_per_byte"} and any(
+            method not in pose.rank_scores for pose in records
+        ):
+            unavailable.setdefault(
+                method,
+                f"continuous score input for {method} is unavailable for one or more selected poses",
+            )
+            method_plans[method] = {
+                "method": method,
+                "decisionMode": "threshold_free_ranking",
+                "thresholdApplied": False,
+                "poseCount": 0,
+                "poses": [],
+                "status": "unavailable",
+                "reason": unavailable[method],
+            }
+            continue
+        for pose in records:
+            try:
+                order = (
+                    ordered_hzb_glb_ids_for_pose(pose, assets)
+                    if method == "hzb_visible_first"
+                    else ordered_glb_ids_for_pose(pose, assets, method)
+                )
             except StreamingContractError as error:
                 if method == "hzb_visible_first":
                     unavailable[method] = str(error)
@@ -168,6 +286,7 @@ def main() -> None:
                     "gtGlbIds": list(pose.gt_glb_ids),
                     "orderedGlbIds": list(order),
                     "tiers": tiers,
+                    "rankingInput": hzb_ordering_metadata() if method == "hzb_visible_first" else score_sources.get(method) if isinstance(score_sources, dict) else None,
                 }
             )
         method_plans[method] = {
@@ -178,6 +297,7 @@ def main() -> None:
             "poses": pose_rows,
             "status": "available" if pose_rows else "unavailable",
             "reason": unavailable.get(method),
+            "rankingInput": hzb_ordering_metadata() if method == "hzb_visible_first" else score_sources.get(method) if isinstance(score_sources, dict) else None,
         }
 
     output_dir = args.output_dir.expanduser().resolve()
@@ -213,6 +333,9 @@ def main() -> None:
             "scoreResultDir": str(Path(args.result_dir).expanduser().resolve()),
             "scoreManifest": score_manifest,
             "coverageSource": args.utility_source,
+            "scoreSources": score_sources if isinstance(score_sources, dict) else {},
+            "hzbRegion66Result": str(args.hzb_region66_result.expanduser().resolve()) if args.hzb_region66_result else None,
+            "hzbSource": hzb_source,
         },
     }
     (output_dir / "scheduler_plan.json").write_text(

@@ -108,6 +108,19 @@ def formal_exclusion_reason(path: Path, payload: dict[str, Any]) -> str | None:
         return "smoke-excluded: filename or device label is marked smoke"
     workload = payload.get("workload") or {}
     environment = payload.get("environment") or {}
+    device_identity = (
+        f"{label} {(payload.get('device') or {}).get('model') or ''}".lower()
+    )
+    if "a6000" in device_identity:
+        automation = payload.get("automationEvidence") or {}
+        gate = automation.get("gate") or {}
+        if (
+            automation.get("formalReady") is not True
+            or gate.get("formalReady") is not True
+        ):
+            return "unavailable: A6000 automation hardware evidence failed"
+        if gate.get("concurrentComputeDetected") is not False:
+            return "unavailable: concurrent GPU compute detected during A6000 timing"
     backend = canonical_backend(environment.get("backend"))
     if workload.get("split") != "test":
         return "unavailable: workload is not the frozen test split"

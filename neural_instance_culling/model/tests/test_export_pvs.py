@@ -739,6 +739,101 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
             self.assertFalse(meta["safety"]["safe"])
             self.assertEqual(meta["calibration"]["source"], "checkpoint.calibration.selected")
 
+    def test_export_accepts_checkpoint_specific_exact_calibration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self._checkpoint(root)
+            source["viewcell"]["radiusM"] = 2.5
+            source["protocol"]["viewcell"] = {
+                "shape": "horizontal_disk",
+                "radiusM": 2.5,
+            }
+            source_path = root / "source.pt"
+            torch.save(source, source_path)
+            checkpoint = copy.deepcopy(source)
+            checkpoint["protocol"]["variant"] = (
+                "ifcbench_warm_start_boundary_removed_rvl030_boundary000_"
+                "margin050_temp025_lr2e-5"
+            )
+            checkpoint["protocol"].pop("dataset")
+            checkpoint["protocol"].pop("runtimeMeta")
+            checkpoint["protocol"].pop("viewcell")
+            checkpoint["viewcell"]["radiusM"] = 2.0
+            checkpoint["initialization"] = {
+                "mode": "from-checkpoint",
+                "checkpoint": str(source_path),
+            }
+            checkpoint_path = root / "last.pt"
+            torch.save(checkpoint, checkpoint_path)
+            selected = {
+                "threshold": 0.5945902,
+                "aggregateWeightedRecall": 0.99043,
+                "aggregateWeightedRecallLowerConfidenceBound": 0.99001,
+                "precision": 0.30,
+            }
+            calibration_path = root / "exact_calibration.json"
+            calibration_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "pvs-ifcbench-v4-exact-calibration-v1",
+                        "split": "calibration",
+                        "checkpoint": str(checkpoint_path),
+                        "predictionRule": "score >= threshold",
+                        "status": "safe",
+                        "selection": {"threshold": selected["threshold"]},
+                        "selected": selected,
+                        "testRead": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = root / "exact-out"
+            result = export(
+                parse_args(
+                    [
+                        "--checkpoint",
+                        str(checkpoint_path),
+                        "--calibration",
+                        str(calibration_path),
+                        "--runtime-meta",
+                        str(self._runtime_meta(root)),
+                        "--output-dir",
+                        str(output),
+                    ]
+                )
+            )
+            self.assertAlmostEqual(result["threshold"], selected["threshold"])
+            meta = json.loads((output / "model_meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                meta["calibration"]["protocol"],
+                "checkpoint_specific_exact_calibration",
+            )
+            self.assertTrue(meta["safety"]["safe"])
+            self.assertEqual(meta["viewcell"]["radiusM"], 2.5)
+            self.assertEqual(
+                meta["provenance"]["dataset"]["path"],
+                str((root / "dataset").resolve()),
+            )
+
+            calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
+            calibration["checkpoint"] = str(root / "other.pt")
+            calibration_path.write_text(json.dumps(calibration), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "different checkpoint"):
+                export(
+                    parse_args(
+                        [
+                            "--checkpoint",
+                            str(checkpoint_path),
+                            "--calibration",
+                            str(calibration_path),
+                            "--runtime-meta",
+                            str(self._runtime_meta(root)),
+                            "--output-dir",
+                            str(root / "wrong-exact-out"),
+                        ]
+                    )
+                )
+
     def test_neural_asset_budget_is_a_hard_gate(self) -> None:
         with self.assertRaisesRegex(ValueError, "budget exceeded"):
             _check_neural_asset_budget(

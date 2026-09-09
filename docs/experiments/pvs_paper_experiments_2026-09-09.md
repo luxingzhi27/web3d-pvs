@@ -53,9 +53,13 @@ AABB MLP 正式版改用与 Full 相同的逐 pose 平衡、weighted-recall 保�
 
 附加 `geometry_shell_hzb_equal_asset`：资产字节限制为同场景神经资产大小，从原始不透明 primitive 中按固定 128 个 train 中心视点的投影面积累计值/压缩字节选择 occluder，只删除完整 primitive，不移动顶点。该项用于资产敏感性，不宣称保守或最优简化。
 
-运行路径为：cluster BVH 视锥筛选，正向线性眼空间深度写入 R32Float，以普通 depth attachment 保留最近表面，背景写 far，各 mip 对 2x2 取最大深度，随后批量测试候选 AABB、压缩实例和聚合 GLB。投影矩形向外取整并检查覆盖 mip 的全部 texel；仅当 `HZBMax + bias < candidateNear` 时剔除。近裁剪面、非有限投影、相机位于 AABB 内和其他不确定情况全部保留。
+当前运行路径为：遍历外壳 prototype/instance 提交深度绘制，使用普通 depth attachment 保留最近表面，并在 `rgba32float` 颜色载荷中保存正向线性眼空间深度；背景写 far，各 mip 对 2x2 取最大深度，随后批量测试候选 AABB、压缩实例和聚合 GLB。投影矩形向外取整并检查覆盖 mip 的全部 texel；仅当 `HZBMax + bias < candidateNear` 时剔除。近裁剪面、非有限投影、相机位于 AABB 内和其他不确定情况全部保留。现阶段不把尚未实现的 cluster BVH 或 R32Float 计入性能叙述。
 
-Calibration 扫描高度 `288/576` 和偏置 `0.1/1/10 mm`，按安全条件下 useful cull 最高选取；平局选择耗时更低配置。宽度由 pose aspect 决定。
+Calibration 扫描固定 HZB 分辨率 `512x288 / 1024x576` 和偏置 `0.1/1/10 mm`，按安全条件下 useful cull 最高选取；平局选择耗时更低配置。投影矩阵逐 pose 使用真实 aspect，HZB 纹理分辨率作为基线自身预算固定，不冒充前端图像分辨率。
+
+完整 calibration 和 frozen test 每个 pose 只执行一轮可见性查询，避免把精度矩阵重复五遍；独立的 120-pose 性能任务才对每个 pose 执行五轮并统计 p50/p95。两类任务都必须通过同一硬件 GPU 和无并发计算证据门。
+
+六组 calibration 由 `select_geometry_shell_hzb.py` 冻结配置：安全池要求 weighted recall 及其单侧 95% 下界均严格大于 `0.99`，安全池内按 useful cull、balanced accuracy、specificity、precision 和延迟排序；没有安全成员时仍输出诊断配置，但不得标成安全 HZB。
 
 公平比较分为：
 
@@ -165,15 +169,17 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 |---|---|---|
 | 场景统计 | 完成 | 两场景规模、三角形、GLB 字节、split、候选/GT 分布已进入 Table 1 |
 | HKUST Full test | 完成 | 三种子均通过安全门；WR `0.997082 +/- 0.001634`，LCB `0.994334 +/- 0.003271`，useful cull `0.901758 +/- 0.007830` |
-| IFCBench 微调 | 运行中 | 四个 `4 x 900` 扫描成员已安全完成，第五个高学习率成员运行中；随后自动精确校准和三种子 `8 x 900` 确认 |
-| AABB + Ray MLP | 运行中 | 两场景 `6 x 300` checkpoint 已开始生成；修正 aggregate useful/bad cull 回填及安全池排名后重新做 calibration/validation 选择，随后自动三种子 `40 x 900` 与 frozen test |
-| HZB 外壳与运行时 | 代码和资产完成 | lossless/equal-asset 四套资产、WebGPU HZB、Point60 同点 GT、Region `1/5/9/all` 标签无关抽样和评价器已完成；正式 calibration/test 等 GPU 独占窗口 |
+| IFCBench 微调 | 运行中 | 五组 `4 x 900` 扫描与精确 calibration/validation 已完成；选定去边界项配置正在做三种子 `8 x 900` 确认，完成后按 validation 安全性决定是否替换原 Full |
+| AABB + Ray MLP | 运行中 | 两场景 `6 x 300` 扫描已完成并选择 `2e-4`；自动链等待 IFCBench 确认后执行两场景三种子 `40 x 900` 与 frozen test |
+| HZB 外壳与运行时 | 代码和资产完成 | 四套外壳、逐 pose aspect、Region `1/5/9/all`、正式硬件失败门、六组 calibration 选择器和两场景 120-pose 分层 timing 计划已完成；Point60 的 60度计划已生成，真实 Color-ID GT 与正式 calibration/test 待独占 GPU |
 | 资产与容量 | 完成 | 神经资产为 lossless shell 的 `1.37%`（HKUST）和 `19.78%`（IFCBench）；rank Pareto、Table 4 及 PDF/SVG/PNG 已生成 |
 | 端侧模型前向 | 部分完成 | HKUST M2 与 vivo 各五 session 正式完成；IFCBench 移动端和 A6000 独占结果仍缺失，不以并发 smoke 代替 |
 | Safety-efficiency | 完成 | 六个核心变体的 calibration-safe validation 曲线及论文图已生成 |
 | Streaming | 部分完成 | 两场景 Full/启发式/oracle 的全 test 冷缓存结果已生成；AABB MLP 与 HZB visible-first 待正式结果后替换占位并重跑 |
 | Test 图像 | 部分完成 | HKUST Full 的 684 view-cell formal-v2 manifest 已冻结；HZB manifest 转换入口已完成；硬件渲染、IFCBench 最终成员和 AABB/HZB 图像结果待 GPU 独占窗口 |
-| GT 收敛 | 部分完成 | 两场景各 100 cell x 128 点计划已生成；正式 Vulkan Color-ID 采样和 128 点收敛汇总待执行 |
+| GT 收敛 | 部分完成 | 两场景各 100 cell x 128 点水平圆盘计划已生成，IFCBench 半径为 `2.5 m`；新 evaluator 已按计划/raw 三元组对齐，正式 Vulkan Color-ID 采样待执行 |
 | 离线成本 / 结果包 | 完成当前可得项 | 六阶段成本、artifact registry、三种子 Table 2 汇总已生成；未记录时间保持 unavailable，不作推算 |
 
 当前执行顺序不变：完成 IFCBench 确认和 AABB 长训；冻结两场景最终成员并各读取一次 test；在无训练并发的窗口依次完成 HZB、真实图像、GT 收敛和 A6000 计时；最后替换 streaming 基线、重建全部表图与结果包。任何中间指标都不取消已登记长训。
+
+本轮实现回归已通过 benchmark `164` 项、model `48` 项、完整前端 `npm test` 和 sampler `7` 项测试；测试过程禁用 CUDA，不作为任何正式性能结果。

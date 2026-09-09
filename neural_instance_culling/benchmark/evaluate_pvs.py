@@ -51,6 +51,7 @@ CHECKPOINT_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-check
 REPLAY_SPLITS = ("train", "calibration", "validation", "test")
 TRAINING_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-training-v4"
 CALIBRATION_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-calibration-summary-v4"
+EXACT_CALIBRATION_SCHEMA = "pvs-ifcbench-v4-exact-calibration-v1"
 EVALUATION_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-v4-evaluation-v1"
 REGISTERED_MAX_NORM_CYCLES = 8.0
 # Keep the schema names discoverable under the v4-specific vocabulary used by
@@ -361,6 +362,54 @@ def _v4_frozen_threshold(
 ) -> tuple[float, dict[str, Any]]:
     """Named v4 entry for callers that record the checkpoint contract."""
     return _frozen_threshold(checkpoint, calibration_summary, allow_unsafe=allow_unsafe)
+
+
+def _exact_frozen_threshold(
+    checkpoint_path: Path,
+    calibration_summary: Mapping[str, Any],
+) -> tuple[float, dict[str, Any]]:
+    """Read a float32 change-point threshold tied to one checkpoint."""
+    if calibration_summary.get("schema") != EXACT_CALIBRATION_SCHEMA:
+        raise ValueError("exact calibration summary schema is invalid")
+    if calibration_summary.get("split") != "calibration":
+        raise ValueError("exact calibration summary must come from calibration")
+    if calibration_summary.get("testRead") is not False:
+        raise ValueError("exact calibration summary is not test-free")
+    declared_checkpoint = calibration_summary.get("checkpoint")
+    if (
+        declared_checkpoint is None
+        or Path(str(declared_checkpoint)).resolve() != checkpoint_path.resolve()
+    ):
+        raise ValueError("exact calibration summary belongs to a different checkpoint")
+    if calibration_summary.get("predictionRule") != "score >= threshold":
+        raise ValueError("exact calibration prediction rule is invalid")
+    if calibration_summary.get("status") != "safe":
+        raise ValueError("exact calibration has no safe workpoint")
+    selection = calibration_summary.get("selection")
+    selected = calibration_summary.get("selected")
+    if not isinstance(selection, Mapping) or not isinstance(selected, Mapping):
+        raise ValueError("exact calibration summary has no frozen workpoint")
+    threshold = float(selection.get("threshold", np.nan))
+    selected_threshold = float(selected.get("threshold", np.nan))
+    weighted_recall = float(selected.get("aggregateWeightedRecall", np.nan))
+    lower_bound = float(
+        selected.get("aggregateWeightedRecallLowerConfidenceBound", np.nan)
+    )
+    if not np.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise ValueError("exact calibration threshold is outside [0, 1]")
+    if not np.isclose(selected_threshold, threshold, rtol=0.0, atol=1e-7):
+        raise ValueError("exact calibration threshold fields disagree")
+    if weighted_recall <= 0.99 or lower_bound <= 0.99:
+        raise ValueError("exact calibration workpoint fails the weighted-recall safety gate")
+    return threshold, {
+        "protocol": "checkpoint_specific_exact_calibration",
+        "selectionSplit": "calibration",
+        "selectedThreshold": threshold,
+        "selectedFromTest": False,
+        "testEvaluationCount": 0,
+        "safeWorkpoint": True,
+        "selection": _compact_threshold_selection(selected),
+    }
 
 
 def _safe_div(numerator: float, denominator: float, default: float = 0.0) -> float:
@@ -909,15 +958,26 @@ def _evaluate_checkpoint(args: argparse.Namespace, checkpoint: Mapping[str, Any]
     if is_test and args.calibration is None:
         raise ValueError("formal test evaluation requires explicit --calibration")
     calibration_path = Path(args.calibration).resolve() if args.calibration else checkpoint_path.parent / "calibration_ready_summary.json"
-    expected_calibration = (checkpoint_path.parent / "calibration_ready_summary.json").resolve()
-    if calibration_path != expected_calibration:
-        raise ValueError("v4 replay must use this checkpoint's calibration_ready_summary.json")
     calibration_summary = json.loads(calibration_path.read_text(encoding="utf-8"))
-    threshold, threshold_source = _frozen_threshold(
-        checkpoint,
-        calibration_summary,
-        allow_unsafe=bool(args.allow_unsafe_diagnostic),
-    )
+    if calibration_summary.get("schema") == EXACT_CALIBRATION_SCHEMA:
+        if bool(args.allow_unsafe_diagnostic):
+            raise ValueError("exact calibration does not permit an unsafe diagnostic test")
+        threshold, threshold_source = _exact_frozen_threshold(
+            checkpoint_path, calibration_summary
+        )
+    else:
+        expected_calibration = (
+            checkpoint_path.parent / "calibration_ready_summary.json"
+        ).resolve()
+        if calibration_path != expected_calibration:
+            raise ValueError(
+                "native v4 replay must use this checkpoint's calibration_ready_summary.json"
+            )
+        threshold, threshold_source = _frozen_threshold(
+            checkpoint,
+            calibration_summary,
+            allow_unsafe=bool(args.allow_unsafe_diagnostic),
+        )
     model_meta_path = Path(args.model_meta).resolve() if args.model_meta else checkpoint_path.parent / "model_meta.json"
     if not model_meta_path.is_file():
         raise FileNotFoundError(f"v4 checkpoint has no model_meta.json: {model_meta_path}")

@@ -413,7 +413,11 @@ def _checkpoint(
         "protocol": dict(protocol),
         "relation": dict(relation_meta),
         "geometry": dict(geometry_meta),
-        "viewcell": {"shape": "horizontal_disk", "radiusM": 2.0},
+        "viewcell": dict(
+            protocol.get("viewcell")
+            or protocol.get("initialization", {}).get("inheritedViewcell")
+            or {"shape": "horizontal_disk", "radiusM": 2.0}
+        ),
         "calibration": calibration,
         "validationAtCalibration": validation,
         "best": best,
@@ -509,6 +513,21 @@ def _initialize_model_from_checkpoint(
         source_seed = int(protocol["seed"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("--init-checkpoint protocol has no valid source seed") from exc
+    inherited_protocol = {
+        key: protocol[key]
+        for key in (
+            "dataset",
+            "runtimeMeta",
+            "sampler",
+            "fov",
+            "viewcell",
+            "occlusionRepresentation",
+        )
+        if key in protocol
+    }
+    source_viewcell = checkpoint.get("viewcell")
+    if not isinstance(source_viewcell, Mapping):
+        source_viewcell = protocol.get("viewcell")
     return {
         "mode": "from-checkpoint",
         "checkpoint": str(Path(checkpoint_path).resolve()),
@@ -520,6 +539,10 @@ def _initialize_model_from_checkpoint(
         "optimizerStateLoaded": False,
         "optimizerStateSource": "new",
         "inheritedInstanceCalibrationBlend": blend,
+        "inheritedProtocol": inherited_protocol,
+        "inheritedViewcell": (
+            dict(source_viewcell) if isinstance(source_viewcell, Mapping) else None
+        ),
     }
 
 
@@ -740,6 +763,16 @@ def main(argv: list[str] | None = None) -> None:
     glb_bytes = _load_glb_bytes(args.glb_index, args.glb_root, num_glbs)
     total_steps = args.epochs * args.steps_per_epoch
     initialization["plannedExtraUpdates"] = int(total_steps)
+    if dataset.viewcell_radii_m is None or dataset.viewcell_radii_m.size == 0:
+        raise ValueError("V4 training requires explicit viewcell_radius_m values")
+    viewcell_radius_min = float(np.min(dataset.viewcell_radii_m))
+    viewcell_radius_max = float(np.max(dataset.viewcell_radii_m))
+    if abs(viewcell_radius_max - viewcell_radius_min) > 1e-6:
+        raise ValueError("V4 runtime export requires one fixed view-cell radius")
+    viewcell_contract = {
+        "shape": "horizontal_disk",
+        "radiusM": viewcell_radius_min,
+    }
 
     protocol = {
         "schema": TRAINING_SCHEMA,
@@ -755,9 +788,24 @@ def main(argv: list[str] | None = None) -> None:
             "calibration": int(calibration_split.pose_indices.size),
             "validation": int(validation_split.pose_indices.size),
         },
+        "dataset": {"path": str(args.dataset_dir.resolve())},
+        "runtimeMeta": {"path": str(args.runtime_meta.resolve())},
+        "viewcell": viewcell_contract,
+        "fov": {
+            "modelInputFovYDeg": float(dataset.meta.get("modelInputFovYDeg", 66.0)),
+            "frontendRenderFovYDeg": float(
+                dataset.meta.get("frontendRenderFovYDeg", 60.0)
+            ),
+        },
+        "occlusionRepresentation": dict(model.config["occlusionRepresentation"]),
         "candidateUnion": False,
         "testRead": False,
     }
+    if args.init_checkpoint is not None:
+        inherited_protocol = initialization.get("inheritedProtocol")
+        if isinstance(inherited_protocol, Mapping):
+            for key, value in inherited_protocol.items():
+                protocol[key] = value
     _write_json(args.output_dir / "run_manifest.json", {
         "schema": "pvs-v4-training-run-v1",
         "arguments": vars(args),

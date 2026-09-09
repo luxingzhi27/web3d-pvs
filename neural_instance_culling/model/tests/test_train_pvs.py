@@ -156,6 +156,9 @@ class TrainPvsTests(unittest.TestCase):
             "protocol": {
                 "schema": TRAINING_SCHEMA,
                 "seed": 20260802,
+                "dataset": {"path": "/data/ifcbench"},
+                "runtimeMeta": {"path": "/data/ifcbench/runtime.json"},
+                "viewcell": {"shape": "horizontal_disk", "radiusM": 2.5},
                 "testRead": False,
             },
             "experimentName": "source_v4",
@@ -186,6 +189,11 @@ class TrainPvsTests(unittest.TestCase):
         self.assertFalse(initialization["optimizerStateLoaded"])
         self.assertEqual(initialization["optimizerStateSource"], "new")
         self.assertAlmostEqual(initialization["inheritedInstanceCalibrationBlend"], 0.73)
+        self.assertEqual(
+            initialization["inheritedProtocol"]["dataset"]["path"],
+            "/data/ifcbench",
+        )
+        self.assertEqual(initialization["inheritedViewcell"]["radiusM"], 2.5)
         self.assertAlmostEqual(float(target.instance_calibration_blend), 0.73)
 
 
