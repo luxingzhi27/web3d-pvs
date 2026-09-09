@@ -14,11 +14,13 @@ from pathlib import Path
 from typing import Any
 
 
-INSTANCE_RENDER_MANIFEST_SCHEMA = "local-true-component-id-render-manifest-v2"
-FORMAL_INSTANCE_RENDER_MANIFEST_SCHEMA = "local-true-component-id-formal-render-manifest-v1"
-INSTANCE_RENDER_BATCH_MANIFEST_SCHEMA = "local-true-component-id-render-batch-manifest-v1"
+INSTANCE_RENDER_MANIFEST_SCHEMA = "local-true-component-id-render-manifest-v3"
+FORMAL_INSTANCE_RENDER_MANIFEST_SCHEMA = "local-true-component-id-formal-render-manifest-v2"
+INSTANCE_RENDER_BATCH_MANIFEST_SCHEMA = "local-true-component-id-render-batch-manifest-v2"
 INSTANCE_BINDING_SCHEMA = "component-instance-binding-preflight-v1"
 INSTANCE_ID_ENCODING = "componentGlobalId + 1, RGB24, 0 background"
+PREDICTION_COMPONENT_IDS_BY_KEY_FIELD = "predictionComponentIdsByKey"
+PREDICTION_KEY_FIELD = "predictionKey"
 RENDER_FOV_Y_DEG = 60.0
 MODEL_INPUT_FOV_Y_DEG = 66.0
 
@@ -256,7 +258,7 @@ def build_instance_binding_preflight(
 
 
 def validate_instance_render_manifest(manifest: dict[str, Any]) -> None:
-    """Validate the browser-facing v2 manifest without touching assets."""
+    """Validate the browser-facing keyed prediction manifest without assets."""
     if manifest.get("schema") != INSTANCE_RENDER_MANIFEST_SCHEMA:
         raise InstanceBindingError(
             "refusing non-instance render manifest; expected "
@@ -321,8 +323,34 @@ def validate_instance_render_manifest(manifest: dict[str, Any]) -> None:
     if reference.get("mode") != "full_scene_renderable_instances" or reference.get("idSource") != "componentGlobalId":
         raise InstanceBindingError("manifest reference must be a full component-ID scene render")
     prediction = manifest.get("prediction") or {}
-    if prediction.get("field") != "predictionComponentIds":
-        raise InstanceBindingError("manifest prediction field must be predictionComponentIds")
+    if (
+        prediction.get("field") != PREDICTION_COMPONENT_IDS_BY_KEY_FIELD
+        or prediction.get("keyField") != PREDICTION_KEY_FIELD
+    ):
+        raise InstanceBindingError(
+            "manifest prediction must use predictionComponentIdsByKey and predictionKey"
+        )
+    prediction_component_ids_by_key = manifest.get(PREDICTION_COMPONENT_IDS_BY_KEY_FIELD)
+    if not isinstance(prediction_component_ids_by_key, dict):
+        raise InstanceBindingError(
+            f"manifest.{PREDICTION_COMPONENT_IDS_BY_KEY_FIELD} is missing"
+        )
+    for prediction_key, component_ids in prediction_component_ids_by_key.items():
+        if not isinstance(prediction_key, str) or not prediction_key:
+            raise InstanceBindingError("manifest prediction table contains an empty key")
+        if not isinstance(component_ids, list):
+            raise InstanceBindingError(
+                f"prediction key {prediction_key!r} must map to a component ID list"
+            )
+        for component_id in component_ids:
+            if not isinstance(component_id, int) or isinstance(component_id, bool) or component_id < 0:
+                raise InstanceBindingError(
+                    f"prediction key {prediction_key!r} has an invalid prediction component ID: {component_id!r}"
+                )
+            if str(component_id) not in component_to_binding:
+                raise InstanceBindingError(
+                    f"prediction key {prediction_key!r} contains unknown componentGlobalId {component_id}"
+                )
     synthetic_smoke = manifest.get("syntheticComponentIdSmoke")
     if synthetic_smoke is not None:
         for field in ("referenceComponentIds", "predictionComponentIds"):
@@ -338,37 +366,51 @@ def validate_instance_render_manifest(manifest: dict[str, Any]) -> None:
                     raise InstanceBindingError(
                         f"synthetic smoke contains unknown componentGlobalId {component_id}"
                     )
+    prediction_key_by_viewcell: dict[int, str] = {}
     for sample_index, sample in enumerate(manifest.get("samples") or []):
         if any(key in sample for key in ("referenceGlbs", "testGlbs", "predictionGlbIds")):
             raise InstanceBindingError(
                 f"sample {sample_index} still uses GLB-level image IDs; use component IDs only"
             )
-        if not isinstance(sample.get("predictionComponentIds"), list):
+        if "predictionComponentIds" in sample:
             raise InstanceBindingError(
-                f"sample {sample_index} is missing predictionComponentIds"
+                f"sample {sample_index} stores predictionComponentIds; use predictionKey"
             )
+        prediction_key = sample.get(PREDICTION_KEY_FIELD)
+        if not isinstance(prediction_key, str) or not prediction_key:
+            raise InstanceBindingError(
+                f"sample {sample_index} is missing {PREDICTION_KEY_FIELD}"
+            )
+        if prediction_key not in prediction_component_ids_by_key:
+            raise InstanceBindingError(
+                f"sample {sample_index} references unknown predictionKey {prediction_key!r}"
+            )
+        if "viewcellRow" in sample:
+            viewcell_row = sample.get("viewcellRow")
+            if not isinstance(viewcell_row, int) or isinstance(viewcell_row, bool) or viewcell_row < 0:
+                raise InstanceBindingError(
+                    f"sample {sample_index} has an invalid viewcellRow: {viewcell_row!r}"
+                )
+            previous_key = prediction_key_by_viewcell.get(viewcell_row)
+            if previous_key is not None and previous_key != prediction_key:
+                raise InstanceBindingError(
+                    f"view-cell row {viewcell_row} uses multiple prediction keys: "
+                    f"{previous_key!r} and {prediction_key!r}"
+                )
+            prediction_key_by_viewcell[viewcell_row] = prediction_key
         if abs(float(sample.get("renderFovYDeg", fov)) - RENDER_FOV_Y_DEG) > 1e-6:
             raise InstanceBindingError(f"sample {sample_index} does not use 60 degree rendering")
         if abs(float(sample.get("modelInputFovYDeg", model_fov)) - MODEL_INPUT_FOV_Y_DEG) > 1e-6:
             raise InstanceBindingError(f"sample {sample_index} does not use 66 degree model input")
-        for component_id in sample["predictionComponentIds"]:
-            if not isinstance(component_id, int) or component_id < 0:
-                raise InstanceBindingError(
-                    f"sample {sample_index} has an invalid prediction component ID: {component_id!r}"
-                )
-            if str(component_id) not in component_to_binding:
-                raise InstanceBindingError(
-                    f"sample {sample_index} contains unknown componentGlobalId {component_id}"
-                )
 
 
 def validate_instance_render_batch_manifest(manifest: dict[str, Any]) -> None:
-    """Validate several v2 prediction batches for one browser page.
+    """Validate several keyed prediction batches for one browser page.
 
     A batch manifest does not introduce a new image or instance semantic.  It
-    only groups ordinary v2 samples so the browser can load the complete local
+    only groups ordinary keyed samples so the browser can load the complete local
     GLB inventory once and then render every batch in sequence.  The flattened
-    copy below deliberately goes through the v2 validator so the FOV, ID
+    copy below deliberately goes through the common validator so the FOV, ID
     encoding, full-scene reference, and component-level prediction checks stay
     identical.
     """
@@ -409,18 +451,17 @@ def validate_instance_render_batch_manifest(manifest: dict[str, Any]) -> None:
             seen_sample_ids.add(sample_id)
             flattened.append(sample)
 
-    legacy_manifest = dict(manifest)
-    legacy_manifest["schema"] = INSTANCE_RENDER_MANIFEST_SCHEMA
-    legacy_manifest["samples"] = flattened
-    validate_instance_render_manifest(legacy_manifest)
+    common_manifest = dict(manifest)
+    common_manifest["schema"] = INSTANCE_RENDER_MANIFEST_SCHEMA
+    common_manifest["samples"] = flattened
+    validate_instance_render_manifest(common_manifest)
 
 
 def validate_formal_instance_render_manifest(manifest: dict[str, Any]) -> None:
     """Validate the stricter real-mesh, hardware-GPU image protocol.
 
-    The legacy validator remains intentionally non-formal for historical
-    smoke manifests.  This validator reuses its component/GLB consistency
-    checks on a private legacy-shaped copy, then enforces the additional
+    The common validator checks component/GLB consistency on a private
+    non-formal copy, then this validator enforces the additional
     evidence that a formal image result cannot be a synthetic render, a GLB
     coarse mask, a partial inventory, or a pending browser implementation.
     """
@@ -434,10 +475,10 @@ def validate_formal_instance_render_manifest(manifest: dict[str, Any]) -> None:
     if manifest.get("syntheticComponentIdSmoke") is not None:
         raise InstanceBindingError("synthetic component-ID smoke cannot be formal")
 
-    legacy = dict(manifest)
-    legacy["schema"] = INSTANCE_RENDER_MANIFEST_SCHEMA
-    legacy["formalImageEvaluationReady"] = False
-    validate_instance_render_manifest(legacy)
+    common = dict(manifest)
+    common["schema"] = INSTANCE_RENDER_MANIFEST_SCHEMA
+    common["formalImageEvaluationReady"] = False
+    validate_instance_render_manifest(common)
 
     requirements = manifest.get("formalRequirements") or {}
     if requirements.get("requiresHardwareWebGL") is not True:
@@ -466,5 +507,3 @@ def validate_formal_instance_render_manifest(manifest: dict[str, Any]) -> None:
     for index, sample in enumerate(samples):
         if sample.get("referenceMode") != "full_scene_renderable_instances":
             raise InstanceBindingError(f"formal sample {index} is not a full-scene reference")
-        if sample.get("predictionComponentIds") is None:
-            raise InstanceBindingError(f"formal sample {index} has no component prediction list")

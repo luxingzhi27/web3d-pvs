@@ -46,6 +46,8 @@ from instance_id_render_schema import (  # noqa: E402
     INSTANCE_ID_ENCODING,
     MODEL_INPUT_FOV_Y_DEG,
     INSTANCE_RENDER_MANIFEST_SCHEMA,
+    PREDICTION_COMPONENT_IDS_BY_KEY_FIELD,
+    PREDICTION_KEY_FIELD,
     RENDER_FOV_Y_DEG,
     build_instance_binding_preflight,
     validate_formal_instance_render_manifest,
@@ -1027,6 +1029,7 @@ def run_true_glb_renderer(
     args: argparse.Namespace,
     output_dir: Path,
     manifest_samples: list[dict[str, Any]],
+    prediction_component_ids_by_key: dict[str, list[int]],
     subpose_selection: dict[str, Any],
     glb_paths: dict[int, Path],
     instance_bindings: dict[str, Any],
@@ -1060,8 +1063,14 @@ def run_true_glb_renderer(
             "completeInventory": True,
         },
         "prediction": {
-            "field": "predictionComponentIds",
+            "field": PREDICTION_COMPONENT_IDS_BY_KEY_FIELD,
+            "keyField": PREDICTION_KEY_FIELD,
+            "keyScope": "viewcellRow",
             "postFilter": "component_visibility_mask_after_conservative_render_submission",
+        },
+        PREDICTION_COMPONENT_IDS_BY_KEY_FIELD: {
+            str(prediction_key): [int(component_id) for component_id in component_ids]
+            for prediction_key, component_ids in prediction_component_ids_by_key.items()
         },
         "instanceBindings": instance_bindings,
         "glbAabbs": {
@@ -1113,9 +1122,9 @@ def run_true_glb_renderer(
     else:
         validate_instance_render_manifest(manifest)
     manifest_path = output_dir / "true_glb_render_manifest.json"
-    # Large scenes repeat one view-cell prediction across several real
-    # subposes. Compact JSON keeps the browser manifest below Node's string
-    # limit without changing any sample or prediction semantics.
+    # Large scenes share one view-cell prediction across several real subposes.
+    # Compact JSON keeps the browser manifest below Node's string limit without
+    # changing any sample or prediction semantics.
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, separators=(",", ":")),
         encoding="utf-8",
@@ -1313,6 +1322,7 @@ def main() -> None:
     top_missed: dict[int, int] = {}
     self_consistency_per: float | None = None
     true_render_manifest_samples: list[dict[str, Any]] = []
+    prediction_component_ids_by_key: dict[str, list[int]] = {}
     missing_glb_samples = 0
     render_failed_samples = 0
     prediction_ms: list[float] = []
@@ -1342,6 +1352,11 @@ def main() -> None:
             )
             pred_ids = np.asarray(pred_ids, dtype=np.uint32)
             prediction_ms.append(float(pred_result.total_ms))
+            prediction_key = f"vc{row:05d}"
+            if args.image_renderer == "true_glb":
+                prediction_component_ids_by_key[prediction_key] = [
+                    int(value) for value in pred_ids.tolist()
+                ]
 
             comp_metrics = set_metrics(pred_ids, gt_ids)
             wrec = weighted_recall(pred_ids, gt_ids, gt_weights)
@@ -1429,7 +1444,7 @@ def main() -> None:
                             "renderFovYDeg": float(RENDER_FOV_Y_DEG),
                             "modelInputFovYDeg": float(model_fov_y),
                             "aspect": float(aspect),
-                            "predictionComponentIds": [int(v) for v in pred_ids.tolist()],
+                            PREDICTION_KEY_FIELD: prediction_key,
                             "referenceMode": "full_scene_renderable_instances",
                         }
                     )
@@ -1487,6 +1502,7 @@ def main() -> None:
             args,
             output_dir,
             true_render_manifest_samples,
+            prediction_component_ids_by_key,
             subpose_selection,
             glb_paths,
             instance_bindings,

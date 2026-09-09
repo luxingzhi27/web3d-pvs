@@ -20,11 +20,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const SLM2_ROOT = path.join(REPO_ROOT, 'slm2viewer');
-const INSTANCE_RENDER_MANIFEST_SCHEMA = 'local-true-component-id-render-manifest-v2';
-const FORMAL_INSTANCE_RENDER_MANIFEST_SCHEMA = 'local-true-component-id-formal-render-manifest-v1';
-const INSTANCE_RENDER_BATCH_MANIFEST_SCHEMA = 'local-true-component-id-render-batch-manifest-v1';
+const INSTANCE_RENDER_MANIFEST_SCHEMA = 'local-true-component-id-render-manifest-v3';
+const FORMAL_INSTANCE_RENDER_MANIFEST_SCHEMA = 'local-true-component-id-formal-render-manifest-v2';
+const INSTANCE_RENDER_BATCH_MANIFEST_SCHEMA = 'local-true-component-id-render-batch-manifest-v2';
 const INSTANCE_BINDING_SCHEMA = 'component-instance-binding-preflight-v1';
 const INSTANCE_ID_ENCODING = 'componentGlobalId + 1, RGB24, 0 background';
+const PREDICTION_COMPONENT_IDS_BY_KEY_FIELD = 'predictionComponentIdsByKey';
+const PREDICTION_KEY_FIELD = 'predictionKey';
 const RENDER_FOV_Y_DEG = 60;
 const MODEL_INPUT_FOV_Y_DEG = 66;
 
@@ -161,8 +163,27 @@ function validateInstanceRenderManifest(manifest) {
       manifest.reference.idSource !== 'componentGlobalId') {
     throw new Error('manifest reference must be a full component-ID scene render');
   }
-  if (!manifest.prediction || manifest.prediction.field !== 'predictionComponentIds') {
-    throw new Error('manifest prediction field must be predictionComponentIds');
+  if (!manifest.prediction ||
+      manifest.prediction.field !== PREDICTION_COMPONENT_IDS_BY_KEY_FIELD ||
+      manifest.prediction.keyField !== PREDICTION_KEY_FIELD) {
+    throw new Error('manifest prediction must use predictionComponentIdsByKey and predictionKey');
+  }
+  const predictionComponentIdsByKey = manifest[PREDICTION_COMPONENT_IDS_BY_KEY_FIELD];
+  if (!predictionComponentIdsByKey || typeof predictionComponentIdsByKey !== 'object' ||
+      Array.isArray(predictionComponentIdsByKey)) {
+    throw new Error(`manifest.${PREDICTION_COMPONENT_IDS_BY_KEY_FIELD} is missing`);
+  }
+  for (const [predictionKey, componentIds] of Object.entries(predictionComponentIdsByKey)) {
+    if (!predictionKey) throw new Error('manifest prediction table contains an empty key');
+    if (!Array.isArray(componentIds)) {
+      throw new Error(`prediction key ${predictionKey} must map to a component ID list`);
+    }
+    for (const componentId of componentIds) {
+      if (!Number.isInteger(Number(componentId)) || Number(componentId) < 0 ||
+          !componentToBinding[String(Number(componentId))]) {
+        throw new Error(`prediction key ${predictionKey} contains unknown componentGlobalId ${componentId}`);
+      }
+    }
   }
   if (manifest.syntheticComponentIdSmoke) {
     const smoke = manifest.syntheticComponentIdSmoke;
@@ -177,6 +198,7 @@ function validateInstanceRenderManifest(manifest) {
     }
   }
   const samples = manifest.samples || [];
+  const predictionKeyByViewcell = new Map();
   for (let index = 0; index < samples.length; index += 1) {
     const sample = samples[index];
     if (Object.prototype.hasOwnProperty.call(sample, 'referenceGlbs') ||
@@ -184,20 +206,32 @@ function validateInstanceRenderManifest(manifest) {
         Object.prototype.hasOwnProperty.call(sample, 'predictionGlbIds')) {
       throw new Error(`sample ${index} still contains GLB-level image IDs`);
     }
-    if (!Array.isArray(sample.predictionComponentIds)) {
-      throw new Error(`sample ${index} is missing predictionComponentIds`);
+    if (Object.prototype.hasOwnProperty.call(sample, 'predictionComponentIds')) {
+      throw new Error(`sample ${index} stores predictionComponentIds; use predictionKey`);
+    }
+    const predictionKey = sample[PREDICTION_KEY_FIELD];
+    if (typeof predictionKey !== 'string' || !predictionKey) {
+      throw new Error(`sample ${index} is missing ${PREDICTION_KEY_FIELD}`);
+    }
+    if (!Object.prototype.hasOwnProperty.call(predictionComponentIdsByKey, predictionKey)) {
+      throw new Error(`sample ${index} references unknown predictionKey ${predictionKey}`);
+    }
+    if (Object.prototype.hasOwnProperty.call(sample, 'viewcellRow')) {
+      const viewcellRow = sample.viewcellRow;
+      if (!Number.isInteger(Number(viewcellRow)) || Number(viewcellRow) < 0) {
+        throw new Error(`sample ${index} has an invalid viewcellRow: ${viewcellRow}`);
+      }
+      const previousKey = predictionKeyByViewcell.get(Number(viewcellRow));
+      if (previousKey !== undefined && previousKey !== predictionKey) {
+        throw new Error(`view-cell row ${viewcellRow} uses multiple prediction keys`);
+      }
+      predictionKeyByViewcell.set(Number(viewcellRow), predictionKey);
     }
     if (Number(sample.renderFovYDeg) !== RENDER_FOV_Y_DEG) {
       throw new Error(`sample ${index} does not use the 60 degree render camera`);
     }
     if (Number(sample.modelInputFovYDeg) !== MODEL_INPUT_FOV_Y_DEG) {
       throw new Error(`sample ${index} does not use the 66 degree model-input camera`);
-    }
-    for (const componentId of sample.predictionComponentIds) {
-      if (!Number.isInteger(Number(componentId)) || Number(componentId) < 0 ||
-          !componentToBinding[String(Number(componentId))]) {
-        throw new Error(`sample ${index} contains unknown componentGlobalId ${componentId}`);
-      }
     }
   }
   return {
@@ -208,6 +242,8 @@ function validateInstanceRenderManifest(manifest) {
     selectedGlbCount: selected.size,
     componentBindingCount: Object.keys(componentToBinding).length,
     sampleCount: samples.length,
+    predictionKeyCount: Object.keys(predictionComponentIdsByKey).length,
+    predictionKeyReuseCount: samples.length - new Set(samples.map((sample) => sample[PREDICTION_KEY_FIELD])).size,
     formalImageEvaluationReady: false,
     browserInstanceReorderImplemented: false,
   };
@@ -221,8 +257,8 @@ function validateFormalInstanceRenderManifest(manifest) {
     throw new Error('formal image manifest must set formalImageEvaluationReady=true');
   }
   if (manifest.syntheticComponentIdSmoke) throw new Error('synthetic component-ID smoke cannot be formal');
-  const legacy = { ...manifest, schema: INSTANCE_RENDER_MANIFEST_SCHEMA, formalImageEvaluationReady: false };
-  const base = validateInstanceRenderManifest(legacy);
+  const common = { ...manifest, schema: INSTANCE_RENDER_MANIFEST_SCHEMA, formalImageEvaluationReady: false };
+  const base = validateInstanceRenderManifest(common);
   const requirements = manifest.formalRequirements || {};
   if (requirements.requiresHardwareWebGL !== true || requirements.syntheticSmokeAllowed !== false || requirements.completeGlbInventory !== true) {
     throw new Error('formal image requirements must require hardware WebGL, disallow synthetic smoke, and retain complete inventory');
@@ -278,8 +314,8 @@ function validateInstanceRenderBatchManifest(manifest) {
       flattened.push(sample);
     }
   }
-  const legacy = { ...manifest, schema: INSTANCE_RENDER_MANIFEST_SCHEMA, samples: flattened };
-  const validation = validateInstanceRenderManifest(legacy);
+  const common = { ...manifest, schema: INSTANCE_RENDER_MANIFEST_SCHEMA, samples: flattened };
+  const validation = validateInstanceRenderManifest(common);
   return {
     ...validation,
     schema: 'component-id-render-batch-schema-validation-v1',
@@ -389,6 +425,7 @@ function syntheticRendererJs() {
   return `
 import * as THREE from 'three';
 
+const FORMAL_INSTANCE_RENDER_MANIFEST_SCHEMA = 'local-true-component-id-formal-render-manifest-v2';
 const statusEl = document.getElementById('status');
 function status(message) {
   statusEl.textContent = message;
@@ -502,7 +539,7 @@ async function postBuffer(name, typedArray) {
 
 async function main() {
   const manifest = await (await fetch('/manifest', { cache: 'no-store' })).json();
-  const formalManifest = manifest.schema === 'local-true-component-id-formal-render-manifest-v1';
+  const formalManifest = manifest.schema === FORMAL_INSTANCE_RENDER_MANIFEST_SCHEMA;
   const smoke = manifest.syntheticComponentIdSmoke;
   if (!smoke) throw new Error('manifest.syntheticComponentIdSmoke is required');
   const width = 160;
@@ -603,6 +640,9 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 
 const RENDER_FOV_Y_DEG = 60;
+const FORMAL_INSTANCE_RENDER_MANIFEST_SCHEMA = 'local-true-component-id-formal-render-manifest-v2';
+const PREDICTION_COMPONENT_IDS_BY_KEY_FIELD = 'predictionComponentIdsByKey';
+const PREDICTION_KEY_FIELD = 'predictionKey';
 const statusEl = document.getElementById('status');
 function status(message) {
   statusEl.textContent = message;
@@ -907,6 +947,16 @@ function predictionGlbIds(manifest, requiredGlbIds, predictionComponentIds, spat
   return result;
 }
 
+function predictionComponentsForSample(manifest, sample) {
+  const table = manifest[PREDICTION_COMPONENT_IDS_BY_KEY_FIELD] || {};
+  const predictionKey = sample[PREDICTION_KEY_FIELD];
+  if (!Object.prototype.hasOwnProperty.call(table, predictionKey)) {
+    throw new Error('sample ' + (sample.sampleId || '<unknown>') +
+      ' references unknown predictionKey ' + predictionKey);
+  }
+  return table[predictionKey];
+}
+
 function setSpatialInstanceVisibility(groups, visibleComponentIds) {
   const visible = visibleComponentIds ? new Set(visibleComponentIds) : null;
   const dirtyAttributes = new Set();
@@ -982,7 +1032,7 @@ function renderIds(renderer, scene, camera, target, pixels, width, height) {
 async function main() {
   const pageStarted = performance.now();
   const manifest = await (await fetch('/manifest', { cache: 'no-store' })).json();
-  const formalManifest = manifest.schema === 'local-true-component-id-formal-render-manifest-v1';
+  const formalManifest = manifest.schema === FORMAL_INSTANCE_RENDER_MANIFEST_SCHEMA;
   const glbIndex = await (await fetch('/glb-index', { cache: 'no-store' })).json();
   const entriesById = new Map((glbIndex.entries || []).map((entry) => [Number(entry.globalId), entry]));
   const width = Number(manifest.width);
@@ -1192,14 +1242,15 @@ async function main() {
     spatialStats.referenceReuseCount += Math.max(0, sampleGroup.samples.length - 1);
     for (const sample of sampleGroup.samples) {
       const batchId = String(sample.batchId || 'default');
+      const predictionComponentIds = predictionComponentsForSample(manifest, sample);
       const visibilityStarted = performance.now();
-      activePrediction = setPredictionComponents(componentSlots, activePrediction, sample.predictionComponentIds);
+      activePrediction = setPredictionComponents(componentSlots, activePrediction, predictionComponentIds);
       const visibilityUpdateMs = performance.now() - visibilityStarted;
       const predictionMaskStarted = performance.now();
       const predictionGlbs = predictionGlbIds(
         manifest,
         requiredGlbs,
-        sample.predictionComponentIds,
+        predictionComponentIds,
         spatialSelection.componentIds,
       );
       spatialStats.predictionGlbCountSum += predictionGlbs.length;
