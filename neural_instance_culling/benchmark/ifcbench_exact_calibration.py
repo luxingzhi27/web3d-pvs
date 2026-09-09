@@ -466,6 +466,7 @@ def _fixed_bootstrap(
             or int(metadata.get("replicates", -1)) != int(replicates)
             or int(metadata.get("seed", -1)) != int(seed)
             or metadata.get("validPoseRows") != valid_rows.tolist()
+            or metadata.get("poseIndices") != np.asarray(sidecar.pose_indices, dtype=np.int64).tolist()
             or bootstrap_path.stat().st_size != expected_size
             or metadata.get("testRead") is not False
         ):
@@ -492,6 +493,7 @@ def _fixed_bootstrap(
             "replicates": int(replicates),
             "seed": int(seed),
             "validPoseRows": valid_rows.tolist(),
+            "poseIndices": np.asarray(sidecar.pose_indices, dtype=np.int64).tolist(),
             "shape": [int(replicates), int(valid_rows.size)],
             "dtype": "int32",
             "byteOrder": "little",
