@@ -2,7 +2,7 @@
 
 日期：2026-09-09
 
-状态：已新增窄范围 orchestrator；本次只完成 CPU preflight/dry-run 和单测，未启动 Chrome、WebGPU 或 GPU 正式实验，也没有产生新的 HZB visibility、图像或性能结论。
+状态：窄范围 orchestrator 与 CPU preflight 已完成；两场景输入、两档分辨率和 120-pose 计划均通过。尚未启动 Chrome、WebGPU 或 GPU 正式实验，也没有产生新的 HZB visibility、图像或性能结论。
 
 ## 目的与入口
 
@@ -72,13 +72,14 @@ conda run --no-capture-output -n slm_pvs \
   all --dry-run
 ```
 
-实际独占硬件窗口中，去掉 `--dry-run` 后运行 `all`；入口会把每个子进程 stdout/stderr 写入对应任务目录，并沿用现有 runner 的 Chrome Vulkan hardware gate。当前未执行该命令。
+实际独占硬件窗口中，去掉 `--dry-run` 后运行 `all`；入口会把每个子进程 stdout/stderr 写入对应任务目录，并沿用现有 runner 的 Chrome Vulkan hardware gate。正式 `all` 尚未执行；不占 GPU 的 `preflight` 已执行。
 
 本次已通过：
 
 - `python -m py_compile neural_instance_culling/benchmark/run_geometry_shell_hzb_paper.py neural_instance_culling/benchmark/tests/test_run_geometry_shell_hzb_paper.py`；
 - `python -m unittest neural_instance_culling.benchmark.tests.test_run_geometry_shell_hzb_paper`；
-- 真实 worktree 资源上的 `all --dry-run`：`32` 个计划任务，即 2 preflight、12 calibration、2 select、12 test、4 timing，全部 `planned`，未创建 formal 输出目录。
+- 真实 worktree 资源上的 `all --dry-run`：`32` 个计划任务，即 2 preflight、12 calibration、2 select、12 test、4 timing，全部可计划；
+- 真实资源上的 CPU `preflight`：HKUST 与 IFCBench 均通过，确认 calibration 为 `512x288 / 1024x576`、每配置一次 invocation 和单轮可见性，timing 为 120 pose 五轮。
 
 新增文件：
 

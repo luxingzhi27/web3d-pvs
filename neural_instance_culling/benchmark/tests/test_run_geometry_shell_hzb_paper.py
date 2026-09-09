@@ -50,13 +50,24 @@ class GeometryShellHZBPaperOrchestratorTests(unittest.TestCase):
             calibration = orchestrator.build_calibration_tasks(hkust, root / "run")
             self.assertEqual(len(calibration), 6)
             self.assertEqual(
-                {(task.config["height"], task.config["depthBiasM"]) for task in calibration},
-                {(288, 0.0001), (288, 0.001), (288, 0.01), (576, 0.0001), (576, 0.001), (576, 0.01)},
+                {(task.config["width"], task.config["height"], task.config["depthBiasM"]) for task in calibration},
+                {
+                    (512, 288, 0.0001),
+                    (512, 288, 0.001),
+                    (512, 288, 0.01),
+                    (1024, 576, 0.0001),
+                    (1024, 576, 0.001),
+                    (1024, 576, 0.01),
+                },
             )
             self.assertTrue(all(task.config["calibrationInvocations"] == 1 for task in calibration))
             self.assertTrue(all("--timing-rounds" in task.commands[0][1] for task in calibration))
             self.assertTrue(all(task.config["runnerTimingRounds"] == 1 for task in calibration))
             self.assertTrue(all(_argument(task.commands[0][1], "--timing-rounds") == "1" for task in calibration))
+            self.assertEqual(
+                {(_argument(task.commands[0][1], "--width"), _argument(task.commands[0][1], "--height")) for task in calibration},
+                {("512", "288"), ("1024", "576")},
+            )
             self.assertTrue(all("--allow-software-gpu" not in task.commands[0][1] for task in calibration))
 
             selection = {
@@ -196,13 +207,20 @@ class GeometryShellHZBPaperOrchestratorTests(unittest.TestCase):
             self.assertEqual(handoff["commands"][0]["plan"], str(plan.resolve()))
 
     def test_all_dry_run_is_cpu_only_and_enumerates_every_task(self) -> None:
-        args = orchestrator.parse_args(["all", "--dry-run"])
-        with redirect_stdout(io.StringIO()):
-            summary = orchestrator.run(args)
-        self.assertTrue(summary["dryRun"])
-        self.assertFalse(summary["formalGpuExecuted"])
-        self.assertEqual(len(summary["records"]), 32)
-        self.assertFalse((args.output_root).exists())
+        with tempfile.TemporaryDirectory() as temporary:
+            output_root = Path(temporary) / "dry-run-output"
+            args = orchestrator.parse_args([
+                "all",
+                "--dry-run",
+                "--output-root",
+                str(output_root),
+            ])
+            with redirect_stdout(io.StringIO()):
+                summary = orchestrator.run(args)
+            self.assertTrue(summary["dryRun"])
+            self.assertFalse(summary["formalGpuExecuted"])
+            self.assertEqual(len(summary["records"]), 32)
+            self.assertFalse(output_root.exists())
 
 
 if __name__ == "__main__":

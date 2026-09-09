@@ -193,7 +193,7 @@ def load_formal_region66_test_result(
     selected_pose_ids: Iterable[int],
     *,
     expected_scene: str | None = None,
-    expected_candidate_counts: Mapping[int, int] | None = None,
+    expected_candidate_ids: Mapping[int, Sequence[int]] | None = None,
 ) -> tuple[dict[int, tuple[int, ...]], dict[str, Any]]:
     """Load the formal Region66 visible-instance set without inventing scores."""
 
@@ -268,7 +268,22 @@ def load_formal_region66_test_result(
         raise StreamingContractError("Region66 HZB result has no pose samples")
     if workload.get("poseCount") != len(samples):
         raise StreamingContractError("Region66 HZB workload poseCount disagrees with result samples")
+    candidate_rows: np.ndarray | None = None
+    if expected_candidate_ids is not None:
+        candidate_file = workload.get("candidateFile")
+        if not isinstance(candidate_file, str) or not candidate_file or Path(candidate_file).name != candidate_file:
+            raise StreamingContractError("Region66 HZB workload has an invalid candidateFile")
+        if workload.get("candidateDtype") != "uint32-little-endian":
+            raise StreamingContractError("Region66 HZB candidate file must use uint32-little-endian")
+        candidate_path = resolved.parent / candidate_file
+        try:
+            candidate_rows = np.fromfile(candidate_path, dtype="<u4")
+        except OSError as error:
+            raise StreamingContractError(f"cannot read Region66 HZB candidate file: {candidate_path}") from error
+        if workload.get("candidateCount") != int(candidate_rows.size):
+            raise StreamingContractError("Region66 HZB workload candidateCount disagrees with its candidate file")
     visible_by_pose: dict[int, tuple[int, ...]] = {}
+    candidate_cursor = 0
     for index, sample in enumerate(samples):
         if not isinstance(sample, dict):
             raise StreamingContractError(f"Region66 HZB sample {index} is not an object")
@@ -280,17 +295,24 @@ def load_formal_region66_test_result(
         candidate_count = sample.get("candidateCount")
         if isinstance(candidate_count, bool) or not isinstance(candidate_count, int) or candidate_count < 0:
             raise StreamingContractError(f"Region66 HZB pose {pose_id} has an invalid candidateCount")
-        if expected_candidate_counts is not None:
-            expected_count = expected_candidate_counts.get(int(pose_id))
-            if expected_count is None:
+        if expected_candidate_ids is not None:
+            expected_ids = expected_candidate_ids.get(int(pose_id))
+            if expected_ids is None:
                 raise StreamingContractError(
                     f"Region66 HZB pose {pose_id} is outside the expected CSR test split"
                 )
-            if candidate_count != int(expected_count):
+            expected_row = np.asarray(expected_ids, dtype=np.uint32).reshape(-1)
+            if candidate_count != int(expected_row.size):
                 raise StreamingContractError(
                     f"Region66 HZB pose {pose_id} candidateCount {candidate_count} "
-                    f"does not match CSR row length {expected_count}"
+                    f"does not match CSR row length {expected_row.size}"
                 )
+            actual_row = candidate_rows[candidate_cursor : candidate_cursor + candidate_count]
+            if not np.array_equal(actual_row, expected_row):
+                raise StreamingContractError(
+                    f"Region66 HZB pose {pose_id} candidate IDs do not match its CSR row"
+                )
+        candidate_cursor += candidate_count
         visible_by_pose[int(pose_id)] = _formal_integer_list(
             sample.get("visibleInstanceIds"),
             f"Region66 HZB pose {pose_id} visibleInstanceIds",
@@ -299,6 +321,8 @@ def load_formal_region66_test_result(
         raise StreamingContractError(
             "Region66 HZB samples do not exactly cover poseSelection.selectedPoseIndices"
         )
+    if candidate_rows is not None and candidate_cursor != int(candidate_rows.size):
+        raise StreamingContractError("Region66 HZB sample candidate counts do not consume its candidate file")
 
     requested = [int(value) for value in selected_pose_ids]
     if len(requested) != len(set(requested)):
@@ -501,15 +525,15 @@ def main() -> None:
         try:
             test_dataset = PoseCSRDataset(args.dataset_dir, num_instances=len(instance_to_glb))
             complete_test_pose_ids = test_dataset.split("test").pose_indices.astype(np.int64, copy=False).tolist()
-            expected_candidate_counts = {
-                int(pose_id): int(test_dataset.candidate_slice(int(pose_id)).size)
+            expected_candidate_ids = {
+                int(pose_id): test_dataset.candidate_slice(int(pose_id))
                 for pose_id in complete_test_pose_ids
             }
             hzb_instances, hzb_source = load_formal_region66_test_result(
                 args.hzb_region66_result,
                 complete_test_pose_ids,
                 expected_scene=str(asset_meta.get("sceneName", "")),
-                expected_candidate_counts=expected_candidate_counts,
+                expected_candidate_ids=expected_candidate_ids,
             )
             records = attach_formal_region66_visible_glbs(
                 records,
@@ -619,6 +643,7 @@ def main() -> None:
             method_summary["reason"] = reason
     ranking_summary["scene"] = asset_meta
     ranking_summary["split"] = args.split
+    ranking_summary["testRead"] = args.split == "test"
     ranking_summary["poseCount"] = len(records)
     ranking_summary["coverageSource"] = _coverage_source_name(args.utility_source)
     ranking_summary["scoreSources"] = score_sources if isinstance(score_sources, dict) else {}
@@ -704,6 +729,7 @@ def main() -> None:
     )
     filtering_summary["scene"] = asset_meta
     filtering_summary["split"] = args.split
+    filtering_summary["testRead"] = args.split == "test"
     filtering_summary["poseCount"] = len(records)
     filtering_summary["coverageSource"] = _coverage_source_name(args.utility_source)
     filtering_summary["source"] = ranking_summary["source"]
@@ -737,6 +763,7 @@ def main() -> None:
         "cacheMode": "strict_cold_cache_per_pose",
         "arrivalSemantics": "GLB bytes and reference-frontmost utility accumulate only after complete GLB arrival",
         "split": args.split,
+        "testRead": args.split == "test",
         "poseCount": len(records),
         "methods": list(methods),
         "filterMethods": filter_methods,

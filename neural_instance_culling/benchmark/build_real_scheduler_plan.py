@@ -163,15 +163,15 @@ def main() -> None:
     else:
         try:
             complete_test_pose_ids = dataset.split("test").pose_indices.astype(np.int64, copy=False).tolist()
-            expected_candidate_counts = {
-                int(pose_id): int(dataset.candidate_slice(int(pose_id)).size)
+            expected_candidate_ids = {
+                int(pose_id): dataset.candidate_slice(int(pose_id))
                 for pose_id in complete_test_pose_ids
             }
             hzb_instances, hzb_source = load_formal_region66_test_result(
                 args.hzb_region66_result,
                 complete_test_pose_ids,
                 expected_scene=str(asset_meta.get("sceneName", "")),
-                expected_candidate_counts=expected_candidate_counts,
+                expected_candidate_ids=expected_candidate_ids,
             )
             records = attach_formal_region66_visible_glbs(
                 records,

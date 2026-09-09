@@ -42,8 +42,7 @@ SELECTION_SCHEMA = "geometry-shell-hzb-calibration-selection-v1"
 PREFLIGHT_SCHEMA = "geometry-shell-hzb-paper-preflight-v1"
 TASK_SCHEMA = "geometry-shell-hzb-paper-task-v1"
 
-CALIBRATION_WIDTH = 512
-CALIBRATION_HEIGHTS = (288, 576)
+CALIBRATION_RESOLUTIONS = ((512, 288), (1024, 576))
 CALIBRATION_DEPTH_BIASES_M = (0.0001, 0.001, 0.01)
 # One calibration round means one browser task per (height, bias) member.
 CALIBRATION_ROUNDS = 1
@@ -559,6 +558,7 @@ def _runner_command(
     result: Path,
     *,
     split: str,
+    width: int,
     height: int,
     depth_bias_m: float,
     region_sample_count: int,
@@ -577,7 +577,7 @@ def _runner_command(
         "--mode", "Region66",
         "--split", split,
         "--limit", "0",
-        "--width", str(CALIBRATION_WIDTH),
+        "--width", str(int(width)),
         "--height", str(int(height)),
         "--fov-y-deg", "60",
         "--region-fov-y-deg", "66",
@@ -624,7 +624,7 @@ def build_calibration_tasks(
     evaluator: Path = EVALUATOR,
 ) -> list[TaskSpec]:
     tasks: list[TaskSpec] = []
-    for height in CALIBRATION_HEIGHTS:
+    for width, height in CALIBRATION_RESOLUTIONS:
         for bias in CALIBRATION_DEPTH_BIASES_M:
             name = f"h{height}_b{_format_bias(bias)}"
             directory = output_root / "calibration" / scene.key / "lossless" / name
@@ -643,6 +643,7 @@ def build_calibration_tasks(
                             "lossless",
                             result,
                             split="calibration",
+                            width=width,
                             height=height,
                             depth_bias_m=bias,
                             region_sample_count=0,
@@ -659,7 +660,7 @@ def build_calibration_tasks(
                 expected_artifacts=VISIBILITY_FILES,
                 config={
                     "shellVariant": "lossless",
-                    "width": CALIBRATION_WIDTH,
+                    "width": width,
                     "height": height,
                     "depthBiasM": bias,
                     "regionSampleCount": 0,
@@ -748,6 +749,7 @@ def build_test_tasks(
                             variant,
                             result,
                             split="test",
+                            width=selected["width"],
                             height=selected["height"],
                             depth_bias_m=selected["depthBiasM"],
                             region_sample_count=region_count,
@@ -807,6 +809,7 @@ def build_timing_tasks(
                         variant,
                         result,
                         split="test",
+                        width=selected["width"],
                         height=selected["height"],
                         depth_bias_m=selected["depthBiasM"],
                         region_sample_count=0,
@@ -1096,7 +1099,7 @@ def _validate_selection_task(task: TaskSpec) -> None:
     if selection.get("selectionSplit") != "calibration" or selection.get("testRead") is not False:
         raise ValueError("selection is not calibration-only")
     rows = selection.get("rows")
-    if not isinstance(rows, list) or len(rows) != len(CALIBRATION_HEIGHTS) * len(CALIBRATION_DEPTH_BIASES_M):
+    if not isinstance(rows, list) or len(rows) != len(CALIBRATION_RESOLUTIONS) * len(CALIBRATION_DEPTH_BIASES_M):
         raise ValueError("selection does not contain the complete calibration matrix")
     _selected_config(selection)
 
@@ -1285,8 +1288,8 @@ def _dry_run_selection() -> dict[str, Any]:
         "testRead": False,
         "selected": {
             "assetVariant": "lossless",
-            "width": CALIBRATION_WIDTH,
-            "height": CALIBRATION_HEIGHTS[0],
+            "width": CALIBRATION_RESOLUTIONS[0][0],
+            "height": CALIBRATION_RESOLUTIONS[0][1],
             "depthBiasM": CALIBRATION_DEPTH_BIASES_M[1],
         },
     }
@@ -1440,8 +1443,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "formalGpuExecuted": formal_gpu_executed,
         "testRead": mode in {"test", "timing", "all"} and not args.dry_run,
         "calibration": {
-            "width": CALIBRATION_WIDTH,
-            "heights": list(CALIBRATION_HEIGHTS),
+            "resolutions": [list(value) for value in CALIBRATION_RESOLUTIONS],
             "depthBiasM": list(CALIBRATION_DEPTH_BIASES_M),
             "rounds": CALIBRATION_ROUNDS,
             "invocationsPerConfiguration": CALIBRATION_INVOCATIONS_PER_CONFIGURATION,

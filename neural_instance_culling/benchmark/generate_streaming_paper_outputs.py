@@ -102,6 +102,49 @@ PAPER_LABEL_OVERRIDES = {
     "aabb": "AABB MLP",
 }
 
+SUMMARY_CONTRACTS = {
+    "threshold_free_ranking": (
+        "pvs-glb-streaming-ranking-summary-v1",
+        False,
+    ),
+    "threshold_filtering": (
+        "pvs-glb-streaming-filter-summary-v1",
+        True,
+    ),
+}
+
+
+def validate_paper_summary(
+    summary: dict[str, Any],
+    path: Path,
+    decision_mode: str,
+) -> None:
+    expected_schema, threshold_applied = SUMMARY_CONTRACTS[decision_mode]
+    if summary.get("schema") != expected_schema:
+        raise ValueError(f"{path}: expected {expected_schema}")
+    if summary.get("decisionMode") != decision_mode:
+        raise ValueError(f"{path}: decisionMode must be {decision_mode}")
+    if summary.get("thresholdApplied") is not threshold_applied:
+        raise ValueError(f"{path}: thresholdApplied disagrees with {decision_mode}")
+    if summary.get("split") != "test" or summary.get("testRead") is not True:
+        raise ValueError(f"{path}: paper streaming inputs must be frozen test summaries")
+    if summary.get("cacheMode") != "strict_cold_cache_per_pose":
+        raise ValueError(f"{path}: paper streaming input must use strict cold-cache poses")
+    pose_count = summary.get("poseCount")
+    if isinstance(pose_count, bool) or not isinstance(pose_count, int) or pose_count <= 0:
+        raise ValueError(f"{path}: poseCount must be a positive integer")
+    methods = summary.get("methods")
+    if not isinstance(methods, dict) or not methods:
+        raise ValueError(f"{path}: paper streaming summary has no methods")
+    for name, method in methods.items():
+        if not isinstance(method, dict):
+            raise ValueError(f"{path}: method {name} is not an object")
+        if method.get("status") == "available":
+            if method.get("decisionMode") != decision_mode:
+                raise ValueError(f"{path}: method {name} has the wrong decision mode")
+            if method.get("poseCount") != pose_count:
+                raise ValueError(f"{path}: method {name} does not cover the complete test summary")
+
 
 def _ranking_input(summary: dict[str, Any], method_name: str) -> dict[str, Any] | None:
     inputs = summary.get("rankingInputs")
@@ -379,6 +422,8 @@ def plot_curves(path_prefix: Path, summaries: list[tuple[Path, dict[str, Any]]])
 def main() -> None:
     args = parse_args()
     summaries = [(path.expanduser().resolve(), read_json(path)) for path in args.summary]
+    for path, summary in summaries:
+        validate_paper_summary(summary, path, "threshold_free_ranking")
     output_dir = args.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     rows = []
@@ -396,6 +441,7 @@ def main() -> None:
     filter_rows = []
     for path in args.filter_summary:
         summary = read_json(path)
+        validate_paper_summary(summary, path.expanduser().resolve(), "threshold_filtering")
         for method_name, method in summary.get("methods", {}).items():
             filter_rows.append(summary_row(summary, path, method_name, method))
     if filter_rows:
@@ -404,6 +450,8 @@ def main() -> None:
 
     manifest = {
         "schema": "pvs-glb-streaming-paper-output-v1",
+        "split": "test",
+        "testRead": True,
         "rankingSummaries": [str(path) for path, _summary in summaries],
         "filterSummaries": [str(path.expanduser().resolve()) for path in args.filter_summary],
         "rankingTable": "table5_streaming_ranking.csv",

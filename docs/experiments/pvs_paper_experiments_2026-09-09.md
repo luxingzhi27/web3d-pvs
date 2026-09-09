@@ -171,7 +171,7 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 | HKUST Full test | 完成 | 三种子均通过安全门；WR `0.997082 +/- 0.001634`，LCB `0.994334 +/- 0.003271`，useful cull `0.901758 +/- 0.007830` |
 | IFCBench 微调 | 运行中 | 五组 `4 x 900` 扫描与精确 calibration/validation 已完成；选定去边界项配置正在做三种子 `8 x 900` 确认，完成后按 validation 安全性决定是否替换原 Full |
 | AABB + Ray MLP | 运行中 | 两场景 `6 x 300` 扫描已完成并选择 `2e-4`；自动链等待 IFCBench 确认后执行两场景三种子 `40 x 900` 与 frozen test |
-| HZB 外壳与运行时 | 代码和资产完成 | 四套外壳、逐 pose aspect、Region `1/5/9/all`、正式硬件失败门、六组 calibration 选择器和两场景 120-pose 分层 timing 计划已完成；Point60 的 60度计划已生成，真实 Color-ID GT 与正式 calibration/test 待独占 GPU |
+| HZB 外壳与运行时 | CPU preflight 完成 | 四套外壳、逐 pose aspect、Region `1/5/9/all`、正式硬件失败门、`512x288 / 1024x576` 六组 calibration 选择器和两场景 120-pose 分层 timing 计划已通过；Point60 的 60度计划已生成，真实 Color-ID GT 与正式 calibration/test 待独占 GPU |
 | 资产与容量 | 完成 | 神经资产为 lossless shell 的 `1.37%`（HKUST）和 `19.78%`（IFCBench）；rank Pareto、Table 4 及 PDF/SVG/PNG 已生成 |
 | 端侧模型前向 | 部分完成 | HKUST M2 与 vivo 各五 session 正式完成；IFCBench 移动端和 A6000 独占结果仍缺失，不以并发 smoke 代替 |
 | Safety-efficiency | 完成 | 六个核心变体的 calibration-safe validation 曲线及论文图已生成 |
@@ -182,4 +182,4 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 
 当前执行顺序不变：完成 IFCBench 确认和 AABB 长训；冻结两场景最终成员并各读取一次 test；在无训练并发的窗口依次完成 HZB、真实图像、GT 收敛和 A6000 计时；最后替换 streaming 基线、重建全部表图与结果包。任何中间指标都不取消已登记长训。
 
-本轮实现回归已通过 benchmark `164` 项、model `48` 项、完整前端 `npm test` 和 sampler `7` 项测试；测试过程禁用 CUDA，不作为任何正式性能结果。
+本轮实现回归已通过 benchmark `166` 项、model `48` 项、完整前端 `npm test` 和 sampler `7` 项测试；测试过程禁用 CUDA，不作为任何正式性能结果。

@@ -35,7 +35,7 @@ exporter 将该 `scores` 数组写入 streaming sidecar 的 `aabb` 字段，并�
 
 ### HZB visible-first
 
-`--hzb-region66-result` 接受正式 `geometry-shell-hzb-browser-result-v1` JSON。它必须声明 `mode=Region66`、test workload、完整 representative pose selection、`formalReady=true`、`executionClass=formal-hardware-gpu`，并通过 `gpuGate`。结果中的 pose 集合必须与冻结 CSR test split 完全相等，每个 sample 的 `candidateCount` 必须等于同 pose 的 CSR candidate 行长度；`visibleInstanceIds` 再映射到该候选行和 GLB。任何 pose、数量、实例或候选不一致都会使该方法 unavailable。
+`--hzb-region66-result` 接受正式 `geometry-shell-hzb-browser-result-v1` JSON。它必须声明 `mode=Region66`、test workload、完整 representative pose selection、`formalReady=true`、`executionClass=formal-hardware-gpu`，并通过 `gpuGate`。结果中的 pose 集合必须与冻结 CSR test split 完全相等；`candidateFile` 中每个 pose 的 uint32 实例编号和 `candidateCount` 都必须逐项等于同 pose 的 CSR candidate 行。`visibleInstanceIds` 再映射到该候选行和 GLB。任何 pose、数量、实例或候选不一致都会使该方法 unavailable。
 
 HZB 不生成连续分数。排序规则是：
 
@@ -49,7 +49,7 @@ HZB 不生成连续分数。排序规则是：
 
 - `export_glb_streaming_scores.py` 生成 `pvs-glb-streaming-score-sidecar-v1`，在 `score_manifest.json` 中保存 `scoreSources` 和 `unavailableSources`。
 - `simulate_glb_streaming.py` 生成独立的 `ranking_summary.json`、`filtering_summary.json`、逐 pose JSONL 和 `streaming_manifest.json`。ranking 不读取阈值；filtering 只使用 checkpoint calibration 阈值，并且不把预测子集写入 ranking 曲线。
-- `generate_streaming_paper_outputs.py` 只为 formal AABB/HZB 输入生成可用表格和曲线。缺少 formal source 的历史 AABB/HZB 行会在 CSV/Markdown 中保留为 `status=unavailable`，不会被绘图。
+- `generate_streaming_paper_outputs.py` 只接受 `split=test`、`testRead=true`、完整 pose 数且 decision mode 正确的正式 ranking/filtering summary。缺少 formal source 的历史 AABB/HZB 行会在 CSV/Markdown 中保留为 `status=unavailable`，不会被绘图；validation、部分 pose 和旧占位 summary 会直接拒绝。
 - `build_real_scheduler_plan.py` 固定从 test split 选择 12 个 pose；它复用同一个 score sidecar、CSR candidate GLB 集合和 HZB 排列。计划仍显式关闭 startup-100，并只写 `urgent/warm/speculative` 三层。
 
 本次 fixture 验证已覆盖 AABB 连续分数对齐、Region66 pose/candidate 对齐、HZB visible-first 排序以及旧占位拒绝。正式两场景的 AABB 数值、HZB 数值、网络时间和 GPU 性能尚未生成，不能从 fixture 或历史输出推断。

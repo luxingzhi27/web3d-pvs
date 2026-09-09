@@ -25,7 +25,11 @@ from glb_streaming import (  # noqa: E402
 from build_reference_frontmost_histogram import build_reference_histogram  # noqa: E402
 from export_glb_streaming_scores import load_formal_aabb_test_sidecar  # noqa: E402
 from export_glb_streaming_scores import _model_sources  # noqa: E402
-from generate_streaming_paper_outputs import scene_display_name, summary_row  # noqa: E402
+from generate_streaming_paper_outputs import (  # noqa: E402
+    scene_display_name,
+    summary_row,
+    validate_paper_summary,
+)
 from score_sidecar import ScoreSidecarWriter  # noqa: E402
 from simulate_glb_streaming import (  # noqa: E402
     attach_formal_region66_visible_glbs,
@@ -274,6 +278,9 @@ class GlbStreamingContractTests(unittest.TestCase):
                 "scene": "fixture-scene",
                 "split": "test",
                 "poseCount": 1,
+                "candidateCount": 3,
+                "candidateFile": "geometry_shell_hzb_candidates_uint32.bin",
+                "candidateDtype": "uint32-little-endian",
                 "fovYDeg": 66,
                 "poseSelection": {
                     "split": "test",
@@ -293,11 +300,14 @@ class GlbStreamingContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             result_path = Path(directory) / "region66.json"
             result_path.write_text(json.dumps(payload), encoding="utf-8")
+            np.asarray([0, 1, 2], dtype="<u4").tofile(
+                result_path.parent / "geometry_shell_hzb_candidates_uint32.bin"
+            )
             visible, source = load_formal_region66_test_result(
                 result_path,
                 [10],
                 expected_scene="fixture-scene",
-                expected_candidate_counts={10: 3},
+                expected_candidate_ids={10: [0, 1, 2]},
             )
 
         self.assertEqual(visible, {10: (0, 2)})
@@ -340,6 +350,9 @@ class GlbStreamingContractTests(unittest.TestCase):
                 "scene": "fixture-scene",
                 "split": "test",
                 "poseCount": 1,
+                "candidateCount": 2,
+                "candidateFile": "geometry_shell_hzb_candidates_uint32.bin",
+                "candidateDtype": "uint32-little-endian",
                 "fovYDeg": 66,
                 "poseSelection": {
                     "split": "test",
@@ -359,12 +372,15 @@ class GlbStreamingContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             result_path = Path(directory) / "region66.json"
             result_path.write_text(json.dumps(payload), encoding="utf-8")
+            np.asarray([0, 1], dtype="<u4").tofile(
+                result_path.parent / "geometry_shell_hzb_candidates_uint32.bin"
+            )
             with self.assertRaisesRegex(StreamingContractError, "does not match CSR row length"):
                 load_formal_region66_test_result(
                     result_path,
                     [10],
                     expected_scene="fixture-scene",
-                    expected_candidate_counts={10: 3},
+                    expected_candidate_ids={10: [0, 1, 2]},
                 )
 
     def test_legacy_aabb_summary_is_unavailable_in_paper_outputs(self) -> None:
@@ -383,6 +399,50 @@ class GlbStreamingContractTests(unittest.TestCase):
         )
         self.assertEqual(row["status"], "unavailable")
         self.assertIn("formal test score sidecar", row["availability_reason"])
+
+    def test_paper_output_rejects_non_test_or_partial_summary(self) -> None:
+        ranking = {
+            "schema": "pvs-glb-streaming-ranking-summary-v1",
+            "decisionMode": "threshold_free_ranking",
+            "thresholdApplied": False,
+            "cacheMode": "strict_cold_cache_per_pose",
+            "split": "validation",
+            "testRead": False,
+            "poseCount": 2,
+            "methods": {
+                "full": {
+                    "status": "available",
+                    "decisionMode": "threshold_free_ranking",
+                    "poseCount": 2,
+                }
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "frozen test summaries"):
+            validate_paper_summary(ranking, Path("ranking.json"), "threshold_free_ranking")
+        ranking["split"] = "test"
+        ranking["testRead"] = True
+        ranking["methods"]["full"]["poseCount"] = 1
+        with self.assertRaisesRegex(ValueError, "complete test summary"):
+            validate_paper_summary(ranking, Path("ranking.json"), "threshold_free_ranking")
+
+    def test_paper_output_accepts_complete_formal_filter_summary(self) -> None:
+        filtering = {
+            "schema": "pvs-glb-streaming-filter-summary-v1",
+            "decisionMode": "threshold_filtering",
+            "thresholdApplied": True,
+            "cacheMode": "strict_cold_cache_per_pose",
+            "split": "test",
+            "testRead": True,
+            "poseCount": 2,
+            "methods": {
+                "full": {
+                    "status": "available",
+                    "decisionMode": "threshold_filtering",
+                    "poseCount": 2,
+                }
+            },
+        }
+        validate_paper_summary(filtering, Path("filtering.json"), "threshold_filtering")
 
     def test_aabb_runner_spec_never_turns_into_a_fallback_source(self) -> None:
         runner_specs, sidecar, requested = _model_sources(
