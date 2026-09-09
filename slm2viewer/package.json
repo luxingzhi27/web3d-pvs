@@ -30,6 +30,7 @@
     "smoke:refilter": "node ./scripts/smoke_v4_runtime_refilter.mjs --allow-software-gpu",
     "smoke:wasm-fallback": "node ./scripts/smoke_v4_wasm_fallback.mjs",
     "probe:webgpu-hardware": "node ./scripts/probe_headless_webgpu_hardware.mjs",
+    "benchmark:geometry-shell-hzb": "node ./scripts/run_geometry_shell_hzb_benchmark.mjs",
     "serve:runtime-benchmark": "node ./scripts/runtime_benchmark_server.mjs",
     "capture:initial-glb-order": "node ./scripts/capture_initial_glb_load_order.mjs --allow-software-gpu --limit=100 --viewport-width=694 --viewport-height=552",
     "nginx:script": "echo scripts/install_nginx_site.sh",

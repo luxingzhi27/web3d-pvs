@@ -32,6 +32,7 @@
 | [`evaluation/pvs_mainline_image_evaluation_2026-09-09.md`](evaluation/pvs_mainline_image_evaluation_2026-09-09.md) | HKUST 与 IFCBench validation 的硬件 Color-ID 正式图像结果 |
 | [`evaluation/pvs_threshold_curves_2026-09-09.md`](evaluation/pvs_threshold_curves_2026-09-09.md) | calibration/validation weighted recall 安全效率曲线与阈值冻结口径 |
 | [`evaluation/pvs_test_image_evaluation_2026-09-09.md`](evaluation/pvs_test_image_evaluation_2026-09-09.md) | frozen test 图像批处理、Vulkan/ANGLE 硬件门和定性样本选择入口 |
+| [`evaluation/geometry_shell_hzb_evaluation_2026-09-09.md`](evaluation/geometry_shell_hzb_evaluation_2026-09-09.md) | 纯几何外壳 HZB 的资产、公平区域查询、硬件计时和评价协议 |
 
 ## 当前系统与部署
 
