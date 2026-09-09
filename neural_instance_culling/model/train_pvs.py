@@ -391,6 +391,7 @@ def _checkpoint(
     calibration: Mapping[str, Any] | None,
     validation: Mapping[str, Any] | None,
     best: Mapping[str, Any] | None = None,
+    optimizer: torch.optim.Optimizer | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "schema": CHECKPOINT_SCHEMA,
@@ -416,6 +417,18 @@ def _checkpoint(
         "calibration": calibration,
         "validationAtCalibration": validation,
         "best": best,
+        "initialization": dict(protocol.get("initialization", {})),
+        "updatesFromInitialization": int(global_step),
+        "optimizerState": (
+            _optimizer_state_metadata(
+                args,
+                optimizer,
+                global_step,
+                protocol.get("initialization", {}),
+            )
+            if optimizer is not None
+            else None
+        ),
         "testRead": False,
     }
     if model.occlusion_representation == "survival":
@@ -433,6 +446,113 @@ def _save_fp16(path: Path, values: torch.Tensor) -> None:
     values.detach().cpu().numpy().astype("<f2").tofile(path)
 
 
+def _load_checkpoint(path: Path) -> dict[str, Any]:
+    """Load one V4 checkpoint without ever loading an optimizer state."""
+    resolved = Path(path).resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"initialization checkpoint does not exist: {resolved}")
+    try:
+        value = torch.load(resolved, map_location="cpu", weights_only=False)
+    except TypeError:
+        value = torch.load(resolved, map_location="cpu")
+    if not isinstance(value, Mapping):
+        raise ValueError(f"initialization checkpoint is not a mapping: {resolved}")
+    return dict(value)
+
+
+def _model_config_compatible(
+    checkpoint_config: Mapping[str, Any],
+    requested_config: Mapping[str, Any],
+) -> bool:
+    """Compare architecture fields while allowing registered old metadata."""
+    source = dict(checkpoint_config)
+    source_representation = source.get("occlusionRepresentation")
+    if isinstance(source_representation, Mapping):
+        representation = dict(source_representation)
+        for key in ("querySemantics", "offlineSupervision"):
+            representation.pop(key, None)
+        source["occlusionRepresentation"] = representation
+    tail_separator = source.pop("queryTailSeparator", None)
+    if tail_separator is not None and (
+        not isinstance(tail_separator, Mapping) or tail_separator.get("enabled") is not False
+    ):
+        return False
+    return source == dict(requested_config)
+
+
+def _initialize_model_from_checkpoint(
+    model: BoundedRelationSurvivalMomentModel,
+    checkpoint_path: Path,
+) -> dict[str, Any]:
+    """Initialize model parameters from V4 while keeping AdamW fresh."""
+    checkpoint = _load_checkpoint(checkpoint_path)
+    if checkpoint.get("schema") != CHECKPOINT_SCHEMA:
+        raise ValueError("--init-checkpoint must use the current V4 checkpoint schema")
+    if checkpoint.get("runtimeSchema") != MODEL_SCHEMA or checkpoint.get("testRead") is not False:
+        raise ValueError("--init-checkpoint has an invalid runtime schema or test provenance")
+    config = checkpoint.get("modelConfig")
+    if not isinstance(config, Mapping) or not _model_config_compatible(config, model.config):
+        raise ValueError("--init-checkpoint modelConfig does not match the requested V4 model")
+    protocol = checkpoint.get("protocol")
+    if not isinstance(protocol, Mapping) or protocol.get("schema") != TRAINING_SCHEMA:
+        raise ValueError("--init-checkpoint training protocol is not the current V4 protocol")
+    if protocol.get("testRead") is not False:
+        raise ValueError("--init-checkpoint training protocol is not test-free")
+    state = checkpoint.get("modelState")
+    if not isinstance(state, Mapping):
+        raise ValueError("--init-checkpoint has no modelState")
+    model.load_state_dict(state, strict=True)
+    blend = float(model.instance_calibration_blend.detach().cpu())
+    if not math.isfinite(blend) or not 0.0 <= blend <= 1.0:
+        raise ValueError("--init-checkpoint contains an invalid instance calibration blend")
+    try:
+        source_seed = int(protocol["seed"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("--init-checkpoint protocol has no valid source seed") from exc
+    return {
+        "mode": "from-checkpoint",
+        "checkpoint": str(Path(checkpoint_path).resolve()),
+        "sourceExperimentName": checkpoint.get("experimentName"),
+        "sourceSeed": source_seed,
+        "sourceEpoch": int(checkpoint.get("epoch", 0)),
+        "sourceGlobalStep": int(checkpoint.get("globalStep", 0)),
+        "optimizer": "AdamW",
+        "optimizerStateLoaded": False,
+        "optimizerStateSource": "new",
+        "inheritedInstanceCalibrationBlend": blend,
+    }
+
+
+def _optimizer_state_metadata(
+    args: argparse.Namespace,
+    optimizer: torch.optim.Optimizer,
+    global_step: int,
+    initialization: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Record optimizer provenance without inflating V4 checkpoints with tensors."""
+    state_steps: list[float] = []
+    for state in optimizer.state.values():
+        step = state.get("step")
+        if isinstance(step, torch.Tensor) and step.numel() == 1:
+            state_steps.append(float(step.detach().cpu()))
+        elif isinstance(step, (int, float)):
+            state_steps.append(float(step))
+    return {
+        "schema": "pvs-fresh-adamw-state-v1",
+        "type": "AdamW",
+        "stateLoaded": False,
+        "stateSource": "new",
+        "parameterGroupCount": len(optimizer.param_groups),
+        "stateEntryCount": len(optimizer.state),
+        "stateStepMin": min(state_steps) if state_steps else 0.0,
+        "stateStepMax": max(state_steps) if state_steps else 0.0,
+        "learningRate": float(args.learning_rate),
+        "weightDecay": float(args.weight_decay),
+        "updatesFromInitialization": int(global_step),
+        "initializationMode": initialization.get("mode"),
+    }
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-dir", type=Path, required=True)
@@ -442,6 +562,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--glb-index", type=Path, required=True)
     parser.add_argument("--glb-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--init-checkpoint",
+        type=Path,
+        default=None,
+        help="initialize model parameters from one V4 checkpoint and create a fresh AdamW",
+    )
     parser.add_argument("--experiment-name", required=True)
     parser.add_argument("--variant", required=True)
     parser.add_argument("--occlusion-representation", choices=OCCLUSION_REPRESENTATION_MODES, default="survival")
@@ -586,7 +712,22 @@ def main(argv: list[str] | None = None) -> None:
     ).to(device)
     model.set_instance_world_aabbs(torch.from_numpy(world_aabbs).to(device))
     model.set_instance_to_glb(torch.from_numpy(instance_to_glb).to(device))
+    initialization: dict[str, Any] = {
+        "mode": "from-scratch",
+        "checkpoint": None,
+        "optimizer": "AdamW",
+        "optimizerStateLoaded": False,
+        "optimizerStateSource": "new",
+    }
+    if args.init_checkpoint is not None:
+        initialization = _initialize_model_from_checkpoint(model, args.init_checkpoint)
+    # Reliability is derived from the current train split.  It is not an
+    # optimizer state and is refreshed after loading a source checkpoint.
     model.set_instance_calibration_reliability(torch.from_numpy(reliability).to(device))
+    if args.init_checkpoint is not None:
+        model.set_instance_calibration_blend(
+            float(initialization["inheritedInstanceCalibrationBlend"])
+        )
     geometry = geometry.to(device)
     relation_tensors = {
         key: value.to(device) if torch.is_tensor(value) else value
@@ -597,6 +738,8 @@ def main(argv: list[str] | None = None) -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, args.epochs))
     glb_bytes = _load_glb_bytes(args.glb_index, args.glb_root, num_glbs)
+    total_steps = args.epochs * args.steps_per_epoch
+    initialization["plannedExtraUpdates"] = int(total_steps)
 
     protocol = {
         "schema": TRAINING_SCHEMA,
@@ -604,7 +747,7 @@ def main(argv: list[str] | None = None) -> None:
         "variant": args.variant,
         "seed": int(args.seed),
         "lossVariant": args.loss_variant,
-        "initialization": {"mode": "from-scratch"},
+        "initialization": initialization,
         "instanceCalibration": {"mode": args.instance_calibration_mode},
         "splitNames": {"train": train_name, "calibration": calibration_name, "validation": validation_name},
         "splitPoseCounts": {
@@ -626,7 +769,6 @@ def main(argv: list[str] | None = None) -> None:
     history: list[dict[str, Any]] = []
     metrics_path = args.output_dir / "train_metrics.jsonl"
     global_step = 0
-    total_steps = args.epochs * args.steps_per_epoch
     best_safe: dict[str, Any] | None = None
     best_diagnostic: dict[str, Any] | None = None
     best_safe_key: tuple[float, ...] | None = None
@@ -653,10 +795,14 @@ def main(argv: list[str] | None = None) -> None:
             if batch["instance"].size == 0:
                 continue
             global_step += 1
-            blend = _calibration_blend(
-                global_step - 1, total_steps,
-                args.instance_calibration_warmup_fraction,
-                args.instance_calibration_ramp_fraction,
+            blend = (
+                float(initialization["inheritedInstanceCalibrationBlend"])
+                if args.init_checkpoint is not None
+                else _calibration_blend(
+                    global_step - 1, total_steps,
+                    args.instance_calibration_warmup_fraction,
+                    args.instance_calibration_ramp_fraction,
+                )
             )
             model.set_instance_calibration_blend(blend)
             runtime, coefficients, coefficient_diagnostics = _runtime_features(
@@ -677,10 +823,19 @@ def main(argv: list[str] | None = None) -> None:
                 viewcell_radius_m=tensors["viewcell_radius_m"].float(),
                 pose_offsets=tensors["pose_offsets"].long(),
             )
-            separation_scale = min(
-                1.0,
-                (global_step / max(1, total_steps)) / max(args.integrated_tail_ramp_fraction, 1e-8),
-            ) if args.integrated_tail_ramp_fraction > 0 else 1.0
+            separation_scale = (
+                1.0
+                if args.init_checkpoint is not None
+                else (
+                    min(
+                        1.0,
+                        (global_step / max(1, total_steps))
+                        / max(args.integrated_tail_ramp_fraction, 1e-8),
+                    )
+                    if args.integrated_tail_ramp_fraction > 0
+                    else 1.0
+                )
+            )
             visibility_loss, visibility_parts = pose_balanced_rvl_contrastive_visibility_loss(
                 logits,
                 tensors["target"].float(),
@@ -832,6 +987,7 @@ def main(argv: list[str] | None = None) -> None:
                         model, args, epoch + 1, global_step, protocol, relation_meta,
                         geometry_meta, coefficients, coefficient_diagnostics,
                         reliability_meta, calibration_payload, validation_row, best_diagnostic,
+                        optimizer=optimizer,
                     ), args.output_dir / "best_diagnostic.pt")
             if selected is not None and validation_safe:
                 assert validation_row is not None
@@ -852,6 +1008,7 @@ def main(argv: list[str] | None = None) -> None:
                         model, args, epoch + 1, global_step, protocol, relation_meta,
                         geometry_meta, coefficients, coefficient_diagnostics,
                         reliability_meta, calibration_payload, validation_row, best_safe,
+                        optimizer=optimizer,
                     )
                     torch.save(payload, args.output_dir / "best_safe.pt")
                     shutil.copyfile(args.output_dir / "best_safe.pt", args.output_dir / "best.pt")
@@ -861,11 +1018,13 @@ def main(argv: list[str] | None = None) -> None:
                 model, args, epoch + 1, global_step, protocol, relation_meta,
                 geometry_meta, coefficients, coefficient_diagnostics,
                 reliability_meta, calibration_payload, validation_row, best_safe or best_diagnostic,
+                optimizer=optimizer,
             ), args.output_dir / f"checkpoint_epoch_{epoch + 1:03d}.pt")
         torch.save(_checkpoint(
             model, args, epoch + 1, global_step, protocol, relation_meta,
             geometry_meta, coefficients, coefficient_diagnostics,
             reliability_meta, calibration_payload, validation_row,
+            optimizer=optimizer,
         ), args.output_dir / "last.pt")
         history.append(row)
         _append_jsonl(metrics_path, row)
@@ -897,6 +1056,8 @@ def main(argv: list[str] | None = None) -> None:
         "validationAtFrozenThreshold": best_safe_validation or best_diagnostic_validation,
         "safeCheckpoint": str(args.output_dir / "best_safe.pt") if best_safe else None,
         "diagnosticCheckpoint": str(args.output_dir / "best_diagnostic.pt") if best_diagnostic else None,
+        "initialization": protocol["initialization"],
+        "optimizerState": _optimizer_state_metadata(args, optimizer, global_step, protocol["initialization"]),
         "selectionRule": aggregate_weighted_cull_selection_rule(0.99, 0.99),
         "testRead": False,
     }

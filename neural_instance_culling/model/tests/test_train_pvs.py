@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import sys
 import tempfile
 import unittest
@@ -16,6 +17,7 @@ from run_pvs import MAINLINE_CONFIG, build_train_command  # noqa: E402
 from fixed_geometry_encoder import InstancePointNetPPGeoEncoder  # noqa: E402
 from train_pvs import (  # noqa: E402
     _calibration_blend,
+    _initialize_model_from_checkpoint,
     _load_relation_bundle,
     _resolve_split,
     _validation_key,
@@ -24,7 +26,7 @@ from train_pvs import (  # noqa: E402
     parse_args,
 )
 
-DATA_ROOT = Path(__file__).resolve().parents[3]
+DATA_ROOT = Path(os.environ.get("SLM_DATA_ROOT", "/mnt/sda/rhyang/slm")).resolve()
 
 
 class TrainPvsTests(unittest.TestCase):
@@ -119,6 +121,72 @@ class TrainPvsTests(unittest.TestCase):
         self.assertEqual(_calibration_blend(0, 100, 0.1, 0.2), 0.0)
         self.assertGreater(_calibration_blend(20, 100, 0.1, 0.2), 0.0)
         self.assertEqual(_calibration_blend(99, 100, 0.1, 0.2), 1.0)
+
+    def test_warm_start_loads_v4_model_state_but_records_fresh_adamw(self) -> None:
+        import torch
+
+        from pvs_model import BoundedRelationSurvivalMomentModel
+        from train_pvs import CHECKPOINT_SCHEMA, MODEL_SCHEMA, TRAINING_SCHEMA
+
+        source = BoundedRelationSurvivalMomentModel(
+            2,
+            1,
+            survival_rank=4,
+            relation_source="bounded_hierarchical",
+            occlusion_representation="survival",
+            spectral_mode="moment_envelope",
+            depth_q01=1.0,
+            depth_q99=2.0,
+            depth_epsilon=1e-6,
+            instance_calibration_mode="residual",
+        )
+        source.set_instance_calibration_blend(0.73)
+        checkpoint_config = dict(source.config)
+        checkpoint_config["occlusionRepresentation"] = dict(
+            checkpoint_config["occlusionRepresentation"],
+            querySemantics="monotone_logistic_survival",
+            offlineSupervision="train_only_relation_and_depth_censoring",
+        )
+        checkpoint_config["queryTailSeparator"] = {"enabled": False}
+        checkpoint = {
+            "schema": CHECKPOINT_SCHEMA,
+            "runtimeSchema": MODEL_SCHEMA,
+            "modelConfig": checkpoint_config,
+            "modelState": source.state_dict(),
+            "protocol": {
+                "schema": TRAINING_SCHEMA,
+                "seed": 20260802,
+                "testRead": False,
+            },
+            "experimentName": "source_v4",
+            "epoch": 40,
+            "globalStep": 36000,
+            "testRead": False,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "source.pt"
+            torch.save(checkpoint, path)
+            target = BoundedRelationSurvivalMomentModel(
+                2,
+                1,
+                survival_rank=4,
+                relation_source="bounded_hierarchical",
+                occlusion_representation="survival",
+                spectral_mode="moment_envelope",
+                depth_q01=1.0,
+                depth_q99=2.0,
+                depth_epsilon=1e-6,
+                instance_calibration_mode="residual",
+            )
+            initialization = _initialize_model_from_checkpoint(target, path)
+        self.assertEqual(initialization["mode"], "from-checkpoint")
+        self.assertEqual(initialization["sourceSeed"], 20260802)
+        self.assertEqual(initialization["sourceEpoch"], 40)
+        self.assertEqual(initialization["sourceGlobalStep"], 36000)
+        self.assertFalse(initialization["optimizerStateLoaded"])
+        self.assertEqual(initialization["optimizerStateSource"], "new")
+        self.assertAlmostEqual(initialization["inheritedInstanceCalibrationBlend"], 0.73)
+        self.assertAlmostEqual(float(target.instance_calibration_blend), 0.73)
 
 
 if __name__ == "__main__":
