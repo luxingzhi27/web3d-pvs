@@ -44,6 +44,7 @@
 
 | 文档 | 内容 |
 |---|---|
+| [`experiments/pvs_paper_experiments_2026-09-09.md`](experiments/pvs_paper_experiments_2026-09-09.md) | 论文核心实验、图表、IFCBench 微调和一周执行计划 |
 | [`experiments/pvs_third_scene_and_geometry_shell_hzb_baseline_2026-09-08.md`](experiments/pvs_third_scene_and_geometry_shell_hzb_baseline_2026-09-08.md) | 独立来源第三 BIM 场景选择与 Geometry-only shell HZB 基线计划 |
 | [`current/browser_instance_visibility_streaming_patent_application_2026-09-02.md`](current/browser_instance_visibility_streaming_patent_application_2026-09-02.md) | 浏览器区域可见性、资源调度和增量加载专利正文 |
 | [`current/browser_visibility_streaming_patent_figures_plan_2026-09-01.md`](current/browser_visibility_streaming_patent_figures_plan_2026-09-01.md) | 专利附图规划、参考标号、可编辑图源和导出规范 |
