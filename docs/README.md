@@ -12,6 +12,7 @@
 
 | 文档 | 内容 |
 |---|---|
+| [`evaluation/ifcbench_calibration_finetune_2026-09-09.md`](evaluation/ifcbench_calibration_finetune_2026-09-09.md) | IFCBench 精确校准、warm-start 微调扫描与三种子确认执行记录 |
 | [`current/pvs_mainline_2026-08-23.md`](current/pvs_mainline_2026-08-23.md) | V4 模型结构、代码入口、主 split、当前工作点和 validation 摘要 |
 | [`experiments/pvs_mainline_training_2026-08-21.md`](experiments/pvs_mainline_training_2026-08-21.md) | 三种子 `40 × 900` 正式训练及六项核心消融协议 |
 | [`evaluation/pvs_mainline_core_ablation_paper_analysis_2026-08-28.md`](evaluation/pvs_mainline_core_ablation_paper_analysis_2026-08-28.md) | 论文式方法说明、正式消融结果和配对 bootstrap 分析 |

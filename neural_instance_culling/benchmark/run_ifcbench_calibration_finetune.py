@@ -16,6 +16,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+from statistics import mean, stdev
 from typing import Any, Sequence
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -413,9 +414,121 @@ def selection_payload(benchmark_root: Path) -> dict[str, Any]:
     }
 
 
+def confirmation_members(
+    model_root: Path,
+    benchmark_root: Path,
+    selected_name: str,
+) -> list[tuple[str, Path, Path]]:
+    return [
+        (
+            f"seed{seed}",
+            member_dir(model_root, "confirm", selected_name, seed, CONFIRM_EPOCHS),
+            Path(benchmark_root).resolve() / "confirm" / selected_name / f"seed{seed}",
+        )
+        for seed in CONFIRM_SEEDS
+    ]
+
+
+def run_confirmation_exact(
+    data_root: Path,
+    model_root: Path,
+    benchmark_root: Path,
+    selected_name: str,
+    gpu_ids: Sequence[int],
+) -> None:
+    members = confirmation_members(model_root, benchmark_root, selected_name)
+    bootstrap_root = Path(benchmark_root).resolve() / "fixed_bootstrap"
+    calibration_bootstrap = bootstrap_root / "calibration_pose_indices_i32.bin"
+    validation_bootstrap = bootstrap_root / "validation_pose_indices_i32.bin"
+    jobs = []
+    for label, member, result_root in members:
+        jobs.append((
+            f"confirm_score_calibration_{label}",
+            score_command(data_root, member / "last.pt", "calibration", result_root / "calibration_scores"),
+        ))
+    run_jobs(jobs, gpu_ids, Path(benchmark_root) / "logs/confirm_exact_score_calibration")
+
+    jobs = []
+    for label, _member, result_root in members:
+        jobs.append((
+            f"confirm_calibrate_{label}",
+            calibrate_command(
+                result_root / "calibration_scores",
+                calibration_bootstrap,
+                result_root / "exact_calibration.json",
+            ),
+        ))
+    run_jobs(jobs, gpu_ids, Path(benchmark_root) / "logs/confirm_exact_calibrate")
+
+    jobs = []
+    for label, member, result_root in members:
+        jobs.append((
+            f"confirm_score_validation_{label}",
+            score_command(data_root, member / "last.pt", "validation", result_root / "validation_scores"),
+        ))
+    run_jobs(jobs, gpu_ids, Path(benchmark_root) / "logs/confirm_exact_score_validation")
+
+    jobs = []
+    for label, _member, result_root in members:
+        jobs.append((
+            f"confirm_evaluate_{label}",
+            evaluate_command(
+                result_root / "validation_scores",
+                result_root / "exact_calibration.json",
+                validation_bootstrap,
+                result_root / "validation_frozen.json",
+            ),
+        ))
+    run_jobs(jobs, gpu_ids, Path(benchmark_root) / "logs/confirm_exact_validation")
+
+
+def confirmation_summary(
+    model_root: Path,
+    benchmark_root: Path,
+    selected_name: str,
+) -> dict[str, Any]:
+    rows = []
+    for seed, (_label, member, result_root) in zip(
+        CONFIRM_SEEDS,
+        confirmation_members(model_root, benchmark_root, selected_name),
+    ):
+        calibration = _read_json(result_root / "exact_calibration.json")
+        validation = _read_json(result_root / "validation_frozen.json")
+        rows.append({
+            "seed": seed,
+            "checkpoint": str((member / "last.pt").resolve()),
+            "threshold": float(calibration["selection"]["threshold"]),
+            "calibrationStatus": calibration["status"],
+            "validation": validation["metrics"],
+            "testRead": False,
+        })
+    metrics = (
+        "agg_precision", "agg_recall", "agg_weighted_recall",
+        "aggregateWeightedRecallLowerConfidenceBound", "agg_accuracy",
+        "agg_balanced_accuracy", "agg_specificity", "agg_useful_cull",
+        "agg_bad_cull", "avg_pred_count", "positiveFraction",
+    )
+    aggregate = {}
+    for metric in metrics:
+        values = [float(row["validation"][metric]) for row in rows]
+        aggregate[metric] = {"mean": mean(values), "sampleStd": stdev(values)}
+    return {
+        "schema": "pvs-ifcbench-finetune-confirmation-summary-v1",
+        "experiment": EXPERIMENT,
+        "selectedConfig": selected_name,
+        "training": {"epochs": CONFIRM_EPOCHS, "stepsPerEpoch": STEPS_PER_EPOCH},
+        "rows": rows,
+        "aggregate": aggregate,
+        "testRead": False,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("preflight", "smoke", "scan", "exact", "select", "confirm"))
+    parser.add_argument(
+        "mode",
+        choices=("preflight", "smoke", "scan", "exact", "select", "confirm", "post-scan"),
+    )
     parser.add_argument("--data-root", type=Path, default=DATA_ROOT_DEFAULT)
     parser.add_argument("--model-root", type=Path, default=ROOT / "neural_instance_culling/model/out" / EXPERIMENT)
     parser.add_argument("--benchmark-root", type=Path, default=ROOT / "neural_instance_culling/benchmark/out" / EXPERIMENT)
@@ -464,14 +577,16 @@ def main() -> None:
         ]
         run_jobs(jobs, args.gpu_ids, benchmark_root / "logs/scan")
         return
-    if args.mode == "exact":
+    if args.mode in ("exact", "post-scan"):
         run_exact_calibration(args.data_root, model_root, benchmark_root, args.gpu_ids)
-        return
-    if args.mode == "select":
+        if args.mode == "exact":
+            return
+    if args.mode in ("select", "post-scan"):
         payload = selection_payload(benchmark_root)
         _write_json(benchmark_root / "selection.json", payload)
         print(json.dumps({"selected": payload["selected"]["config"], "selectionStatus": payload["selectionStatus"], "testRead": False}))
-        return
+        if args.mode == "select":
+            return
     selection = _read_json(benchmark_root / "selection.json")
     selected_name = str(selection["selected"]["config"])
     jobs = [
@@ -490,6 +605,14 @@ def main() -> None:
         for seed in CONFIRM_SEEDS
     ]
     run_jobs(jobs, args.gpu_ids, benchmark_root / "logs/confirm")
+    run_confirmation_exact(args.data_root, model_root, benchmark_root, selected_name, args.gpu_ids)
+    summary = confirmation_summary(model_root, benchmark_root, selected_name)
+    _write_json(benchmark_root / "confirmation_summary.json", summary)
+    print(json.dumps({
+        "selected": selected_name,
+        "confirmationSummary": str(benchmark_root / "confirmation_summary.json"),
+        "testRead": False,
+    }))
 
 
 if __name__ == "__main__":
