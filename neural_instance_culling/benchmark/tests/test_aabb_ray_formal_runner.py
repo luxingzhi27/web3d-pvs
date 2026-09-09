@@ -21,6 +21,7 @@ from run_aabb_ray_baseline import (  # noqa: E402
     _aggregate_cull_rates,
     _row_key,
     _selected_threshold,
+    _validation_key,
     build_train_command,
     formal_test_allowed,
 )
@@ -61,6 +62,26 @@ class AabbRayFormalRunnerTests(unittest.TestCase):
             _row_key(higher_lcb, safe_first=False),
             _row_key(more_cull, safe_first=False),
         )
+
+    def test_validation_selection_uses_cull_only_after_safety(self) -> None:
+        def item(*, recall: float, lower: float, useful: float) -> dict:
+            return {"validation": {"aggregate": {
+                "weightedRecall": recall,
+                "weightedRecallLowerConfidenceBound": lower,
+                "usefulCull": useful,
+                "balancedAccuracy": 0.8,
+                "specificity": 0.8,
+                "precision": 0.2,
+                "avgPredCount": 100,
+            }}}
+
+        safe_more_cull = item(recall=0.995, lower=0.991, useful=0.8)
+        safe_higher_lcb = item(recall=0.999, lower=0.998, useful=0.6)
+        self.assertGreater(_validation_key(safe_more_cull), _validation_key(safe_higher_lcb))
+
+        unsafe_more_cull = item(recall=0.995, lower=0.980, useful=0.9)
+        unsafe_higher_lcb = item(recall=0.995, lower=0.989, useful=0.1)
+        self.assertGreater(_validation_key(unsafe_higher_lcb), _validation_key(unsafe_more_cull))
 
     def test_registered_scan_and_confirmation_matrix_is_fixed(self) -> None:
         self.assertEqual(SCAN_LEARNING_RATES, (2e-4, 1e-3))

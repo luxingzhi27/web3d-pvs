@@ -16,7 +16,7 @@
 - `scene_statistics.py` 统计场景范围、原型/展开三角形、GLB 字节分布、实例到 GLB 复用率，以及四个 split 的 candidate、GT、visible weight 分布。
 - `train_aabb_ray_baseline.py` 与 `run_aabb_ray_baseline.py` 注册 18 维 AABB+ray/MVP MLP，采用 pose-balanced BCE、单侧 RVL recall guard 和共享困难尾部分离目标。扫描固定为两个 LR 的 `6 x 300`，确认训练固定为三种子 `40 x 900`，每个成员保存 stdout/stderr。
 
-2026-09-09 协议复核修正：统一阈值行直接提供 `TP/FP/FN/TN`，但旧汇总代码读取了不存在的 `agg_useful_cull/agg_bad_cull`，使 aggregate useful/bad cull 变成空值。现按 `TN/candidate` 与 `FN/candidate` 从混淆计数计算；安全池内先最大化 useful cull，再比较 balanced accuracy、specificity 和 precision，weighted-recall 下界仅在成员均已严格通过 `0.99` 门后作后续平局项。若没有安全成员，诊断选择仍优先选择 weighted-recall 下界最高者。扫描 checkpoint 不重训，只需用修正后的评价代码重新完成 calibration/validation 选择。
+2026-09-09 协议复核修正：统一阈值行直接提供 `TP/FP/FN/TN`，但旧汇总代码读取了不存在的 `agg_useful_cull/agg_bad_cull`，使 aggregate useful/bad cull 变成空值。现按 `TN/candidate` 与 `FN/candidate` 从混淆计数计算；calibration 阈值和 validation 配置都在严格通过 weighted recall 及 LCB `0.99` 后，先最大化 useful cull，再比较 balanced accuracy、specificity 和 precision，weighted-recall 下界只作后续平局项。若没有安全成员，诊断选择仍优先选择 weighted-recall 下界最高者。扫描 checkpoint 不重训，只需用修正后的评价代码重新完成 calibration/validation 选择。
 - `generate_paper_tables.py` 只接收 `testRead=true` 且一次 test 读取的结果，生成 Table 1/2 CSV 和 Markdown。
 
 ## 运行与产物

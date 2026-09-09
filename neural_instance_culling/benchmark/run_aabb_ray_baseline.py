@@ -456,6 +456,21 @@ def _metric_payload(raw: Mapping[str, Any], *, threshold: float) -> dict[str, An
     return {"threshold": float(threshold), "aggregate": aggregate, "poseMacro": pose}
 
 
+def _validation_key(item: Mapping[str, Any]) -> tuple[float, ...]:
+    aggregate = item["validation"]["aggregate"]
+    recall = float(aggregate.get("weightedRecall") or -1.0)
+    lower = float(aggregate.get("weightedRecallLowerConfidenceBound") or -1.0)
+    safe = recall > WEIGHTED_RECALL_TARGET and lower > WEIGHTED_RECALL_TARGET
+    useful = float(aggregate.get("usefulCull") or 0.0)
+    balanced = float(aggregate.get("balancedAccuracy") or 0.0)
+    specificity = float(aggregate.get("specificity") or 0.0)
+    precision = float(aggregate.get("precision") or 0.0)
+    predicted = -float(aggregate.get("avgPredCount") or 0.0)
+    if safe:
+        return 1.0, useful, balanced, specificity, precision, lower, predicted
+    return 0.0, lower, useful, balanced, specificity, precision, predicted
+
+
 def evaluate_checkpoint(
     data_root: Path,
     scene: str,
@@ -610,20 +625,7 @@ def run_scene(
                     "testRead": False,
                 }
             )
-        selected_scan = max(
-            scan_rows,
-            key=lambda item: (
-                float(
-                    float(item["validation"]["aggregate"]["weightedRecall"] or -1.0) > WEIGHTED_RECALL_TARGET
-                    and float(item["validation"]["aggregate"].get("weightedRecallLowerConfidenceBound") or -1.0) > WEIGHTED_RECALL_TARGET
-                ),
-                float(item["validation"]["aggregate"].get("weightedRecallLowerConfidenceBound") or -1.0),
-                float(item["validation"]["aggregate"].get("usefulCull") or 0.0),
-                float(item["validation"]["aggregate"].get("balancedAccuracy") or 0.0),
-                float(item["validation"]["aggregate"].get("precision") or 0.0),
-                -float(item["validation"]["aggregate"].get("avgPredCount") or 0.0),
-            ),
-        )
+        selected_scan = max(scan_rows, key=_validation_key)
         selection = {
             "schema": "pvs-aabb-ray-scan-selection-v1",
             "scene": scene,
