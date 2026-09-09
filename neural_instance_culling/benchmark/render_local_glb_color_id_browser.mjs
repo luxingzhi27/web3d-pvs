@@ -1552,6 +1552,10 @@ async function main() {
       }
       if (req.method === 'POST' && url.pathname === '/done') {
         const body = JSON.parse((await readBody(req)).toString('utf8'));
+        body.chromeLaunch = {
+          executable: chromeExe,
+          args: chromeArgs,
+        };
         if (args.requireHardwareGpu) {
           const gpuGate = classifyGpuBackend(body.gpuBackend);
           body.gpuGate = {
@@ -1592,6 +1596,7 @@ async function main() {
   const chromeArgs = [
     ...(args.browserMode === 'headless' ? ['--headless=new'] : []),
     '--no-first-run',
+    '--disable-dev-shm-usage',
     '--disable-background-networking',
     '--disable-extensions',
     '--hide-scrollbars',

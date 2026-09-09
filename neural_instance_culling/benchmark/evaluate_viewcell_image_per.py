@@ -860,11 +860,18 @@ def resolve_threshold(args: argparse.Namespace, spec: dict[str, str], runner) ->
                     f"{eval_summary} frozen threshold {threshold} has pose_recall={observed:.6f}, "
                     f"below required {float(minimum_pose_recall):.3f}."
                 )
+        test_evaluation_count = int(data.get("testEvaluationCount", 0))
         return threshold, {
-            "source": "pre-test calibration summary; no threshold scan",
+            "source": (
+                "pre-test calibration summary; no threshold scan"
+                if test_evaluation_count == 0
+                else "calibration summary was read after a test evaluation"
+            ),
             "threshold": threshold,
             "protocol": data.get("protocol"),
-            "testEvaluationCount": int(data.get("testEvaluationCount", 0)),
+            "testEvaluationCount": test_evaluation_count,
+            "selectionSplit": "calibration",
+            "testRead": bool(test_evaluation_count),
         }
 
     if data.get("protocol") == "calibration_ready_pre_test":
@@ -911,6 +918,8 @@ def resolve_threshold(args: argparse.Namespace, spec: dict[str, str], runner) ->
             ),
             "threshold": threshold,
             "workpoint": workpoint,
+            "selectionSplit": "calibration",
+            "testRead": False,
         }
     if args.threshold_policy == "best_f1":
         workpoint = data.get("workpoints", {}).get("bestF1") or (max(rows, key=lambda r: r.get("pose_f1", 0.0)) if rows else {})
@@ -1030,6 +1039,7 @@ def run_true_glb_renderer(
     output_dir: Path,
     manifest_samples: list[dict[str, Any]],
     prediction_component_ids_by_key: dict[str, list[int]],
+    threshold_selection: dict[str, Any],
     subpose_selection: dict[str, Any],
     glb_paths: dict[int, Path],
     instance_bindings: dict[str, Any],
@@ -1044,6 +1054,24 @@ def run_true_glb_renderer(
     if missing:
         raise RuntimeError(f"True GLB renderer refuses to run because local GLBs are missing: {missing[:16]}")
     formal = bool(args.formal_image_evaluation)
+    if formal and args.split == "test" and (
+        threshold_selection.get("selectionSplit") != "calibration"
+        or threshold_selection.get("testRead") is not False
+    ):
+        raise RuntimeError(
+            "formal test image evaluation requires a threshold frozen from calibration; "
+            "test-time command-line threshold provenance is not accepted"
+        )
+    if formal and args.split == "test" and args.split_source != "pose_csr":
+        raise RuntimeError("formal test image evaluation requires split_source=pose_csr")
+    if formal and args.split == "test" and (
+        int(args.max_viewcells) != 0 or int(args.subposes_per_viewcell) != 0
+    ):
+        raise RuntimeError(
+            "formal test image evaluation requires all unique view-cells and all dense subposes"
+        )
+    selected_viewcell_count = int(subpose_selection.get("viewcellCount", 0))
+    selected_sample_count = int(len(manifest_samples))
     manifest = {
         "schema": FORMAL_INSTANCE_RENDER_MANIFEST_SCHEMA if formal else INSTANCE_RENDER_MANIFEST_SCHEMA,
         "created": datetime.now().isoformat(timespec="seconds"),
@@ -1055,6 +1083,34 @@ def run_true_glb_renderer(
         "glbIndex": str(args.glb_index.resolve()),
         "runtimeMeta": str(args.runtime_meta.resolve()),
         "selectedGlbs": selected_glbs,
+        "split": str(args.split),
+        "testRead": bool(args.split == "test"),
+        "testEvaluationCount": int(1 if args.split == "test" else 0),
+        "splitSource": str(args.split_source),
+        "viewcellCount": selected_viewcell_count,
+        "threshold": float(threshold_selection.get("threshold", args.threshold or 0.0)),
+        "thresholdSelection": dict(threshold_selection),
+        "thresholdProvenance": {
+            "selectionSplit": threshold_selection.get("selectionSplit"),
+            "testRead": threshold_selection.get("testRead", False),
+            "source": threshold_selection.get("source"),
+            "checkpointCalibrationOnly": threshold_selection.get("selectionSplit") == "calibration",
+        },
+        "testCoverage": {
+            "schema": "pvs-formal-test-image-coverage-v1",
+            "split": str(args.split),
+            "selection": (
+                "all_unique_test_viewcells"
+                if args.split == "test" and int(args.max_viewcells) == 0
+                else "selected_split_viewcells"
+            ),
+            "viewcellCount": selected_viewcell_count,
+            "sampleCount": selected_sample_count,
+            "uniquePoseCount": selected_sample_count,
+            "maxViewcells": int(args.max_viewcells),
+            "sampledWithReplacement": False,
+            "subposesPerViewcell": int(args.subposes_per_viewcell),
+        },
         "subposeSelection": subpose_selection,
         "reference": {
             "mode": "full_scene_renderable_instances",
@@ -1137,6 +1193,8 @@ def run_true_glb_renderer(
         "--output-dir",
         str(output_dir / "true_glb_render"),
     ]
+    if args.require_hardware_gpu or formal:
+        cmd.append("--require-hardware-gpu")
     if args.render_schema_only:
         cmd.append("--validate-only")
     if args.chrome_exe is not None:
@@ -1217,6 +1275,19 @@ def main() -> None:
         return
     if args.formal_image_evaluation and args.image_renderer != "true_glb":
         raise ValueError("formal image evaluation requires --image-renderer true_glb")
+    if args.formal_image_evaluation and args.split == "test":
+        if args.split_source != "pose_csr":
+            raise ValueError("formal test image evaluation requires --split-source pose_csr")
+        if args.threshold is not None:
+            raise ValueError(
+                "formal test image evaluation requires the checkpoint calibration summary; "
+                "a command-line threshold is not accepted"
+            )
+        if int(args.max_viewcells) != 0 or int(args.subposes_per_viewcell) != 0:
+            raise ValueError(
+                "formal test image evaluation requires --max-viewcells 0 and "
+                "--subposes-per-viewcell 0"
+            )
     if len(args.model_spec) > 1:
         raise ValueError("--model-spec may be supplied at most once")
     dynamic_spec = None
@@ -1503,6 +1574,7 @@ def main() -> None:
             output_dir,
             true_render_manifest_samples,
             prediction_component_ids_by_key,
+            threshold_info,
             subpose_selection,
             glb_paths,
             instance_bindings,
@@ -1590,6 +1662,8 @@ def main() -> None:
         "splitAlignment": viewcells.split_alignment,
         "runtimeMeta": str(args.runtime_meta),
         "split": args.split,
+        "testRead": bool(args.split == "test"),
+        "testEvaluationCount": int(1 if args.split == "test" else 0),
         "viewcellCount": int(selected_rows.size),
         "subposesPerViewcell": int(args.subposes_per_viewcell),
         "subposeSelection": subpose_selection,
