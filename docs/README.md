@@ -28,6 +28,7 @@
 | [`evaluation/unified_pvs_metrics_evaluation.md`](evaluation/unified_pvs_metrics_evaluation.md) | pose-macro/aggregate、weighted recall、分类、剔除、资源和运行指标口径 |
 | [`evaluation/pvs_frontend_inference_latency_protocol_2026-09-09.md`](evaluation/pvs_frontend_inference_latency_protocol_2026-09-09.md) | 桌面和真实移动设备的 WebGPU 候选模型前向耗时协议 |
 | [`evaluation/pvs_runtime_paper_outputs_2026-09-09.md`](evaluation/pvs_runtime_paper_outputs_2026-09-09.md) | 正式桌面/手机推理耗时汇总、候选规模拟合和论文图产物 |
+| [`evaluation/pvs_asset_runtime_table4_2026-09-09.md`](evaluation/pvs_asset_runtime_table4_2026-09-09.md) | Table 4 资产/运行时汇总、HZB 对照和 rank 容量 Pareto 图 |
 | [`evaluation/test_split_benchmark_protocol.md`](evaluation/test_split_benchmark_protocol.md) | train、calibration、validation、test 的职责及冻结 test 规则 |
 | [`evaluation/viewcell_image_per_evaluation.md`](evaluation/viewcell_image_per_evaluation.md) | 真实 `60°` 相机下的 Color-ID 图像漏检与额外像素评价 |
 | [`evaluation/pvs_mainline_image_evaluation_2026-09-09.md`](evaluation/pvs_mainline_image_evaluation_2026-09-09.md) | HKUST 与 IFCBench validation 的硬件 Color-ID 正式图像结果 |
