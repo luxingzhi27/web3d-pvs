@@ -23,6 +23,8 @@ IFCBench 数据契约为 `41,298` 个实例、`3,669` 个 GLB、`19,647 / 2,183 
 
 提交 `1c1d99d` 为训练日志补充 `stepSeconds`、`stepsPerSecond` 和 `etaSeconds`。本次已启动的 scan 进程在该提交前启动，因此其日志保留 `epoch/step/loss/elapsedSeconds`；后续 confirmation 使用完整吞吐和 ETA 字段。
 
+提交 `ebc3bdd` 进一步把公共 bootstrap 索引绑定到完整的全局 `pose_indices` 列表和有效 pose 行列表，复用前会拒绝 pose 顺序不一致的 sidecar。
+
 ## 代码契约与 smoke
 
 运行命令：
