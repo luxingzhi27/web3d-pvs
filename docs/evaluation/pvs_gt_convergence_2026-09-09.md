@@ -4,7 +4,7 @@
 
 ## 目的与口径
 
-本实验检查有限 subpose 并集能否稳定近似区域 PVS。每个场景从 validation 按场景类别、candidate 数和 GT 数分层选择 100 个 view-cell；嵌套采样顺序从中心最近点开始，再用最远点覆盖扩展。`G_N` 是前 N 个真实 Color-ID subpose 的实例并集，参考是该 cell 当前所有已采样 subpose 的并集。
+本实验检查有限 subpose 并集能否稳定近似区域 PVS。每个场景从 validation 按场景类别、观察方向、candidate 数、GT 数和可见权重分层选择 100 个 view-cell；嵌套采样顺序从中心开始，再用固定低差异序列扩展。`G_N` 是前 N 个真实 Color-ID subpose 的实例并集，参考是该 cell 当前所有已采样 subpose 的并集。
 
 该初检不读取 test。实例覆盖和 `visible_weights` 加权覆盖同时报告；后者是采样器的重要性权重，不称为真实像素覆盖。零 GT cell 的空集对空集覆盖定义为 1。
 
@@ -23,6 +23,26 @@ HKUST 当前 32 点已接近当前参考并集，但仍不能证明 64/128 点�
 ## 后续正式动作
 
 正式 supplementary 实验仍需对同一 100 个 validation cell 构造嵌套的 `1/2/4/8/16/32/64/128` 真实硬件 Color-ID 采样。补采样必须使用登记的 Chrome Vulkan 硬件路径及 GPU evidence；完成后以 128 点并集为参考重跑本工具。若 64 到 128 的新增实例比例或加权遗漏仍明显，继续增加参考采样，不能提前宣称收敛。
+
+正式计划已经生成：HKUST 使用半径 2 m 的水平圆盘，Metropolis 使用原数据集的 `2.5 m x 2.5 m x 1 m` 相机对齐盒。HKUST 的 100 个 cell 包含 `28/26/15/12/10/9` 个 street-gap/near-building/plaza/perimeter/sky/far；Metropolis 按 validation 分布包含 `82/13/4/1` 个 street-gap/near-building/sky/far。每场景计划均为 100 cell、128 点，共 12,800 个 pose，并明确标记 `testRead=false`。
+
+计划生成命令：
+
+```bash
+conda run -n slm_pvs python \
+  neural_instance_culling/benchmark/build_gt_convergence_pose_plan.py \
+  --dataset-dir neural_instance_culling/dataset/out/pose_csr_hkust_v3_main_stratified_calibration_fov66_v1 \
+  --representative-plan neural_instance_culling/sampler/out/hkust_v3_viewcell_fov66/representatives.jsonl \
+  --output neural_instance_culling/benchmark/out/paper_results/gt_convergence/hkust_128_plan.jsonl \
+  --scene hkust_v3 --viewcell-shape horizontal_disk --radius 2 --half-up 0
+
+conda run -n slm_pvs python \
+  neural_instance_culling/benchmark/build_gt_convergence_pose_plan.py \
+  --dataset-dir neural_instance_culling/dataset/out/pose_csr_ifcbench_fantasy_metropolis_main_stratified_calibration_fov66_v1 \
+  --representative-plan neural_instance_culling/sampler/out/ifcbench_fantasy_metropolis_instanced_v2/pose_plan_fov66.jsonl \
+  --output neural_instance_culling/benchmark/out/paper_results/gt_convergence/ifcbench_128_plan.jsonl \
+  --scene ifcbench_fantasy_metropolis --viewcell-shape camera_aligned_box --radius 2.5 --half-up 1
+```
 
 实现入口：
 
