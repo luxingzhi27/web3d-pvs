@@ -874,6 +874,34 @@ def resolve_threshold(args: argparse.Namespace, spec: dict[str, str], runner) ->
             "testRead": bool(test_evaluation_count),
         }
 
+    if data.get("schema") == "pvs-bounded-relation-prior-instance-calibrated-calibration-summary-v4":
+        if data.get("testRead") is not False:
+            raise RuntimeError(f"{eval_summary} must be a test-free calibration summary.")
+        best_safe = data.get("bestSafe")
+        selection = best_safe.get("selection") if isinstance(best_safe, dict) else None
+        if not isinstance(best_safe, dict) or best_safe.get("safe") is not True or not isinstance(selection, dict):
+            raise RuntimeError(f"{eval_summary} has no frozen safe calibration workpoint.")
+        threshold = float(best_safe.get("threshold", selection.get("threshold", float("nan"))))
+        weighted_recall = float(selection.get("agg_weighted_recall", selection.get("aggregateWeightedRecall", -1.0)))
+        weighted_lcb = float(selection.get("aggregateWeightedRecallLowerConfidenceBound", -1.0))
+        target = float(data.get("weightedRecallFloor", args.target_weighted_recall))
+        lcb_target = float(data.get("weightedRecallLowerConfidenceBoundFloor", target))
+        if (
+            not np.isfinite(threshold)
+            or not 0.0 <= threshold <= 1.0
+            or weighted_recall <= target
+            or weighted_lcb <= lcb_target
+        ):
+            raise RuntimeError(f"{eval_summary} does not contain a valid strict weighted-recall workpoint.")
+        return threshold, {
+            "source": "current V4 bestSafe calibration workpoint; no threshold scan",
+            "threshold": threshold,
+            "workpoint": selection,
+            "selectionSplit": "calibration",
+            "testRead": False,
+            "testEvaluationCount": 0,
+        }
+
     if data.get("protocol") == "calibration_ready_pre_test":
         if int(data.get("testEvaluationCount", 0)) != 0:
             raise RuntimeError(
@@ -1581,7 +1609,7 @@ def main() -> None:
             glb_aabbs,
             world_aabbs,
         )
-        if args.formal_image_evaluation:
+        if args.formal_image_evaluation and not args.render_schema_only:
             gpu_gate = render_summary.get("gpuGate") or {}
             if render_summary.get("formalImageEvaluationReady") is not True or gpu_gate.get("hardware") is not True:
                 raise RuntimeError(
@@ -1589,7 +1617,7 @@ def main() -> None:
                 )
         image_metrics = render_summary.get("imageMetrics") or {
             "schema": "component-id-image-schema-validation-v1",
-            "formalImageEvaluationReady": bool(args.formal_image_evaluation),
+            "formalImageEvaluationReady": False,
             "evaluatedSubposeCount": 0,
             "reason": "browser instance renderer is not implemented; validation only",
         }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 
@@ -13,7 +14,7 @@ MODEL_DIR = BENCHMARK_DIR.parent / "model"
 sys.path.insert(0, str(BENCHMARK_DIR))
 sys.path.insert(0, str(MODEL_DIR))
 
-from evaluate_viewcell_image_per import ViewcellDataset  # noqa: E402
+from evaluate_viewcell_image_per import ViewcellDataset, resolve_threshold  # noqa: E402
 from pose_csr_dataset import DIRECTIONAL_POSE_DTYPE, PoseCSRDataset  # noqa: E402
 
 
@@ -84,6 +85,45 @@ def _write_fixture(root: Path, *, canonical_center: bool = False) -> tuple[Path,
 
 
 class ViewcellSplitSourceTests(unittest.TestCase):
+    def test_current_v4_calibration_summary_resolves_frozen_safe_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            summary = Path(temp_dir) / "calibration.json"
+            summary.write_text(
+                json.dumps(
+                    {
+                        "schema": "pvs-bounded-relation-prior-instance-calibrated-calibration-summary-v4",
+                        "testRead": False,
+                        "weightedRecallFloor": 0.99,
+                        "weightedRecallLowerConfidenceBoundFloor": 0.99,
+                        "bestSafe": {
+                            "safe": True,
+                            "threshold": 0.68,
+                            "selection": {
+                                "threshold": 0.68,
+                                "agg_weighted_recall": 0.997,
+                                "aggregateWeightedRecallLowerConfidenceBound": 0.994,
+                                "pose_recall": 0.97,
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = SimpleNamespace(
+                threshold=None,
+                threshold_policy="weighted_precision",
+                target_weighted_recall=0.99,
+                minimum_pose_recall=None,
+            )
+            threshold, source = resolve_threshold(
+                args,
+                {"eval_summary": str(summary)},
+                SimpleNamespace(threshold=0.1),
+            )
+            self.assertAlmostEqual(threshold, 0.68)
+            self.assertEqual(source["selectionSplit"], "calibration")
+            self.assertFalse(source["testRead"])
+
     def test_pose_csr_split_labels_are_aligned_and_support_formal_names(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             viewcell_dir, pose_dir = _write_fixture(Path(temp_dir))
