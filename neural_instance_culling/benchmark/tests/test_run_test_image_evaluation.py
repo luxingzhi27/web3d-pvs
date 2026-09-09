@@ -59,6 +59,39 @@ def make_frozen_test_fixture(root: Path) -> dict:
 
 
 class FrozenTestImageEvaluationTests(unittest.TestCase):
+    def test_accepts_one_calibration_frozen_selection_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = make_frozen_test_fixture(Path(directory))
+            baseline.pop("threshold", None)
+            baseline.pop("thresholdSelection")
+            baseline.pop("thresholdProvenance")
+            baseline["baselineSelection"] = {
+                "method": "geometry-shell-hzb",
+                "selectionSplit": "calibration",
+                "testRead": False,
+                "assetVariant": "equal-asset",
+                "resolution": [128, 72],
+                "depthBiasM": 0.001,
+                "regionSampleCount": 0,
+                "sourceResult": "region66.json",
+            }
+            validation = validate_test_manifest(baseline)
+            self.assertEqual(validation["selectionMethod"], "geometry-shell-hzb")
+
+            selected_from_test = copy.deepcopy(baseline)
+            selected_from_test["baselineSelection"]["selectionSplit"] = "test"
+            with self.assertRaisesRegex(ValueError, "calibration"):
+                validate_test_manifest(selected_from_test)
+
+            mixed = copy.deepcopy(baseline)
+            mixed["thresholdSelection"] = {
+                "threshold": 0.5,
+                "selectionSplit": "calibration",
+                "testRead": False,
+            }
+            with self.assertRaisesRegex(ValueError, "exactly one"):
+                validate_test_manifest(mixed)
+
     def test_manifest_rejects_test_selection_or_incomplete_coverage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             manifest = make_frozen_test_fixture(Path(directory))

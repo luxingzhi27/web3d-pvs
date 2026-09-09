@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -46,18 +47,68 @@ def validate_test_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     if manifest.get("testEvaluationCount") != 1:
         raise ValueError("formal test image manifest must declare testEvaluationCount=1")
 
-    threshold = manifest.get("thresholdSelection")
-    if not isinstance(threshold, dict):
-        raise ValueError("formal test image manifest is missing thresholdSelection")
-    if threshold.get("selectionSplit") != "calibration":
-        raise ValueError("formal test image threshold must come from calibration")
-    if threshold.get("testRead") is not False:
-        raise ValueError("calibration threshold provenance must be recorded before test")
-    provenance = manifest.get("thresholdProvenance")
-    if not isinstance(provenance, dict):
-        raise ValueError("formal test image manifest is missing thresholdProvenance")
-    if provenance.get("selectionSplit") != "calibration" or provenance.get("testRead") is not False:
-        raise ValueError("thresholdProvenance must identify pre-test calibration")
+    has_threshold = "thresholdSelection" in manifest
+    has_baseline = "baselineSelection" in manifest
+    if has_threshold == has_baseline:
+        raise ValueError(
+            "formal test image manifest must contain exactly one of "
+            "thresholdSelection or baselineSelection"
+        )
+    if has_threshold:
+        threshold = manifest.get("thresholdSelection")
+        if not isinstance(threshold, dict):
+            raise ValueError("formal test image manifest is missing thresholdSelection")
+        if threshold.get("selectionSplit") != "calibration":
+            raise ValueError("formal test image threshold must come from calibration")
+        if threshold.get("testRead") is not False:
+            raise ValueError("calibration threshold provenance must be recorded before test")
+        provenance = manifest.get("thresholdProvenance")
+        if not isinstance(provenance, dict):
+            raise ValueError("formal test image manifest is missing thresholdProvenance")
+        if provenance.get("selectionSplit") != "calibration" or provenance.get("testRead") is not False:
+            raise ValueError("thresholdProvenance must identify pre-test calibration")
+        selection_method = "threshold"
+    else:
+        if any(field in manifest for field in ("threshold", "thresholdProvenance")):
+            raise ValueError("baseline test image manifest cannot contain neural threshold fields")
+        baseline = manifest.get("baselineSelection")
+        if not isinstance(baseline, dict):
+            raise ValueError("formal test image manifest is missing baselineSelection")
+        if baseline.get("method") != "geometry-shell-hzb":
+            raise ValueError("formal test image baseline must use geometry-shell-hzb")
+        if baseline.get("selectionSplit") != "calibration":
+            raise ValueError("formal test image baseline must come from calibration")
+        if baseline.get("testRead") is not False:
+            raise ValueError("calibration baseline provenance must be recorded before test")
+        for field in ("assetVariant", "resolution", "depthBiasM", "regionSampleCount", "sourceResult"):
+            if field not in baseline:
+                raise ValueError(f"formal test image baseline is missing {field}")
+        if not isinstance(baseline["assetVariant"], str) or not baseline["assetVariant"]:
+            raise ValueError("formal test image baseline assetVariant must be non-empty")
+        resolution = baseline["resolution"]
+        if isinstance(resolution, dict):
+            resolution = [resolution.get("width"), resolution.get("height")]
+        if (
+            not isinstance(resolution, (list, tuple))
+            or len(resolution) != 2
+            or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in resolution)
+        ):
+            raise ValueError("formal test image baseline resolution must contain positive width and height")
+        try:
+            depth_bias = float(baseline["depthBiasM"])
+        except (TypeError, ValueError) as error:
+            raise ValueError("formal test image baseline depthBiasM must be finite and non-negative") from error
+        if not math.isfinite(depth_bias) or depth_bias < 0:
+            raise ValueError("formal test image baseline depthBiasM must be finite and non-negative")
+        if (
+            isinstance(baseline["regionSampleCount"], bool)
+            or not isinstance(baseline["regionSampleCount"], int)
+            or baseline["regionSampleCount"] < 0
+        ):
+            raise ValueError("formal test image baseline regionSampleCount must be non-negative")
+        if not isinstance(baseline["sourceResult"], str) or not baseline["sourceResult"]:
+            raise ValueError("formal test image baseline sourceResult must be non-empty")
+        selection_method = "geometry-shell-hzb"
 
     coverage = manifest.get("testCoverage")
     if not isinstance(coverage, dict):
@@ -85,6 +136,7 @@ def validate_test_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         "testRead": True,
         "testEvaluationCount": 1,
         "selectionSplit": "calibration",
+        "selectionMethod": selection_method,
         "viewcellCount": coverage.get("viewcellCount"),
         "sampleCount": coverage.get("sampleCount"),
     }

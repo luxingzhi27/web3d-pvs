@@ -2,25 +2,30 @@
 
 日期：2026-09-09
 
-状态：入口已精简为单场景薄 runner。正式 test 图像渲染仍须在模型、checkpoint、calibration 阈值和候选语义冻结后执行一次；本 worktree 本次只做 schema/选择测试，不启动 GPU 或 Chrome。
+状态：入口为单场景薄 runner。正式 test 图像渲染须在选择配置和候选语义冻结后执行一次；本 worktree 本次只做 schema/选择测试，不启动 GPU 或 Chrome。
 
 ## 输入契约
 
 输入是现有 `local-true-component-id-formal-render-manifest-v2`。manifest 必须声明：
 
 - `split=test`、`testRead=true`、`testEvaluationCount=1`；
-- `thresholdSelection.selectionSplit=calibration`、`thresholdSelection.testRead=false`；
-- `thresholdProvenance` 同样指向 test 之前的 calibration；
+- calibration-frozen `thresholdSelection` 或 `baselineSelection` 二选一，且
+  `selectionSplit=calibration`、`testRead=false`；HZB 基线使用
+  `method=geometry-shell-hzb` 以及 `assetVariant`、`resolution`、`depthBiasM`、
+  `regionSampleCount`、`sourceResult`；
 - `testCoverage.selection=all_unique_test_viewcells`、`maxViewcells=0`、`sampledWithReplacement=false`；
 - `testCoverage.subposesPerViewcell=0`，`subposeSelection.mode=all` 且 `requestedPerViewcell=0`。
 
-这些字段只说明 test 已冻结以及覆盖范围。完整 formal-v2 schema、实例绑定、`predictionKey` 复用和 sample FOV 由现有 renderer validator 负责。
+这些字段只说明 test 已冻结以及覆盖范围。HZB 的 Region66 转换、pose 覆盖、显式
+Pose CSR 候选和基线配置见 [`pvs_hzb_test_image_manifest_2026-09-09.md`](pvs_hzb_test_image_manifest_2026-09-09.md)。
+完整 formal-v2 schema、实例绑定、`predictionKey` 复用和 sample FOV 由现有 renderer
+validator 负责。
 
 ## 单场景 Runner
 
 入口：`neural_instance_culling/benchmark/run_test_image_evaluation.py`。
 
-Runner 不加载模型、不选择阈值、不重算预测，不复制 manifest validator，不抓取 `nvidia-smi`，也不写入 renderer 的 GPU evidence。它完成最小字段门控后直接调用现有正式 renderer：
+Runner 不加载模型、不选择阈值、不重算预测，不复制 manifest validator，不抓取 `nvidia-smi`，也不写入 renderer 的 GPU evidence。它完成最小字段门控后直接调用现有正式 renderer；选择门接受校准冻结的神经阈值或 HZB 基线二选一：
 
 ```bash
 conda run --no-capture-output -n slm_pvs \
@@ -74,14 +79,14 @@ conda run --no-capture-output -n slm_pvs \
 
 选择器只使用 test manifest 的 sample 集合和 renderer 的逐 sample PER；它不参与模型、checkpoint 或阈值选择。普通集合指标、weighted recall、useful/bad cull 和图像 PER 的解释仍遵循现有评价文档，图像指标不能替代剔除效率指标。
 
-## 修改与验证
+## 本次记录
 
-本次追加提交精简了：
+本次追加提交收敛 HZB formal-v2 转换入口：
 
-- `run_test_image_evaluation.py`：单场景最小字段门控和现有 renderer 调用；
-- `select_qualitative_image_samples.py`：PER 分位数、最大误差和两个预登记角色映射；
-- 两个 benchmark 测试：test 不参与选择、`predictionKey` 复用和预登记时序；
-- `evaluate_viewcell_image_per.py` 与 `render_local_glb_color_id_browser.mjs`：保留现有 formal manifest 及 renderer 入口契约；
-- 本文档和 `docs/README.md` 索引。
+- `build_hzb_image_manifest.py`：将 Region66 实例预测转换为 formal-v2 keyed manifest；
+- `test_build_hzb_image_manifest.py`：转换契约和 schema-only renderer；
+- 本文档、HZB 转换契约文档和 `docs/README.md` 索引。
 
-验证使用 `CUDA_VISIBLE_DEVICES=` 的 `slm_pvs` conda 环境，未启动 GPU、Chrome 或正式 Color-ID 渲染。正式 test 图像数值结果需在硬件空闲且所有输入冻结后，通过上述单场景入口执行。
+验证命令为 benchmark tests 全集；使用 `CUDA_VISIBLE_DEVICES=` 的 `slm_pvs`
+环境，不启动 GPU、Chrome 或正式 Color-ID 渲染。正式 test 图像数值结果需在硬件
+空闲且所有输入冻结后，通过上述单场景入口执行。
