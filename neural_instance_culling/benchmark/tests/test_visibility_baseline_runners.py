@@ -97,6 +97,39 @@ def make_batch() -> dict[str, np.ndarray]:
 
 
 class VisibilityBaselineRunnerTests(unittest.TestCase):
+    def test_v4_runner_accepts_empty_viewcell_candidates_without_model_call(self) -> None:
+        class RejectingModel:
+            def compute_logits_with_aux(self, *_args, **_kwargs):
+                raise AssertionError("the model must not run for an empty candidate set")
+
+        runner = PvsV4Runner(
+            "empty-viewcell",
+            "bounded-relation-survival-moment-v4",
+            RejectingModel(),
+            np.zeros((3, 6), dtype=np.float32),
+            np.arange(3, dtype=np.int64),
+            {"sceneBounds": {"min": [0, 0, 0], "max": [1, 1, 1]}},
+            {},
+            0.5,
+            torch.device("cpu"),
+            runtime_features=torch.zeros((3, 124), dtype=torch.float32),
+        )
+
+        predicted, result = runner.predict_viewcell_ids(
+            np.zeros((3,), dtype=np.float32),
+            np.zeros((3,), dtype=np.float32),
+            np.asarray([0.0, 0.0, 1.0, 1.0, 1.0], dtype=np.float32),
+            np.empty((0,), dtype=np.uint32),
+            query_center_world=np.zeros((3,), dtype=np.float32),
+            viewcell_radius_m=1.0,
+        )
+
+        self.assertEqual(predicted.dtype, np.uint32)
+        self.assertEqual(predicted.size, 0)
+        self.assertEqual(result.scores.size, 0)
+        self.assertEqual(result.forward_ms, 0.0)
+        self.assertEqual(result.total_ms, 0.0)
+
     def test_bounded_relation_runner_preserves_pose_offsets(self) -> None:
         class RecordingModel:
             def __init__(self) -> None:

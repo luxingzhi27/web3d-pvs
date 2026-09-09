@@ -22,6 +22,8 @@ from export_pvs import (  # noqa: E402
     GEO_DIM,
     LOW_RANK_SUMMARY_DIM,
     MAX_NEURAL_ASSET_BYTES,
+    MAX_NEURAL_ASSET_BYTES_PER_INSTANCE,
+    MAX_SHARED_NEURAL_ASSET_BYTES,
     MODEL_SCHEMA,
     RELATION_CONDITION_DIM,
     RUNTIME_FEATURE_DIM,
@@ -31,6 +33,7 @@ from export_pvs import (  # noqa: E402
     SURVIVAL_PARAMETER_DIM,
     SURVIVAL_RANK,
     _check_neural_asset_budget,
+    _neural_asset_budget_limit,
     _runtime_weight_specs,
     export,
     parse_args,
@@ -746,6 +749,24 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
                     "chi_table_fp32.bin": b"0",
                 }
             )
+
+    def test_neural_asset_budget_scales_with_fixed_instance_table(self) -> None:
+        instance_count = 41_298
+        expected = instance_count * MAX_NEURAL_ASSET_BYTES_PER_INSTANCE + MAX_SHARED_NEURAL_ASSET_BYTES
+        self.assertEqual(_neural_asset_budget_limit(instance_count), expected)
+        used = instance_count * 248 + 64 * 1024
+        self.assertEqual(
+            _check_neural_asset_budget(
+                {
+                    "instance_runtime_features_fp16.bin": b"0" * (instance_count * 248),
+                    "query_weights_fp16.bin": b"0" * (32 * 1024),
+                    "frequency_cycles_fp32.bin": b"0" * (16 * 1024),
+                    "chi_table_fp32.bin": b"0" * (16 * 1024),
+                },
+                instance_count,
+            ),
+            used,
+        )
 
     def _export_with_threshold(self, root: Path, checkpoint: dict, threshold: float) -> Path:
         checkpoint_path = root / "threshold.pt"

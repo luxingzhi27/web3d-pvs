@@ -1,6 +1,6 @@
 # View-cell 图像级评价协议
 
-更新时间：2026-09-05
+更新时间：2026-09-09
 
 图像级评价回答：模型在实例集合上满足安全约束后，使用前端真实相机渲染时仍会损失多少可见像素。它不能替代集合 precision、recall、useful cull、bad cull 或 GLB 资源指标。
 
@@ -58,4 +58,4 @@ SwiftShader、llvmpipe、softpipe、swrast 或无法确认后端的结果只能�
 - 预测 GLB 数、预测 GLB 字节和相对完整候选的削减；
 - 浏览器后端、GPU、分辨率、页面复用和运行时间。
 
-当前 V4 主线的 validation 图像指标尚未完成正式回填，应标记为 `not_available`；完成硬件 Color-ID 评价后再补充结果。
+当前 V4 主线已在 HKUST 和 IFCBench 的 seed-20260802 validation 安全工作点完成正式硬件 Color-ID 评价。完整口径、结果和限制见 [V4 主线 HKUST 与 IFCBench 图像级评价](pvs_mainline_image_evaluation_2026-09-09.md)。该结果是完整模型的绝对图像质量证据，不等同于多种子图像置信区间或逐模块图像消融。

@@ -154,6 +154,10 @@ def repair_existing_viewcell_query_geometry(
             "cameraSemantics": "poses.camera_world is candidate_camera_world = query_center_world - normalize(viewcell_forward) * candidate_back_offset",
             "viewcellGeometryMaterialization": geometry,
             "files": {**(metadata.get("files") or {}), **geometry["files"]},
+            "stats": {
+                **(metadata.get("stats") or {}),
+                "pvsBackOffsetRange": geometry["candidateBackOffsetRangeM"],
+            },
         }
     )
     temporary_meta = meta_path.with_name(f".{meta_path.name}.partial")
@@ -253,6 +257,10 @@ def apply_manifest(args: argparse.Namespace) -> dict[str, Any]:
                 "candidateCameraSemantics": "66-degree candidate anchor backed from the query center by viewcell_radius/tan(30deg); stored candidate CSR remains the native subpose union",
                 "cameraSemantics": "poses.camera_world is candidate_camera_world = query_center_world - normalize(viewcell_forward) * candidate_back_offset",
                 "viewcellGeometryMaterialization": viewcell_geometry,
+                "stats": {
+                    **output_meta["stats"],
+                    "pvsBackOffsetRange": viewcell_geometry["candidateBackOffsetRangeM"],
+                },
                 "files": {
                     **output_meta["files"],
                     **viewcell_geometry["files"],

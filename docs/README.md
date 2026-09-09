@@ -27,6 +27,7 @@
 | [`evaluation/pvs_frontend_inference_latency_protocol_2026-09-09.md`](evaluation/pvs_frontend_inference_latency_protocol_2026-09-09.md) | 桌面和真实移动设备的 WebGPU 候选模型前向耗时协议 |
 | [`evaluation/test_split_benchmark_protocol.md`](evaluation/test_split_benchmark_protocol.md) | train、calibration、validation、test 的职责及冻结 test 规则 |
 | [`evaluation/viewcell_image_per_evaluation.md`](evaluation/viewcell_image_per_evaluation.md) | 真实 `60°` 相机下的 Color-ID 图像漏检与额外像素评价 |
+| [`evaluation/pvs_mainline_image_evaluation_2026-09-09.md`](evaluation/pvs_mainline_image_evaluation_2026-09-09.md) | HKUST 与 IFCBench validation 的硬件 Color-ID 正式图像结果 |
 
 ## 当前系统与部署
 

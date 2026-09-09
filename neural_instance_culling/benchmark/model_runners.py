@@ -112,6 +112,17 @@ class BaseModelRunner:
     def score_batch(self, batch: dict[str, np.ndarray]) -> PredictionResult:
         return self.score_arrays(batch["camera"], batch["camera_world"], batch["camera_view"], batch["instance"], batch.get("mvp"))
 
+    @staticmethod
+    def empty_prediction_result() -> PredictionResult:
+        empty = np.empty((0,), dtype=np.float32)
+        return PredictionResult(
+            scores=empty,
+            forward_ms=0.0,
+            total_ms=0.0,
+            utility_scores=empty.copy(),
+            download_scores=empty.copy(),
+        )
+
     def predict_ids(
         self,
         camera_norm: np.ndarray,
@@ -122,6 +133,8 @@ class BaseModelRunner:
         threshold: float | None = None,
     ) -> tuple[np.ndarray, PredictionResult]:
         count = int(candidate_ids.size)
+        if count == 0:
+            return np.empty((0,), dtype=np.uint32), self.empty_prediction_result()
         camera = np.repeat(camera_norm[None, :], count, axis=0).astype(np.float32, copy=False)
         world = np.repeat(camera_world[None, :], count, axis=0).astype(np.float32, copy=False)
         view = np.repeat(camera_view[None, :], count, axis=0).astype(np.float32, copy=False)
@@ -669,6 +682,8 @@ class PvsV4Runner(BaseModelRunner):
         del mvp
         ids = np.asarray(candidate_ids, dtype=np.uint32).reshape(-1)
         count = int(ids.size)
+        if count == 0:
+            return ids, self.empty_prediction_result()
         batch = {
             "camera": np.repeat(np.asarray(camera_norm, dtype=np.float32)[None, :], count, axis=0),
             "camera_world": np.repeat(np.asarray(camera_world, dtype=np.float32)[None, :], count, axis=0),

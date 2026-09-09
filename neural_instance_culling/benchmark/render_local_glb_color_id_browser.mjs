@@ -1218,6 +1218,7 @@ async function main() {
       const predictionRenderMs = performance.now() - predictionStarted;
       const { metrics, contributors } = computeMetrics(reference, test);
       imageRateSamples.push({
+        PER: metrics.PER,
         missPixelRate: metrics.missPixelRate,
         wrongInstancePixelRate: metrics.wrongInstancePixelRate,
         extraPixelRateOverImage: metrics.extraPixelRateOverImage,
@@ -1359,11 +1360,17 @@ async function main() {
       missPixelRate: totals.missPixels / valid,
       wrongInstancePixelRate: totals.wrongInstancePixels / valid,
       extraPixelRateOverImage: totals.extraPixels / total,
+      meanPER: meanRate('PER'),
+      medianPER: percentile('PER', 50),
+      p95PER: percentile('PER', 95),
       meanMissPixelRate: meanRate('missPixelRate'),
+      medianMissPixelRate: percentile('missPixelRate', 50),
       p95MissPixelRate: percentile('missPixelRate', 95),
       meanWrongInstancePixelRate: meanRate('wrongInstancePixelRate'),
+      medianWrongInstancePixelRate: percentile('wrongInstancePixelRate', 50),
       p95WrongInstancePixelRate: percentile('wrongInstancePixelRate', 95),
       meanExtraPixelRateOverImage: meanRate('extraPixelRateOverImage'),
+      medianExtraPixelRateOverImage: percentile('extraPixelRateOverImage', 50),
       p95ExtraPixelRateOverImage: percentile('extraPixelRateOverImage', 95),
       evaluatedSubposeCount: samples.length,
       renderFailedSubposeCount: 0,

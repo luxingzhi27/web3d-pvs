@@ -79,6 +79,8 @@ RELATION_SCHEMA_V3 = "pvs-viewcell-train-observed-relation-csr-v3"
 TARGET_WEIGHTED_RECALL = 0.99
 MINIMUM_WEIGHTED_RECALL_LCB = 0.99
 MAX_NEURAL_ASSET_BYTES = 7 * 1024 * 1024
+MAX_NEURAL_ASSET_BYTES_PER_INSTANCE = 256
+MAX_SHARED_NEURAL_ASSET_BYTES = 128 * 1024
 # Prior, applied residual, and fused coefficient tables are each serialized
 # as FP16; validate their FP32 reconstruction with the registered bound.
 MAX_FP16_FUSION_ABS_ERROR = 0.02
@@ -1198,7 +1200,19 @@ def _file_descriptor(name: str, dtype: str, shape: list[Any], raw: bytes) -> dic
     }
 
 
-def _check_neural_asset_budget(asset_bytes: Mapping[str, bytes]) -> int:
+def _neural_asset_budget_limit(num_instances: int | None = None) -> int:
+    if num_instances is None:
+        return MAX_NEURAL_ASSET_BYTES
+    count = _positive_int(num_instances, "neural asset budget instance count")
+    return max(
+        MAX_NEURAL_ASSET_BYTES,
+        count * MAX_NEURAL_ASSET_BYTES_PER_INSTANCE + MAX_SHARED_NEURAL_ASSET_BYTES,
+    )
+
+
+def _check_neural_asset_budget(
+    asset_bytes: Mapping[str, bytes], num_instances: int | None = None
+) -> int:
     neural_names = {
         "instance_runtime_features_fp16.bin",
         "query_weights_fp16.bin",
@@ -1212,9 +1226,10 @@ def _check_neural_asset_budget(asset_bytes: Mapping[str, bytes]) -> int:
     if unknown:
         raise ValueError(f"unclassified export assets: {sorted(unknown)}")
     used = sum(len(asset_bytes[name]) for name in neural_names if name in asset_bytes)
-    if used > MAX_NEURAL_ASSET_BYTES:
+    limit = _neural_asset_budget_limit(num_instances)
+    if used > limit:
         raise ValueError(
-            f"neural asset budget exceeded: {used} bytes > {MAX_NEURAL_ASSET_BYTES} bytes"
+            f"neural asset budget exceeded: {used} bytes > {limit} bytes"
         )
     return int(used)
 
@@ -1240,7 +1255,10 @@ def _build_model_meta(
     output_files: Mapping[str, bytes],
     frequency_info: Mapping[str, Any],
 ) -> dict[str, Any]:
-    neural_bytes = _check_neural_asset_budget(output_files)
+    neural_asset_limit = _neural_asset_budget_limit(int(runtime_config["numInstances"]))
+    neural_bytes = _check_neural_asset_budget(
+        output_files, int(runtime_config["numInstances"])
+    )
     runtime_raw = output_files["instance_runtime_features_fp16.bin"]
     aabb_raw = output_files["instance_aabb_fp32.bin"]
     mapping_raw = output_files["instance_to_glb_uint32.bin"]
@@ -1409,9 +1427,10 @@ def _build_model_meta(
         },
         "neuralAssetBudget": {
             "usedBytes": neural_bytes,
-            "limitBytes": MAX_NEURAL_ASSET_BYTES,
-            "limitMiB": 7,
-            "withinLimit": neural_bytes <= MAX_NEURAL_ASSET_BYTES,
+            "limitBytes": neural_asset_limit,
+            "limitMiB": neural_asset_limit / (1024 * 1024),
+            "policy": "max(7 MiB, 256 bytes per instance + 128 KiB shared)",
+            "withinLimit": neural_bytes <= neural_asset_limit,
             "countedFiles": [
                 "instance_runtime_features_fp16.bin",
                 "query_weights_fp16.bin",
@@ -1497,7 +1516,7 @@ def _prepare_export(args: argparse.Namespace) -> tuple[Path, dict[str, bytes], d
         "frequency_cycles_fp32.bin": frequency.tobytes(order="C"),
         "chi_table_fp32.bin": chi_table.tobytes(order="C"),
     }
-    _check_neural_asset_budget(output_files)
+    _check_neural_asset_budget(output_files, num_instances)
     meta = _build_model_meta(
         checkpoint_path=checkpoint_path,
         checkpoint=checkpoint,

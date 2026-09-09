@@ -317,7 +317,7 @@ Full 的普通 aggregate recall 低 `0.0040`、bad cull 高 `0.000091`，但 wei
 
 去除困难边界后，precision、accuracy、useful cull 和平均预测数差异均跨零，说明其普通实例分类贡献不稳定；Full 的 balanced accuracy 提高 `0.61` 个百分点，置信区间不跨零。与此同时，Full 的平均预测 GLB 字节少约 `22.15 MB/pose`，并把三个种子的安全阈值从 `0.05-0.15` 提高到 `0.42-0.68`。
 
-较高且稳定的安全阈值表明正负分数尾部的绝对位置更健康，但阈值可被 bias 或温度改变，不能单独证明性能。GLB 字节差异还受到实例到 GLB 的分组和资源大小影响，在硬件 Color-ID 图像评价完成前只能作为资源诊断。当前证据支持保留该项作为辅助优化，但不足以把它单独包装成最主要的性能贡献。
+较高且稳定的安全阈值表明正负分数尾部的绝对位置更健康，但阈值可被 bias 或温度改变，不能单独证明性能。GLB 字节差异还受到实例到 GLB 的分组和资源大小影响，仍只能作为资源诊断。完整模型的硬件 Color-ID 评价已经完成，但没有对该损失消融单独重复图像渲染，因此当前证据支持保留该项作为辅助优化，不足以把它单独包装成最主要的图像质量贡献。
 
 ### 7.7 表征对比项消融
 
@@ -335,7 +335,7 @@ Full 的普通 aggregate recall 低 `0.0040`、bad cull 高 `0.000091`，但 wei
 
 第三，**综合损失中最可靠的基础是逐 pose 平衡分类与单侧 weighted-recall 保护**。召回保护在独立 calibration 阈值下表现为更好的安全工作点效率；困难边界间隔主要改善 balanced accuracy、资源映射和分布健康。表征对比损失则已被正式否定，不应作为论文贡献。
 
-论文主张必须限定在 validation 证据覆盖的范围内。当前可以声称各结构在 weighted-recall 安全门内改善实例分类和有效剔除，但不能在图像指标回填前声称稳定改善最终画面质量，也不能在硬件 WebGPU/移动端测量前声称确定的端侧加速倍数。GLB 字节结果是基于当前实例分数聚合的资源诊断，不是独立下载头的训练贡献。
+论文主张必须限定在 validation 证据覆盖的范围内。当前可以声称各结构在 weighted-recall 安全门内改善实例分类和有效剔除；完整模型在 HKUST 和 IFCBench 的硬件 Color-ID validation 评价中分别得到 `0.3247%` 和 `0.0545%` aggregate PER。由于尚未对全部消融成员做配对图像渲染，不能把这两个绝对结果解释为某一模块稳定改善图像质量。GLB 字节结果是基于当前实例分数聚合的资源诊断，不是独立下载头的训练贡献。
 
 ## 9. 复现与验证状态
 
@@ -347,4 +347,4 @@ neural_instance_culling/benchmark/out/pvs_v4_integrated_visibility_mainline_v1/p
 
 汇总使用相同的 730 个 validation pose、三种子和 10,000 次配对分层 bootstrap。汇总器验证逐 pose 候选实例编号一致、指标有限、每个成员使用自己的 calibration 阈值且 `testRead=false`。对应单元测试已通过。
 
-尚未完成的证据为硬件 Color-ID 图像指标回填、浏览器 NVIDIA/Vulkan WebGPU 延迟和真实移动端性能。它们不影响本报告的实例分类消融结论，但会限制图像质量和系统收益的最终论文表述。
+硬件 Color-ID 图像指标已经回填，见 [`pvs_mainline_image_evaluation_2026-09-09.md`](pvs_mainline_image_evaluation_2026-09-09.md)。浏览器 NVIDIA/Vulkan WebGPU 与真实移动设备前向耗时也已完成实测，但端到端首屏时间、完整调度开销和逐消融图像评价仍未完成；这些缺口不影响本报告的实例分类消融结论，但仍限制系统收益和模块级图像收益的最终论文表述。

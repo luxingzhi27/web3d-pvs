@@ -997,9 +997,11 @@ def write_summary_md(path: Path, summary: dict[str, Any]) -> None:
         f"- Frustum-cell FPR: `{f['frustumCellFPR']:.6f}`",
         f"- Frustum-cell IoU: `{f['frustumCellIoU']:.6f}`",
         f"- Image PER: `{float(i.get('PER', 0.0)):.6f}`",
+        f"- Mean / median / p95 PER: `{float(i.get('meanPER') or 0.0):.6f}` / `{float(i.get('medianPER') or 0.0):.6f}` / `{float(i.get('p95PER') or 0.0):.6f}`",
         f"- Miss pixel rate: `{float(i.get('missPixelRate', 0.0)):.6f}`",
-        f"- P95 miss pixel rate: `{float(i.get('p95MissPixelRate', 0.0) or 0.0):.6f}`",
+        f"- Mean / median / p95 miss pixel rate: `{float(i.get('meanMissPixelRate') or 0.0):.6f}` / `{float(i.get('medianMissPixelRate') or 0.0):.6f}` / `{float(i.get('p95MissPixelRate') or 0.0):.6f}`",
         f"- Wrong-ID pixel rate: `{float(i.get('wrongInstancePixelRate', 0.0)):.6f}`",
+        f"- Mean / median / p95 wrong-ID pixel rate: `{float(i.get('meanWrongInstancePixelRate') or 0.0):.6f}` / `{float(i.get('medianWrongInstancePixelRate') or 0.0):.6f}` / `{float(i.get('p95WrongInstancePixelRate') or 0.0):.6f}`",
         f"- Extra pixel rate over image: `{float(i.get('extraPixelRateOverImage', 0.0)):.6f}`",
         f"- Self-consistency PER: `{float(s.get('selfConsistencyPER') or 0.0):.6f}`",
         "",
@@ -1111,7 +1113,13 @@ def run_true_glb_renderer(
     else:
         validate_instance_render_manifest(manifest)
     manifest_path = output_dir / "true_glb_render_manifest.json"
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Large scenes repeat one view-cell prediction across several real
+    # subposes. Compact JSON keeps the browser manifest below Node's string
+    # limit without changing any sample or prediction semantics.
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
     cmd = [
         "node",
         str(args.true_renderer_script),
