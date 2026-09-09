@@ -83,7 +83,7 @@ lossless runtime 下载总量还包括 `shell_meta.json`：HKUST 为 `399,388,45
 2. max mip：每个 2x2 block 取最大正深度，完整处理奇数宽高到 1x1；
 3. 保守 AABB：投影 8 个角点，向外取整覆盖矩形；相机在 AABB 内、近裁剪面穿越、非有限投影和空/越界 footprint 都保留；selected occluder 自身直接保留，其他候选（包括 non-occluder）执行 HZB 测试；
 4. 只有 `hzbMax + depthBiasM < candidateNear` 才允许剔除；
-5. `queryPoint60` 对单个真实 60°相机查询，`queryRegion66` 对离线 subpose 分别查询后取实例并集；
+5. `queryPoint60` 对单个真实 60°相机查询，`queryRegion66` 对离线 subpose 分别查询后取实例并集；Point60 准确率必须使用单个 Color-ID raw canonical subpose GT，不能使用 Region union；
 6. GPU 只回读计数、最终可见实例编号和 GLB flag，实例输出保持 component 粒度，GLB 队列由可见实例聚合得到。
 
 WebGPU MVP 明确固定 color/HZB texture、depth texture 和 render pipeline 为 `sampleCount=1`，不做 MSAA 或 resolve；
@@ -107,10 +107,10 @@ Region66 结果文件为：
 - WebGPU adapter：`vendor=nvidia`、`architecture=ampere`；
 - browser result 和旁路 evidence 均保存 `gpuBackend`（API=`webgpu`、adapter 字段）以及独立 `gpuGate`；
 - WebGL 辅助 renderer：NVIDIA RTX A6000 的 ANGLE Vulkan；
-- Point60：2 个 pose、91 个候选引用，平均 45.5 个候选和 44 个保留实例；timing total p50=`34.00 ms`、p95=`58.57 ms`。aggregate precision=`0.068182`、recall=`1.0`、specificity=`0.035294`、balanced accuracy=`0.517647`、useful cull=`0.032967`、bad cull=`0`、weighted recall=`1.0`、weighted recall lower95=`1.0`。每个 pose 保留数为 `32/33`、`56/58`；该结果使用重新生成的 contract asset，仍为并发 smoke，不是正式 timing 或完整 test 结论；
+- Point60：2 个 pose、91 个候选引用，平均 45.5 个候选和 44 个保留实例；timing total p50=`34.00 ms`、p95=`58.57 ms`。每个 pose 保留数为 `32/33`、`56/58`。这次历史 smoke 的 accuracy/GLB 数字使用了 Region-union `visible_ids.bin`，在本 follow-up 后只保留为 runtime 路径诊断，不进入 Point60 accuracy 表；它仍是并发 smoke，不是正式 timing 或完整 test 结论；
 - Region66：2 个 pose、4 个子姿态/pose，平均 6,433 个候选和 5,705 个并集保留实例；timing total p50=`36.10 ms`、p95=`44.74 ms`。aggregate precision=`0.140316`、recall=`0.995647`、specificity=`0.128708`、balanced accuracy=`0.562178`、useful cull=`0.112622`、bad cull=`0.000544`、weighted recall=`0.999021`、weighted recall lower95=`0.998910`。两个 pose 的保留数为 `5,611/6,013`、`5,799/6,853`，每个 pose 的 4 个 subpose 查询后取并集；该结果使用重新生成的 contract asset，仍为并发 smoke，不是正式 test 结论；
 - 两个 smoke 均报告 WebGPU adapter `vendor=nvidia`、`architecture=ampere`，WebGL 辅助 renderer 为 NVIDIA RTX A6000 ANGLE Vulkan，`gpuValidationErrors=[]` 且无 page error；同一窗口的 `nvidia-smi pmon` 检出 GPU 0-3 上的 IFCBench `python` 计算进程，因此写入 `formalReady=false`、`executionClass=hardware-smoke-concurrent`。
-- GLB 资源统计按 pose 内去重后再做 pose macro 平均，不再把跨 pose union 作为主指标。Point60 的主 `glb.poseMacro` 为 `44` 个 predicted、`3` 个 truth、`3` 个 intersection，源 GLB 字节分别为 `3,580,428 / 106,684 / 106,684 B`；两个 pose predicted 数/字节为 `32/2,163,372 B`、`56/4,997,484 B`。Region66 的主 `glb.poseMacro` 为 `932`、`277`、`277`，源 GLB 字节为 `27,644,000 / 6,357,804 / 6,357,804 B`；两个 pose predicted 数/字节为 `842/21,871,312 B`、`1,022/33,416,688 B`。`glb.unionDiagnostic` 仅作跨 pose 重复度诊断；bytes 来自显式 `glbIndex.json` 与 `--glb-root` 的 `stat().st_size`。
+- GLB 资源统计按 pose 内去重后再做 pose macro 平均，不再把跨 pose union 作为主指标。Region66 的主 `glb.poseMacro` 为 `932`、`277`、`277`，源 GLB 字节为 `27,644,000 / 6,357,804 / 6,357,804 B`；两个 pose predicted 数/字节为 `842/21,871,312 B`、`1,022/33,416,688 B`。Point60 旧 `glb.poseMacro`（`44/3/3`，字节 `3,580,428/106,684/106,684 B`）同样使用了 union GT，只作无效 runtime 诊断，不进入资源准确率表。`glb.unionDiagnostic` 仅作跨 pose 重复度诊断；bytes 来自显式 `glbIndex.json` 与 `--glb-root` 的 `stat().st_size`。
 
 每个 smoke 目录旁都有 `geometry_shell_hzb_gpu_evidence.json`，保存 `gpuBackend`、adapter/WebGL gate、Chrome 参数、同窗口
 `nvidia-smi` 和 `pmon` before/during/after。并发 smoke 的 timing 字段只用于确认路径可运行，不进入正式性能汇总。
@@ -121,8 +121,10 @@ Region66 结果文件为：
 
 本轮没有正式全量 HZB visibility test，因此尚未产生可用于论文结论的 pose/aggregate precision、recall、weighted recall 及其置信下界、specificity、balanced accuracy、useful cull、bad cull、image PER、miss pixel、wrong-ID pixel、GLB byte reduction 和正式冷启动/端侧延迟。2 pose smoke 的上述诊断值已单独标注，不能替代完整 test。
 
-正式评价需使用与 PVS 相同的 candidate CSR、GT visible IDs/weights 和 split：
+正式评价需使用与 PVS 相同的 candidate CSR、split 和可追溯的 GT visible IDs/weights：
 
+- Region66 使用 Pose CSR 的 `visible_ids.bin/visible_weights.bin` union GT；
+- Point60 不得读取该 union GT。必须传入对应场景 Color-ID raw 目录，固定按每个 view-cell 的 `subpose_id=0` 读取一个 source row 的 `visible_component_ids/component_weights`。没有该参数时 evaluator 直接拒绝生成 Point60 accuracy/GLB 指标，而不是退回 union；输出的 `groundTruth.mode=canonical-subpose`、`groundTruth.source=raw_three_color_id_jsonl` 和 `groundTruth.subposeId=0` 是正式口径字段；
 - 画面损失指标：weighted recall、miss pixel、image PER、wrong-ID pixel；
 - 剔除效率指标：useful cull、specificity、预测/候选比例、bad cull、GLB 数量/字节削减；
 - 资源/运行指标：shell 传输字节、解码后 GPU 内存、depth/mip/query/readback 分阶段时间和总调度时间。
@@ -159,12 +161,36 @@ conda run -n slm_pvs python neural_instance_culling/benchmark/evaluate_geometry_
 
 该版本保留为论文 Geometry-shell HZB 基线/资产敏感性对照；当前风险是外壳仍未完成独占 GPU 的全 test visibility、图像损失和端侧正式计时，Chrome 还有 external Instance warning。
 
+## Follow-up：公平 Region 抽样与 Point60 GT
+
+日期：2026-09-09。目的：补齐论文计划中的 Region 子姿态抽样契约，并阻止 view-cell union 被误当作 Point60 同点 GT。
+
+Region runner 新增 `--region-sample-count`，只接受 `0/1/5/9`，默认 `0`。`0` 保留该 view-cell 的全部实际 source subpose，并按 source ordinal 发送；非零值先选择距 `viewcell_centers.bin` canonical query center 最近的点，之后每次选择到已选世界位置集合最小距离最大的点，完全不读取任何 visible label。距离相同按 source ordinal 决定。请求数大于 available 数时选择全部 available 点。每个 workload pose 记录 `availableSubposeCount`、`selectedSubposeCount`、选中 ordinal/source pose index、`selectionMode`、`strategy` 和 `labelSource=none`；workload/result 汇总记录 workload 范围内的总数与均值/范围。
+
+Point60 的正式 evaluator 现在要求显式 `--point-gt-raw-dir`，从顶层 `*.jsonl` 中按 `viewcell_id` 固定取 `subpose_id=0`，保留该行的逐组件 ID 和权重；Region66 仍读取 CSR union。代表性命令为：
+
+```bash
+conda run -n slm_pvs python neural_instance_culling/benchmark/evaluate_geometry_shell_hzb.py \
+  --result <point60-result.json> \
+  --dataset-dir <pose-csr-dataset> \
+  --runtime-meta <scene-root>/assets/runtimeVisibilityMeta.json \
+  --point-gt-raw-dir <scene-viewcell-colorid-raw-dir> \
+  --output <point60-metrics.json>
+```
+
+HKUST raw source 为 `neural_instance_culling/sampler/out/hkust_v3_viewcell_fov66/color_id`，IFCBench raw source 为 `neural_instance_culling/sampler/out/ifcbench_fantasy_metropolis_instanced_v2/viewcell_colorid_k4`。`subpose_id=0` 是 source 中固定的 canonical representative；它不是把整个区域可见集合复制到 Point60。若后续正式协议要求几何中心的精确 Color-ID 重渲染，需要另行登记中心点 reference，不能把这里的 source representative 改称为精确中心测量。
+
+对已有 2-pose Point60 浏览器输出做的 CPU-only raw-GT 诊断得到 `gtCount=5`、`tp=5`、aggregate recall=`1.0`、precision=`0.056818`、weighted recall=`1.0`；该数字只验证 evaluator 的逐 subpose 对齐，不是新的浏览器 smoke，也不构成正式 test 结论。
+
+本 follow-up 未启动浏览器或 GPU；已有 Point60/Region66 结果仍是上一轮并发硬件 smoke，Point60 的旧 accuracy 只作无效口径诊断，Region66 的旧结果仍是全 4 subpose 的并发 smoke。正式独占硬件 timing、Point60 raw-GT 全 test visibility、Region 子集 `1/5/9` 的 GPU 结果和图像评价均未执行。
+
 ## 验证与剩余工作
 
 已通过：
 
 - `node neural_instance_culling/benchmark/test_geometry_shell_hzb_exporter.mjs`；
 - `node slm2viewer/scripts/test_geometry_shell_hzb_core.mjs`；
+- `node slm2viewer/scripts/test_geometry_shell_hzb_runner.mjs`；
 - `conda run -n slm_pvs python -m unittest neural_instance_culling.benchmark.tests.test_evaluate_geometry_shell_hzb`；
 - 修正后的 Point60/Region66 browser smoke，均有 WebGPU adapter 和 before/during/after GPU evidence；
 - 两场景完整 lossless/equal-asset CPU exporter，runtime 文件总量和 equal-asset 硬预算均已复核；
@@ -177,7 +203,7 @@ conda run -n slm_pvs python neural_instance_culling/benchmark/evaluate_geometry_
 
 剩余正式运行：
 
-1. 等待 GPU 0-3 的 IFCBench 扫描结束，在独占 GPU 窗口重做 Point60 和 Region66 小规模验证；当前 v4 两次 smoke 均因并发明确标为 `hardware-smoke-concurrent`；
+1. 等待 GPU 0-3 的 IFCBench 扫描结束，在独占 GPU 窗口重做 Point60 和 Region66 小规模验证，并分别运行 Region `1/5/9/0`；当前 v4 两次 smoke 均因并发明确标为 `hardware-smoke-concurrent`；
 2. 按计划校准 resolution/depth bias，并在完整 test split 上执行 HZB visibility 与图像评价；
 3. 在 A6000、M2 和真实移动设备分别记录冷启动、depth-only、mip、AABB/query/readback p50/p95；
 4. 定位 Chrome external Instance warning 后再冻结正式 HZB 性能表。

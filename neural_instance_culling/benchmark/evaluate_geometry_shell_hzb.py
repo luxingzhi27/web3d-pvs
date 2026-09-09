@@ -88,6 +88,124 @@ def set_metrics(predicted: np.ndarray, truth: np.ndarray, candidates: np.ndarray
     return metrics_from_counts(int(candidate.size), int(pred.size), int(gt.size), tp)
 
 
+def iter_jsonl(path_or_dir: Path):
+    files = sorted(path_or_dir.glob("*.jsonl")) if path_or_dir.is_dir() else [path_or_dir]
+    for path in files:
+        if not path.is_file():
+            continue
+        with path.open("r", encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, start=1):
+                if line.strip():
+                    yield path, line_number, json.loads(line)
+
+
+def _raw_visible_ids_and_weights(row: dict[str, Any], source: str) -> tuple[np.ndarray, np.ndarray, str]:
+    raw_ids = row.get("visible_component_ids") or []
+    if not isinstance(raw_ids, list):
+        raise ValueError(f"{source} visible_component_ids must be a list")
+    ids_list = []
+    for value in raw_ids:
+        try:
+            component_id = int(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{source} contains a non-integer visible component ID") from error
+        if component_id < 0 or component_id >= 2**32:
+            raise ValueError(f"{source} contains an out-of-range visible component ID")
+        ids_list.append(component_id)
+
+    raw_weights = row.get("component_weights")
+    if raw_weights is None:
+        weights = np.ones((len(ids_list),), dtype=np.float32)
+        weight_source = "uniform-visible-instance-fallback"
+    else:
+        if not isinstance(raw_weights, list) or len(raw_weights) != len(ids_list):
+            raise ValueError(f"{source} component_weights must align one-to-one with visible_component_ids")
+        weights = np.asarray(raw_weights, dtype=np.float32)
+        if not np.isfinite(weights).all() or (weights < 0).any():
+            raise ValueError(f"{source} component_weights must be finite and non-negative")
+        weight_source = "raw_three_color_id_component_weights"
+
+    by_id: dict[int, float] = {}
+    for component_id, weight in zip(ids_list, weights.tolist()):
+        by_id[component_id] = max(by_id.get(component_id, 0.0), float(weight))
+    sorted_ids = np.asarray(sorted(by_id), dtype=np.uint32)
+    sorted_weights = np.asarray([by_id[int(value)] for value in sorted_ids.tolist()], dtype=np.float32)
+    return sorted_ids, sorted_weights, weight_source
+
+
+def load_point_ground_truth(
+    raw_dir: Path,
+    needed_viewcell_ids: set[int],
+    canonical_subpose_id: int = 0,
+) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
+    """Load one deterministic raw Color-ID subpose per Point60 view-cell.
+
+    The view-cell CSR intentionally stores a visibility union.  Point60 must
+    use a single raw source row instead; the source row is selected by its
+    explicit ``subpose_id`` and never by its visible labels.
+    """
+    if not raw_dir.is_dir():
+        raise ValueError(f"Point60 requires an existing raw Color-ID directory: {raw_dir}")
+    files = sorted(raw_dir.glob("*.jsonl"))
+    if not files:
+        raise ValueError(f"Point60 raw GT directory has no top-level JSONL files: {raw_dir}")
+    if canonical_subpose_id != 0:
+        raise ValueError("Point60 canonical subpose selection is fixed to subpose_id=0")
+
+    needed = {int(value) for value in needed_viewcell_ids}
+    found: dict[int, dict[str, Any]] = {}
+    rows_scanned = 0
+    rows_without_weights = 0
+    for path, line_number, row in iter_jsonl(raw_dir):
+        rows_scanned += 1
+        try:
+            viewcell_id = int(row["viewcell_id"])
+            subpose_id = int(row["subpose_id"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"Point60 raw GT row {path}:{line_number} lacks integer viewcell_id/subpose_id") from error
+        if viewcell_id not in needed or subpose_id != canonical_subpose_id:
+            continue
+        if viewcell_id in found:
+            raise ValueError(f"Point60 raw GT has duplicate canonical row for viewcell_id {viewcell_id}")
+        ids, weights, weight_source = _raw_visible_ids_and_weights(row, f"{path}:{line_number}")
+        if weight_source == "uniform-visible-instance-fallback":
+            rows_without_weights += 1
+        found[viewcell_id] = {
+            "visibleIds": ids,
+            "visibleWeights": weights,
+            "viewcellId": viewcell_id,
+            "subposeId": subpose_id,
+            "poseIndex": int(row["pose_index"]) if row.get("pose_index") is not None else None,
+            "cameraPos": row.get("camera_pos"),
+            "viewcellCenter": row.get("viewcell_center"),
+        }
+
+    missing = sorted(needed.difference(found))
+    if missing:
+        raise ValueError(
+            "Point60 raw GT is missing canonical subpose_id=0 rows for view-cells: "
+            f"{missing[:16]}" + (" ..." if len(missing) > 16 else "")
+        )
+    summary = {
+        "schema": "geometry-shell-hzb-point-gt-v1",
+        "enabled": True,
+        "source": "raw_three_color_id_jsonl",
+        "rawDir": str(raw_dir.resolve()),
+        "rawFileCount": len(files),
+        "rowsScanned": rows_scanned,
+        "requestedViewcellCount": len(needed),
+        "matchedViewcellCount": len(found),
+        "subposeId": canonical_subpose_id,
+        "selection": "fixed-subpose-id-0-per-viewcell",
+        "rowsWithoutComponentWeights": rows_without_weights,
+        "weightSource": (
+            "uniform-visible-instance-fallback"
+            if rows_without_weights else "raw_three_color_id_component_weights"
+        ),
+    }
+    return found, summary
+
+
 def load_glb_sizes(glb_index_path: Path, glb_root: Path) -> tuple[dict[int, int], dict[str, Any]]:
     """Resolve source GLB paths and read their file sizes without loading payloads."""
     index = read_json(glb_index_path)
@@ -192,6 +310,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bootstrap-seed", type=int, default=20260909)
     parser.add_argument("--glb-index", type=Path, default=None)
     parser.add_argument("--glb-root", type=Path, default=None)
+    parser.add_argument(
+        "--point-gt-raw-dir",
+        type=Path,
+        default=None,
+        help="Top-level Color-ID JSONL directory for Point60 canonical subpose GT.",
+    )
     return parser.parse_args()
 
 
@@ -199,6 +323,20 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     result = read_json(args.result)
     if result.get("schema") != RESULT_SCHEMA:
         raise ValueError(f"unsupported HZB result schema: {result.get('schema')!r}")
+    mode = result.get("mode")
+    if mode not in {"Point60", "Region66"}:
+        raise ValueError(f"unsupported HZB evaluation mode: {mode!r}")
+    samples = result.get("samples") or []
+    if not samples:
+        raise ValueError("HZB result has no samples")
+    point_gt_raw_dir = getattr(args, "point_gt_raw_dir", None)
+    if mode == "Point60" and point_gt_raw_dir is None:
+        raise ValueError(
+            "Point60 accuracy evaluation requires --point-gt-raw-dir; "
+            "the dataset visible_ids.bin is a Region66 view-cell union"
+        )
+    if mode == "Region66" and point_gt_raw_dir is not None:
+        raise ValueError("--point-gt-raw-dir is only valid for Point60 evaluation")
     dataset_meta = read_json(args.dataset_dir / "dataset_meta.json")
     runtime_meta = read_json(args.runtime_meta)
     glb_sizes = None
@@ -210,20 +348,30 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     pose_count = int(dataset_meta.get("poseCount", dataset_meta.get("viewcellCount", 0)))
     offsets = read_u64(args.dataset_dir / "candidate_offsets.bin")
     candidates = read_u32(args.dataset_dir / "candidate_ids.bin")
-    visible_offsets = read_u64(args.dataset_dir / "visible_offsets.bin")
-    visible_ids = read_u32(args.dataset_dir / "visible_ids.bin")
-    visible_weights_path = args.dataset_dir / "visible_weights.bin"
-    visible_weights = np.fromfile(visible_weights_path, dtype="<f4") if visible_weights_path.exists() else None
-    if offsets.size != pose_count + 1 or visible_offsets.size != pose_count + 1:
+    if offsets.size != pose_count + 1:
         raise ValueError("dataset CSR offset lengths do not match pose count")
-    if int(offsets[-1]) != candidates.size or int(visible_offsets[-1]) != visible_ids.size:
-        raise ValueError("dataset CSR offsets do not match data lengths")
-    if visible_weights is not None and visible_weights.size != visible_ids.size:
-        raise ValueError("visible_weights.bin length does not match visible_ids.bin")
-    if visible_weights is not None and (
-        not np.isfinite(visible_weights).all() or (visible_weights < 0).any()
-    ):
-        raise ValueError("visible_weights.bin must contain finite non-negative values")
+    if int(offsets[-1]) != candidates.size:
+        raise ValueError("dataset candidate CSR offsets do not match data lengths")
+    visible_offsets = None
+    visible_ids = None
+    visible_weights = None
+    point_ground_truth = None
+    point_ground_truth_summary = None
+    if mode == "Region66":
+        visible_offsets = read_u64(args.dataset_dir / "visible_offsets.bin")
+        visible_ids = read_u32(args.dataset_dir / "visible_ids.bin")
+        visible_weights_path = args.dataset_dir / "visible_weights.bin"
+        visible_weights = np.fromfile(visible_weights_path, dtype="<f4") if visible_weights_path.exists() else None
+        if visible_offsets.size != pose_count + 1:
+            raise ValueError("dataset visible CSR offset lengths do not match pose count")
+        if int(visible_offsets[-1]) != visible_ids.size:
+            raise ValueError("dataset visible CSR offsets do not match data lengths")
+        if visible_weights is not None and visible_weights.size != visible_ids.size:
+            raise ValueError("visible_weights.bin length does not match visible_ids.bin")
+        if visible_weights is not None and (
+            not np.isfinite(visible_weights).all() or (visible_weights < 0).any()
+        ):
+            raise ValueError("visible_weights.bin must contain finite non-negative values")
     records = runtime_meta.get("componentRecords", [])
     mapping = np.full(int(dataset_meta.get("numInstances", 0)), -1, dtype=np.int64)
     for record in records:
@@ -233,9 +381,14 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         mapping[component_id] = int(record["globalGlbId"])
     if mapping.size == 0 or (mapping < 0).any():
         raise ValueError("runtime metadata has no dense component-to-GLB mapping")
-    samples = result.get("samples") or []
-    if not samples:
-        raise ValueError("HZB result has no samples")
+    if mode == "Point60":
+        sample_pose_ids = {int(sample["poseId"]) for sample in samples}
+        if any(pose_id < 0 or pose_id >= pose_count for pose_id in sample_pose_ids):
+            raise ValueError("Point60 result contains a poseId outside the dataset")
+        point_ground_truth, point_ground_truth_summary = load_point_ground_truth(
+            point_gt_raw_dir,
+            sample_pose_ids,
+        )
     split = args.split if args.split is not None else result.get("workload", {}).get("split")
     if split is None:
         split = "unknown"
@@ -251,7 +404,16 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         if pose_id < 0 or pose_id >= pose_count:
             raise ValueError(f"HZB result poseId {pose_id} is out of range")
         candidate = candidates[int(offsets[pose_id]): int(offsets[pose_id + 1])]
-        truth = visible_ids[int(visible_offsets[pose_id]): int(visible_offsets[pose_id + 1])]
+        if mode == "Point60":
+            point_truth = point_ground_truth[pose_id]
+            truth = point_truth["visibleIds"]
+            truth_weights = point_truth["visibleWeights"]
+        else:
+            truth = visible_ids[int(visible_offsets[pose_id]): int(visible_offsets[pose_id + 1])]
+            truth_weights = (
+                visible_weights[int(visible_offsets[pose_id]): int(visible_offsets[pose_id + 1])]
+                if visible_weights is not None else None
+            )
         predicted = np.asarray(sample.get("visibleInstanceIds", []), dtype=np.uint32)
         metrics = set_metrics(predicted, truth, candidate)
         metrics["poseId"] = pose_id
@@ -259,14 +421,13 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         per_pose.append(metrics)
         for key in totals:
             totals[key] += int(metrics[key])
-        if visible_weights is None:
+        if truth_weights is None:
             weighted_hits.append(float(metrics["tp"]))
             weighted_totals.append(float(metrics["gtCount"]))
         else:
-            weights = visible_weights[int(visible_offsets[pose_id]): int(visible_offsets[pose_id + 1])]
             predicted_set = set(int(value) for value in predicted.tolist())
-            weighted_hits.append(float(sum(float(weight) for value, weight in zip(truth.tolist(), weights.tolist()) if int(value) in predicted_set)))
-            weighted_totals.append(float(weights.sum()))
+            weighted_hits.append(float(sum(float(weight) for value, weight in zip(truth.tolist(), truth_weights.tolist()) if int(value) in predicted_set)))
+            weighted_totals.append(float(truth_weights.sum()))
         if predicted.size and (predicted >= mapping.size).any():
             raise ValueError(f"HZB result poseId {pose_id} contains an out-of-range instance")
         if truth.size and (truth >= mapping.size).any():
@@ -287,6 +448,27 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     weighted_hits_array = np.asarray(weighted_hits, dtype=np.float64)
     weighted_totals_array = np.asarray(weighted_totals, dtype=np.float64)
     weighted_recall = safe_ratio(weighted_hits_array.sum(), weighted_totals_array.sum())
+    if mode == "Point60":
+        ground_truth = {
+            "mode": "canonical-subpose",
+            "source": "raw_three_color_id_jsonl",
+            "subposeId": int(point_ground_truth_summary["subposeId"]),
+            "selection": point_ground_truth_summary["selection"],
+            "rawDir": point_ground_truth_summary["rawDir"],
+            "summary": point_ground_truth_summary,
+        }
+        weight_source = (
+            "raw_three_color_id_component_weights"
+            if point_ground_truth_summary["weightSource"] == "raw_three_color_id_component_weights"
+            else "raw-three-color-id-uniform-visible-instance-fallback"
+        )
+    else:
+        ground_truth = {
+            "mode": "viewcell-union",
+            "source": "dataset_visible_ids_bin",
+            "semantics": dataset_meta.get("gtSemantics"),
+        }
+        weight_source = "visible_weights.bin" if visible_weights is not None else "uniform-visible-instance-fallback"
     glb_output: dict[str, Any] = {
         "poseMacro": macro_glb_metrics(glb_per_pose),
         "perPose": glb_per_pose,
@@ -309,7 +491,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         },
         "weightedRecall": weighted_recall,
         "weightedRecallLower95": bootstrap_lower(weighted_hits_array, weighted_totals_array, int(args.bootstrap_seed)),
-        "weightedRecallWeightSource": "visible_weights.bin" if visible_weights is not None else "uniform-visible-instance-fallback",
+        "weightedRecallWeightSource": weight_source,
+        "groundTruth": ground_truth,
         "glb": glb_output,
         "totals": totals,
         "perPose": per_pose,

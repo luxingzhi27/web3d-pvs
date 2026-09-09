@@ -18,6 +18,8 @@ const VIEWER_ROOT = path.resolve(SCRIPT_DIR, '..');
 const REPO_ROOT = path.resolve(VIEWER_ROOT, '..');
 const POSE_STRIDE_BYTES = 64;
 const SOFTWARE_PATTERN = /swiftshader|llvmpipe|softpipe|swrast|software/i;
+const REGION_SAMPLE_COUNTS = new Set([0, 1, 5, 9]);
+const REGION_SELECTION_STRATEGY = 'canonical-nearest-then-farthest-point-world-position';
 
 function parseArgs(argv) {
   const options = {
@@ -41,11 +43,12 @@ function parseArgs(argv) {
     port: 0,
     timeoutMs: 30 * 60 * 1000,
     requireHardwareGpu: true,
+    regionSampleCount: 0,
   };
   const valueOptions = new Set([
     'shell-dir', 'dataset-dir', 'region-dataset-dir', 'output', 'mode', 'split', 'limit',
     'warmup-count', 'width', 'height', 'aspect', 'fov-y-deg', 'region-fov-y-deg', 'near', 'far',
-    'depth-bias-m', 'chrome-exe', 'port', 'timeout-ms',
+    'depth-bias-m', 'chrome-exe', 'port', 'timeout-ms', 'region-sample-count',
   ]);
   for (let index = 2; index < argv.length; index += 1) {
     const token = argv[index];
@@ -81,6 +84,7 @@ function parseArgs(argv) {
     else if (key === 'chrome-exe') options.chromeExe = path.resolve(value);
     else if (key === 'port') options.port = Number(value);
     else if (key === 'timeout-ms') options.timeoutMs = Number(value);
+    else if (key === 'region-sample-count') options.regionSampleCount = Number(value);
   }
   if (!options.shellDir || !options.datasetDir || !options.output) {
     throw new Error('--shell-dir, --dataset-dir and --output are required.');
@@ -99,6 +103,9 @@ function parseArgs(argv) {
   if (!(options.aspect > 0) || !(options.near >= 0) || !(options.far > options.near)
       || !(options.depthBiasM >= 0) || !(options.timeoutMs > 0)) throw new Error('camera/timing options are invalid.');
   if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65535) throw new Error('--port is invalid.');
+  if (!Number.isInteger(options.regionSampleCount) || !REGION_SAMPLE_COUNTS.has(options.regionSampleCount)) {
+    throw new Error('--region-sample-count must be one of 0, 1, 5 or 9.');
+  }
   return options;
 }
 
@@ -142,6 +149,136 @@ function requireFile(directory, name) {
   return file;
 }
 
+function squaredDistance(left, right) {
+  let value = 0;
+  for (let index = 0; index < 3; index += 1) {
+    const delta = Number(left[index]) - Number(right[index]);
+    value += delta * delta;
+  }
+  return value;
+}
+
+/**
+ * Select real source subposes without consulting any visibility labels.
+ * The ordinal is the source order inside this view-cell and is the sole tie
+ * breaker, so equal positions and equal distances remain reproducible.
+ */
+function selectRegionSubposes(subposes, canonicalCenter, requestedCount) {
+  if (!Number.isInteger(requestedCount) || !REGION_SAMPLE_COUNTS.has(requestedCount)) {
+    throw new Error('region sample count must be one of 0, 1, 5 or 9.');
+  }
+  if (!Array.isArray(canonicalCenter) || canonicalCenter.length !== 3
+      || canonicalCenter.some((value) => !Number.isFinite(Number(value)))) {
+    throw new Error('canonical query center must be a finite vec3.');
+  }
+  const ordered = subposes.map((subpose, index) => {
+    const ordinal = Number(subpose.ordinal ?? index);
+    const position = Array.from(subpose.position || [], Number);
+    if (!Number.isInteger(ordinal) || ordinal < 0 || position.length !== 3
+        || position.some((value) => !Number.isFinite(value))) {
+      throw new Error('region subposes must have a finite position and non-negative integer ordinal.');
+    }
+    return { ...subpose, ordinal, position };
+  }).sort((left, right) => left.ordinal - right.ordinal);
+  for (let index = 1; index < ordered.length; index += 1) {
+    if (ordered[index - 1].ordinal === ordered[index].ordinal) {
+      throw new Error('region subpose ordinals must be unique within a view-cell.');
+    }
+  }
+  if (requestedCount === 0) return ordered;
+  const targetCount = Math.min(requestedCount, ordered.length);
+  if (targetCount === 0) return [];
+
+  const remaining = ordered.slice();
+  const selected = [];
+  let nearestIndex = 0;
+  let nearestDistance = squaredDistance(remaining[0].position, canonicalCenter);
+  for (let index = 1; index < remaining.length; index += 1) {
+    const distance = squaredDistance(remaining[index].position, canonicalCenter);
+    if (distance < nearestDistance
+        || (distance === nearestDistance && remaining[index].ordinal < remaining[nearestIndex].ordinal)) {
+      nearestIndex = index;
+      nearestDistance = distance;
+    }
+  }
+  selected.push(remaining.splice(nearestIndex, 1)[0]);
+
+  while (selected.length < targetCount) {
+    let bestIndex = 0;
+    let bestDistance = -Infinity;
+    for (let index = 0; index < remaining.length; index += 1) {
+      const distance = Math.min(
+        ...selected.map((subpose) => squaredDistance(remaining[index].position, subpose.position)),
+      );
+      if (distance > bestDistance
+          || (distance === bestDistance && remaining[index].ordinal < remaining[bestIndex].ordinal)) {
+        bestIndex = index;
+        bestDistance = distance;
+      }
+    }
+    selected.push(remaining.splice(bestIndex, 1)[0]);
+  }
+  return selected;
+}
+
+function regionSelectionMode(requestedCount) {
+  return requestedCount === 0 ? 'all' : 'deterministic-fps-subset';
+}
+
+function makeRegionSamplingRecord(requestedCount, availableSubposeCount, selectedSubposes) {
+  return {
+    requestedCount,
+    availableSubposeCount,
+    selectedSubposeCount: selectedSubposes.length,
+    selectionMode: regionSelectionMode(requestedCount),
+    strategy: requestedCount === 0 ? 'all-subposes-in-source-order' : REGION_SELECTION_STRATEGY,
+    labelSource: 'none',
+    selectedSubposeOrdinals: selectedSubposes.map((subpose) => subpose.ordinal),
+    selectedSourcePoseIndices: selectedSubposes
+      .map((subpose) => subpose.sourcePoseIndex)
+      .filter((value) => value != null),
+  };
+}
+
+function summarizeRegionSampling(rows, requestedCount) {
+  const records = rows.map((row) => row.regionSampling).filter(Boolean);
+  const available = records.map((record) => Number(record.availableSubposeCount));
+  const selected = records.map((record) => Number(record.selectedSubposeCount));
+  return {
+    schema: 'geometry-shell-hzb-region-sampling-v1',
+    requestedCount,
+    selectionMode: regionSelectionMode(requestedCount),
+    strategy: requestedCount === 0 ? 'all-subposes-in-source-order' : REGION_SELECTION_STRATEGY,
+    labelSource: 'none',
+    viewCellCount: records.length,
+    availableSubposeCount: available.reduce((sum, value) => sum + value, 0),
+    selectedSubposeCount: selected.reduce((sum, value) => sum + value, 0),
+    minAvailableSubposeCount: Math.min(...available),
+    maxAvailableSubposeCount: Math.max(...available),
+    meanAvailableSubposeCount: available.reduce((sum, value) => sum + value, 0) / Math.max(1, available.length),
+    minSelectedSubposeCount: Math.min(...selected),
+    maxSelectedSubposeCount: Math.max(...selected),
+    meanSelectedSubposeCount: selected.reduce((sum, value) => sum + value, 0) / Math.max(1, selected.length),
+    perViewCell: 'workload.poses[].regionSampling',
+  };
+}
+
+function attachRegionSamplingToResult(browserResult, workload) {
+  const regionSampling = workload.regionSampling || null;
+  const rowsByPoseId = new Map(
+    workload.poses.map((row) => [Number(row.poseId), row]),
+  );
+  return {
+    ...browserResult,
+    regionSampling,
+    workload: { ...browserResult.workload, regionSampling },
+    samples: (browserResult.samples || []).map((sample) => ({
+      ...sample,
+      regionSampling: rowsByPoseId.get(Number(sample.poseId))?.regionSampling || null,
+    })),
+  };
+}
+
 function buildPointRows(options, meta, poseBuffer, candidateOffsets, candidateIds, queryCenters) {
   const splitId = Number(meta.splitIds?.[options.split]);
   if (!Number.isInteger(splitId)) throw new Error(`dataset_meta.json has no split ${options.split}.`);
@@ -172,26 +309,41 @@ function buildPointRows(options, meta, poseBuffer, candidateOffsets, candidateId
 }
 
 function buildRegionRows(options, meta, poseBuffer, candidateOffsets, candidateIds, queryCenters, regionDir) {
+  const regionSampleCount = options.regionSampleCount ?? 0;
   const pointRows = buildPointRows({ ...options, limit: 0 }, meta, poseBuffer, candidateOffsets, candidateIds, queryCenters);
   const regionMeta = readJson(requireFile(regionDir, 'dataset_meta.json'));
   const regionPoseCount = Number(regionMeta.viewcellCount ?? regionMeta.poseCount);
   const offsetsPath = path.join(regionDir, 'subpose_offsets.bin');
   const positionsPath = path.join(regionDir, 'subpose_camera_pos.bin');
   const forwardsPath = path.join(regionDir, 'subpose_camera_forward.bin');
-  if (!fs.existsSync(offsetsPath) || !fs.existsSync(positionsPath) || !fs.existsSync(forwardsPath)) {
-    throw new Error('Region66 requires subpose_offsets.bin, subpose_camera_pos.bin and subpose_camera_forward.bin.');
+  const centersPath = path.join(regionDir, 'viewcell_centers.bin');
+  const sourcePoseIndicesPath = path.join(regionDir, 'subpose_pose_indices.bin');
+  if (!fs.existsSync(offsetsPath) || !fs.existsSync(positionsPath) || !fs.existsSync(forwardsPath)
+      || !fs.existsSync(centersPath) || !fs.existsSync(sourcePoseIndicesPath)) {
+    throw new Error('Region66 requires subpose offsets/positions/forwards, viewcell centers and source pose indices.');
   }
   const offsets = readU64File(offsetsPath, regionPoseCount + 1);
-  const positions = readVec3File(positionsPath, Number(offsets[regionPoseCount]));
-  const forwards = readVec3File(forwardsPath, Number(offsets[regionPoseCount]));
+  if (offsets[0] !== 0n || offsets.some((value, index) => index > 0 && value < offsets[index - 1])) {
+    throw new Error('Region66 subpose offsets must be monotonic and start at zero.');
+  }
+  const subposeCount = Number(offsets[regionPoseCount]);
+  const positions = readVec3File(positionsPath, subposeCount);
+  const forwards = readVec3File(forwardsPath, subposeCount);
+  const centers = readVec3File(centersPath, regionPoseCount);
+  const sourcePoseIndices = readU32File(sourcePoseIndicesPath);
+  if (sourcePoseIndices.length !== subposeCount) {
+    throw new Error('Region66 subpose_pose_indices.bin length does not match subpose_offsets.bin.');
+  }
   const rows = [];
   for (const row of pointRows) {
     if (row.poseId >= regionPoseCount) throw new Error(`Region66 pose ${row.poseId} is outside region dataset.`);
     const start = Number(offsets[row.poseId]);
     const end = Number(offsets[row.poseId + 1]);
-    const subposes = [];
+    const availableSubposes = [];
     for (let index = start; index < end; index += 1) {
-      subposes.push({
+      availableSubposes.push({
+        ordinal: index - start,
+        sourcePoseIndex: Number(sourcePoseIndices[index]),
         position: Array.from(positions.subarray(index * 3, index * 3 + 3)),
         forward: Array.from(forwards.subarray(index * 3, index * 3 + 3)),
         fovYDeg: options.regionFovYDeg,
@@ -200,13 +352,24 @@ function buildRegionRows(options, meta, poseBuffer, candidateOffsets, candidateI
         far: options.far,
       });
     }
-    rows.push({ ...row, subposes, fovYDeg: options.regionFovYDeg });
+    if (availableSubposes.length === 0) {
+      throw new Error(`Region66 view-cell ${row.poseId} has no successful subposes.`);
+    }
+    const canonicalCenter = Array.from(centers.subarray(row.poseId * 3, row.poseId * 3 + 3));
+    const subposes = selectRegionSubposes(availableSubposes, canonicalCenter, regionSampleCount);
+    rows.push({
+      ...row,
+      subposes,
+      fovYDeg: options.regionFovYDeg,
+      regionSampling: makeRegionSamplingRecord(regionSampleCount, availableSubposes.length, subposes),
+    });
     if (options.limit > 0 && rows.length >= options.limit) break;
   }
   return rows;
 }
 
 function buildWorkload(options) {
+  const regionSampleCount = options.regionSampleCount ?? 0;
   const datasetMeta = readJson(requireFile(options.datasetDir, 'dataset_meta.json'));
   const shellMeta = readJson(requireFile(options.shellDir, 'shell_meta.json'));
   if (shellMeta.schema !== 'geometry-shell-hzb-v1') throw new Error('shell directory has an unsupported schema.');
@@ -249,6 +412,7 @@ function buildWorkload(options) {
       category: row.category,
     };
     if (row.subposes) output.subposes = row.subposes;
+    if (row.regionSampling) output.regionSampling = row.regionSampling;
     cursor += ids.length;
     return output;
   });
@@ -275,6 +439,9 @@ function buildWorkload(options) {
     fovYDeg: options.mode === 'Region66' ? options.regionFovYDeg : options.fovYDeg,
     near: options.near,
     far: options.far,
+    regionSampling: options.mode === 'Region66'
+      ? summarizeRegionSampling(workloadRows, regionSampleCount)
+      : null,
     source: {
       datasetDirName: path.basename(options.datasetDir),
       regionDatasetDirName: options.regionDatasetDir ? path.basename(options.regionDatasetDir) : null,
@@ -505,7 +672,7 @@ async function main() {
       timeout: options.timeoutMs,
     });
     await page.waitForFunction(() => window.__geometryShellHZBReady === true, null, { timeout: options.timeoutMs });
-    result = await page.evaluate(async (config) => window.runGeometryShellHZBBenchmark(config), {
+    const browserResult = await page.evaluate(async (config) => window.runGeometryShellHZBBenchmark(config), {
       assetBaseUrl: `http://127.0.0.1:${port}/shell/`,
       workloadUrl: `http://127.0.0.1:${port}/workload/geometry_shell_hzb_workload.json`,
       mode: options.mode,
@@ -517,6 +684,7 @@ async function main() {
       depthBiasM: options.depthBiasM,
       warmupCount: options.warmupCount,
     });
+    result = attachRegionSamplingToResult(browserResult, workloadInfo.workload);
   } catch (error) {
     failure = String(error?.stack || error);
   } finally {
@@ -586,6 +754,7 @@ async function main() {
       datasetDir: options.datasetDir,
       regionDatasetDir: options.regionDatasetDir || null,
       output: options.output,
+      regionSampling: workloadInfo.workload.regionSampling || null,
       gpuGate,
       formalReady,
       executionClass,
@@ -638,7 +807,19 @@ async function main() {
   }, null, 2));
 }
 
-main().catch((error) => {
-  console.error(error?.stack || error);
-  process.exitCode = 1;
-});
+export {
+  buildRegionRows,
+  buildWorkload,
+  attachRegionSamplingToResult,
+  makeRegionSamplingRecord,
+  parseArgs,
+  selectRegionSubposes,
+  summarizeRegionSampling,
+};
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error?.stack || error);
+    process.exitCode = 1;
+  });
+}
