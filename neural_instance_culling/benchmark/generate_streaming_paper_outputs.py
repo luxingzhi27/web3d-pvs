@@ -76,6 +76,15 @@ def scene_name(summary: dict[str, Any], path: Path) -> str:
     return path.parent.name
 
 
+def scene_display_name(scene: str) -> str:
+    normalized = scene.lower()
+    if "hkust" in normalized:
+        return "HKUST"
+    if "ifcbench" in normalized or "metropolis" in normalized:
+        return "Metropolis"
+    return scene
+
+
 def number_mean(method: dict[str, Any], field: str) -> float | None:
     value = method.get(field)
     if not isinstance(value, dict):
@@ -288,7 +297,7 @@ def plot_curves(path_prefix: Path, summaries: list[tuple[Path, dict[str, Any]]])
                 y_values = np.asarray([[float(point.get("meanCoverage", 0.0)) * 100.0 for point in curve] for curve in curves])
                 axis.plot(x, y_values.mean(axis=0), color="#aaaaaa", linewidth=1.5, label="20 fixed random (mean)")
                 axis.fill_between(x, y_values.min(axis=0), y_values.max(axis=0), color="#aaaaaa", alpha=0.18)
-        axis.set_title(scene)
+        axis.set_title(scene_display_name(scene))
         axis.set_xlabel("Complete GLB bytes downloaded (MiB)")
         axis.set_ylabel(coverage_axis_label(summary))
         axis.set_ylim(0.0, 100.5)

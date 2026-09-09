@@ -22,7 +22,7 @@ from glb_streaming import (  # noqa: E402
     summarize_ranking_results,
 )
 from build_reference_frontmost_histogram import build_reference_histogram  # noqa: E402
-from generate_streaming_paper_outputs import summary_row  # noqa: E402
+from generate_streaming_paper_outputs import scene_display_name, summary_row  # noqa: E402
 
 
 def assets() -> dict[int, GlbAsset]:
@@ -34,6 +34,13 @@ def assets() -> dict[int, GlbAsset]:
 
 
 class GlbStreamingContractTests(unittest.TestCase):
+    def test_paper_figure_uses_public_scene_names(self) -> None:
+        self.assertEqual(scene_display_name("hkust-v3"), "HKUST")
+        self.assertEqual(
+            scene_display_name("ifcbench_fantasy_metropolis_instanced_v2"),
+            "Metropolis",
+        )
+
     def test_complete_glb_arrival_and_bytes_targets(self) -> None:
         pose = PoseRecord(
             pose_id=7,
