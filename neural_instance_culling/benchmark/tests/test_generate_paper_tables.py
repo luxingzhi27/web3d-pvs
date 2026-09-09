@@ -7,67 +7,66 @@ import sys
 import tempfile
 import unittest
 
+
 BENCHMARK = Path(__file__).resolve().parents[1]
 if str(BENCHMARK) not in sys.path:
     sys.path.insert(0, str(BENCHMARK))
+from generate_paper_tables import collect_artifact_registry, collect_test_metric_rows, generate_tables, summarize_test_rows  # noqa: E402
 
-from generate_paper_tables import collect_test_metric_rows, generate_tables  # noqa: E402
+
+def _test_payload(seed: int, precision: float) -> dict[str, object]:
+    return {
+        "testRead": True, "split": "test", "testEvaluationCount": 1,
+        "scene": "fixture", "method": f"full_seed{seed}", "poseCount": 3,
+        "aggregate": {
+            "precision": precision, "recall": 0.9, "weightedRecall": 0.95,
+            "weightedRecallLowerConfidenceBound": 0.9, "averagePrecision": 0.5,
+            "avgPredCount": 2.0, "glbByteReduction": 0.2,
+        },
+        "poseMacro": {"averagePrecision": 0.4},
+    }
 
 
 class PaperTableGeneratorTests(unittest.TestCase):
-    def test_only_frozen_test_payloads_enter_table_two(self) -> None:
+    def test_table_two_uses_three_seed_mean_and_sample_std(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             stats = root / "scene_statistics.csv"
-            with stats.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=["scene", "instance_count"])
-                writer.writeheader()
-                writer.writerow({"scene": "fixture", "instance_count": 2})
+            stats.write_text("scene,instance_count\nfixture,2\n", encoding="utf-8")
             metrics = root / "metrics"
             metrics.mkdir()
-            (metrics / "validation.json").write_text(
-                json.dumps({"testRead": False, "split": "validation"}),
-                encoding="utf-8",
-            )
-            (metrics / "test.json").write_text(
-                json.dumps(
-                    {
-                        "testRead": True,
-                        "split": "test",
-                        "testEvaluationCount": 1,
-                        "scene": "fixture",
-                        "method": "keep_all",
-                        "poseCount": 1,
-                        "aggregate": {
-                            "precision": 1.0,
-                            "recall": 1.0,
-                            "weightedRecall": 1.0,
-                            "weightedRecallLowerConfidenceBound": 1.0,
-                        },
-                        "poseMacro": {},
-                    }
-                ),
-                encoding="utf-8",
-            )
-            rows = collect_test_metric_rows(metrics, ["fixture"])
-            self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["method"], "keep_all")
+            for seed, precision in enumerate((1.0, 2.0, 3.0), 1):
+                (metrics / f"seed{seed}.json").write_text(json.dumps(_test_payload(seed, precision)), encoding="utf-8")
+            raw = collect_test_metric_rows(metrics, ["fixture"])
+            summary = summarize_test_rows(raw)
+            self.assertEqual(len(raw), 3)
+            self.assertEqual(summary[0]["seed_count"], 3)
+            self.assertEqual(summary[0]["aggregate_precision_mean"], 2.0)
+            self.assertAlmostEqual(summary[0]["aggregate_precision_std"], 1.0)
             result = generate_tables(stats, metrics, root / "tables")
-            self.assertEqual(result["table1RowCount"], 1)
             self.assertEqual(result["table2RowCount"], 1)
+            with (root / "tables/table2_test_visibility.csv").open(newline="") as handle:
+                self.assertEqual(next(csv.DictReader(handle))["seed_count"], "3")
 
     def test_non_test_split_cannot_be_marked_as_test_read(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             metrics = root / "metrics"
             metrics.mkdir()
-            path = metrics / "invalid.json"
-            path.write_text(
-                json.dumps({"testRead": True, "split": "validation"}),
-                encoding="utf-8",
-            )
+            (metrics / "invalid.json").write_text(json.dumps({"testRead": True, "split": "validation"}), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "not a test split"):
                 collect_test_metric_rows(metrics, ["fixture"])
+
+    def test_registry_keeps_explicit_unavailable_status(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "bundle_manifest.json"
+            manifest.write_text(json.dumps({"artifactRegistry": {"schema": "fixture", "sections": ["hzb"], "artifacts": [
+                {"section": "hzb", "artifactId": "hzb", "path": "/missing", "status": "unavailable", "reason": "not supplied"},
+            ]}}), encoding="utf-8")
+            rows = collect_artifact_registry(manifest)
+            self.assertEqual(rows[0]["status"], "unavailable")
+            self.assertEqual(rows[0]["reason"], "not supplied")
 
 
 if __name__ == "__main__":

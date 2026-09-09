@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect completed paper evidence into a stable, table-oriented bundle."""
+"""Build the paper bundle and register its known artifact paths."""
 from __future__ import annotations
 
 import argparse
@@ -7,53 +7,43 @@ import csv
 import json
 from pathlib import Path
 from statistics import mean, stdev
-from typing import Any, Iterable, Mapping
+import sys
+from typing import Any, Iterable, Mapping, Sequence
+
+
+BENCHMARK_DIR = Path(__file__).resolve().parent
+if str(BENCHMARK_DIR) not in sys.path:
+    sys.path.insert(0, str(BENCHMARK_DIR))
+from collect_preprocessing_cost import collect_preprocessing_cost  # noqa: E402
 
 
 RELATIVE_INPUTS = {
-    "ablation": Path(
-        "neural_instance_culling/benchmark/out/"
-        "pvs_v4_integrated_visibility_mainline_v1/paper_core_ablation_summary.json"
-    ),
-    "rank": Path(
-        "neural_instance_culling/benchmark/out/"
-        "pvs_survival_rank_capacity_sweep_v1/capacity_summary.json"
-    ),
-    "runtime": Path(
-        "neural_instance_culling/benchmark/out/"
-        "pvs_v4_frontend_inference_latency_v1/summary.json"
-    ),
-    "hkust_image": Path(
-        "neural_instance_culling/benchmark/out/"
-        "pvs_v4_image_validation_hkust_seed20260802_v1/summary.json"
-    ),
-    "ifcbench_image": Path(
-        "neural_instance_culling/benchmark/out/"
-        "pvs_v4_image_validation_ifcbench_seed20260802_v1/summary.json"
-    ),
+    "ablation": Path("neural_instance_culling/benchmark/out/pvs_v4_integrated_visibility_mainline_v1/paper_core_ablation_summary.json"),
+    "rank": Path("neural_instance_culling/benchmark/out/pvs_survival_rank_capacity_sweep_v1/capacity_summary.json"),
+    "runtime": Path("neural_instance_culling/benchmark/out/pvs_v4_frontend_inference_latency_v1/summary.json"),
+    "hkust_image": Path("neural_instance_culling/benchmark/out/pvs_v4_image_validation_hkust_seed20260802_v1/summary.json"),
+    "ifcbench_image": Path("neural_instance_culling/benchmark/out/pvs_v4_image_validation_ifcbench_seed20260802_v1/summary.json"),
 }
 
+ARTIFACT_REGISTRY_SCHEMA = "pvs-paper-artifact-registry-v1"
+ARTIFACT_SECTIONS = (
+    "sceneStatistics", "testMetrics", "imageMetrics", "ablation", "rankSweep",
+    "runtime", "hzb", "thresholdCurves", "streaming", "gtConvergence",
+    "preprocessing", "figures",
+)
+HZB_ARTIFACTS = (
+    ("hkust-v3", "lossless", "geometry_shell_hzb_lossless_hkust"),
+    ("hkust-v3", "equal-asset", "geometry_shell_hzb_equal_asset_hkust"),
+    ("ifcbench_fantasy_metropolis_instanced_v2", "lossless", "geometry_shell_hzb_lossless_ifcbench"),
+    ("ifcbench_fantasy_metropolis_instanced_v2", "equal-asset", "geometry_shell_hzb_equal_asset_ifcbench"),
+)
 ABLATION_METRICS = (
-    "posePrecision",
-    "poseRecall",
-    "poseWeightedRecall",
-    "poseAccuracy",
-    "poseBalancedAccuracy",
-    "poseSpecificity",
-    "aggregatePrecision",
-    "aggregateRecall",
-    "aggregateWeightedRecall",
-    "aggregateAccuracy",
-    "aggregateBalancedAccuracy",
-    "aggregateSpecificity",
-    "aggregateUsefulCull",
-    "aggregateBadCull",
-    "avgCandidateCount",
-    "avgGtCount",
-    "avgPredCount",
-    "predictedGlbCount",
-    "predictedGlbBytes",
-    "glbByteReduction",
+    "posePrecision", "poseRecall", "poseWeightedRecall", "poseAccuracy",
+    "poseBalancedAccuracy", "poseSpecificity", "aggregatePrecision",
+    "aggregateRecall", "aggregateWeightedRecall", "aggregateAccuracy",
+    "aggregateBalancedAccuracy", "aggregateSpecificity", "aggregateUsefulCull",
+    "aggregateBadCull", "avgCandidateCount", "avgGtCount", "avgPredCount",
+    "predictedGlbCount", "predictedGlbBytes", "glbByteReduction",
 )
 
 
@@ -66,13 +56,10 @@ def load_json(path: Path) -> dict[str, Any]:
 
 def write_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
 
 
-def write_csv(path: Path, rows: Iterable[Mapping[str, Any]], fields: list[str]) -> None:
+def write_csv(path: Path, rows: Iterable[Mapping[str, Any]], fields: Sequence[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -87,37 +74,24 @@ def build_ablation(source: Path, output: Path) -> dict[str, Any]:
     source_rows = summary.get("rows")
     if not isinstance(source_rows, dict):
         raise ValueError("core ablation summary has no variant rows")
-
     rows: list[dict[str, Any]] = []
     for variant, members in source_rows.items():
         if not isinstance(members, dict) or len(members) < 2:
             raise ValueError(f"ablation variant {variant} has fewer than two seeds")
-        member_values = list(members.values())
+        values = list(members.values())
         row: dict[str, Any] = {
-            "variant": variant,
-            "split": "validation",
-            "seedCount": len(member_values),
-            "safeSeedCount": sum(
-                float(item["validationWeightedRecallLowerConfidenceBound"]) > 0.99
-                for item in member_values
-            ),
-            "runtimeFeatureMiB": mean(float(item["runtimeFeatureBytes"]) for item in member_values)
-            / (1024.0 * 1024.0),
+            "variant": variant, "split": "validation", "seedCount": len(values),
+            "safeSeedCount": sum(float(item["validationWeightedRecallLowerConfidenceBound"]) > 0.99 for item in values),
+            "runtimeFeatureMiB": mean(float(item["runtimeFeatureBytes"]) for item in values) / (1024 * 1024),
         }
         for metric in ABLATION_METRICS:
-            values = [float(item["metrics"][metric]) for item in member_values]
-            row[f"{metric}Mean"] = mean(values)
-            row[f"{metric}Std"] = stdev(values)
+            numbers = [float(item["metrics"][metric]) for item in values]
+            row[f"{metric}Mean"], row[f"{metric}Std"] = mean(numbers), stdev(numbers)
         rows.append(row)
-
-    fields = list(rows[0])
-    write_csv(output / "ablation" / "core_ablation.csv", rows, fields)
-    write_json(output / "ablation" / "paired_bootstrap.json", {
-        "schema": summary.get("schema"),
-        "split": "validation",
-        "reference": summary.get("reference"),
-        "bootstrap": summary.get("bootstrap"),
-        "comparisons": summary.get("pairedComparisons"),
+    write_csv(output / "ablation/core_ablation.csv", rows, list(rows[0]))
+    write_json(output / "ablation/paired_bootstrap.json", {
+        "schema": summary.get("schema"), "split": "validation", "reference": summary.get("reference"),
+        "bootstrap": summary.get("bootstrap"), "comparisons": summary.get("pairedComparisons"),
     })
     return {"variantCount": len(rows), "seedCountPerVariant": rows[0]["seedCount"]}
 
@@ -128,26 +102,20 @@ def build_rank(source: Path, output: Path) -> dict[str, Any]:
         raise ValueError("rank input must be test-free validation output")
     rows = []
     for rank_text, item in sorted(summary["byRank"].items(), key=lambda pair: int(pair[0])):
-        aggregate = item["aggregateMean"]
-        pose = item["poseMacroMean"]
+        aggregate, pose = item["aggregateMean"], item["poseMacroMean"]
         rows.append({
-            "rank": int(rank_text),
-            "survivalDim": int(item["survivalDim"]),
+            "rank": int(rank_text), "survivalDim": int(item["survivalDim"]),
             "runtimeFeatureDim": int(item["runtimeFeatureDim"]),
-            "runtimeFeatureMiB": float(item["runtimeFeatureBytes"]) / (1024.0 * 1024.0),
+            "runtimeFeatureMiB": float(item["runtimeFeatureBytes"]) / (1024 * 1024),
             "modelStateParameterCount": int(item["modelStateParameterCount"]),
-            "seedCount": int(item["memberCount"]),
-            "safeSeedCount": int(item["safeMemberCount"]),
-            "posePrecision": float(pose["precision"]),
-            "poseWeightedRecall": float(pose["weightedRecall"]),
-            "aggregatePrecision": float(aggregate["precision"]),
-            "aggregateWeightedRecall": float(aggregate["weightedRecall"]),
+            "seedCount": int(item["memberCount"]), "safeSeedCount": int(item["safeMemberCount"]),
+            "posePrecision": float(pose["precision"]), "poseWeightedRecall": float(pose["weightedRecall"]),
+            "aggregatePrecision": float(aggregate["precision"]), "aggregateWeightedRecall": float(aggregate["weightedRecall"]),
             "aggregateBalancedAccuracy": float(aggregate["balancedAccuracy"]),
-            "aggregateUsefulCull": float(aggregate["usefulCull"]),
-            "aggregateBadCull": float(aggregate["badCull"]),
+            "aggregateUsefulCull": float(aggregate["usefulCull"]), "aggregateBadCull": float(aggregate["badCull"]),
             "avgPredCount": float(aggregate["avgPredCount"]),
         })
-    write_csv(output / "rank_sweep" / "rank_capacity.csv", rows, list(rows[0]))
+    write_csv(output / "rank_sweep/rank_capacity.csv", rows, list(rows[0]))
     return {"rankCount": len(rows), "ranks": [row["rank"] for row in rows]}
 
 
@@ -156,19 +124,14 @@ def build_runtime(source: Path, output: Path) -> dict[str, Any]:
     rows = list(summary.get("groups") or [])
     if not rows:
         raise ValueError("runtime summary has no groups")
-    fields = [
-        "device", "backend", "timingSource", "sessionCount", "sampleCount",
-        "runtimeAssetMiB", "candidateMean", "candidateP95", "modelInferenceP50Ms",
-        "modelInferenceP50Ci95", "modelInferenceP95Ms", "modelInferenceP95Ci95",
-        "near10kSampleCount", "near10kP95Ms",
-    ]
+    fields = ("device", "backend", "timingSource", "sessionCount", "sampleCount", "runtimeAssetMiB", "candidateMean", "candidateP95", "modelInferenceP50Ms", "modelInferenceP50Ci95", "modelInferenceP95Ms", "modelInferenceP95Ci95", "near10kSampleCount", "near10kP95Ms")
     serializable = []
     for item in rows:
         row = {field: item.get(field) for field in fields}
         for field in ("modelInferenceP50Ci95", "modelInferenceP95Ci95"):
             row[field] = json.dumps(row[field], separators=(",", ":"))
         serializable.append(row)
-    write_csv(output / "mobile_runtime" / "hkust_webgpu_summary.csv", serializable, fields)
+    write_csv(output / "mobile_runtime/hkust_webgpu_summary.csv", serializable, fields)
     return {"groupCount": len(rows), "scene": "hkust", "backend": "webgpu"}
 
 
@@ -179,71 +142,99 @@ def build_images(inputs: Mapping[str, Path], output: Path) -> dict[str, Any]:
         if summary.get("formalImageEvaluationReady") is not True:
             raise ValueError(f"image input is not formal-ready: {source}")
         split = str(summary.get("split"))
-        target = output / "image_metrics" / f"{scene}_{split}.json"
-        write_json(target, {
-            "schema": "pvs-paper-image-metrics-v1",
-            "scene": scene,
-            "split": split,
-            "modelName": summary.get("modelName"),
-            "threshold": summary.get("threshold"),
-            "viewcellCount": summary.get("viewcellCount"),
-            "subposesPerViewcell": summary.get("subposesPerViewcell"),
-            "imageResolution": summary.get("imageResolution"),
-            "componentSetMetrics": summary.get("componentSetMetrics"),
-            "glbSetMetrics": summary.get("glbSetMetrics"),
-            "weightedRecall": summary.get("weightedRecall"),
-            "imageMetrics": summary.get("imageMetrics"),
-            "formalImageEvaluationReady": True,
-            "gpuGate": summary["renderer"]["gpuGate"],
-            "source": str(source.resolve()),
+        write_json(output / f"image_metrics/{scene}_{split}.json", {
+            "schema": "pvs-paper-image-metrics-v1", "scene": scene, "split": split,
+            "modelName": summary.get("modelName"), "threshold": summary.get("threshold"),
+            "viewcellCount": summary.get("viewcellCount"), "subposesPerViewcell": summary.get("subposesPerViewcell"),
+            "imageResolution": summary.get("imageResolution"), "componentSetMetrics": summary.get("componentSetMetrics"),
+            "glbSetMetrics": summary.get("glbSetMetrics"), "weightedRecall": summary.get("weightedRecall"),
+            "imageMetrics": summary.get("imageMetrics"), "formalImageEvaluationReady": True,
+            "gpuGate": summary["renderer"]["gpuGate"], "source": str(source.resolve()),
         })
-        result[scene] = {
-            "split": split,
-            "viewcellCount": int(summary["viewcellCount"]),
-            "subposeCount": int(summary["imageMetrics"]["evaluatedSubposeCount"]),
-            "formalHardware": bool(summary["renderer"]["gpuGate"]["hardware"]),
-        }
+        result[scene] = {"split": split, "viewcellCount": int(summary["viewcellCount"]), "subposeCount": int(summary["imageMetrics"]["evaluatedSubposeCount"]), "formalHardware": bool(summary["renderer"]["gpuGate"]["hardware"])}
     return result
+
+
+def _optional_root(value: Path | None, data_root: Path, relative: str) -> Path:
+    return (value if value is not None else data_root / relative).expanduser().resolve()
+
+
+def _artifact_specs(data_root: Path, output: Path, *, hzb: Path, curves: Path, streaming: Path, gt: Path, figures: Path, test_image: Path) -> list[tuple[str, str, Path]]:
+    paper = data_root / "neural_instance_culling/benchmark/out/paper_results"
+    specs: list[tuple[str, str, Path]] = [
+        ("sceneStatistics", "scene_statistics", paper / "scene_statistics.csv"),
+        ("testMetrics", "test_metrics", paper / "test_metrics"),
+        ("imageMetrics", "validation_image_metrics", output / "image_metrics"),
+        ("imageMetrics", "test_image_metrics", test_image if test_image.is_file() else test_image / "*test*.json"),
+        ("ablation", "core_ablation", output / "ablation/core_ablation.csv"),
+        ("rankSweep", "rank_capacity", output / "rank_sweep/rank_capacity.csv"),
+        ("runtime", "mobile_runtime", output / "mobile_runtime/hkust_webgpu_summary.csv"),
+    ]
+    specs.extend(("hzb", name, hzb / f"{name}.offline.json") for _scene, _variant, name in HZB_ARTIFACTS)
+    specs.extend([
+        ("thresholdCurves", "threshold_curves", curves), ("streaming", "streaming", streaming),
+        ("gtConvergence", "gt_convergence", gt), ("preprocessing", "preprocessing", output / "preprocessing"),
+        ("figures", "figures", figures),
+    ])
+    return specs
+
+
+def _artifact_exists(path: Path) -> bool:
+    return bool(list(path.parent.glob(path.name))) if "*" in path.name else path.exists()
+
+
+def build_artifact_registry(specs: Sequence[tuple[str, str, Path]]) -> dict[str, Any]:
+    artifacts = []
+    for section, artifact_id, path in specs:
+        available = _artifact_exists(path)
+        artifacts.append({
+            "section": section, "artifactId": artifact_id, "path": str(path.resolve()),
+            "status": "available" if available else "unavailable",
+            "reason": "" if available else "registered path does not exist",
+        })
+    return {"schema": ARTIFACT_REGISTRY_SCHEMA, "sections": list(ARTIFACT_SECTIONS), "artifacts": artifacts}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-root", type=Path, default=Path(__file__).resolve().parents[2])
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path(__file__).resolve().parent / "out" / "paper_results",
-    )
+    parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parent / "out" / "paper_results")
+    parser.add_argument("--hzb-dir", type=Path, default=None)
+    parser.add_argument("--threshold-curves-dir", type=Path, default=None)
+    parser.add_argument("--streaming-dir", type=Path, default=None)
+    parser.add_argument("--gt-convergence-dir", type=Path, default=None)
+    parser.add_argument("--figures-dir", type=Path, default=None)
+    parser.add_argument("--test-image-dir", type=Path, default=None)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    data_root = args.data_root.resolve()
-    output = args.output_dir.resolve()
+    data_root, output = args.data_root.resolve(), args.output_dir.resolve()
     sources = {name: data_root / relative for name, relative in RELATIVE_INPUTS.items()}
     missing = [str(path) for path in sources.values() if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"missing completed paper input(s): {missing}")
-
+    roots = {
+        "hzb": _optional_root(args.hzb_dir, data_root, "neural_instance_culling/benchmark/out/paper_results/hzb"),
+        "curves": _optional_root(args.threshold_curves_dir, data_root, "neural_instance_culling/benchmark/out/paper_results/threshold_curves"),
+        "streaming": _optional_root(args.streaming_dir, data_root, "neural_instance_culling/benchmark/out/paper_results/streaming"),
+        "gt": _optional_root(args.gt_convergence_dir, data_root, "neural_instance_culling/benchmark/out/paper_results/gt_convergence"),
+        "figures": _optional_root(args.figures_dir, data_root, "neural_instance_culling/benchmark/out/paper_results/figures"),
+        "test_image": _optional_root(args.test_image_dir, data_root, "neural_instance_culling/benchmark/out/paper_results/image_metrics"),
+    }
+    preprocessing = collect_preprocessing_cost(data_root, output / "preprocessing")
+    ablation = build_ablation(sources["ablation"], output)
+    rank = build_rank(sources["rank"], output)
+    runtime = build_runtime(sources["runtime"], output)
+    images = build_images({"hkust": sources["hkust_image"], "ifcbench": sources["ifcbench_image"]}, output)
+    registry = build_artifact_registry(_artifact_specs(data_root, output, **roots))
     manifest = {
-        "schema": "pvs-paper-result-bundle-v1",
-        "scope": "completed evidence only",
-        "ablation": build_ablation(sources["ablation"], output),
-        "rankSweep": build_rank(sources["rank"], output),
-        "runtime": build_runtime(sources["runtime"], output),
-        "imageMetrics": build_images({
-            "hkust": sources["hkust_image"],
-            "ifcbench": sources["ifcbench_image"],
-        }, output),
-        "pending": [
-            "frozen test metrics and images",
-            "IFCBench runtime and WASM runtime",
-            "geometry-shell HZB",
-            "cold-cache streaming",
-            "scene statistics and preprocessing costs",
-            "GT convergence",
-        ],
+        "schema": "pvs-paper-result-bundle-v1", "scope": "completed evidence plus explicit unavailable registrations",
+        "generatedBy": "build_paper_result_bundle.py", "artifactRegistry": registry,
+        "ablation": ablation, "rankSweep": rank, "runtime": runtime, "imageMetrics": images,
+        "preprocessing": preprocessing,
+        "pending": ["IFCBench runtime and WASM runtime", "frozen test image results", "GT convergence"],
     }
     write_json(output / "bundle_manifest.json", manifest)
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
