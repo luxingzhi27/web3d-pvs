@@ -2,7 +2,7 @@
 
 更新时间：2026-09-09
 
-当前主线是 HKUST 场景的 V4 实例级可见性模型：离线固定实例特征和遮挡生存系数，浏览器以 `66°` 后退视锥建立候选，以真实 `60°` 视锥完成显示过滤。Metropolis 当前使用显式实例 AABB 视锥模式。
+当前论文主线是 HKUST 与 Metropolis/IFCBench 两场景的 V4 实例级可见性模型：离线固定实例特征和遮挡生存系数，浏览器以 `66°` 后退视锥建立候选，以真实 `60°` 视锥完成显示过滤。HKUST 最终模型已冻结；IFCBench 三种子微调确认完成后按 validation 规则冻结最终成员。
 
 2026-09-09 已将源码收敛到当前 V4 训练、六项核心消融、容量实验、数据重建、统一评价和前端部署链路。旧 M4-M12、OWRB、方向代理、失败的额外打分头、完整三角形 HZB 及迁移前 Windows/ROCm 入口已从当前源码删除；清理前状态保存在 Git 提交 `30e15f7`，不再以兼容开关保留。
 
@@ -14,6 +14,7 @@
 |---|---|
 | [`evaluation/pvs_gt_convergence_2026-09-09.md`](evaluation/pvs_gt_convergence_2026-09-09.md) | 两场景现有 subpose 的 GT 并集收敛初检与 128 点补采样要求 |
 | [`evaluation/ifcbench_calibration_finetune_2026-09-09.md`](evaluation/ifcbench_calibration_finetune_2026-09-09.md) | IFCBench 精确校准、warm-start 微调扫描与三种子确认执行记录 |
+| [`evaluation/ifcbench_mainline_finalization_template.md`](evaluation/ifcbench_mainline_finalization_template.md) | IFCBench validation 决策、三种子冻结 test 与运行资产导出的最终记录模板 |
 | [`current/pvs_mainline_2026-08-23.md`](current/pvs_mainline_2026-08-23.md) | V4 模型结构、代码入口、主 split、当前工作点和 validation 摘要 |
 | [`experiments/pvs_mainline_training_2026-08-21.md`](experiments/pvs_mainline_training_2026-08-21.md) | 三种子 `40 × 900` 正式训练及六项核心消融协议 |
 | [`evaluation/pvs_mainline_core_ablation_paper_analysis_2026-08-28.md`](evaluation/pvs_mainline_core_ablation_paper_analysis_2026-08-28.md) | 论文式方法说明、正式消融结果和配对 bootstrap 分析 |
@@ -35,7 +36,9 @@
 | [`evaluation/pvs_threshold_curves_2026-09-09.md`](evaluation/pvs_threshold_curves_2026-09-09.md) | calibration/validation weighted recall 安全效率曲线与阈值冻结口径 |
 | [`evaluation/pvs_test_image_evaluation_2026-09-09.md`](evaluation/pvs_test_image_evaluation_2026-09-09.md) | frozen test 图像批处理、Vulkan/ANGLE 硬件门和定性样本选择入口 |
 | [`evaluation/pvs_hzb_test_image_manifest_2026-09-09.md`](evaluation/pvs_hzb_test_image_manifest_2026-09-09.md) | HZB Region66 test 到 formal-v2 的显式 Pose CSR 候选、pose 覆盖和基线配置契约 |
+| [`evaluation/pvs_hzb_formal_execution_2026-09-09.md`](evaluation/pvs_hzb_formal_execution_2026-09-09.md) | Geometry-shell HZB calibration、冻结 test、120-pose 分阶段硬件计时和执行状态 |
 | [`evaluation/geometry_shell_hzb_evaluation_2026-09-09.md`](evaluation/geometry_shell_hzb_evaluation_2026-09-09.md) | 纯几何外壳 HZB 的资产、公平区域查询、硬件计时和评价协议 |
+| [`evaluation/pvs_glb_streaming_formal_artifact_contract_2026-09-09.md`](evaluation/pvs_glb_streaming_formal_artifact_contract_2026-09-09.md) | AABB 连续分数、HZB Region66 visible-first 与 frozen-test streaming 表格输入契约 |
 | [`evaluation/pvs_preprocessing_cost_and_paper_bundle_2026-09-09.md`](evaluation/pvs_preprocessing_cost_and_paper_bundle_2026-09-09.md) | 两场景离线预处理成本、论文产物登记和统一表格生成入口 |
 
 ## 当前系统与部署

@@ -176,10 +176,10 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 | 端侧模型前向 | 部分完成 | HKUST M2 与 vivo 各五 session 正式完成；IFCBench 移动端和 A6000 独占结果仍缺失，不以并发 smoke 代替 |
 | Safety-efficiency | 完成 | 六个核心变体的 calibration-safe validation 曲线及论文图已生成 |
 | Streaming | 部分完成 | 两场景 Full/启发式/oracle 的全 test 冷缓存结果已生成；AABB MLP 与 HZB visible-first 待正式结果后替换占位并重跑 |
-| Test 图像 | 部分完成 | HKUST Full 的 684 view-cell formal-v2 manifest 已冻结；HZB manifest 转换入口已完成；硬件渲染、IFCBench 最终成员和 AABB/HZB 图像结果待 GPU 独占窗口 |
+| Test 图像 | 部分完成 | HKUST Full 的 684 view-cell formal-v2 manifest 已冻结；HZB manifest 转换与 IFCBench checkpoint 专属精确 calibration 接入已完成；硬件渲染、IFCBench 最终成员和 AABB/HZB 图像结果待 GPU 独占窗口 |
 | GT 收敛 | 部分完成 | 两场景各 100 cell x 128 点水平圆盘计划已生成，IFCBench 半径为 `2.5 m`；新 evaluator 已按计划/raw 三元组对齐，正式 Vulkan Color-ID 采样待执行 |
 | 离线成本 / 结果包 | 完成当前可得项 | 六阶段成本、artifact registry、三种子 Table 2 汇总已生成；未记录时间保持 unavailable，不作推算 |
 
 当前执行顺序不变：完成 IFCBench 确认和 AABB 长训；冻结两场景最终成员并各读取一次 test；在无训练并发的窗口依次完成 HZB、真实图像、GT 收敛和 A6000 计时；最后替换 streaming 基线、重建全部表图与结果包。任何中间指标都不取消已登记长训。
 
-本轮实现回归已通过 benchmark `166` 项、model `48` 项、完整前端 `npm test` 和 sampler `7` 项测试；测试过程禁用 CUDA，不作为任何正式性能结果。
+本轮实现回归已通过 benchmark `167` 项、model `48` 项、完整前端 `npm test` 和 sampler `7` 项测试；测试过程禁用 CUDA，不作为任何正式性能结果。

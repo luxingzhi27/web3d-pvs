@@ -85,6 +85,53 @@ def _write_fixture(root: Path, *, canonical_center: bool = False) -> tuple[Path,
 
 
 class ViewcellSplitSourceTests(unittest.TestCase):
+    def test_ifcbench_exact_calibration_is_checkpoint_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checkpoint = Path(temp_dir) / "member.pt"
+            checkpoint.write_bytes(b"fixture")
+            summary = Path(temp_dir) / "exact_calibration.json"
+            summary.write_text(
+                json.dumps(
+                    {
+                        "schema": "pvs-ifcbench-v4-exact-calibration-v1",
+                        "split": "calibration",
+                        "testRead": False,
+                        "status": "safe",
+                        "checkpoint": str(checkpoint),
+                        "selected": {
+                            "threshold": 0.5945901871,
+                            "agg_weighted_recall": 0.9915,
+                            "aggregateWeightedRecallLowerConfidenceBound": 0.9908,
+                            "pose_recall": 0.91,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = SimpleNamespace(
+                threshold=None,
+                threshold_policy="weighted_precision",
+                target_weighted_recall=0.99,
+                minimum_pose_recall=None,
+            )
+            threshold, source = resolve_threshold(
+                args,
+                {"eval_summary": str(summary), "checkpoint": str(checkpoint)},
+                SimpleNamespace(threshold=0.1),
+            )
+            self.assertAlmostEqual(threshold, 0.5945901871)
+            self.assertEqual(source["selectionSplit"], "calibration")
+            self.assertFalse(source["testRead"])
+
+            other = Path(temp_dir) / "other.pt"
+            other.write_bytes(b"fixture")
+            with self.assertRaisesRegex(RuntimeError, "not bound"):
+                resolve_threshold(
+                    args,
+                    {"eval_summary": str(summary), "checkpoint": str(other)},
+                    SimpleNamespace(threshold=0.1),
+                )
+
     def test_current_v4_calibration_summary_resolves_frozen_safe_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             summary = Path(temp_dir) / "calibration.json"

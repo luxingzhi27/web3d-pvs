@@ -874,6 +874,47 @@ def resolve_threshold(args: argparse.Namespace, spec: dict[str, str], runner) ->
             "testRead": bool(test_evaluation_count),
         }
 
+    if data.get("schema") == "pvs-ifcbench-v4-exact-calibration-v1":
+        if data.get("split") != "calibration" or data.get("testRead") is not False:
+            raise RuntimeError(f"{eval_summary} must be a test-free exact calibration summary.")
+        checkpoint = spec.get("checkpoint")
+        recorded_checkpoint = data.get("checkpoint")
+        if (
+            not checkpoint
+            or not recorded_checkpoint
+            or Path(checkpoint).expanduser().resolve()
+            != Path(str(recorded_checkpoint)).expanduser().resolve()
+        ):
+            raise RuntimeError(f"{eval_summary} is not bound to the requested checkpoint.")
+        selected = data.get("selected")
+        if data.get("status") != "safe" or not isinstance(selected, dict):
+            raise RuntimeError(f"{eval_summary} has no frozen safe exact-calibration workpoint.")
+        threshold = float(selected.get("threshold", float("nan")))
+        weighted_recall = float(
+            selected.get("agg_weighted_recall", selected.get("aggregateWeightedRecall", -1.0))
+        )
+        weighted_lcb = float(selected.get("aggregateWeightedRecallLowerConfidenceBound", -1.0))
+        target = float(args.target_weighted_recall)
+        if (
+            not np.isfinite(threshold)
+            or not 0.0 <= threshold <= 1.0
+            or weighted_recall <= target
+            or weighted_lcb <= target
+        ):
+            raise RuntimeError(f"{eval_summary} does not contain a valid strict weighted-recall workpoint.")
+        threshold, resolved = validate_frozen_workpoint(selected, threshold)
+        resolved.update(
+            {
+                "source": "checkpoint-bound exact calibration workpoint; no threshold scan",
+                "workpoint": selected,
+                "checkpoint": str(Path(checkpoint).expanduser().resolve()),
+                "selectionSplit": "calibration",
+                "testRead": False,
+                "testEvaluationCount": 0,
+            }
+        )
+        return threshold, resolved
+
     if data.get("schema") == "pvs-bounded-relation-prior-instance-calibrated-calibration-summary-v4":
         if data.get("testRead") is not False:
             raise RuntimeError(f"{eval_summary} must be a test-free calibration summary.")

@@ -21,6 +21,12 @@ Pose CSR 候选和基线配置见 [`pvs_hzb_test_image_manifest_2026-09-09.md`](
 完整 formal-v2 schema、实例绑定、`predictionKey` 复用和 sample FOV 由现有 renderer
 validator 负责。
 
+IFCBench 最终成员若来自 warm-start 微调，manifest 生成入口接受当前唯一的
+`pvs-ifcbench-v4-exact-calibration-v1`。该文件必须是 `split=calibration`、
+`testRead=false`、`status=safe`，其记录的 checkpoint 必须与正在评价的 checkpoint
+路径完全一致，且 weighted recall 与单侧 95% 下界都严格大于 `0.99`。图像入口只读取
+其中冻结阈值，不在 test 上重新选阈值；其他未知 calibration schema 仍拒绝。
+
 ## 单场景 Runner
 
 入口：`neural_instance_culling/benchmark/run_test_image_evaluation.py`。
@@ -98,6 +104,8 @@ conda run --no-capture-output -n slm_pvs \
 - `test_build_hzb_image_manifest.py`：转换契约和 schema-only renderer；
 - `test_run_test_image_evaluation.py`：host evidence 完整性、软件后端和 formal-ready
   失败路径；
+- `evaluate_viewcell_image_per.py`：支持 checkpoint 专属 IFCBench 精确 calibration
+  生成 frozen-test 图像 manifest；
 - 本文档、HZB 转换契约文档和 `docs/README.md` 索引。
 
 相关单测命令为：
