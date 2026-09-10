@@ -98,6 +98,12 @@ Sponza 固定为 Khronos `glTF-Sample-Assets` 的 `Models/Sponza/glTF/Sponza.glt
 
 固定 `128 KiB` 转换产物位于 `neural_instance_culling/dataset/out/standard_graphics_scenes/sponza_128k/assets/`，生成 `132` 个一单位一资源的 renderable units，总 GLB 字节为 `7,188,496 B`，单元字节 p50 `48,476 B`、p95 `121,103.8 B`、最大 `125,244 B`。其中 `110` 个输出单位为 OPAQUE、`22` 个为保留 alpha 纹理的 MASK。AABB 体积碰撞判定会把非闭合建筑 shell 内部全部排除，因此 Sponza 正式计划改用真实三角形最近表面距离；非闭合 shell 不执行内部实体判定，也不把输出宣称为 navmesh。
 
+### 4.5 固定几何表与标准场景 HZB 外壳
+
+两个标准场景均已按每单位 `1024` 个归一化表面点生成离线点缓存。Sponza 为 `132/132` 成功、Big City 为 `2734/2734` 成功，均无 decode failure、fallback 或 empty geometry。随后使用同一个冻结的 HKUST 几何编码器导出 96D float16 固定表，得到 Sponza `[132,96]` 和 Big City `[2734,96]`；两表数值均有限。该编码器不在标准场景上更新，标准场景的 train/calibration/validation/test 只用于后续 PVS 模型，因此不存在目标场景 test 对几何编码器的监督泄漏。论文必须将其描述为共享冻结几何特征提取器，不能描述成标准场景专属预训练。
+
+标准场景 lossless shell 也已导出。Sponza 外壳仅含 `110` 个确定 OPAQUE 单位、`227,327` 个三角形，22 个 MASK 单位不写遮挡深度；压缩几何为 `1,732,508 B`，完整运行资产为 `1,844,914 B`。Big City 的 `2734` 个单位均为 OPAQUE，外壳含 `15,711,990` 个三角形；压缩几何为 `103,401,989 B`，含 AABB、映射和 metadata 的完整运行资产以 offline report 为准。它们目前只是 HZB 启动资产，不是 HZB 精度或耗时结果；equal-asset shell 必须等对应神经运行资产冻结后再导出。
+
 ## 5. 固定 renderable-unit 转换协议
 
 ### 5.1 原则
@@ -331,7 +337,7 @@ neural_instance_culling/benchmark/out/paper_results/standard_graphics/
 |---|---|---|
 | G0 来源与资产审计 | Big City 与 Sponza 源文件均已取得并完成 source audit；Sponza 的许可边界已按实际模型文件修正 | 完成或登记 Viking 来源；本地派生场景资产不进入公开结果包 |
 | G1 单位转换 | Big City 已生成 `2734` 个、Sponza 已生成 `132` 个一单位一资源 GLB，并写出 conversion/runtime/audit manifests | 完成两场景 reference/Color-ID smoke 和 MASK 语义核验 |
-| G2 数据、训练、评价 | Big City 与 Sponza 已有固定 view-cell 尺寸和四路空间块 pose plan；两者均无正式 Color-ID/Pose CSR 或模型结果 | 完成硬件 subpose 采样、Pose CSR、Full/AABB 三 seed、Hi-Z 对照和一次 frozen test |
+| G2 数据、训练、评价 | Big City 与 Sponza 已有固定 view-cell、四路空间块 pose plan、1024 点缓存、共享冻结编码器生成的 96D 表和 lossless HZB shell；两者仍无正式 Color-ID/Pose CSR 或模型结果 | 完成硬件 subpose 采样、Pose CSR、关系证据、Full/AABB 三 seed、Hi-Z 对照和一次 frozen test |
 | G3 表图与敏感性 | 没有标准场景正式指标、图像或性能数字 | 仅在代表场景完成 `64/128/256 KiB` 敏感性，再生成 G1-G3 表、Pareto、延迟和定性图 |
 
 下一步按已冻结的相机和 view-cell 契约执行 Big City、Sponza 硬件 Color-ID 采样，再生成完整数据集和固定几何；在这些输入通过 schema、候选/GT 语义和硬件门核验前，不启动正式训练或把转换统计写成 PVS 结果。
