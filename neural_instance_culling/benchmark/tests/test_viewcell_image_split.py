@@ -14,8 +14,13 @@ MODEL_DIR = BENCHMARK_DIR.parent / "model"
 sys.path.insert(0, str(BENCHMARK_DIR))
 sys.path.insert(0, str(MODEL_DIR))
 
-from evaluate_viewcell_image_per import ViewcellDataset, resolve_threshold  # noqa: E402
+from evaluate_viewcell_image_per import (  # noqa: E402
+    ViewcellDataset,
+    load_frozen_sidecar_predictions,
+    resolve_threshold,
+)
 from pose_csr_dataset import DIRECTIONAL_POSE_DTYPE, PoseCSRDataset  # noqa: E402
+from score_sidecar import ScoreSidecarWriter  # noqa: E402
 
 
 def _write_fixture(root: Path, *, canonical_center: bool = False) -> tuple[Path, Path]:
@@ -85,6 +90,64 @@ def _write_fixture(root: Path, *, canonical_center: bool = False) -> tuple[Path,
 
 
 class ViewcellSplitSourceTests(unittest.TestCase):
+    def test_aabb_calibration_uses_its_frozen_best_safe_workpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checkpoint = Path(temp_dir) / "aabb.pt"
+            checkpoint.write_bytes(b"fixture")
+            summary = Path(temp_dir) / "calibration.json"
+            summary.write_text(json.dumps({
+                "schema": "pvs-aabb-ray-mlp-calibration-v1",
+                "selectionSplit": "calibration",
+                "testRead": False,
+                "testEvaluationCount": 0,
+                "checkpoint": str(checkpoint),
+                "bestSafe": {"selection": {
+                    "threshold": 0.48,
+                    "aggregateWeightedRecall": 0.997,
+                    "aggregateWeightedRecallLowerConfidenceBound": 0.994,
+                }},
+                "thresholdRows": [{
+                    "threshold": 0.52,
+                    "pose_weighted_recall": 0.995,
+                    "pose_precision": 0.5,
+                }],
+            }), encoding="utf-8")
+            args = SimpleNamespace(
+                threshold=None,
+                threshold_policy="weighted_precision",
+                target_weighted_recall=0.99,
+                minimum_pose_recall=None,
+            )
+            threshold, source = resolve_threshold(
+                args,
+                {"eval_summary": str(summary), "checkpoint": str(checkpoint)},
+                SimpleNamespace(threshold=0.1),
+            )
+            self.assertEqual(threshold, 0.48)
+            self.assertIn("AABB bestSafe", source["source"])
+
+    def test_frozen_sidecar_predictions_reuse_the_test_candidate_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _viewcell_dir, pose_dir = _write_fixture(Path(temp_dir))
+            pose = PoseCSRDataset(pose_dir, num_instances=3)
+            sidecar = Path(temp_dir) / "scores"
+            with ScoreSidecarWriter(sidecar, split="test", threshold=0.7) as writer:
+                writer.append_pose(
+                    2,
+                    np.asarray([2], dtype=np.uint32),
+                    np.asarray([0.9], dtype=np.float32),
+                    np.asarray([1], dtype=np.uint8),
+                    np.asarray([1.0], dtype=np.float32),
+                    predicted_ids=np.asarray([2], dtype=np.uint32),
+                )
+            predictions, source = load_frozen_sidecar_predictions(
+                sidecar,
+                pose,
+                np.asarray([2], dtype=np.int64),
+            )
+            self.assertEqual(predictions[2].tolist(), [2])
+            self.assertEqual(source["threshold"], 0.7)
+
     def test_ifcbench_exact_calibration_is_checkpoint_bound(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             checkpoint = Path(temp_dir) / "member.pt"

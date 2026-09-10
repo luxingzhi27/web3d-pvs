@@ -55,6 +55,7 @@ from instance_id_render_schema import (  # noqa: E402
 )
 from model_runners import load_runner, selected_default_specs, select_device  # noqa: E402
 from pose_csr_dataset import PoseCSRDataset  # noqa: E402
+from score_sidecar import SIDECAR_SCHEMA, read_score_sidecar  # noqa: E402
 
 
 CATEGORY_NAMES = {
@@ -90,6 +91,12 @@ def parse_args() -> argparse.Namespace:
             "Explicit model spec: "
             "name|kind|checkpoint|runtime_features|calibration_summary."
         ),
+    )
+    parser.add_argument(
+        "--score-sidecar",
+        type=Path,
+        default=None,
+        help="reuse predicted IDs from one frozen-test score sidecar",
     )
     parser.add_argument("--runtime-meta", type=Path, default=Path("hkust-v3/assets/runtimeVisibilityMeta.json"))
     parser.add_argument(
@@ -508,6 +515,58 @@ def load_raw_visibility(raw_dir: Path, needed_pose_indices: set[int]) -> tuple[d
     }
 
 
+def load_frozen_sidecar_predictions(
+    sidecar_path: Path,
+    pose_dataset: PoseCSRDataset,
+    selected_rows: np.ndarray,
+) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
+    manifest_path = sidecar_path / "manifest.json" if sidecar_path.is_dir() else sidecar_path
+    manifest_path = manifest_path.expanduser().resolve()
+    manifest = read_json(manifest_path)
+    if (
+        manifest.get("schema") != SIDECAR_SCHEMA
+        or manifest.get("split") != "test"
+        or manifest.get("testRead") is not True
+    ):
+        raise ValueError("image prediction sidecar must be a frozen test score sidecar")
+    arrays = read_score_sidecar(manifest_path)
+    pose_indices = np.asarray(arrays["poseIndices"], dtype=np.int64)
+    pose_offsets = np.asarray(arrays["poseOffsets"], dtype=np.int64)
+    candidate_ids = np.asarray(arrays["candidateIds"], dtype=np.uint32)
+    predicted_offsets = np.asarray(arrays["predictedOffsets"], dtype=np.int64)
+    predicted_ids = np.asarray(arrays["predictedIds"], dtype=np.uint32)
+    expected_test = np.asarray(pose_dataset.split("test").pose_indices, dtype=np.int64)
+    if set(pose_indices.tolist()) != set(expected_test.tolist()):
+        raise ValueError("image prediction sidecar does not cover the complete test split")
+    if pose_offsets.size != pose_indices.size + 1 or predicted_offsets.size != pose_indices.size + 1:
+        raise ValueError("image prediction sidecar offsets are invalid")
+
+    row_by_pose = {int(pose_id): index for index, pose_id in enumerate(pose_indices.tolist())}
+    predictions: dict[int, np.ndarray] = {}
+    for pose_id in np.asarray(selected_rows, dtype=np.int64).tolist():
+        sidecar_row = row_by_pose.get(int(pose_id))
+        if sidecar_row is None:
+            raise ValueError(f"image prediction sidecar is missing pose {pose_id}")
+        candidate_start = int(pose_offsets[sidecar_row])
+        candidate_end = int(pose_offsets[sidecar_row + 1])
+        expected_candidates = np.asarray(pose_dataset.candidate_slice(int(pose_id)), dtype=np.uint32)
+        if not np.array_equal(candidate_ids[candidate_start:candidate_end], expected_candidates):
+            raise ValueError(f"image prediction candidates disagree at pose {pose_id}")
+        pred_start = int(predicted_offsets[sidecar_row])
+        pred_end = int(predicted_offsets[sidecar_row + 1])
+        values = predicted_ids[pred_start:pred_end].copy()
+        if not np.all(np.isin(values, expected_candidates, assume_unique=False)):
+            raise ValueError(f"image prediction IDs are outside candidates at pose {pose_id}")
+        predictions[int(pose_id)] = values
+    return predictions, {
+        "kind": "frozen_test_score_sidecar",
+        "manifest": str(manifest_path),
+        "checkpoint": manifest.get("checkpoint"),
+        "calibration": manifest.get("calibration"),
+        "threshold": manifest.get("threshold"),
+    }
+
+
 def normalize(v: np.ndarray, fallback: np.ndarray) -> np.ndarray:
     n = float(np.linalg.norm(v))
     if n < 1e-6:
@@ -874,6 +933,48 @@ def resolve_threshold(args: argparse.Namespace, spec: dict[str, str], runner) ->
             "testRead": bool(test_evaluation_count),
         }
 
+    if data.get("schema") == "pvs-aabb-ray-mlp-calibration-v1":
+        if (
+            data.get("selectionSplit") != "calibration"
+            or data.get("testRead") is not False
+            or int(data.get("testEvaluationCount", 0)) != 0
+        ):
+            raise RuntimeError(f"{eval_summary} must be a test-free AABB calibration summary.")
+        checkpoint = spec.get("checkpoint")
+        recorded_checkpoint = data.get("checkpoint")
+        if (
+            not checkpoint
+            or not recorded_checkpoint
+            or Path(checkpoint).expanduser().resolve()
+            != Path(str(recorded_checkpoint)).expanduser().resolve()
+        ):
+            raise RuntimeError(f"{eval_summary} is not bound to the requested AABB checkpoint.")
+        best_safe = data.get("bestSafe")
+        selection = best_safe.get("selection") if isinstance(best_safe, dict) else None
+        if not isinstance(selection, dict):
+            raise RuntimeError(f"{eval_summary} has no frozen safe AABB workpoint.")
+        threshold = float(selection.get("threshold", float("nan")))
+        weighted_recall = float(selection.get("aggregateWeightedRecall", -1.0))
+        weighted_lcb = float(
+            selection.get("aggregateWeightedRecallLowerConfidenceBound", -1.0)
+        )
+        if (
+            not np.isfinite(threshold)
+            or not 0.0 <= threshold <= 1.0
+            or weighted_recall <= float(args.target_weighted_recall)
+            or weighted_lcb <= float(args.target_weighted_recall)
+        ):
+            raise RuntimeError(f"{eval_summary} has no valid strict AABB safety workpoint.")
+        return threshold, {
+            "source": "checkpoint-bound AABB bestSafe calibration workpoint; no threshold scan",
+            "threshold": threshold,
+            "workpoint": selection,
+            "checkpoint": str(Path(checkpoint).expanduser().resolve()),
+            "selectionSplit": "calibration",
+            "testRead": False,
+            "testEvaluationCount": 0,
+        }
+
     if data.get("schema") == "pvs-ifcbench-v4-exact-calibration-v1":
         if data.get("split") != "calibration" or data.get("testRead") is not False:
             raise RuntimeError(f"{eval_summary} must be a test-free exact calibration summary.")
@@ -1050,6 +1151,15 @@ def write_summary_md(path: Path, summary: dict[str, Any]) -> None:
     g = s["glbSetMetrics"]
     f = s["frustumCellMetrics"]
     i = s["imageMetrics"]
+    frustum_lines = (
+        [f"- Frustum-cell diagnostic: `{f.get('status')}` ({f.get('reason')})"]
+        if f.get("status") == "not_computed"
+        else [
+            f"- Frustum-cell FNR: `{f['frustumCellFNR']:.6f}`",
+            f"- Frustum-cell FPR: `{f['frustumCellFPR']:.6f}`",
+            f"- Frustum-cell IoU: `{f['frustumCellIoU']:.6f}`",
+        ]
+    )
     lines = [
         "# Viewcell Image-Level PVS Evaluation",
         "",
@@ -1073,9 +1183,7 @@ def write_summary_md(path: Path, summary: dict[str, Any]) -> None:
         f"| GLB set | {g['posePrecision']:.4f} | {g['poseRecall']:.4f} | {g['poseF1']:.4f} | {g['poseJaccard']:.4f} | {s['avgPredGlbs']:.2f} | {s['avgGtGlbs']:.2f} |",
         "",
         f"- Weighted recall: `{s['weightedRecall']:.4f}`",
-        f"- Frustum-cell FNR: `{f['frustumCellFNR']:.6f}`",
-        f"- Frustum-cell FPR: `{f['frustumCellFPR']:.6f}`",
-        f"- Frustum-cell IoU: `{f['frustumCellIoU']:.6f}`",
+        *frustum_lines,
         f"- Image PER: `{float(i.get('PER', 0.0)):.6f}`",
         f"- Mean / median / p95 PER: `{float(i.get('meanPER') or 0.0):.6f}` / `{float(i.get('medianPER') or 0.0):.6f}` / `{float(i.get('p95PER') or 0.0):.6f}`",
         f"- Miss pixel rate: `{float(i.get('missPixelRate', 0.0)):.6f}`",
@@ -1359,6 +1467,10 @@ def main() -> None:
             )
     if len(args.model_spec) > 1:
         raise ValueError("--model-spec may be supplied at most once")
+    if args.score_sidecar is not None and args.model_spec:
+        raise ValueError("--score-sidecar and --model-spec are mutually exclusive")
+    if args.score_sidecar is not None and args.split != "test":
+        raise ValueError("--score-sidecar is only valid for split=test")
     dynamic_spec = None
     if args.model_spec:
         dynamic_spec = parse_model_spec(args.model_spec[0])
@@ -1374,7 +1486,6 @@ def main() -> None:
     if len(grid) != 3:
         raise ValueError("--froxel-grid must be formatted as W,H,D")
 
-    device = select_device(args.device)
     world_aabbs, instance_to_glb, runtime_meta = load_runtime_meta(args.runtime_meta)
     viewcells = ViewcellDataset(args.viewcell_dataset)
     pose_dataset = PoseCSRDataset(args.pose_csr, num_instances=world_aabbs.shape[0])
@@ -1389,10 +1500,32 @@ def main() -> None:
     if pose_dataset.poses.shape[0] != viewcells.viewcell_ids.shape[0]:
         raise RuntimeError(f"Pose CSR count {pose_dataset.poses.shape[0]} does not match viewcell count {viewcells.viewcell_ids.shape[0]}")
 
-    specs = {dynamic_spec[0]: dynamic_spec[1]} if dynamic_spec is not None else selected_default_specs(args.model_name)
-    canonical_name, spec = next(iter(specs.items()))
-    runner = load_runner(canonical_name, spec, args.runtime_meta, device)
+    frozen_predictions: dict[int, np.ndarray] | None = None
+    if args.score_sidecar is not None:
+        frozen_predictions, sidecar_source = load_frozen_sidecar_predictions(
+            args.score_sidecar,
+            pose_dataset,
+            selected_rows,
+        )
+        canonical_name = args.model_name
+        spec = {
+            "kind": "frozen_test_score_sidecar",
+            "checkpoint": str(sidecar_source.get("checkpoint") or ""),
+            "runtime_features": "",
+            "eval_summary": str(sidecar_source.get("calibration") or ""),
+            "sidecar": sidecar_source["manifest"],
+        }
+        threshold_value = float(sidecar_source.get("threshold"))
+        runner = type("FrozenThreshold", (), {"threshold": threshold_value})()
+        device = torch.device("cpu")
+    else:
+        device = select_device(args.device)
+        specs = {dynamic_spec[0]: dynamic_spec[1]} if dynamic_spec is not None else selected_default_specs(args.model_name)
+        canonical_name, spec = next(iter(specs.items()))
+        runner = load_runner(canonical_name, spec, args.runtime_meta, device)
     threshold, threshold_info = resolve_threshold(args, spec, runner)
+    if frozen_predictions is not None and abs(float(threshold) - float(runner.threshold)) > 1e-7:
+        raise RuntimeError("frozen score sidecar threshold disagrees with calibration")
 
     glb_paths, local_glb_check = load_glb_index(args.glb_index, args.glb_root)
     # This is a JSON/header-only audit.  It verifies that the component ID
@@ -1480,18 +1613,22 @@ def main() -> None:
             camera_world = np.asarray(pose_dataset.poses["camera_world"][row], dtype=np.float32)
             camera_view = pose_dataset.camera_view(row)
             mvp = pose_dataset.mvp_slice(row) if pose_dataset.mvp is not None else None
-            pred_ids, pred_result = runner.predict_viewcell_ids(
-                camera_norm,
-                camera_world,
-                camera_view,
-                candidate_ids,
-                query_center_world=pose_dataset.query_center_world(row, required=True),
-                viewcell_radius_m=pose_dataset.viewcell_radius_m(row, required=True),
-                mvp=mvp,
-                threshold=threshold,
-            )
-            pred_ids = np.asarray(pred_ids, dtype=np.uint32)
-            prediction_ms.append(float(pred_result.total_ms))
+            if frozen_predictions is not None:
+                pred_ids = frozen_predictions[row]
+                prediction_ms.append(0.0)
+            else:
+                pred_ids, pred_result = runner.predict_viewcell_ids(
+                    camera_norm,
+                    camera_world,
+                    camera_view,
+                    candidate_ids,
+                    query_center_world=pose_dataset.query_center_world(row, required=True),
+                    viewcell_radius_m=pose_dataset.viewcell_radius_m(row, required=True),
+                    mvp=mvp,
+                    threshold=threshold,
+                )
+                pred_ids = np.asarray(pred_ids, dtype=np.uint32)
+                prediction_ms.append(float(pred_result.total_ms))
             prediction_key = f"vc{row:05d}"
             if args.image_renderer == "true_glb":
                 prediction_component_ids_by_key[prediction_key] = [
@@ -1504,16 +1641,28 @@ def main() -> None:
             pred_glbs = glbs_for_components(pred_ids, instance_to_glb)
             gt_glbs = glbs_for_components(gt_ids, instance_to_glb)
             glb_metrics = set_metrics(pred_glbs, gt_glbs)
-            froxel = froxel_metrics(gt_ids, pred_ids, world_aabbs, camera_world, camera_view, grid, args.froxel_near, args.froxel_far)
-            froxel_totals["gtCellCount"] += int(froxel["gtCellCount"])
-            froxel_totals["predCellCount"] += int(froxel["predCellCount"])
-            froxel_totals["fnCellCount"] += int(froxel["fnCellCount"])
-            froxel_totals["fpCellCount"] += int(froxel["fpCellCount"])
-            froxel_totals["gridCellCount"] += int(froxel["gridCellCount"])
-            union_count = int(froxel["gtCellCount"] + froxel["fpCellCount"])
-            intersection_count = int(froxel["gtCellCount"] - froxel["fnCellCount"])
-            froxel_totals["unionCellCount"] += union_count
-            froxel_totals["intersectionCellCount"] += intersection_count
+            if args.render_schema_only:
+                froxel = {"status": "not_computed", "reason": "schema-only manifest generation"}
+            else:
+                froxel = froxel_metrics(
+                    gt_ids,
+                    pred_ids,
+                    world_aabbs,
+                    camera_world,
+                    camera_view,
+                    grid,
+                    args.froxel_near,
+                    args.froxel_far,
+                )
+                froxel_totals["gtCellCount"] += int(froxel["gtCellCount"])
+                froxel_totals["predCellCount"] += int(froxel["predCellCount"])
+                froxel_totals["fnCellCount"] += int(froxel["fnCellCount"])
+                froxel_totals["fpCellCount"] += int(froxel["fpCellCount"])
+                froxel_totals["gridCellCount"] += int(froxel["gridCellCount"])
+                union_count = int(froxel["gtCellCount"] + froxel["fpCellCount"])
+                intersection_count = int(froxel["gtCellCount"] - froxel["fnCellCount"])
+                froxel_totals["unionCellCount"] += union_count
+                froxel_totals["intersectionCellCount"] += intersection_count
 
             pred_component_counts.append(int(pred_ids.size))
             gt_component_counts.append(int(gt_ids.size))
@@ -1706,16 +1855,24 @@ def main() -> None:
                 "Uses local GLB AABB proxy geometry; use --image-renderer true_glb for real mesh rendering.",
             ],
         }
-    frustum_cell_metrics = {
-        "schema": "instance-set-to-frustum-cell-diagnostic-v1",
-        "grid": list(grid),
-        "near": float(args.froxel_near),
-        "far": float(args.froxel_far),
-        **froxel_totals,
-        "frustumCellFNR": float(froxel_totals["fnCellCount"] / max(1, froxel_totals["gtCellCount"])),
-        "frustumCellFPR": float(froxel_totals["fpCellCount"] / max(1, froxel_totals["gridCellCount"] - froxel_totals["gtCellCount"])),
-        "frustumCellIoU": float(froxel_totals["intersectionCellCount"] / max(1, froxel_totals["unionCellCount"])),
-    }
+    frustum_cell_metrics = (
+        {
+            "schema": "instance-set-to-frustum-cell-diagnostic-v1",
+            "status": "not_computed",
+            "reason": "schema-only manifest generation",
+        }
+        if args.render_schema_only
+        else {
+            "schema": "instance-set-to-frustum-cell-diagnostic-v1",
+            "grid": list(grid),
+            "near": float(args.froxel_near),
+            "far": float(args.froxel_far),
+            **froxel_totals,
+            "frustumCellFNR": float(froxel_totals["fnCellCount"] / max(1, froxel_totals["gtCellCount"])),
+            "frustumCellFPR": float(froxel_totals["fpCellCount"] / max(1, froxel_totals["gridCellCount"] - froxel_totals["gtCellCount"])),
+            "frustumCellIoU": float(froxel_totals["intersectionCellCount"] / max(1, froxel_totals["unionCellCount"])),
+        }
+    )
     summary = {
         "schema": "viewcell-image-per-benchmark-v2",
         "created": datetime.now().isoformat(timespec="seconds"),
@@ -1744,7 +1901,16 @@ def main() -> None:
         "avgGtComponents": float(np.mean(gt_component_counts)) if gt_component_counts else 0.0,
         "avgPredGlbs": float(np.mean(pred_glb_counts)) if pred_glb_counts else 0.0,
         "avgGtGlbs": float(np.mean(gt_glb_counts)) if gt_glb_counts else 0.0,
-        "avgPredictionMs": float(np.mean(prediction_ms)) if prediction_ms else 0.0,
+        "avgPredictionMs": (
+            None
+            if frozen_predictions is not None
+            else float(np.mean(prediction_ms)) if prediction_ms else 0.0
+        ),
+        "predictionSource": (
+            {"kind": "frozen_test_score_sidecar", "path": spec.get("sidecar")}
+            if frozen_predictions is not None
+            else {"kind": "model_runner"}
+        ),
         "frustumCellMetrics": frustum_cell_metrics,
         "imageMetrics": image_metrics,
         "selfConsistencyPER": self_consistency_per,

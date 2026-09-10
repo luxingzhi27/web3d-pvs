@@ -49,6 +49,10 @@ Node 执行窗口的宿主机证据。正式运行只有在 WebGL 后端不是�
 summary 报告 `formalImageEvaluationReady=true` 时才成功。HKUST 与 IFCBench 分别
 执行一次，不能把两个场景的 component ID 或资产清单合并。
 
+神经与 AABB manifest 由 `evaluate_viewcell_image_per.py --score-sidecar` 直接复用正式 test sidecar 的 `predictedIds`，不再次执行模型。入口要求 sidecar 覆盖完整 test split，并逐 pose 核对其 candidate 顺序与 Pose CSR 完全一致；阈值仍从 sidecar 登记的 calibration 文件解析并与 sidecar threshold 相等。AABB calibration 使用唯一的 `pvs-aabb-ray-mlp-calibration-v1.bestSafe.selection`，不再从通用 threshold rows 二次选择。`--render-schema-only` 只构造渲染 manifest，因此不计算 froxel 诊断，也不报告推理耗时。
+
+截至 2026-09-11 已完成四份 formal-v2 schema-only 输入：HKUST Full/AABB 均覆盖 `684` 个 test view-cell、`23,856` 个真实 60 度 subpose，阈值分别为 `0.6800000072/0.4799999893`；IFCBench Full/AABB 均覆盖 `2710` 个 test view-cell、`10,840` 个 subpose，阈值分别为 `0.6882505417/0.5199999809`。这些 manifest 的 `formalImageEvaluationReady=true` 表示输入契约完整，不是硬件图像结果；对应 `summary.json` 在 schema-only 阶段仍为 false。HZB manifest 必须等 calibration-frozen Region66 test 输出后再构造。
+
 不启动浏览器的 schema 检查：
 
 ```bash

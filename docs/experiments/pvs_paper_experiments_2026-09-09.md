@@ -186,7 +186,7 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 | 端侧模型前向 | 部分完成 | HKUST M2 与 vivo 各五 session 正式完成；IFCBench 移动端和 A6000 独占结果仍缺失，不以并发 smoke 代替 |
 | Safety-efficiency | 完成 | 六个核心变体的 calibration-safe validation 曲线及论文图已生成 |
 | Streaming | test 分数已完成，正式模拟待 HZB | 两场景 validation ranking/filtering 与冻结 alpha 已生成，HKUST `alpha=1.0`、IFCBench `alpha=0.5`。正式 test sidecar 直接复用同一次 frozen-test 连续分数：HKUST 为 `684 poses / 3,174,148 candidate rows`，IFCBench 为 `2710 / 27,061,482`，均包含 Full 与 AABB。待 HZB Region66 test 后执行完整 test simulation、12-pose scheduler replay 和 Table 5 |
-| Test 图像 | 部分完成 | HKUST Full 的 684 view-cell formal-v2 manifest 已冻结；HZB manifest 转换与 IFCBench checkpoint 专属精确 calibration 接入已完成；硬件渲染、IFCBench 最终成员和 AABB/HZB 图像结果待 GPU 独占窗口 |
+| Test 图像 | 四份输入已冻结，硬件渲染待执行 | HKUST 与 IFCBench 的 Full/AABB formal-v2 manifest 已直接复用 frozen-test sidecar 生成，分别覆盖 `684/2710` 个 view-cell 和 `23,856/10,840` 个真实 60 度 subpose；AABB 阈值解析已修正为 calibration `bestSafe`。待 HZB Region66 test 后生成两场景 HZB manifest，再逐方法执行独占 Vulkan/ANGLE 渲染 |
 | GT 收敛 | 部分完成 | 两场景各 100 cell x 128 点水平圆盘计划已生成，IFCBench 半径为 `2.5 m`；新 evaluator 已按计划/raw 三元组对齐，正式 Vulkan Color-ID 采样待执行 |
 | 离线成本 / 结果包 | 完成当前可得项 | 六阶段成本、artifact registry、三种子 Table 2 汇总已生成；未记录时间保持 unavailable，不作推算 |
 | 标准图形场景 | Big City/Sponza 资产与相机计划完成，正式 PVS 待执行 | Big City 已转换为 `2734` 个、Sponza 已转换为 `132` 个 `128 KiB` 目标 renderable units，均为一单位一资源。Big City/Sponza 分别生成 `8088/2424` 个原始查询 pose 的四路空间块计划，并为固定 view-cell 预留 0.8 m 几何安全半径。两场景均尚未生成正式 Color-ID、Pose CSR、训练、Hi-Z 或 test 数字 |
