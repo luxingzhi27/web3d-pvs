@@ -1,0 +1,13 @@
+{
+  "name": "slm-graphics-scene-importer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Deterministic glTF/GLB renderable-unit importer for standard graphics scenes.",
+  "scripts": {
+    "test": "node test/importer_smoke.mjs"
+  },
+  "dependencies": {
+    "meshoptimizer": "^1.2.0"
+  }
+}
