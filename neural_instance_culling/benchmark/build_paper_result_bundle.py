@@ -20,7 +20,7 @@ from collect_preprocessing_cost import collect_preprocessing_cost  # noqa: E402
 RELATIVE_INPUTS = {
     "ablation": Path("neural_instance_culling/benchmark/out/pvs_v4_integrated_visibility_mainline_v1/paper_core_ablation_summary.json"),
     "rank": Path("neural_instance_culling/benchmark/out/pvs_survival_rank_capacity_sweep_v1/capacity_summary.json"),
-    "runtime": Path("neural_instance_culling/benchmark/out/pvs_v4_frontend_inference_latency_v1/summary.json"),
+    "runtime": Path("neural_instance_culling/benchmark/out/paper_results/mobile_runtime/runtime_paper_summary.json"),
     "hkust_image": Path("neural_instance_culling/benchmark/out/pvs_v4_image_validation_hkust_seed20260802_v1/summary.json"),
     "ifcbench_image": Path("neural_instance_culling/benchmark/out/pvs_v4_image_validation_ifcbench_seed20260802_v1/summary.json"),
 }
@@ -124,23 +124,40 @@ def build_runtime(source: Path, output: Path) -> dict[str, Any]:
     rows = list(summary.get("groups") or [])
     if not rows:
         raise ValueError("runtime summary has no groups")
-    if any(not item.get("scene") for item in rows):
+    formal = [item for item in rows if item.get("status") == "formal"]
+    if any(not item.get("scene") for item in formal):
         raise ValueError("formal runtime groups must identify their scene")
-    if any(int(item.get("sessionCount", 0)) < 5 for item in rows):
+    if any(int(item.get("formalSessions", 0)) < 5 for item in formal):
         raise ValueError("formal runtime groups require at least five sessions")
-    fields = ("scene", "device", "backend", "timingSource", "sessionCount", "sampleCount", "runtimeAssetMiB", "candidateMean", "candidateP95", "modelInferenceP50Ms", "modelInferenceP50Ci95", "modelInferenceP95Ms", "modelInferenceP95Ci95", "near10kSampleCount", "near10kP95Ms")
-    serializable = []
-    for item in rows:
-        row = {field: item.get(field) for field in fields}
-        for field in ("modelInferenceP50Ci95", "modelInferenceP95Ci95"):
-            row[field] = json.dumps(row[field], separators=(",", ":"))
-        serializable.append(row)
+    fields = (
+        "status", "scene", "device", "deviceModel", "backend", "adapter",
+        "timingSource", "formalUploadCount", "formalSessions", "sampleCount",
+        "poseCount", "candidateTotal", "candidateMean", "candidateP95",
+        "candidateMin", "candidateMax", "runtimeAssetMiB", "latencyMeanMs",
+        "latencyMeanCi95LowMs", "latencyMeanCi95HighMs", "latencyP50Ms",
+        "latencyP50Ci95LowMs", "latencyP50Ci95HighMs", "latencyP95Ms",
+        "latencyP95Ci95LowMs", "latencyP95Ci95HighMs", "fitInterceptMs",
+        "fitSlopeMsPerCandidate", "fitRmseMs", "fitMaeMs", "fitR2",
+        "fitMaxAbsErrorMs", "reason",
+    )
+    serializable = [{field: item.get(field) for field in fields} for item in rows]
     runtime_output = output / "mobile_runtime/runtime_summary.csv"
     write_csv(runtime_output, serializable, fields)
     return {
         "groupCount": len(rows),
-        "scenes": sorted({str(item["scene"]) for item in rows}),
-        "backends": sorted({str(item.get("backend")) for item in rows}),
+        "formalGroupCount": len(formal),
+        "scenes": sorted({str(item["scene"]) for item in formal}),
+        "backends": sorted({str(item.get("backend")) for item in formal}),
+        "unavailableGroups": [
+            {
+                "scene": item.get("scene"),
+                "device": item.get("device"),
+                "backend": item.get("backend"),
+                "reason": item.get("reason"),
+            }
+            for item in rows
+            if item.get("status") != "formal"
+        ],
         "output": str(runtime_output.resolve()),
     }
 
@@ -187,8 +204,11 @@ def _artifact_specs(data_root: Path, output: Path, *, hzb: Path, curves: Path, s
         hzb / "geometry_shell_hzb_paper_2026-09-09/execution_summary.json",
     ))
     specs.extend([
-        ("thresholdCurves", "threshold_curves", curves), ("streaming", "streaming", streaming),
-        ("gtConvergence", "gt_convergence", gt), ("preprocessing", "preprocessing", output / "preprocessing"),
+        ("thresholdCurves", "threshold_curves", curves),
+        ("streaming", "formal_streaming", streaming / "figures/paper_output_manifest.json"),
+        ("gtConvergence", "hkust_128", gt / "hkust_128_eval/summary.json"),
+        ("gtConvergence", "ifcbench_128", gt / "ifcbench_128_eval/summary.json"),
+        ("preprocessing", "preprocessing", output / "preprocessing"),
         ("figures", "figures", figures),
     ])
     return specs
@@ -244,12 +264,25 @@ def main() -> None:
     runtime = build_runtime(sources["runtime"], output)
     images = build_images({"hkust": sources["hkust_image"], "ifcbench": sources["ifcbench_image"]}, output)
     registry = build_artifact_registry(_artifact_specs(data_root, output, **roots))
+    pending = [
+        {
+            "section": item["section"],
+            "artifactId": item["artifactId"],
+            "reason": item["reason"],
+        }
+        for item in registry["artifacts"]
+        if item["status"] != "available"
+    ]
+    pending.extend(
+        {"section": "runtime", "artifactId": "runtime_group", **item}
+        for item in runtime["unavailableGroups"]
+    )
     manifest = {
         "schema": "pvs-paper-result-bundle-v1", "scope": "completed evidence plus explicit unavailable registrations",
         "generatedBy": "build_paper_result_bundle.py", "artifactRegistry": registry,
         "ablation": ablation, "rankSweep": rank, "runtime": runtime, "imageMetrics": images,
         "preprocessing": preprocessing,
-        "pending": ["IFCBench runtime and WASM runtime", "frozen test image results", "GT convergence"],
+        "pending": pending,
     }
     write_json(output / "bundle_manifest.json", manifest)
     print(json.dumps(manifest, ensure_ascii=False, indent=2))

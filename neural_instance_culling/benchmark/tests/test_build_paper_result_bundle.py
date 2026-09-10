@@ -56,16 +56,17 @@ class PaperResultBundleTest(unittest.TestCase):
             root = Path(temporary)
             source = root / "runtime.json"
             source.write_text(json.dumps({"groups": [{
-                "scene": "hkust", "device": "fixture", "backend": "webgpu-v4",
-                "sessionCount": 5, "sampleCount": 15,
+                "status": "formal", "scene": "hkust", "device": "fixture",
+                "backend": "webgpu-v4", "formalSessions": 5, "sampleCount": 15,
             }]}), encoding="utf-8")
             result = MODULE.build_runtime(source, root / "paper")
             self.assertEqual(result["scenes"], ["hkust"])
+            self.assertEqual(result["formalGroupCount"], 1)
             self.assertTrue((root / "paper/mobile_runtime/runtime_summary.csv").is_file())
 
             source.write_text(json.dumps({"groups": [{
-                "device": "fixture", "backend": "webgpu-v4",
-                "sessionCount": 5, "sampleCount": 15,
+                "status": "formal", "device": "fixture", "backend": "webgpu-v4",
+                "formalSessions": 5, "sampleCount": 15,
             }]}), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "identify their scene"):
                 MODULE.build_runtime(source, root / "paper")
