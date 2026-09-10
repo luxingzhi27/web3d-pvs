@@ -35,7 +35,7 @@ EXPORT = ROOT / "neural_instance_culling" / "model" / "export_pvs.py"
 
 SCENE = "ifcbench_fantasy_metropolis"
 FULL_EXPERIMENT = "pvs_mainline_v4_ifcbench_fantasy_metropolis_v1"
-FINETUNE_EXPERIMENT = "pvs_ifcbench_v4_calibration_finetune_v1"
+FINETUNE_EXPERIMENT = "pvs_ifcbench_v4_calibration_finetune_v2_refine"
 FULL_EPOCHS = 40
 FINETUNE_EPOCHS = 8
 SEEDS = (20260801, 20260802, 20260803)
@@ -49,7 +49,11 @@ EXPECTED_SPLITS = {
 WEIGHTED_RECALL_FLOOR = 0.99
 TEST_BOOTSTRAP_REPLICATES = 10_000
 
-CONFIRMATION_SCHEMA = "pvs-ifcbench-finetune-confirmation-summary-v1"
+CONFIRMATION_SCHEMA = "pvs-ifcbench-calibration-finetune-refine-confirmation-summary-v1"
+SUPPORTED_CONFIRMATION_SCHEMAS = {
+    CONFIRMATION_SCHEMA,
+    "pvs-ifcbench-finetune-confirmation-summary-v1",
+}
 DECISION_SCHEMA = "pvs-ifcbench-final-freeze-decision-v1"
 PREFLIGHT_SCHEMA = "pvs-ifcbench-finalize-preflight-v1"
 PLAN_SCHEMA = "pvs-ifcbench-finalize-plan-v1"
@@ -321,9 +325,10 @@ def load_confirmation_summary(path: Path) -> dict[str, Any]:
     """Load and structurally validate the test-free confirmation summary."""
     resolved = Path(path).expanduser().resolve()
     payload = _read_json(resolved)
-    if payload.get("schema") != CONFIRMATION_SCHEMA:
+    if payload.get("schema") not in SUPPORTED_CONFIRMATION_SCHEMAS:
         raise ValueError(
-            f"confirmation summary schema is invalid: expected={CONFIRMATION_SCHEMA!r}"
+            "confirmation summary schema is invalid: "
+            f"expected one of {sorted(SUPPORTED_CONFIRMATION_SCHEMAS)!r}"
         )
     if payload.get("testRead") is not False:
         raise ValueError("confirmation summary must declare testRead=false")
@@ -508,7 +513,10 @@ def _fine_tune_members(
             if raw.get("checkpoint") is not None
             else fallback_checkpoint
         )
-        exact_value = raw.get("exactCalibration", raw.get("calibrationPath"))
+        exact_value = raw.get(
+            "exactCalibration",
+            raw.get("calibrationSummary", raw.get("calibrationPath")),
+        )
         calibration = (
             _resolve_path(
                 exact_value,
@@ -1184,7 +1192,7 @@ def _plan_from_args(args: argparse.Namespace) -> dict[str, Any]:
     confirmation_summary = (
         args.confirmation_summary
         if args.confirmation_summary is not None
-        else args.finetune_benchmark_root / "confirmation_summary.json"
+        else args.finetune_benchmark_root / "refine_confirmation_summary.json"
     )
     return prepare_plan(
         data_root=args.data_root,
