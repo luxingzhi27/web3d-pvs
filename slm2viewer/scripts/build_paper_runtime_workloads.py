@@ -99,8 +99,9 @@ def _install_runtime(source: Path, destination: Path) -> None:
 
 def build(data_root: Path, viewer_root: Path) -> dict[str, Any]:
     builder = viewer_root / "scripts/build_pvs_runtime_workload.py"
-    output_root = viewer_root / "assets/benchmark/pvs_paper_runtime"
-    asset_root = viewer_root / "assets/neural_instance_culling"
+    public_root = viewer_root / "public"
+    output_root = public_root / "assets/benchmark/pvs_paper_runtime"
+    asset_root = public_root / "assets/neural_instance_culling"
     scene_rows = []
     for scene in SCENES:
         dataset = data_root / "neural_instance_culling/dataset/out" / scene["dataset"]

@@ -46,7 +46,7 @@ class PaperRuntimeWorkloadTest(unittest.TestCase):
             self.assertEqual([row["id"] for row in manifest["scenes"]], ["hkust", "ifcbench"])
             self.assertEqual(run.call_count, 2)
             for scene in target.SCENES:
-                copied = viewer / "assets/neural_instance_culling" / scene["asset"]
+                copied = viewer / "public/assets/neural_instance_culling" / scene["asset"]
                 target._validate_runtime(copied, scene)
 
     def test_rejects_wrong_final_viewcell_radius(self) -> None:
