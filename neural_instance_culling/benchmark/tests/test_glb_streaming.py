@@ -12,12 +12,18 @@ sys.path.insert(0, str(BENCHMARK_DIR))
 
 from glb_streaming import (  # noqa: E402
     BANDWIDTHS_MBPS,
+    DECISION_MODE_SCHEDULER_REPLAY,
+    NEURAL_COST_ALPHA_CANDIDATES,
+    NEURAL_COST_METHOD,
     FIXED_RANDOM_METHODS,
     GlbAsset,
     PoseRecord,
     RANKING_METHODS,
     StreamingContractError,
+    apply_neural_cost_alpha,
+    select_neural_cost_alpha,
     simulate_ranked_pose,
+    simulate_scheduler_replay_pose,
     simulate_threshold_filter_pose,
     summarize_filter_results,
     summarize_ranking_results,
@@ -28,14 +34,22 @@ from export_glb_streaming_scores import _model_sources  # noqa: E402
 from generate_streaming_paper_outputs import (  # noqa: E402
     scene_display_name,
     summary_row,
+    validate_scheduler_replay_summary,
     validate_paper_summary,
 )
 from score_sidecar import ScoreSidecarWriter  # noqa: E402
+from glb_streaming_io import (  # noqa: E402
+    LoadedPose,
+    attach_geometry_scores,
+    load_neural_cost_manifest,
+    write_neural_cost_manifest,
+)
 from simulate_glb_streaming import (  # noqa: E402
     attach_formal_region66_visible_glbs,
     hzb_ordering_metadata,
     load_formal_region66_test_result,
     ordered_hzb_glb_ids_for_pose,
+    require_complete_test_pose_selection,
     simulate_hzb_ranked_pose,
 )
 
@@ -79,6 +93,136 @@ class GlbStreamingContractTests(unittest.TestCase):
         # even though the next GLB has already started in a real transport.
         self.assertEqual(result["rankAtCoverage"]["95"], 3)
 
+    def test_neural_glb_probability_and_frozen_cost_order(self) -> None:
+        pose = PoseRecord(
+            pose_id=8,
+            ordinal=0,
+            candidate_glb_ids=(0, 1, 2),
+            gt_glb_ids=(0, 1, 2),
+            utility_by_glb={0: 1.0, 1: 1.0, 2: 1.0},
+            rank_scores={"neural_probability": {0: 0.6, 1: 0.9, 2: 0.8}},
+            neural_cost_alpha=0.5,
+            coverage_source="visible_weights",
+            coverage_semantics="fixture visible weights",
+            coverage_unit="fixture weight",
+        )
+        pure = simulate_ranked_pose(pose, assets(), "neural_probability")
+        cost = simulate_ranked_pose(pose, assets(), NEURAL_COST_METHOD)
+        self.assertEqual(pure["rankingInput"]["formula"], "p_g=max_i(p_i)")
+        self.assertEqual(cost["rankingInput"]["costExponent"], 0.5)
+        self.assertEqual(cost["rankingInput"]["instanceProbabilityAggregation"], "max")
+        self.assertEqual(cost["rankingInput"]["bytesSource"], "complete GLB file bytes")
+        self.assertEqual(cost["visibleWeightCoverageCeiling"], 1.0)
+
+    def test_neural_cost_alpha_selection_is_validation_only_and_manifest_is_frozen(self) -> None:
+        poses = [
+            PoseRecord(
+                pose_id=9,
+                ordinal=0,
+                candidate_glb_ids=(0, 1, 2),
+                gt_glb_ids=(1, 2),
+                utility_by_glb={1: 9.0, 2: 1.0},
+                rank_scores={"full": {0: 0.1, 1: 0.9, 2: 0.8}},
+                coverage_source="visible_weights",
+                coverage_semantics="fixture visible weights",
+                coverage_unit="fixture weight",
+            )
+        ]
+        manifest = select_neural_cost_alpha(poses, assets(), selection_split="validation")
+        self.assertTrue(manifest["frozen"])
+        self.assertEqual(manifest["selectionSplit"], "validation")
+        self.assertEqual(manifest["candidateAlphas"], list(NEURAL_COST_ALPHA_CANDIDATES))
+        self.assertIn(manifest["selectedAlpha"], NEURAL_COST_ALPHA_CANDIDATES)
+        self.assertEqual(len(manifest["candidates"]), 3)
+        with self.assertRaisesRegex(StreamingContractError, "only on the validation"):
+            select_neural_cost_alpha(poses, assets(), selection_split="test")
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_neural_cost_manifest(Path(directory) / "alpha.json", manifest)
+            loaded = load_neural_cost_manifest(path)
+        self.assertEqual(loaded["selectedAlpha"], manifest["selectedAlpha"])
+        self.assertEqual(loaded["path"], str(path))
+
+    def test_neural_cost_manifest_rejects_unregistered_alpha(self) -> None:
+        manifest = {
+            "schema": "pvs-glb-streaming-neural-cost-manifest-v1",
+            "frozen": True,
+            "eligibleForTest": True,
+            "selectionSplit": "validation",
+            "candidateAlphas": [0.0, 0.5, 1.0],
+            "selectedAlpha": 0.25,
+            "formula": "p_g / bytes_g^alpha",
+            "instanceProbabilityAggregation": "max",
+            "bytesSource": "complete GLB file bytes",
+        }
+        from glb_streaming_io import validate_neural_cost_manifest
+
+        with self.assertRaisesRegex(StreamingContractError, "selectedAlpha"):
+            validate_neural_cost_manifest(manifest)
+
+    def test_geometry_heuristics_aggregate_candidate_instance_aabbs(self) -> None:
+        pose = PoseRecord(
+            pose_id=11,
+            ordinal=0,
+            candidate_glb_ids=(0, 1),
+            gt_glb_ids=(0,),
+        )
+        loaded = LoadedPose(
+            record=pose,
+            candidate_instance_ids=np.asarray([0, 1, 2], dtype=np.uint32),
+            visible_instance_ids=np.asarray([0], dtype=np.uint32),
+            camera_world=np.zeros(3, dtype=np.float32),
+            camera_forward=np.asarray([0.0, 0.0, 1.0], dtype=np.float32),
+            camera_view=np.asarray([0.0, 0.0, 1.0, 1.0, 1.0], dtype=np.float32),
+            mvp=np.eye(4, dtype=np.float32).reshape(-1),
+            candidate_instance_aabbs=np.asarray(
+                [
+                    [10.0, 10.0, 1.0, 10.1, 10.1, 1.1],
+                    [0.0, 0.0, 1.0, 1.0, 1.0, 1.1],
+                    [0.0, 0.0, 2.0, 0.1, 0.1, 2.1],
+                ],
+                dtype=np.float32,
+            ),
+        )
+        instance_to_glb = {0: 0, 1: 0, 2: 1}
+        result = attach_geometry_scores(
+            [loaded],
+            {
+                0: GlbAsset(0, 10, 0, np.asarray([-100, -100, -100, 100, 100, 100], dtype=np.float32)),
+                1: GlbAsset(1, 20, 1, np.asarray([-100, -100, -100, 100, 100, 100], dtype=np.float32)),
+            },
+            {},
+            instance_to_glb,
+        )[0]
+        self.assertAlmostEqual(result.rank_scores["distance"][0], 0.5)
+        self.assertAlmostEqual(result.rank_scores["distance"][1], 1.0 / 3.0)
+        self.assertGreater(result.rank_scores["projected_area"][0], result.rank_scores["projected_area"][1])
+        self.assertEqual(result.rank_scores["projected_area_per_byte"][0], result.rank_scores["projected_area"][0] / 10.0)
+
+    def test_geometry_heuristics_do_not_fallback_to_merged_asset_aabb(self) -> None:
+        pose = PoseRecord(
+            pose_id=12,
+            ordinal=0,
+            candidate_glb_ids=(0,),
+            gt_glb_ids=(),
+        )
+        loaded = SimpleNamespace(
+            record=pose,
+            candidate_instance_ids=np.asarray([0], dtype=np.uint32),
+            camera_world=np.zeros(3, dtype=np.float32),
+            candidate_instance_aabbs=None,
+        )
+        result = attach_geometry_scores(
+            [loaded],
+            {0: GlbAsset(0, 10, 0, np.asarray([0, 0, 0, 1, 1, 1], dtype=np.float32))},
+            {},
+            {0: 0},
+        )[0]
+        self.assertNotIn("distance", result.rank_scores)
+        self.assertNotIn("projected_area", result.rank_scores)
+
     def test_oracle_is_utility_per_byte_and_not_global_optimum_claim(self) -> None:
         pose = PoseRecord(
             pose_id=1,
@@ -106,7 +250,7 @@ class GlbStreamingContractTests(unittest.TestCase):
         for left, right in zip(first, second):
             self.assertEqual(left, right)
             self.assertEqual(left["candidateGlbCount"], 3)
-        self.assertEqual(len(RANKING_METHODS), 28)
+        self.assertEqual(len(RANKING_METHODS), 29)
 
     def test_missing_gt_resource_reports_unreachable_without_candidate_repair(self) -> None:
         pose = PoseRecord(
@@ -154,6 +298,57 @@ class GlbStreamingContractTests(unittest.TestCase):
         self.assertEqual(filter_summary["decisionMode"], "threshold_filtering")
         self.assertNotIn("full", ranking_summary["methods"])
         self.assertNotIn("original", filter_summary["methods"])
+
+    def test_visible_weight_coverage_is_explicit_and_not_pixel_coverage(self) -> None:
+        pose = PoseRecord(
+            pose_id=14,
+            ordinal=0,
+            candidate_glb_ids=(0, 1),
+            gt_glb_ids=(1,),
+            utility_by_glb={1: 7.0},
+            rank_scores={"full": {0: 0.99, 1: 0.5}},
+            coverage_source="visible_weights",
+            coverage_semantics="rvcServer visible component weight",
+            coverage_unit="rvcServer_component_weight",
+        )
+        result = simulate_ranked_pose(pose, assets(), "full")
+        self.assertEqual(result["coverageSource"], "visible_weight_coverage")
+        self.assertEqual(result["coverageMetric"], "visible_weight_coverage")
+        self.assertIn("visibleWeightCoverageCurve", result)
+        self.assertIn("visibleWeightCoverage", result["coverageCurve"][0])
+        self.assertNotIn("pixelCoverage", result)
+        self.assertNotIn("pixel_coverage", result)
+
+    def test_formal_test_pose_selection_rejects_limits_and_subsets(self) -> None:
+        class DatasetFixture:
+            def split(self, name: str) -> SimpleNamespace:
+                self.assert_name = name
+                return SimpleNamespace(pose_indices=np.asarray([3, 7, 9], dtype=np.int64))
+
+        dataset = DatasetFixture()
+        with self.assertRaisesRegex(StreamingContractError, "pose_limit"):
+            require_complete_test_pose_selection(dataset, [3, 7, 9], pose_limit=1)
+        with self.assertRaisesRegex(StreamingContractError, "complete test split"):
+            require_complete_test_pose_selection(dataset, [3, 7])
+        self.assertEqual(require_complete_test_pose_selection(dataset, [3, 7, 9]), [3, 7, 9])
+
+    def test_scheduler_replay_is_not_a_threshold_free_ranking_result(self) -> None:
+        pose = PoseRecord(
+            pose_id=15,
+            ordinal=0,
+            candidate_glb_ids=(0, 1, 2),
+            gt_glb_ids=(1,),
+        )
+        result = simulate_scheduler_replay_pose(
+            pose,
+            assets(),
+            method="neural_scheduler",
+            tiers={"urgent": [1], "warm": [2], "speculative": [0]},
+            threshold_applied=True,
+        )
+        self.assertEqual(result["decisionMode"], DECISION_MODE_SCHEDULER_REPLAY)
+        self.assertTrue(result["thresholdApplied"])
+        self.assertEqual(result["schedulerReplay"]["arrivalOrder"], [1, 2, 0])
 
     def test_invalid_score_method_is_rejected(self) -> None:
         pose = PoseRecord(
@@ -434,6 +629,13 @@ class GlbStreamingContractTests(unittest.TestCase):
             "split": "test",
             "testRead": True,
             "poseCount": 2,
+            "testPoseCount": 2,
+            "poseSelection": {
+                "split": "test",
+                "selectedPoseCount": 2,
+                "limit": 0,
+                "completeTest": True,
+            },
             "methods": {
                 "full": {
                     "status": "available",
@@ -443,6 +645,22 @@ class GlbStreamingContractTests(unittest.TestCase):
             },
         }
         validate_paper_summary(filtering, Path("filtering.json"), "threshold_filtering")
+
+    def test_scheduler_summary_has_a_separate_contract(self) -> None:
+        scheduler = {
+            "schema": "pvs-real-scheduler-streaming-summary-v1",
+            "scheduler": "GlbResourceScheduler",
+            "schedulerTiers": ["urgent", "warm", "speculative"],
+            "split": "test",
+            "testRead": True,
+            "poseCount": 12,
+            "poseIds": list(range(12)),
+            "startup100Enabled": False,
+            "startupTierUsed": False,
+            "cacheMode": "strict_cold_cache_per_pose",
+        }
+        validate_scheduler_replay_summary(scheduler, Path("scheduler.json"))
+        validate_paper_summary(scheduler, Path("scheduler.json"), DECISION_MODE_SCHEDULER_REPLAY)
 
     def test_aabb_runner_spec_never_turns_into_a_fallback_source(self) -> None:
         runner_specs, sidecar, requested = _model_sources(

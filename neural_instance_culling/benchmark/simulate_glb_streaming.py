@@ -24,12 +24,22 @@ if str(BENCHMARK_DIR) not in sys.path:
 
 from glb_streaming import (  # noqa: E402
     BANDWIDTHS_MBPS,
+    DECISION_MODE_SCHEDULER_REPLAY,
+    DECISION_MODE_THRESHOLD_FILTERING,
+    DECISION_MODE_THRESHOLD_FREE_RANKING,
     GlbAsset,
+    NEURAL_COST_ALPHA_CANDIDATES,
+    NEURAL_COST_METHOD,
+    NEURAL_PROBABILITY_METHOD,
     PoseRecord,
     RANKING_METHODS,
     TARGET_COVERAGES,
     StreamingContractError,
+    apply_neural_cost_alpha,
     build_fractional_utility_byte_lower_bound,
+    coverage_metadata,
+    neural_cost_method_for_alpha,
+    select_neural_cost_alpha,
     simulate_ranked_pose,
     simulate_threshold_filter_pose,
     summarize_filter_results,
@@ -37,9 +47,11 @@ from glb_streaming import (  # noqa: E402
 )
 from glb_streaming_io import (  # noqa: E402
     attach_geometry_scores,
+    load_neural_cost_manifest,
     load_glb_assets,
     load_pose_inputs,
     load_score_sidecar,
+    write_neural_cost_manifest,
 )
 from pose_csr_dataset import PoseCSRDataset  # noqa: E402
 
@@ -64,7 +76,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--utility-source",
         choices=["binary_gt", "visible_weights", "reference_frontmost_pixels"],
-        default="binary_gt",
+        default="visible_weights",
     )
     parser.add_argument(
         "--reference-frontmost",
@@ -83,6 +95,12 @@ def parse_args() -> argparse.Namespace:
         "--methods",
         default=",".join(RANKING_METHODS),
         help="comma-separated ranking methods; defaults to the complete paper set",
+    )
+    parser.add_argument(
+        "--neural-cost-manifest",
+        type=Path,
+        default=None,
+        help="frozen validation-selected alpha manifest; required for test neural-cost ranking",
     )
     parser.add_argument(
         "--filter-thresholds",
@@ -137,11 +155,7 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def _coverage_source_name(utility_source: str) -> str:
-    return {
-        "binary_gt": "gt_glb_presence",
-        "visible_weights": "visible_weights_utility_not_pixel_coverage",
-        "reference_frontmost_pixels": "reference-frontmost-pixel-histogram-v1",
-    }[utility_source]
+    return coverage_metadata(utility_source)["source"]
 
 
 def _formal_aabb_source(source: Any) -> bool:
@@ -151,6 +165,28 @@ def _formal_aabb_source(source: Any) -> bool:
         and source.get("split") == "test"
         and source.get("testRead") is True
     )
+
+
+def require_complete_test_pose_selection(
+    dataset: PoseCSRDataset,
+    selected_pose_ids: Iterable[int],
+    *,
+    pose_limit: int = 0,
+    label: str = "formal test mode",
+) -> list[int]:
+    """Reject a partial test selection before it can be reported as formal."""
+
+    if pose_limit:
+        raise StreamingContractError(
+            f"{label} rejects pose_limit; use every pose in the test split"
+        )
+    selected = [int(value) for value in selected_pose_ids]
+    expected = dataset.split("test").pose_indices.astype(np.int64, copy=False).tolist()
+    if selected != expected:
+        raise StreamingContractError(
+            f"{label} requires the complete test split; a test subset is not reportable"
+        )
+    return expected
 
 
 def _read_json_object(path: str | Path, label: str) -> dict[str, Any]:
@@ -481,14 +517,29 @@ def main() -> None:
     args = parse_args()
     if args.pose_limit < 0:
         raise ValueError("--pose-limit must be non-negative")
+    if args.split == "test" and args.pose_limit:
+        raise StreamingContractError(
+            "formal test mode rejects --pose-limit; a complete test split is required"
+        )
     if args.log_every < 0:
         raise ValueError("--log-every must be non-negative")
     methods = tuple(name.strip() for name in args.methods.split(",") if name.strip())
-    unknown = [name for name in methods if name not in RANKING_METHODS]
+    supported_methods = set(RANKING_METHODS) | {NEURAL_PROBABILITY_METHOD} | {
+        neural_cost_method_for_alpha(alpha) for alpha in NEURAL_COST_ALPHA_CANDIDATES
+    }
+    unknown = [name for name in methods if name not in supported_methods]
     if unknown:
         raise ValueError(f"unknown ranking methods: {unknown}")
     if not methods:
         raise ValueError("--methods selected no methods")
+    explicit_cost_methods = {
+        neural_cost_method_for_alpha(alpha) for alpha in NEURAL_COST_ALPHA_CANDIDATES
+    }
+    if args.split == "test" and any(method in explicit_cost_methods for method in methods):
+        raise StreamingContractError(
+            "test ranking may use only neural_cost with a frozen validation manifest; "
+            "alpha candidates are validation-only"
+        )
     if args.utility_source == "reference_frontmost_pixels" and args.reference_frontmost is None:
         raise ValueError("reference-frontmost-pixels requires --reference-frontmost")
 
@@ -496,6 +547,12 @@ def main() -> None:
         args.runtime_meta,
         args.glb_index,
         args.glb_root,
+    )
+    output_dir = args.output_dir.expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    dataset_for_selection = PoseCSRDataset(
+        args.dataset_dir,
+        num_instances=len(instance_to_glb),
     )
     loaded_poses = load_pose_inputs(
         args.dataset_dir,
@@ -508,12 +565,60 @@ def main() -> None:
         reference_frontmost_path=args.reference_frontmost,
     )
     selected_pose_ids = [pose.record.pose_id for pose in loaded_poses]
+    complete_test_pose_ids: list[int] | None = None
+    if args.split == "test":
+        complete_test_pose_ids = require_complete_test_pose_selection(
+            dataset_for_selection,
+            selected_pose_ids,
+            pose_limit=args.pose_limit,
+        )
     score_by_pose, score_manifest = load_score_sidecar(
         args.result_dir,
         args.dataset_dir,
         selected_pose_ids,
+        require_complete_test=args.split == "test",
     )
     records = attach_geometry_scores(loaded_poses, assets, score_by_pose, instance_to_glb)
+
+    neural_cost_manifest: dict[str, Any] | None = None
+    neural_cost_requested = NEURAL_COST_METHOD in methods or bool(
+        set(methods) & explicit_cost_methods
+    )
+    if neural_cost_requested:
+        if args.split == "validation":
+            if args.neural_cost_manifest is not None:
+                raise StreamingContractError(
+                    "validation alpha selection writes a new frozen manifest; it does not read a test manifest"
+                )
+            neural_cost_manifest = select_neural_cost_alpha(
+                records,
+                assets,
+                selection_split=args.split,
+            )
+            manifest_path = write_neural_cost_manifest(
+                output_dir / "neural_cost_ranking_manifest.json",
+                neural_cost_manifest,
+            )
+            neural_cost_manifest = {
+                **neural_cost_manifest,
+                "path": str(manifest_path),
+            }
+        elif args.split == "test":
+            manifest_path = args.neural_cost_manifest
+            if manifest_path is None:
+                raise StreamingContractError(
+                    "test neural-cost ranking requires --neural-cost-manifest from validation"
+                )
+            neural_cost_manifest = load_neural_cost_manifest(manifest_path)
+        else:
+            raise StreamingContractError(
+                "neural cost alpha must be selected on validation or read from a frozen manifest for test"
+            )
+        if NEURAL_COST_METHOD in methods:
+            records = apply_neural_cost_alpha(
+                records,
+                neural_cost_manifest["selectedAlpha"],
+            )
 
     hzb_source: dict[str, Any] | None = None
     hzb_unavailable_reason: str | None = None
@@ -523,10 +628,10 @@ def main() -> None:
         hzb_unavailable_reason = "formal Region66 visible-first input is test-only"
     else:
         try:
-            test_dataset = PoseCSRDataset(args.dataset_dir, num_instances=len(instance_to_glb))
-            complete_test_pose_ids = test_dataset.split("test").pose_indices.astype(np.int64, copy=False).tolist()
+            if complete_test_pose_ids is None:
+                raise StreamingContractError("complete test pose selection was not established")
             expected_candidate_ids = {
-                int(pose_id): test_dataset.candidate_slice(int(pose_id))
+                int(pose_id): dataset_for_selection.candidate_slice(int(pose_id))
                 for pose_id in complete_test_pose_ids
             }
             hzb_instances, hzb_source = load_formal_region66_test_result(
@@ -573,13 +678,34 @@ def main() -> None:
 
     required_score_methods = {
         "full",
+        NEURAL_COST_METHOD,
         "aabb",
         "distance",
         "projected_area",
         "projected_area_per_byte",
     }
     for method in methods:
-        if method in required_score_methods and any(method not in pose.rank_scores for pose in records):
+        if method == NEURAL_COST_METHOD:
+            missing_neural_cost_input = any(
+                pose.neural_cost_alpha is None
+                or not any(
+                    name in pose.rank_scores
+                    for name in ("full", "neural_probability", "neural")
+                )
+                for pose in records
+            )
+        else:
+            missing_neural_cost_input = False
+        if (
+            method in required_score_methods
+            and (
+                missing_neural_cost_input
+                or (
+                    method != NEURAL_COST_METHOD
+                    and any(method not in pose.rank_scores for pose in records)
+                )
+            )
+        ):
             unavailable_reasons.setdefault(
                 method,
                 f"continuous score input for {method} is unavailable for one or more selected poses",
@@ -603,6 +729,7 @@ def main() -> None:
                     if method == "hzb_visible_first"
                     else simulate_ranked_pose(pose, assets, method)
                 )
+                ranking_inputs[method] = method_rows[method].get("rankingInput")
                 if method == "hzb_visible_first":
                     ranking_inputs[method] = hzb_ordering_metadata()
             except StreamingContractError as error:
@@ -645,21 +772,71 @@ def main() -> None:
     ranking_summary["split"] = args.split
     ranking_summary["testRead"] = args.split == "test"
     ranking_summary["poseCount"] = len(records)
-    ranking_summary["coverageSource"] = _coverage_source_name(args.utility_source)
+    ranking_summary["testPoseCount"] = (
+        len(complete_test_pose_ids) if complete_test_pose_ids is not None else None
+    )
+    ranking_summary["poseSelection"] = {
+        "split": args.split,
+        "selectedPoseCount": len(records),
+        "limit": int(args.pose_limit),
+        "completeTest": args.split == "test",
+    }
+    coverage = coverage_metadata(args.utility_source)
+    ranking_summary["coverageSource"] = coverage["source"]
+    ranking_summary["coverageMetric"] = coverage["metric"]
+    ranking_summary["coverageUnit"] = coverage["unit"]
+    ranking_summary["coverageSemantics"] = coverage["semantics"]
+    ranking_summary["completeTestSplit"] = args.split == "test"
     ranking_summary["scoreSources"] = score_sources if isinstance(score_sources, dict) else {}
     formal_aabb_input = (
         score_sources.get("aabb")
         if isinstance(score_sources, dict) and _formal_aabb_source(score_sources.get("aabb"))
         else None
     )
-    ranking_summary["rankingInputs"] = {
-        "aabb": formal_aabb_input
-        or {"kind": "unavailable", "reason": unavailable_reasons.get("aabb", "no formal AABB score input")},
-        "hzb_visible_first": hzb_source or {
+    ranking_inputs_by_method = {
+        str(name): value
+        for name, value in {
+            method: next(
+                (
+                    row.get("rankingInputs", {}).get(method)
+                    for row in ranking_rows
+                    if isinstance(row.get("rankingInputs", {}).get(method), dict)
+                ),
+                None,
+            )
+            for method in methods
+        }.items()
+        if value is not None
+    }
+    aabb_ranking_input: dict[str, Any]
+    if formal_aabb_input is not None:
+        aabb_ranking_input = {
+            **(ranking_inputs_by_method.get("aabb") or {}),
+            **formal_aabb_input,
+        }
+    else:
+        aabb_ranking_input = {
+            "kind": "unavailable",
+            "reason": unavailable_reasons.get("aabb", "no formal AABB score input"),
+        }
+    hzb_ranking_input: dict[str, Any]
+    if hzb_source is not None:
+        hzb_ranking_input = {
+            **(ranking_inputs_by_method.get("hzb_visible_first") or {}),
+            **hzb_source,
+        }
+    else:
+        hzb_ranking_input = {
             "kind": "unavailable",
             "reason": unavailable_reasons.get("hzb_visible_first", "no formal Region66 test result"),
-        },
+        }
+    ranking_summary["rankingInputs"] = {
+        **ranking_inputs_by_method,
+        "aabb": aabb_ranking_input,
+        "hzb_visible_first": hzb_ranking_input,
     }
+    if neural_cost_manifest is not None:
+        ranking_summary["neuralCostManifest"] = neural_cost_manifest
     ranking_summary["source"] = {
         "datasetDir": str(Path(args.dataset_dir).expanduser().resolve()),
         "runtimeMeta": str(Path(args.runtime_meta).expanduser().resolve()),
@@ -731,12 +908,21 @@ def main() -> None:
     filtering_summary["split"] = args.split
     filtering_summary["testRead"] = args.split == "test"
     filtering_summary["poseCount"] = len(records)
-    filtering_summary["coverageSource"] = _coverage_source_name(args.utility_source)
+    filtering_summary["testPoseCount"] = (
+        len(complete_test_pose_ids) if complete_test_pose_ids is not None else None
+    )
+    filtering_summary["poseSelection"] = ranking_summary["poseSelection"]
+    filtering_summary["coverageSource"] = coverage["source"]
+    filtering_summary["coverageMetric"] = coverage["metric"]
+    filtering_summary["coverageUnit"] = coverage["unit"]
+    filtering_summary["coverageSemantics"] = coverage["semantics"]
+    filtering_summary["completeTestSplit"] = args.split == "test"
     filtering_summary["source"] = ranking_summary["source"]
     filtering_summary["thresholdSources"] = score_manifest.get("thresholdSources", {})
     filtering_summary["scoreSources"] = ranking_summary["scoreSources"]
     filtering_summary["rankingInputs"] = ranking_summary["rankingInputs"]
     filtering_summary["unavailableReasons"] = filter_unavailable_reasons
+    filtering_summary["neuralCostManifest"] = neural_cost_manifest
     for method, reason in filter_unavailable_reasons.items():
         method_summary = filtering_summary.get("methods", {}).get(method)
         if isinstance(method_summary, dict) and method_summary.get("status") != "available":
@@ -745,8 +931,6 @@ def main() -> None:
         "Threshold filtering is a separate decision mode; its predicted subset is not used by ranking metrics."
     )
 
-    output_dir = args.output_dir.expanduser().resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
     _write_jsonl(output_dir / "ranking_per_pose.jsonl", ranking_rows)
     _write_jsonl(output_dir / "filtering_per_pose.jsonl", filter_rows)
     (output_dir / "ranking_summary.json").write_text(
@@ -759,16 +943,33 @@ def main() -> None:
     )
     manifest = {
         "schema": "pvs-glb-streaming-experiment-v1",
-        "decisionModes": ["threshold_free_ranking", "threshold_filtering"],
+        "decisionModes": [
+            DECISION_MODE_THRESHOLD_FREE_RANKING,
+            DECISION_MODE_THRESHOLD_FILTERING,
+            DECISION_MODE_SCHEDULER_REPLAY,
+        ],
+        "resultTypes": {
+            "ranking": DECISION_MODE_THRESHOLD_FREE_RANKING,
+            "filtering": DECISION_MODE_THRESHOLD_FILTERING,
+            "schedulerReplay": DECISION_MODE_SCHEDULER_REPLAY,
+        },
         "cacheMode": "strict_cold_cache_per_pose",
         "arrivalSemantics": "GLB bytes and reference-frontmost utility accumulate only after complete GLB arrival",
         "split": args.split,
         "testRead": args.split == "test",
         "poseCount": len(records),
+        "testPoseCount": (
+            len(complete_test_pose_ids) if complete_test_pose_ids is not None else None
+        ),
+        "poseSelection": ranking_summary["poseSelection"],
         "methods": list(methods),
         "filterMethods": filter_methods,
         "filterThresholds": filter_thresholds,
-        "coverageSource": _coverage_source_name(args.utility_source),
+        "coverageSource": coverage["source"],
+        "coverageMetric": coverage["metric"],
+        "coverageUnit": coverage["unit"],
+        "coverageSemantics": coverage["semantics"],
+        "completeTestSplit": args.split == "test",
         "scoreSources": ranking_summary["scoreSources"],
         "rankingInputs": ranking_summary["rankingInputs"],
         "rankingSummary": "ranking_summary.json",
@@ -777,6 +978,7 @@ def main() -> None:
         "filteringPerPose": "filtering_per_pose.jsonl",
         "source": ranking_summary["source"],
         "scoreManifest": score_manifest,
+        "neuralCostManifest": neural_cost_manifest,
         "unavailableReasons": unavailable_reasons,
     }
     (output_dir / "streaming_manifest.json").write_text(

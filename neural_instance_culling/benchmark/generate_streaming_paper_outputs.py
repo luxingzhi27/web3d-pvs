@@ -14,7 +14,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from glb_streaming import FIXED_RANDOM_METHODS, RANKING_METHOD_LABELS
+from glb_streaming import (
+    DECISION_MODE_SCHEDULER_REPLAY,
+    DECISION_MODE_THRESHOLD_FILTERING,
+    DECISION_MODE_THRESHOLD_FREE_RANKING,
+    FIXED_RANDOM_METHODS,
+    RANKING_METHOD_LABELS,
+)
 
 
 TABLE_FIELDS = [
@@ -25,8 +31,16 @@ TABLE_FIELDS = [
     "input_kind",
     "availability_reason",
     "decision_mode",
+    "ranking_formula",
+    "instance_aggregation",
+    "cost_alpha",
+    "parameter_selection_split",
+    "uses_merged_glb_aabb",
     "pose_count",
     "coverage_source",
+    "coverage_metric",
+    "coverage_unit",
+    "coverage_semantics",
     "candidate_glb_mean",
     "candidate_bytes_mean",
     "predicted_glb_mean",
@@ -60,6 +74,13 @@ def parse_args() -> argparse.Namespace:
         help="ranking_summary.json; repeat once per scene",
     )
     parser.add_argument("--filter-summary", action="append", type=Path, default=[])
+    parser.add_argument(
+        "--scheduler-summary",
+        action="append",
+        type=Path,
+        default=[],
+        help="real scheduler replay summary; kept separate from ranking/filtering tables",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser.parse_args()
 
@@ -103,11 +124,11 @@ PAPER_LABEL_OVERRIDES = {
 }
 
 SUMMARY_CONTRACTS = {
-    "threshold_free_ranking": (
+    DECISION_MODE_THRESHOLD_FREE_RANKING: (
         "pvs-glb-streaming-ranking-summary-v1",
         False,
     ),
-    "threshold_filtering": (
+    DECISION_MODE_THRESHOLD_FILTERING: (
         "pvs-glb-streaming-filter-summary-v1",
         True,
     ),
@@ -119,6 +140,11 @@ def validate_paper_summary(
     path: Path,
     decision_mode: str,
 ) -> None:
+    if decision_mode == DECISION_MODE_SCHEDULER_REPLAY:
+        validate_scheduler_replay_summary(summary, path)
+        return
+    if decision_mode not in SUMMARY_CONTRACTS:
+        raise ValueError(f"{path}: unsupported paper summary decision mode {decision_mode}")
     expected_schema, threshold_applied = SUMMARY_CONTRACTS[decision_mode]
     if summary.get("schema") != expected_schema:
         raise ValueError(f"{path}: expected {expected_schema}")
@@ -133,6 +159,35 @@ def validate_paper_summary(
     pose_count = summary.get("poseCount")
     if isinstance(pose_count, bool) or not isinstance(pose_count, int) or pose_count <= 0:
         raise ValueError(f"{path}: poseCount must be a positive integer")
+    test_pose_count = summary.get("testPoseCount")
+    if (
+        isinstance(test_pose_count, bool)
+        or not isinstance(test_pose_count, int)
+        or test_pose_count <= 0
+        or test_pose_count != pose_count
+    ):
+        raise ValueError(f"{path}: complete test summary must declare testPoseCount equal to poseCount")
+    selection = summary.get("poseSelection")
+    if not isinstance(selection, dict):
+        raise ValueError(f"{path}: complete test summary is missing poseSelection")
+    if (
+        selection.get("split") != "test"
+        or selection.get("selectedPoseCount") != pose_count
+        or selection.get("limit") not in (None, 0)
+        or selection.get("completeTest") is not True
+    ):
+        raise ValueError(f"{path}: complete test summary has a truncated or incomplete pose selection")
+    coverage_source = str(summary.get("coverageSource", ""))
+    if coverage_source in {
+        "visible_weights",
+        "visible_weight_coverage",
+        "visible_weights_utility_not_pixel_coverage",
+    }:
+        semantics = summary.get("coverageSemantics")
+        if not isinstance(semantics, str) or "pixel" not in semantics.lower():
+            raise ValueError(
+                f"{path}: visible-weight coverage must declare that it is not pixel coverage"
+            )
     methods = summary.get("methods")
     if not isinstance(methods, dict) or not methods:
         raise ValueError(f"{path}: paper streaming summary has no methods")
@@ -146,6 +201,39 @@ def validate_paper_summary(
                 raise ValueError(f"{path}: method {name} does not cover the complete test summary")
 
 
+def validate_scheduler_replay_summary(
+    summary: dict[str, Any],
+    path: Path,
+) -> None:
+    """Validate the separately measured production scheduler replay contract."""
+
+    if summary.get("schema") != "pvs-real-scheduler-streaming-summary-v1":
+        raise ValueError(
+            f"{path}: scheduler replay must use pvs-real-scheduler-streaming-summary-v1"
+        )
+    if (
+        summary.get("decisionMode") is not None
+        and summary.get("decisionMode") != DECISION_MODE_SCHEDULER_REPLAY
+    ):
+        raise ValueError(f"{path}: scheduler summary has a ranking/filtering decision mode")
+    if summary.get("split") != "test" or summary.get("testRead") is not True:
+        raise ValueError(f"{path}: scheduler replay must read the test split")
+    if summary.get("scheduler") != "GlbResourceScheduler":
+        raise ValueError(f"{path}: scheduler replay must use GlbResourceScheduler")
+    if summary.get("schedulerTiers") != ["urgent", "warm", "speculative"]:
+        raise ValueError(f"{path}: scheduler replay must declare all scheduler tiers")
+    if summary.get("startup100Enabled") is not False or summary.get("startupTierUsed") is not False:
+        raise ValueError(f"{path}: scheduler replay must disable startup-100")
+    pose_count = summary.get("poseCount")
+    pose_ids = summary.get("poseIds")
+    if pose_count != 12 or not isinstance(pose_ids, list) or len(pose_ids) != 12:
+        raise ValueError(f"{path}: scheduler replay must contain exactly 12 fixed test poses")
+    if len(set(pose_ids)) != len(pose_ids):
+        raise ValueError(f"{path}: scheduler replay pose IDs must be unique")
+    if summary.get("cacheMode") != "strict_cold_cache_per_pose":
+        raise ValueError(f"{path}: scheduler replay must use strict cold-cache poses")
+
+
 def _ranking_input(summary: dict[str, Any], method_name: str) -> dict[str, Any] | None:
     inputs = summary.get("rankingInputs")
     if isinstance(inputs, dict) and isinstance(inputs.get(method_name), dict):
@@ -153,6 +241,9 @@ def _ranking_input(summary: dict[str, Any], method_name: str) -> dict[str, Any] 
     sources = summary.get("scoreSources")
     if method_name == "aabb" and isinstance(sources, dict) and isinstance(sources.get("aabb"), dict):
         return sources["aabb"]
+    method = summary.get("methods", {}).get(method_name)
+    if isinstance(method, dict) and isinstance(method.get("rankingInput"), dict):
+        return method["rankingInput"]
     return None
 
 
@@ -190,6 +281,23 @@ def _paper_method_view(
             view["reason"] = (
                 "legacy or missing HZB input: a formal Region66 test visible-instance result is required"
             )
+    if method_name == "neural_cost" and view.get("status") == "available":
+        source = _ranking_input(summary, method_name)
+        manifest = summary.get("neuralCostManifest")
+        if (
+            not isinstance(source, dict)
+            or source.get("formula") != "p_g / bytes_g^alpha"
+            or source.get("instanceProbabilityAggregation") != "max"
+            or source.get("parameterSelectionSplit") != "validation"
+            or not isinstance(manifest, dict)
+            or manifest.get("frozen") is not True
+            or manifest.get("selectionSplit") != "validation"
+            or manifest.get("testRead") is True
+        ):
+            view["status"] = "unavailable"
+            view["reason"] = (
+                "missing frozen validation neural-cost alpha manifest"
+            )
     return view
 
 
@@ -197,6 +305,9 @@ def summary_row(summary: dict[str, Any], source_path: Path, method_name: str, me
     method = _paper_method_view(summary, method_name, method)
     filtering = method.get("decisionMode") == "threshold_filtering"
     ranking_input = _ranking_input(summary, method_name)
+    coverage_upper_bound = number_mean(method, "visibleWeightCoverageUpperBound")
+    if coverage_upper_bound is None:
+        coverage_upper_bound = number_mean(method, "coverageUpperBound")
     row: dict[str, Any] = {
         "scene": scene_name(summary, source_path),
         "method": method_name,
@@ -205,8 +316,24 @@ def summary_row(summary: dict[str, Any], source_path: Path, method_name: str, me
         "input_kind": ranking_input.get("kind") if isinstance(ranking_input, dict) else None,
         "availability_reason": method.get("reason"),
         "decision_mode": method.get("decisionMode", "threshold_free_ranking"),
+        "ranking_formula": ranking_input.get("formula") if isinstance(ranking_input, dict) else None,
+        "instance_aggregation": (
+            ranking_input.get("instanceProbabilityAggregation", ranking_input.get("instanceAabbAggregation"))
+            if isinstance(ranking_input, dict)
+            else None
+        ),
+        "cost_alpha": ranking_input.get("costExponent") if isinstance(ranking_input, dict) else None,
+        "parameter_selection_split": (
+            ranking_input.get("parameterSelectionSplit") if isinstance(ranking_input, dict) else None
+        ),
+        "uses_merged_glb_aabb": (
+            ranking_input.get("usesMergedGlbAabb") if isinstance(ranking_input, dict) else None
+        ),
         "pose_count": method.get("poseCount", 0),
         "coverage_source": summary.get("coverageSource", "unknown"),
+        "coverage_metric": summary.get("coverageMetric"),
+        "coverage_unit": summary.get("coverageUnit"),
+        "coverage_semantics": summary.get("coverageSemantics"),
         "candidate_glb_mean": number_mean(method, "candidateGlbCount"),
         "candidate_bytes_mean": number_mean(method, "candidateGlbBytes"),
         "predicted_glb_mean": number_mean(method, "predictedGlbCount") if filtering else None,
@@ -218,7 +345,7 @@ def summary_row(summary: dict[str, Any], source_path: Path, method_name: str, me
         "bytes_at_100_mean": None if filtering else number_mean(method.get("bytesAtCoverage", {}), "100"),
         "waste_before_99_mean": None if filtering else number_mean(method, "wasteBefore99Bytes"),
         "required_rank_mean": None if filtering else number_mean(method, "requiredRank"),
-        "coverage_upper_bound_mean": number_mean(method, "coverageUpperBound"),
+        "coverage_upper_bound_mean": coverage_upper_bound,
     }
     for key in ("95", "99", "99.9", "100"):
         row[f"unreachable_{key.replace('.', '_')}_ratio"] = (
@@ -260,6 +387,9 @@ def write_markdown(path: Path, rows: list[dict[str, Any]]) -> None:
         ("Input", "input_kind"),
         ("Reason", "availability_reason"),
         ("Mode", "decision_mode"),
+        ("Formula", "ranking_formula"),
+        ("Aggregation", "instance_aggregation"),
+        ("Alpha", "cost_alpha"),
         ("Pred GLBs", "predicted_glb_mean"),
         ("Pred bytes", "predicted_bytes_mean"),
         ("Pred/cand", "predicted_byte_ratio_mean"),
@@ -278,7 +408,7 @@ def write_markdown(path: Path, rows: list[dict[str, Any]]) -> None:
         "# Progressive GLB streaming",
         "",
         "Values are per-pose means. Bytes are complete GLB bytes; a GLB contributes only after its full resource arrives.",
-        "Ranking rows use the complete fixed candidate GLB set and no visibility threshold. `NA` means the method was unavailable.",
+        "Ranking rows use the complete fixed candidate GLB set and no visibility threshold. Coverage is visible-weight coverage when the declared utility source is `visible_weights`. `NA` means the method was unavailable.",
         "",
         "| " + " | ".join(label for label, _key in columns) + " |",
         "| " + " | ".join("---" for _label, _key in columns) + " |",
@@ -324,7 +454,10 @@ def curve_rows(summary: dict[str, Any], source_path: Path) -> list[dict[str, Any
                     "label": method.get("label", RANKING_METHOD_LABELS.get(method_name, method_name)),
                     "rank_fraction": point.get("rankFraction"),
                     "mean_bytes": point.get("meanBytes"),
-                    "mean_coverage": point.get("meanCoverage"),
+                    "mean_coverage": point.get(
+                        "meanVisibleWeightCoverage",
+                        point.get("meanCoverage"),
+                    ),
                 }
             )
     return rows
@@ -332,10 +465,17 @@ def curve_rows(summary: dict[str, Any], source_path: Path) -> list[dict[str, Any
 
 def coverage_axis_label(summary: dict[str, Any]) -> str:
     source = str(summary.get("coverageSource", ""))
-    if source == "reference-frontmost-pixel-histogram-v1":
-        return "Reference-frontmost pixel coverage (%)"
-    if source == "visible_weights_utility_not_pixel_coverage":
-        return "Visible-weight utility coverage (%)"
+    if source in {
+        "reference_frontmost_pixel_utility",
+        "reference-frontmost-pixel-histogram-v1",
+    }:
+        return "Reference-frontmost pixel utility (%)"
+    if source in {
+        "visible_weights",
+        "visible_weight_coverage",
+        "visible_weights_utility_not_pixel_coverage",
+    }:
+        return "Visible-weight coverage (%)"
     return "GT GLB presence coverage (%)"
 
 
@@ -358,11 +498,13 @@ def plot_curves(path_prefix: Path, summaries: list[tuple[Path, dict[str, Any]]])
         "distance",
         "projected_area",
         "projected_area_per_byte",
+        "neural_cost",
         "hzb_visible_first",
         "gt_utility_per_byte_oracle",
     ]
     colors = {
         "full": "#1f77b4",
+        "neural_cost": "#17becf",
         "aabb": "#ff7f0e",
         "original": "#7f7f7f",
         "distance": "#2ca02c",
@@ -384,7 +526,16 @@ def plot_curves(path_prefix: Path, summaries: list[tuple[Path, dict[str, Any]]])
             if not points:
                 continue
             x = [float(point.get("meanBytes", 0.0)) / (1024 * 1024) for point in points]
-            y = [float(point.get("meanCoverage", 0.0)) * 100.0 for point in points]
+            y = [
+                float(
+                    point.get(
+                        "meanVisibleWeightCoverage",
+                        point.get("meanCoverage", 0.0),
+                    )
+                )
+                * 100.0
+                for point in points
+            ]
             axis.plot(
                 x,
                 y,
@@ -448,12 +599,48 @@ def main() -> None:
         write_csv(output_dir / "table5_streaming_filtering.csv", filter_rows)
         write_markdown(output_dir / "table5_streaming_filtering.md", filter_rows)
 
+    scheduler_summaries = []
+    for path in args.scheduler_summary:
+        resolved = path.expanduser().resolve()
+        summary = read_json(path)
+        validate_paper_summary(summary, resolved, DECISION_MODE_SCHEDULER_REPLAY)
+        scheduler_summaries.append(
+            {
+                "path": str(resolved),
+                "schema": summary["schema"],
+                "decisionMode": DECISION_MODE_SCHEDULER_REPLAY,
+                "poseCount": summary["poseCount"],
+                "methods": summary.get("methods", []),
+                "bandwidthsMbps": summary.get("bandwidthsMbps", []),
+            }
+        )
+    if scheduler_summaries:
+        (output_dir / "scheduler_replay_inputs.json").write_text(
+            json.dumps(
+                {
+                    "schema": "pvs-glb-streaming-scheduler-replay-inputs-v1",
+                    "decisionMode": DECISION_MODE_SCHEDULER_REPLAY,
+                    "summaries": scheduler_summaries,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
     manifest = {
         "schema": "pvs-glb-streaming-paper-output-v1",
         "split": "test",
         "testRead": True,
+        "decisionModes": [
+            DECISION_MODE_THRESHOLD_FREE_RANKING,
+            DECISION_MODE_THRESHOLD_FILTERING,
+            DECISION_MODE_SCHEDULER_REPLAY,
+        ],
         "rankingSummaries": [str(path) for path, _summary in summaries],
         "filterSummaries": [str(path.expanduser().resolve()) for path in args.filter_summary],
+        "schedulerReplaySummaries": [row["path"] for row in scheduler_summaries],
         "rankingTable": "table5_streaming_ranking.csv",
         "rankingTableMarkdown": "table5_streaming_ranking.md",
         "curveSource": "streaming_coverage_curve.csv",
@@ -462,6 +649,7 @@ def main() -> None:
             "streaming_coverage_curve.pdf",
             "streaming_coverage_curve.svg",
         ],
+        "schedulerReplayInputs": "scheduler_replay_inputs.json" if scheduler_summaries else None,
         "notes": [
             "Ranking is threshold-free and uses the complete per-pose candidate GLB set.",
             "Filtering is emitted separately and uses frozen score thresholds.",

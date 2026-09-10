@@ -16,7 +16,15 @@ if str(MODEL_DIR) not in sys.path:
 
 from pose_csr_dataset import PoseCSRDataset, _project_aabb_features_numpy  # noqa: E402
 
-from glb_streaming import GlbAsset, PoseRecord, StreamingContractError
+from glb_streaming import (
+    GlbAsset,
+    NEURAL_COST_ALPHA_CANDIDATES,
+    NEURAL_COST_MANIFEST_SCHEMA,
+    PoseRecord,
+    StreamingContractError,
+    coverage_metadata,
+    validate_neural_cost_alpha,
+)
 
 
 def require_file(path: str | Path, label: str) -> Path:
@@ -34,13 +42,39 @@ def read_json(path: str | Path, label: str = "JSON file") -> Any:
         raise StreamingContractError(f"invalid {label}: {resolved}: {error}") from error
 
 
+def _require_complete_test_pose_selection(
+    dataset: PoseCSRDataset,
+    selected_pose_ids: Iterable[int],
+    label: str,
+) -> tuple[int, ...]:
+    expected = tuple(int(value) for value in dataset.split("test").pose_indices.tolist())
+    selected = tuple(int(value) for value in selected_pose_ids)
+    if selected != expected:
+        raise StreamingContractError(
+            f"{label} must cover the complete test split without a subset"
+        )
+    return expected
+
+
 def _bounds_array(value: Mapping[str, Any], label: str) -> np.ndarray:
-    if "min" not in value or "max" not in value:
-        raise StreamingContractError(f"{label} must contain min and max")
     try:
-        result = np.asarray(list(value["min"]) + list(value["max"]), dtype=np.float32)
+        if "min" in value and "max" in value:
+            result = np.asarray(list(value["min"]) + list(value["max"]), dtype=np.float32)
+        elif "center" in value and "size" in value:
+            center = np.asarray(list(value["center"]), dtype=np.float32)
+            size = np.asarray(list(value["size"]), dtype=np.float32)
+            if center.shape != (3,) or size.shape != (3,):
+                raise ValueError
+            if np.any(size < 0.0):
+                raise ValueError
+            half = size * 0.5
+            result = np.concatenate([center - half, center + half]).astype(np.float32)
+        else:
+            raise ValueError
     except (TypeError, ValueError) as error:
-        raise StreamingContractError(f"{label} has invalid bounds") from error
+        raise StreamingContractError(
+            f"{label} must contain finite min/max or center/size bounds"
+        ) from error
     if result.shape != (6,) or not np.all(np.isfinite(result)) or np.any(result[3:] < result[:3]):
         raise StreamingContractError(f"{label} has non-finite or inverted bounds")
     return result
@@ -50,10 +84,28 @@ def _union_component_bounds(
     component_records: list[Mapping[str, Any]],
     component_ids: Iterable[int],
 ) -> np.ndarray:
-    selected = [component_records[int(index)] for index in component_ids]
+    record_by_id = {
+        int(record.get("instanceId", record.get("componentGlobalId", index))): record
+        for index, record in enumerate(component_records)
+    }
+    try:
+        selected = [record_by_id[int(index)] for index in component_ids]
+    except KeyError as error:
+        raise StreamingContractError(
+            f"GLB component mapping references unknown instance {error.args[0]}"
+        ) from error
     if not selected:
         return np.zeros((6,), dtype=np.float32)
-    bounds = np.stack([_bounds_array(row["bounds"], "component bounds") for row in selected], axis=0)
+    bounds = np.stack(
+        [
+            _bounds_array(
+                row.get("bounds") or row.get("aabb"),
+                "component bounds",
+            )
+            for row in selected
+        ],
+        axis=0,
+    )
     return np.concatenate([bounds[:, :3].min(axis=0), bounds[:, 3:].max(axis=0)]).astype(np.float32)
 
 
@@ -160,6 +212,33 @@ class LoadedPose:
     camera_forward: np.ndarray
     camera_view: np.ndarray
     mvp: np.ndarray | None
+    candidate_instance_aabbs: np.ndarray | None = None
+
+
+def split_pose_ids(dataset: PoseCSRDataset, split: str) -> tuple[int, ...]:
+    """Return the registered split pose IDs in dataset order."""
+
+    return tuple(int(value) for value in dataset.split(split).pose_indices.tolist())
+
+
+def require_complete_test_pose_selection(
+    dataset: PoseCSRDataset,
+    selected_pose_ids: Iterable[int],
+    *,
+    label: str = "formal test input",
+) -> tuple[int, ...]:
+    """Reject a truncated or reordered formal test selection."""
+
+    selected = tuple(int(value) for value in selected_pose_ids)
+    expected = split_pose_ids(dataset, "test")
+    if len(selected) != len(set(selected)):
+        raise StreamingContractError(f"{label} contains duplicate test pose IDs")
+    if selected != expected:
+        raise StreamingContractError(
+            f"{label} must cover the complete test split in registered order: "
+            f"selected={len(selected)}, expected={len(expected)}"
+        )
+    return expected
 
 
 def _load_jsonl_rows(path: str | Path, label: str) -> list[dict[str, Any]]:
@@ -177,6 +256,32 @@ def _load_jsonl_rows(path: str | Path, label: str) -> list[dict[str, Any]]:
                 raise StreamingContractError(f"{label} line {line_number} is not an object")
             rows.append(value)
     return rows
+
+
+def _component_instance_aabbs(
+    component_records: list[Mapping[str, Any]],
+    expected_instances: int,
+) -> np.ndarray | None:
+    """Read instance AABBs without falling back to a merged GLB bound."""
+
+    table = np.full((expected_instances, 6), np.nan, dtype=np.float32)
+    seen: set[int] = set()
+    for fallback_id, record in enumerate(component_records):
+        instance_id = int(record.get("instanceId", record.get("componentGlobalId", fallback_id)))
+        if instance_id < 0 or instance_id >= expected_instances:
+            raise StreamingContractError(
+                f"component instance ID is outside the dense range: {instance_id}"
+            )
+        if instance_id in seen:
+            raise StreamingContractError(f"duplicate component instance ID: {instance_id}")
+        seen.add(instance_id)
+        raw_bounds = record.get("bounds") or record.get("aabb")
+        if raw_bounds is None:
+            continue
+        if not isinstance(raw_bounds, Mapping):
+            raise StreamingContractError(f"instance {instance_id} bounds are not an object")
+        table[instance_id] = _bounds_array(raw_bounds, f"instance {instance_id} bounds")
+    return table if np.all(np.isfinite(table)) else None
 
 
 def load_pose_sidecar(path: str | Path | None, field: str, label: str) -> dict[int, Any]:
@@ -240,6 +345,12 @@ def load_pose_inputs(
 
     runtime = read_json(runtime_meta_path, "runtime metadata")
     dataset = PoseCSRDataset(dataset_dir, num_instances=len(instance_to_glb))
+    if pose_limit < 0:
+        raise StreamingContractError("pose_limit must be non-negative")
+    if split == "test" and pose_limit:
+        raise StreamingContractError(
+            "formal test input rejects pose_limit; a test result must cover the complete test split"
+        )
     if pose_ids is None:
         selected = dataset.split(split).pose_indices.astype(np.int64, copy=False).tolist()
     else:
@@ -248,6 +359,14 @@ def load_pose_inputs(
         selected = selected[: int(pose_limit)]
     if not selected:
         raise StreamingContractError(f"no poses selected from split {split}")
+    if len(selected) != len(set(selected)):
+        raise StreamingContractError(f"selected pose IDs for split {split} must be unique")
+    split_ids = set(int(value) for value in dataset.split(split).pose_indices.tolist())
+    outside_split = sorted(set(selected) - split_ids)
+    if outside_split:
+        raise StreamingContractError(
+            f"selected pose IDs are outside split {split}: {outside_split[:8]}"
+        )
 
     frontmost = load_pose_sidecar(
         reference_frontmost_path,
@@ -263,6 +382,8 @@ def load_pose_inputs(
     component_records = runtime.get("componentRecords") or []
     if len(component_records) != len(instance_to_glb):
         raise StreamingContractError("runtime metadata instance count disagrees with the dataset")
+    instance_aabbs = _component_instance_aabbs(component_records, len(instance_to_glb))
+    coverage = coverage_metadata(utility_source)
     loaded: list[LoadedPose] = []
     for ordinal, pose_id in enumerate(selected):
         if pose_id < 0 or pose_id >= dataset.poses.size:
@@ -270,6 +391,7 @@ def load_pose_inputs(
         candidate_instances = np.asarray(dataset.candidate_slice(pose_id), dtype=np.uint32)
         visible_instances, visible_weights = dataset.visible_slice(pose_id)
         visible_instances = np.asarray(visible_instances, dtype=np.uint32)
+        visible_weights = np.asarray(visible_weights, dtype=np.float32)
         invalid_candidates = [
             int(value) for value in candidate_instances.tolist() if int(value) not in instance_to_glb
         ]
@@ -285,8 +407,21 @@ def load_pose_inputs(
             raise StreamingContractError(f"pose {pose_id} has duplicate candidate instance IDs")
         if np.unique(visible_instances).size != visible_instances.size:
             raise StreamingContractError(f"pose {pose_id} has duplicate visible instance IDs")
+        if visible_weights.shape != visible_instances.shape:
+            raise StreamingContractError(
+                f"pose {pose_id} visible weights are not aligned with visible instance IDs"
+            )
+        if not np.all(np.isfinite(visible_weights)) or np.any(visible_weights < 0.0):
+            raise StreamingContractError(f"pose {pose_id} visible weights are invalid")
+        candidate_instance_set = set(int(value) for value in candidate_instances.tolist())
+        if not set(int(value) for value in visible_instances.tolist()).issubset(candidate_instance_set):
+            raise StreamingContractError(
+                f"pose {pose_id} visible instances are not a subset of candidates"
+            )
         candidate_glbs = tuple(sorted({int(instance_to_glb[int(value)]) for value in candidate_instances}))
         gt_glbs = tuple(sorted({int(instance_to_glb[int(value)]) for value in visible_instances}))
+        if not set(candidate_glbs).issubset(set(int(value) for value in assets)):
+            raise StreamingContractError(f"pose {pose_id} candidate instances map outside GLB inventory")
         utility: dict[int, float] = {}
         if utility_source == "visible_weights":
             for instance_id, weight in zip(visible_instances.tolist(), visible_weights.tolist()):
@@ -300,6 +435,11 @@ def load_pose_inputs(
         camera_forward = np.asarray(dataset.poses["camera_forward"][pose_id], dtype=np.float32)
         camera_view = dataset.camera_view(pose_id)
         mvp = dataset.mvp_slice(pose_id).astype(np.float32, copy=False) if dataset.mvp is not None else None
+        candidate_instance_aabbs = (
+            instance_aabbs[candidate_instances.astype(np.int64, copy=False)].copy()
+            if instance_aabbs is not None
+            else None
+        )
         loaded.append(
             LoadedPose(
                 record=PoseRecord(
@@ -313,6 +453,9 @@ def load_pose_inputs(
                         if pose_id in hzb
                         else None
                     ),
+                    coverage_source=coverage["source"],
+                    coverage_semantics=coverage["semantics"],
+                    coverage_unit=coverage["unit"],
                 ),
                 candidate_instance_ids=candidate_instances,
                 visible_instance_ids=visible_instances,
@@ -320,6 +463,7 @@ def load_pose_inputs(
                 camera_forward=camera_forward,
                 camera_view=camera_view,
                 mvp=mvp,
+                candidate_instance_aabbs=candidate_instance_aabbs,
             )
         )
     return loaded
@@ -331,54 +475,106 @@ def attach_geometry_scores(
     score_by_pose: Mapping[int, Mapping[str, np.ndarray]],
     instance_to_glb: Mapping[int, int],
 ) -> list[PoseRecord]:
-    """Aggregate instance scores and add geometry-only score maps per GLB."""
+    """Aggregate scores and derive geometry heuristics from candidate instances.
+
+    A GLB can contain spatially separated instances.  Therefore distance and
+    projected area are computed for every candidate instance first, then
+    reduced to GLB scores with ``min(distance)`` and ``max(area)``.  The GLB
+    record's union AABB is intentionally never used for these rankings.
+    """
 
     result: list[PoseRecord] = []
-    glb_aabbs = np.stack([assets[index].aabb for index in sorted(assets)], axis=0).astype(np.float32)
-    glb_ids = sorted(assets)
-    glb_index = {glb_id: index for index, glb_id in enumerate(glb_ids)}
     for loaded in poses:
         pose = loaded.record
-        candidate = np.asarray(pose.candidate_glb_ids, dtype=np.int64)
         rank_scores: dict[str, dict[int, float]] = {}
         score_fields = score_by_pose.get(pose.pose_id, {})
-        for method in ("full", "aabb"):
-            values = score_fields.get(method)
-            if values is None:
-                continue
+        for method, raw_values in score_fields.items():
+            values = np.asarray(raw_values, dtype=np.float32).reshape(-1)
             if values.shape != loaded.candidate_instance_ids.shape:
                 raise StreamingContractError(
                     f"pose {pose.pose_id} {method} scores do not match candidate instance rows"
                 )
+            if not np.all(np.isfinite(values)):
+                raise StreamingContractError(f"pose {pose.pose_id} {method} scores are not finite")
+            if method in {"full", "neural", "neural_probability"} and (
+                np.any(values < 0.0) or np.any(values > 1.0)
+            ):
+                raise StreamingContractError(
+                    f"pose {pose.pose_id} {method} scores are not probabilities in [0, 1]"
+                )
             grouped: dict[int, float] = {}
-            for instance_id, score in zip(loaded.candidate_instance_ids.tolist(), values.tolist()):
+            for instance_id, score in zip(
+                loaded.candidate_instance_ids.tolist(), values.tolist()
+            ):
                 glb_id = int(instance_to_glb[int(instance_id)])
                 grouped[glb_id] = max(grouped.get(glb_id, 0.0), float(score))
-            rank_scores[method] = grouped
+            rank_scores[str(method)] = grouped
+
+        neural_scores = next(
+            (
+                rank_scores[name]
+                for name in ("full", "neural_probability", "neural")
+                if name in rank_scores
+            ),
+            None,
+        )
+        if neural_scores is not None:
+            rank_scores["full"] = dict(neural_scores)
+            rank_scores["neural_probability"] = dict(neural_scores)
 
         if loaded.camera_world.shape != (3,):
             raise StreamingContractError(f"pose {pose.pose_id} camera position is invalid")
-        selected_indices = np.asarray([glb_index[index] for index in candidate.tolist()], dtype=np.int64)
-        mins = glb_aabbs[selected_indices, :3]
-        maxs = glb_aabbs[selected_indices, 3:]
-        delta = np.maximum(np.maximum(mins - loaded.camera_world, loaded.camera_world - maxs), 0.0)
-        distance = np.linalg.norm(delta, axis=1)
-        rank_scores["distance"] = {
-            int(glb_id): float(1.0 / (1.0 + distance[index]))
-            for index, glb_id in enumerate(candidate.tolist())
-        }
-        if loaded.mvp is not None:
-            _rect, area, _depth, valid = _project_aabb_features_numpy(
-                glb_aabbs[selected_indices], loaded.mvp
+        instance_aabbs = getattr(loaded, "candidate_instance_aabbs", None)
+        if instance_aabbs is not None:
+            instance_aabbs = np.asarray(instance_aabbs, dtype=np.float32)
+            if instance_aabbs.shape != (loaded.candidate_instance_ids.size, 6):
+                raise StreamingContractError(
+                    f"pose {pose.pose_id} candidate instance AABBs are misaligned"
+                )
+            if not np.all(np.isfinite(instance_aabbs)) or np.any(
+                instance_aabbs[:, 3:] < instance_aabbs[:, :3]
+            ):
+                raise StreamingContractError(
+                    f"pose {pose.pose_id} candidate instance AABBs are invalid"
+                )
+            mins = instance_aabbs[:, :3]
+            maxs = instance_aabbs[:, 3:]
+            delta = np.maximum(
+                np.maximum(mins - loaded.camera_world, loaded.camera_world - maxs),
+                0.0,
             )
-            area = np.where(valid, np.clip(area, 0.0, 1.0), 0.0)
-            rank_scores["projected_area"] = {
-                int(glb_id): float(area[index]) for index, glb_id in enumerate(candidate.tolist())
+            instance_distance = np.linalg.norm(delta, axis=1)
+            grouped_distance: dict[int, float] = {}
+            for instance_id, distance in zip(
+                loaded.candidate_instance_ids.tolist(), instance_distance.tolist()
+            ):
+                glb_id = int(instance_to_glb[int(instance_id)])
+                grouped_distance[glb_id] = min(
+                    grouped_distance.get(glb_id, float("inf")), float(distance)
+                )
+            rank_scores["distance"] = {
+                glb_id: float(1.0 / (1.0 + distance))
+                for glb_id, distance in grouped_distance.items()
             }
-            rank_scores["projected_area_per_byte"] = {
-                int(glb_id): float(area[index]) / max(1, assets[int(glb_id)].byte_size)
-                for index, glb_id in enumerate(candidate.tolist())
-            }
+            if loaded.mvp is not None:
+                _rect, area, _depth, valid = _project_aabb_features_numpy(
+                    instance_aabbs,
+                    loaded.mvp,
+                )
+                instance_area = np.where(valid, np.clip(area, 0.0, 1.0), 0.0)
+                grouped_area: dict[int, float] = {}
+                for instance_id, area_value in zip(
+                    loaded.candidate_instance_ids.tolist(), instance_area.tolist()
+                ):
+                    glb_id = int(instance_to_glb[int(instance_id)])
+                    grouped_area[glb_id] = max(
+                        grouped_area.get(glb_id, 0.0), float(area_value)
+                    )
+                rank_scores["projected_area"] = dict(grouped_area)
+                rank_scores["projected_area_per_byte"] = {
+                    glb_id: float(area_value) / max(1, assets[glb_id].byte_size)
+                    for glb_id, area_value in grouped_area.items()
+                }
         result.append(
             PoseRecord(
                 pose_id=pose.pose_id,
@@ -388,6 +584,10 @@ def attach_geometry_scores(
                 utility_by_glb=pose.utility_by_glb,
                 rank_scores=rank_scores,
                 hzb_visible_glb_ids=pose.hzb_visible_glb_ids,
+                neural_cost_alpha=pose.neural_cost_alpha,
+                coverage_source=pose.coverage_source,
+                coverage_semantics=pose.coverage_semantics,
+                coverage_unit=pose.coverage_unit,
             )
         )
     return result
@@ -397,6 +597,8 @@ def load_score_sidecar(
     result_dir: str | Path,
     dataset_dir: str | Path,
     selected_pose_ids: Iterable[int],
+    *,
+    require_complete_test: bool = False,
 ) -> tuple[dict[int, dict[str, np.ndarray]], dict[str, Any]]:
     """Read score arrays and prove they align with the selected CSR rows."""
 
@@ -418,6 +620,22 @@ def load_score_sidecar(
         raise StreamingContractError("streaming score sidecar pose alignment is invalid")
     dataset = PoseCSRDataset(dataset_dir, num_instances=int(manifest["numInstances"]))
     expected_pose_ids = [int(value) for value in selected_pose_ids]
+    if len(expected_pose_ids) != len(set(expected_pose_ids)):
+        raise StreamingContractError("selected score sidecar pose IDs must be unique")
+    if require_complete_test:
+        if manifest.get("split") != "test" or manifest.get("testRead") is not True:
+            raise StreamingContractError(
+                "formal test score sidecar must declare split=test and testRead=true"
+            )
+        complete_test_pose_ids = _require_complete_test_pose_selection(
+            dataset,
+            expected_pose_ids,
+            label="formal test score sidecar read",
+        )
+        if tuple(int(value) for value in pose_ids.tolist()) != complete_test_pose_ids:
+            raise StreamingContractError(
+                "formal test score sidecar pose order does not match the complete test split"
+            )
     sidecar_rows = {int(pose_id): row for row, pose_id in enumerate(pose_ids.tolist())}
     missing_pose_ids = [pose_id for pose_id in expected_pose_ids if pose_id not in sidecar_rows]
     if missing_pose_ids:
@@ -443,3 +661,71 @@ def load_score_sidecar(
             start, end = int(offsets[row]), int(offsets[row + 1])
             output.setdefault(pose_id, {})[field] = values[start:end]
     return output, manifest
+
+
+def validate_neural_cost_manifest(
+    manifest: Mapping[str, Any],
+    label: str = "neural cost manifest",
+) -> dict[str, Any]:
+    """Validate the validation-selected alpha before a test replay reads it."""
+
+    if manifest.get("schema") != NEURAL_COST_MANIFEST_SCHEMA:
+        raise StreamingContractError(
+            f"{label} must use {NEURAL_COST_MANIFEST_SCHEMA}"
+        )
+    if manifest.get("frozen") is not True or manifest.get("eligibleForTest") is not True:
+        raise StreamingContractError(f"{label} is not frozen for test use")
+    if manifest.get("selectionSplit") != "validation":
+        raise StreamingContractError(f"{label} alpha must be selected on validation")
+    if manifest.get("testRead") is True:
+        raise StreamingContractError(f"{label} claims that test was read during selection")
+    candidate_alphas = manifest.get("candidateAlphas")
+    if not isinstance(candidate_alphas, list):
+        raise StreamingContractError(f"{label} must list candidateAlphas")
+    try:
+        normalized_candidates = [validate_neural_cost_alpha(value, "candidate alpha") for value in candidate_alphas]
+    except (TypeError, ValueError) as error:
+        raise StreamingContractError(f"{label} has invalid candidateAlphas") from error
+    if normalized_candidates != list(NEURAL_COST_ALPHA_CANDIDATES):
+        raise StreamingContractError(
+            f"{label} candidateAlphas must be exactly {list(NEURAL_COST_ALPHA_CANDIDATES)}"
+        )
+    selected_alpha = validate_neural_cost_alpha(
+        manifest.get("selectedAlpha"),
+        f"{label}.selectedAlpha",
+    )
+    if manifest.get("formula") != "p_g / bytes_g^alpha":
+        raise StreamingContractError(f"{label} has an unsupported cost formula")
+    if manifest.get("instanceProbabilityAggregation") != "max":
+        raise StreamingContractError(
+            f"{label} must aggregate instance probabilities with max"
+        )
+    if manifest.get("bytesSource") != "complete GLB file bytes":
+        raise StreamingContractError(f"{label} has an invalid byte source")
+    normalized = dict(manifest)
+    normalized["candidateAlphas"] = normalized_candidates
+    normalized["selectedAlpha"] = selected_alpha
+    return normalized
+
+
+def load_neural_cost_manifest(path: str | Path) -> dict[str, Any]:
+    """Load only a frozen validation-selected neural cost manifest."""
+
+    resolved = require_file(path, "neural cost manifest")
+    return validate_neural_cost_manifest(
+        read_json(resolved, "neural cost manifest"),
+        str(resolved),
+    ) | {"path": str(resolved)}
+
+
+def write_neural_cost_manifest(path: str | Path, manifest: Mapping[str, Any]) -> Path:
+    """Write a manifest after validating that it is test-free and frozen."""
+
+    resolved = Path(path).expanduser().resolve()
+    validated = validate_neural_cost_manifest(manifest)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text(
+        json.dumps(validated, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return resolved
