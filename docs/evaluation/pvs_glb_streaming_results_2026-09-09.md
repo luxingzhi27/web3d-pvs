@@ -88,6 +88,8 @@ conda run -n slm_pvs python neural_instance_culling/benchmark/generate_streaming
 
 探索结果说明：神经分数不需要强制乘 AABB 面积。`p/sqrt(B)` 相对纯 `p` 将 HKUST Bytes@99 从 `18.031` MiB 降至 `10.511` MiB，在 IFCBench 也从 `8.078` MiB 降至 `7.927` MiB；带面积的 `p*A/B` 虽在 HKUST 更低，却在 IFCBench 明显退化，不具备跨场景稳定性。正式方法因此把 `p/Bytes^alpha` 作为成本感知神经排序族，`alpha` 必须在 calibration/validation 上冻结；AABB 投影仅作为独立启发式或明确命名的面积调制消融。
 
+对应正式代码已于 2026-09-10 接入，但上述数字仍是规则确定前的探索结果。新流水线会在 validation 选择 `alpha`，完整 test 只读取冻结 manifest；距离与投影面积也改为逐 candidate instance AABB 计算后按 GLB 聚合。最终 Table 5 必须等待 IFCBench 最终模型和 HZB 正式结果后整体重跑，不能混用本节数字。
+
 ## 指标口径
 
 - `Bytes@x`：按方法顺序下载，累计到完整 GLB 到达后首次达到 x coverage 的字节数；传输中的部分 GLB不贡献 coverage。

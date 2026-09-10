@@ -35,7 +35,7 @@ exporter 将该 `scores` 数组写入 streaming sidecar 的 `aabb` 字段，并�
 
 ### 成本感知神经排序与启发式
 
-2026-09-10 冻结以下论文计算规则；对应方法字段尚需接入模拟器后才能生成正式值，现有探索脚本结果不能替代正式产物。
+2026-09-10 冻结以下论文计算规则，并已接入正式模拟器；现有旧 test 探索值仍不能替代按新协议重跑的正式产物。
 
 - 先对同一 GLB 的候选实例可见性取 `p_g=max_i(p_i)`。
 - 纯神经排序为 `p_g`；成本感知排序为 `p_g / Bytes_g^alpha`。
@@ -72,8 +72,8 @@ HZB 不生成连续分数。排序规则是：
 
 | 指标 | 状态 | 中文含义 |
 |---|---|---|
-| `Bytes@95/99/99.9/100` | 未实现正式值 | 排序前缀达到对应 GLB utility 覆盖率所需的完整下载字节 |
-| `coverage ceiling` / `unreachable` | 未实现正式值 | 固定 candidate GLB 集合可达到的覆盖上限及目标不可达比例 |
+| `Bytes@95/99/99.9/100` | 代码完成，正式值待重跑 | 排序前缀达到对应 visible-weight coverage 所需的完整下载字节 |
+| `coverage ceiling` / `unreachable` | 代码完成，正式值待重跑 | 固定 candidate GLB 集合可达到的 visible-weight coverage 上限及目标不可达比例 |
 | `first-frame`、带宽时间、解析/挂载延迟 | 未实现正式值 | 真实调度计划中的首帧加载和运行成本 |
 
 这套输入契约保留为当前 streaming 评价主线；正式 artifact 到位后仍需重新生成两场景全 test 表格，并单独完成 12-pose 真实调度 replay。主要风险是上游 sidecar、Region66 workload 和 Pose CSR 的 pose/candidate 语义不一致，入口会将其拒绝或标记 unavailable，不应人工修补后继续汇总。
@@ -108,6 +108,21 @@ conda run -n slm_pvs python neural_instance_culling/benchmark/export_glb_streami
   2> neural_instance_culling/benchmark/out/paper_results/streaming_formal/ifcbench_scores_stderr.log
 ```
 
+### 先在 validation 冻结成本指数
+
+每个场景先导出最终 Full 的 validation 连续分数，再运行一次 validation 模拟。该阶段只比较 `alpha=0/0.5/1`，将选择结果写入 `neural_cost_ranking_manifest.json`，并保持 `testRead=false`。
+
+```bash
+conda run -n slm_pvs python neural_instance_culling/benchmark/simulate_glb_streaming.py \
+  --dataset-dir <scene-dataset> \
+  --runtime-meta <runtimeVisibilityMeta.json> \
+  --glb-index <glbIndex.json> --glb-root <asset-root> \
+  --result-dir <scene-validation-score-sidecar> \
+  --output-dir <scene-validation-simulation> \
+  --split validation --utility-source visible_weights \
+  --methods full,neural_cost
+```
+
 ### 两场景完整 test 模拟
 
 ```bash
@@ -117,8 +132,9 @@ conda run -n slm_pvs python neural_instance_culling/benchmark/simulate_glb_strea
   --glb-index <hkust-glbIndex.json> --glb-root <hkust-asset-root> \
   --result-dir neural_instance_culling/benchmark/out/paper_results/streaming_formal/hkust_scores \
   --hzb-region66-result <hkust-region66-formal-test.json> \
+  --neural-cost-manifest <hkust-validation-simulation/neural_cost_ranking_manifest.json> \
   --output-dir neural_instance_culling/benchmark/out/paper_results/streaming_formal/hkust_sim \
-  --split test --log-every 100 \
+  --split test --utility-source visible_weights --log-every 100 \
   > neural_instance_culling/benchmark/out/paper_results/streaming_formal/hkust_sim_stdout.log \
   2> neural_instance_culling/benchmark/out/paper_results/streaming_formal/hkust_sim_stderr.log
 
@@ -128,8 +144,9 @@ conda run -n slm_pvs python neural_instance_culling/benchmark/simulate_glb_strea
   --glb-index <ifcbench-glbIndex.json> --glb-root <ifcbench-asset-root> \
   --result-dir neural_instance_culling/benchmark/out/paper_results/streaming_formal/ifcbench_scores \
   --hzb-region66-result <ifcbench-region66-formal-test.json> \
+  --neural-cost-manifest <ifcbench-validation-simulation/neural_cost_ranking_manifest.json> \
   --output-dir neural_instance_culling/benchmark/out/paper_results/streaming_formal/ifcbench_sim \
-  --split test --log-every 100 \
+  --split test --utility-source visible_weights --log-every 100 \
   > neural_instance_culling/benchmark/out/paper_results/streaming_formal/ifcbench_sim_stdout.log \
   2> neural_instance_culling/benchmark/out/paper_results/streaming_formal/ifcbench_sim_stderr.log
 

@@ -1,6 +1,6 @@
 # PVS 论文核心实验与一周执行计划
 
-日期：2026-09-09
+日期：2026-09-09；2026-09-10 更新正式执行状态
 
 状态：执行中。本文是论文实验、图表、结果目录和执行顺序的唯一计划。
 
@@ -163,23 +163,23 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 
 验收覆盖同分AP、零GT统计、阈值边界、checkpoint和固定表一致性、HZB深度/近裁剪面、区域并集、GLB原子到达、覆盖不可达、像素直方图与重渲染一致性，以及硬件计时边界。禁止新增兼容层、前端历史模型路径或手工哈希步骤。
 
-## 执行进度（2026-09-09）
+## 执行进度（2026-09-10）
 
 | 项目 | 状态 | 已有产物 / 下一动作 |
 |---|---|---|
 | 场景统计 | 完成 | 两场景规模、三角形、GLB 字节、split、候选/GT 分布已进入 Table 1 |
 | HKUST Full test | 完成 | 三种子均通过安全门；WR `0.997082 +/- 0.001634`，LCB `0.994334 +/- 0.003271`，useful cull `0.901758 +/- 0.007830` |
-| IFCBench 微调 | 运行中 | 五组 `4 x 900` 扫描与精确 calibration/validation 已完成；选定去边界项配置正在做三种子 `8 x 900` 确认，完成后按 validation 安全性决定是否替换原 Full |
-| AABB + Ray MLP | 运行中 | 两场景 `6 x 300` 扫描已完成并选择 `2e-4`；自动链等待 IFCBench 确认后执行两场景三种子 `40 x 900` 与 frozen test |
-| HZB 外壳与运行时 | CPU preflight 完成 | 四套外壳、逐 pose aspect、Region `1/5/9/all`、正式硬件失败门、`512x288 / 1024x576` 六组 calibration 选择器和两场景 120-pose 分层 timing 计划已通过；Point60 的 60度计划已生成，真实 Color-ID GT 与正式 calibration/test 待独占 GPU |
+| IFCBench 微调 | v2 refine 运行中 | v1 去边界三种子确认的 WR LCB 为 `0.990089/0.989920/0.990212`。不因 seed02 差 `0.000080` 放弃微调；v2 从三份 v1 checkpoint 继续，先以 seed02 并行扫描边界减半、RVL `0.35` 和低学习率三项 `2 x 900`，再强制完成所选配置三种子 `4 x 900` 确认。确认结束前不读 test |
+| AABB + Ray MLP | 完成 | 两场景三种子 `40 x 900` 与 frozen test 已完成。IFCBench pose PR-AUC `0.28504 +/- 0.00047`、prevalence `0.12232`、useful cull `0.03942`；HKUST 与 Full 的正式对照产物也已登记 |
+| HZB 外壳与运行时 | 正式执行就绪 | 四套外壳、逐 pose aspect、Region `1/5/9/all`、正式硬件失败门、`512x288 / 1024x576` 六组 calibration 选择器和两场景 120-pose timing 计划已通过；32 项 dry-run 与 NVIDIA A6000 WebGPU 硬件门已再次通过。等待 IFCBench refine 结束后独占 GPU 执行 `all` |
 | 资产与容量 | 完成 | 神经资产为 lossless shell 的 `1.37%`（HKUST）和 `19.78%`（IFCBench）；rank Pareto、Table 4 及 PDF/SVG/PNG 已生成 |
 | 端侧模型前向 | 部分完成 | HKUST M2 与 vivo 各五 session 正式完成；IFCBench 移动端和 A6000 独占结果仍缺失，不以并发 smoke 代替 |
 | Safety-efficiency | 完成 | 六个核心变体的 calibration-safe validation 曲线及论文图已生成 |
-| Streaming | 部分完成 | 两场景 Full/启发式/oracle 的全 test 冷缓存结果已生成；AABB MLP 与 HZB visible-first 待正式结果后替换占位并重跑 |
+| Streaming | 正式代码完成，结果待重跑 | 已实现 `p_g=max_i p_i`、`p_g/Bytes_g^alpha`、validation 从 `{0,0.5,1}` 选择并冻结 alpha、逐实例 AABB 投影后按 GLB 聚合、visible-weight coverage、完整 test 校验，以及 filtering/ranking/scheduler replay 三套独立口径。旧 test 探索值不晋级；等待最终 IFCBench 与 HZB 输入后重导两场景 validation/test sidecar 并生成 Table 5 |
 | Test 图像 | 部分完成 | HKUST Full 的 684 view-cell formal-v2 manifest 已冻结；HZB manifest 转换与 IFCBench checkpoint 专属精确 calibration 接入已完成；硬件渲染、IFCBench 最终成员和 AABB/HZB 图像结果待 GPU 独占窗口 |
 | GT 收敛 | 部分完成 | 两场景各 100 cell x 128 点水平圆盘计划已生成，IFCBench 半径为 `2.5 m`；新 evaluator 已按计划/raw 三元组对齐，正式 Vulkan Color-ID 采样待执行 |
 | 离线成本 / 结果包 | 完成当前可得项 | 六阶段成本、artifact registry、三种子 Table 2 汇总已生成；未记录时间保持 unavailable，不作推算 |
 
-当前执行顺序不变：完成 IFCBench 确认和 AABB 长训；冻结两场景最终成员并各读取一次 test；在无训练并发的窗口依次完成 HZB、真实图像、GT 收敛和 A6000 计时；最后替换 streaming 基线、重建全部表图与结果包。任何中间指标都不取消已登记长训。
+当前执行顺序固定为：完成 IFCBench v2 refine 扫描与三种子确认；根据 validation 三种子结果冻结 IFCBench 最终家族并只读取一次 test；随后在无训练并发的窗口执行 HZB 32 项正式矩阵；最后用最终 Full、AABB 和 HZB 输入在 validation 冻结成本指数，再运行两场景完整 test streaming、真实 scheduler replay并重建表图与结果包。任何中间指标都不取消三种子确认、HZB 或 streaming 正式矩阵。
 
 本轮实现回归已通过 benchmark `167` 项、model `48` 项、完整前端 `npm test` 和 sampler `7` 项测试；测试过程禁用 CUDA，不作为任何正式性能结果。
