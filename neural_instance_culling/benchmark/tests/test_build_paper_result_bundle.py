@@ -51,6 +51,25 @@ class PaperResultBundleTest(unittest.TestCase):
             self.assertIn("hzb", registry["sections"])
             self.assertIn("thresholdCurves", registry["sections"])
 
+    def test_runtime_requires_scene_and_five_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "runtime.json"
+            source.write_text(json.dumps({"groups": [{
+                "scene": "hkust", "device": "fixture", "backend": "webgpu-v4",
+                "sessionCount": 5, "sampleCount": 15,
+            }]}), encoding="utf-8")
+            result = MODULE.build_runtime(source, root / "paper")
+            self.assertEqual(result["scenes"], ["hkust"])
+            self.assertTrue((root / "paper/mobile_runtime/runtime_summary.csv").is_file())
+
+            source.write_text(json.dumps({"groups": [{
+                "device": "fixture", "backend": "webgpu-v4",
+                "sessionCount": 5, "sampleCount": 15,
+            }]}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "identify their scene"):
+                MODULE.build_runtime(source, root / "paper")
+
 
 if __name__ == "__main__":
     unittest.main()

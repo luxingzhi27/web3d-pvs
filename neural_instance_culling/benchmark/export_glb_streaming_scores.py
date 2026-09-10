@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Export continuous per-candidate scores for the GLB streaming benchmark.
-
-The exporter is intentionally a separate step from the streaming simulator.
-It reads explicitly supplied CSR/runtime/model paths plus the formal AABB test
-sidecar and writes a small aligned score sidecar. The simulator can then
-compare threshold-free ranking methods without rerunning the AABB model.
-"""
+"""Export aligned continuous per-candidate scores for GLB streaming."""
 from __future__ import annotations
 
 import argparse
@@ -51,6 +45,12 @@ def parse_args() -> argparse.Namespace:
             "name|kind|checkpoint|runtime_features|calibration_summary; use '-' "
             "for unused static-runner fields"
         ),
+    )
+    parser.add_argument(
+        "--full-test-sidecar",
+        type=Path,
+        default=None,
+        help="frozen Full-model test score sidecar or its test evaluation JSON",
     )
     parser.add_argument(
         "--aabb-test-sidecar",
@@ -103,62 +103,66 @@ def _read_json_object(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
-def _resolve_formal_aabb_manifest(path: str | Path) -> tuple[Path, Path | None, dict[str, Any]]:
-    """Resolve a formal AABB sidecar or its formal test evaluation summary."""
+def _resolve_formal_score_manifest(
+    path: str | Path,
+    method: str,
+) -> tuple[Path, Path | None, dict[str, Any]]:
+    """Resolve a frozen-test sidecar or its formal evaluation summary."""
 
     source = Path(path).expanduser().resolve()
     manifest_path = source / "manifest.json" if source.is_dir() else source
-    payload = _read_json_object(manifest_path, "AABB sidecar manifest")
+    payload = _read_json_object(manifest_path, f"{method} sidecar manifest")
     evaluation_summary: Path | None = None
     if payload.get("schema") != SIDECAR_SCHEMA:
         sidecar_value = payload.get("scoreSidecar")
         if sidecar_value is None:
             raise ValueError(
-                "AABB input must be a pvs-typed-score-sidecar-v1 manifest "
+                f"{method} input must be a pvs-typed-score-sidecar-v1 manifest "
                 "or a formal test evaluation JSON with scoreSidecar"
             )
         if payload.get("split") != "test" or payload.get("testRead") is not True:
-            raise ValueError("AABB evaluation summary must be a frozen test result")
+            raise ValueError(f"{method} evaluation summary must be a frozen test result")
         evaluation_summary = manifest_path
         candidate = Path(str(sidecar_value)).expanduser()
         manifest_path = (candidate if candidate.is_absolute() else manifest_path.parent / candidate)
         if manifest_path.is_dir():
             manifest_path = manifest_path / "manifest.json"
-        payload = _read_json_object(manifest_path.resolve(), "AABB score sidecar manifest")
+        payload = _read_json_object(manifest_path.resolve(), f"{method} score sidecar manifest")
     return manifest_path.resolve(), evaluation_summary, payload
 
 
-def load_formal_aabb_test_sidecar(
+def load_formal_test_sidecar(
     path: str | Path,
     dataset: Any,
     selected_pose_ids: np.ndarray,
+    method: str,
 ) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
-    """Load checkpoint-specific continuous AABB scores from the frozen test sidecar.
+    """Load checkpoint-specific continuous scores from a frozen test sidecar.
 
     The returned arrays remain aligned to the stored CSR candidate order.  No
     prediction IDs or thresholded values are used for streaming ranking.
     """
 
-    manifest_path, evaluation_summary, manifest = _resolve_formal_aabb_manifest(path)
+    manifest_path, evaluation_summary, manifest = _resolve_formal_score_manifest(path, method)
     if manifest.get("schema") != SIDECAR_SCHEMA:
-        raise ValueError(f"unsupported AABB score sidecar schema: {manifest.get('schema')!r}")
+        raise ValueError(f"unsupported {method} score sidecar schema: {manifest.get('schema')!r}")
     if manifest.get("split") != "test" or manifest.get("testRead") is not True:
-        raise ValueError("formal AABB score sidecar must declare split=test and testRead=true")
+        raise ValueError(f"formal {method} score sidecar must declare split=test and testRead=true")
     arrays = read_score_sidecar(manifest_path)
     pose_indices = np.asarray(arrays["poseIndices"], dtype=np.int64)
     pose_offsets = np.asarray(arrays["poseOffsets"], dtype=np.int64)
     candidate_ids = np.asarray(arrays["candidateIds"], dtype=np.uint32)
     scores = np.asarray(arrays["scores"], dtype=np.float32)
     if pose_offsets.size != pose_indices.size + 1:
-        raise ValueError("formal AABB sidecar pose offsets are invalid")
+        raise ValueError(f"formal {method} sidecar pose offsets are invalid")
     if np.unique(pose_indices).size != pose_indices.size:
-        raise ValueError("formal AABB sidecar contains duplicate pose IDs")
+        raise ValueError(f"formal {method} sidecar contains duplicate pose IDs")
     if not np.all(np.isfinite(scores)) or np.any(scores < 0.0) or np.any(scores > 1.0):
-        raise ValueError("formal AABB sidecar scores must be finite probabilities in [0, 1]")
+        raise ValueError(f"formal {method} sidecar scores must be finite probabilities in [0, 1]")
     if int(manifest.get("poseCount", -1)) != pose_indices.size:
-        raise ValueError("formal AABB sidecar pose count disagrees with poseIndices")
+        raise ValueError(f"formal {method} sidecar pose count disagrees with poseIndices")
     if int(manifest.get("candidateCount", -1)) != candidate_ids.size:
-        raise ValueError("formal AABB sidecar candidate count disagrees with candidateIds")
+        raise ValueError(f"formal {method} sidecar candidate count disagrees with candidateIds")
 
     dataset_split = getattr(dataset, "split", None)
     if callable(dataset_split):
@@ -169,15 +173,15 @@ def load_formal_aabb_test_sidecar(
         if set(int(value) for value in pose_indices.tolist()) != set(
             int(value) for value in expected_test_pose_ids.tolist()
         ):
-            raise ValueError("formal AABB sidecar must cover the complete dataset test split")
+            raise ValueError(f"formal {method} sidecar must cover the complete dataset test split")
 
     row_by_pose = {int(pose_id): index for index, pose_id in enumerate(pose_indices.tolist())}
     selected = [int(value) for value in np.asarray(selected_pose_ids, dtype=np.int64).tolist()]
     if len(selected) != len(set(selected)):
-        raise ValueError("selected AABB test pose IDs must be unique")
+        raise ValueError(f"selected {method} test pose IDs must be unique")
     missing = [pose_id for pose_id in selected if pose_id not in row_by_pose]
     if missing:
-        raise ValueError(f"formal AABB sidecar is missing selected test poses: {missing[:8]}")
+        raise ValueError(f"formal {method} sidecar is missing selected test poses: {missing[:8]}")
     by_pose: dict[int, np.ndarray] = {}
     for pose_id in selected:
         row = row_by_pose[pose_id]
@@ -190,7 +194,7 @@ def load_formal_aabb_test_sidecar(
             )
         values = scores[start:end]
         if values.shape != expected.shape:
-            raise ValueError(f"formal AABB sidecar scores are misaligned at pose {pose_id}")
+            raise ValueError(f"formal {method} sidecar scores are misaligned at pose {pose_id}")
         by_pose[pose_id] = values.copy()
 
     threshold = manifest.get("threshold")
@@ -199,7 +203,7 @@ def load_formal_aabb_test_sidecar(
         if not np.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
             raise ValueError("formal AABB sidecar threshold is invalid")
     source = {
-        "kind": "formal_aabb_test_sidecar",
+        "kind": f"formal_{method}_test_sidecar",
         "schema": SIDECAR_SCHEMA,
         "manifest": str(manifest_path),
         "evaluationSummary": str(evaluation_summary) if evaluation_summary else None,
@@ -211,6 +215,14 @@ def load_formal_aabb_test_sidecar(
         "calibration": manifest.get("calibration"),
     }
     return by_pose, source
+
+
+def load_formal_aabb_test_sidecar(
+    path: str | Path,
+    dataset: Any,
+    selected_pose_ids: np.ndarray,
+) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
+    return load_formal_test_sidecar(path, dataset, selected_pose_ids, "aabb")
 
 
 def _model_sources(
@@ -249,6 +261,8 @@ def main() -> None:
         raise ValueError("frozen test score export must cover the complete test split")
     if args.poses_per_batch < 1:
         raise ValueError("--poses-per-batch must be positive")
+    if args.full_test_sidecar is not None and args.split != "test":
+        raise ValueError("--full-test-sidecar is only valid for split=test")
     specs: list[tuple[str, dict[str, str]]] = [parse_model_spec(value) for value in args.model_spec]
     names = [name for name, _spec in specs]
     if len(set(names)) != len(names):
@@ -257,7 +271,6 @@ def main() -> None:
     runtime_meta = args.runtime_meta.expanduser().resolve()
     dataset_dir = args.dataset_dir.expanduser().resolve()
     result_dir = args.result_dir.expanduser().resolve()
-    device = select_device(args.device)
     world_aabbs, _instance_to_glb, runtime = load_runtime_meta(runtime_meta)
     dataset = PoseCSRDataset(dataset_dir, num_instances=int(world_aabbs.shape[0]))
     split = dataset.split(args.split)
@@ -271,8 +284,22 @@ def main() -> None:
         specs,
         args.aabb_test_sidecar,
     )
-    if not runner_specs and aabb_sidecar_path is None and not aabb_requested:
-        raise ValueError("provide at least one --model-spec or --aabb-test-sidecar")
+    if args.full_test_sidecar is not None and any(name == "full" for name, _spec in runner_specs):
+        raise ValueError("Full scores were supplied both as a runner and a frozen test sidecar")
+    if not runner_specs and aabb_sidecar_path is None and args.full_test_sidecar is None and not aabb_requested:
+        raise ValueError("provide at least one model or frozen test sidecar")
+
+    device = select_device(args.device) if runner_specs else None
+
+    formal_full_scores: dict[int, np.ndarray] = {}
+    formal_full_source: dict[str, Any] | None = None
+    if args.full_test_sidecar is not None:
+        formal_full_scores, formal_full_source = load_formal_test_sidecar(
+            args.full_test_sidecar,
+            dataset,
+            pose_ids,
+            "full",
+        )
 
     formal_aabb_scores: dict[int, np.ndarray] = {}
     formal_aabb_source: dict[str, Any] | None = None
@@ -307,6 +334,8 @@ def main() -> None:
     pose_offsets = [0]
     all_candidate_ids: list[np.ndarray] = []
     score_parts: dict[str, list[np.ndarray]] = {name: [] for name, _runner, _spec in runners}
+    if formal_full_source is not None:
+        score_parts["full"] = []
     if formal_aabb_source is not None:
         score_parts["aabb"] = []
     score_thresholds: dict[str, float] = {}
@@ -323,6 +352,8 @@ def main() -> None:
         }
     if formal_aabb_source is not None:
         score_sources["aabb"] = formal_aabb_source
+    if formal_full_source is not None:
+        score_sources["full"] = formal_full_source
     start_time = time.perf_counter()
     rng = np.random.default_rng(20260909)
     for batch_start in range(0, pose_ids.size, args.poses_per_batch):
@@ -363,6 +394,17 @@ def main() -> None:
                 threshold_sources[name] = (
                     "checkpoint calibration" if runner.kind == "bounded_relation_survival_moment_v4" else "runner fallback; not a registered safety workpoint"
                 )
+        if formal_full_source is not None:
+            formal_batch_scores = np.concatenate(
+                [formal_full_scores[int(pose_id)] for pose_id in batch_pose_ids.tolist()]
+            ) if batch_pose_ids.size else np.zeros((0,), dtype=np.float32)
+            if formal_batch_scores.shape != ids.shape:
+                raise ValueError("formal Full sidecar scores do not match the selected candidate rows")
+            score_parts["full"].append(formal_batch_scores.astype(np.float32, copy=True))
+            threshold = formal_full_source.get("threshold")
+            if threshold is not None:
+                score_thresholds["full"] = float(threshold)
+                threshold_sources["full"] = "checkpoint calibration"
         if formal_aabb_source is not None:
             formal_batch_scores = np.concatenate(
                 [formal_aabb_scores[int(pose_id)] for pose_id in batch_pose_ids.tolist()]

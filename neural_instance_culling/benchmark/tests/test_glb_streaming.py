@@ -29,7 +29,7 @@ from glb_streaming import (  # noqa: E402
     summarize_ranking_results,
 )
 from build_reference_frontmost_histogram import build_reference_histogram  # noqa: E402
-from export_glb_streaming_scores import load_formal_aabb_test_sidecar  # noqa: E402
+from export_glb_streaming_scores import load_formal_aabb_test_sidecar, load_formal_test_sidecar  # noqa: E402
 from export_glb_streaming_scores import _model_sources  # noqa: E402
 from generate_streaming_paper_outputs import (  # noqa: E402
     scene_display_name,
@@ -462,6 +462,34 @@ class GlbStreamingContractTests(unittest.TestCase):
         self.assertEqual(source["kind"], "formal_aabb_test_sidecar")
         self.assertTrue(source["testRead"])
         self.assertEqual(source["continuousScoreField"], "scores")
+
+    def test_full_sidecar_uses_the_same_frozen_candidate_alignment(self) -> None:
+        class DatasetFixture:
+            def candidate_slice(self, pose_id: int) -> np.ndarray:
+                return np.asarray([1, 3], dtype=np.uint32)
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            sidecar = Path(directory) / "full_test.sidecar"
+            with ScoreSidecarWriter(sidecar, split="test", threshold=0.68) as writer:
+                writer.append_pose(
+                    7,
+                    np.asarray([1, 3], dtype=np.uint32),
+                    np.asarray([0.91, 0.12], dtype=np.float32),
+                    np.asarray([1, 0], dtype=np.uint8),
+                    np.asarray([1.0, 0.0], dtype=np.float32),
+                )
+            scores, source = load_formal_test_sidecar(
+                sidecar,
+                DatasetFixture(),
+                np.asarray([7], dtype=np.int64),
+                "full",
+            )
+
+        np.testing.assert_allclose(scores[7], [0.91, 0.12])
+        self.assertEqual(source["kind"], "formal_full_test_sidecar")
+        self.assertEqual(source["threshold"], 0.68)
 
     def test_formal_region66_result_maps_instances_and_uses_projected_area_per_byte(self) -> None:
         import json

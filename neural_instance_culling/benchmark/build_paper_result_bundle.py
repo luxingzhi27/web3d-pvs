@@ -31,11 +31,11 @@ ARTIFACT_SECTIONS = (
     "runtime", "hzb", "thresholdCurves", "streaming", "gtConvergence",
     "preprocessing", "figures",
 )
-HZB_ARTIFACTS = (
-    ("hkust-v3", "lossless", "geometry_shell_hzb_lossless_hkust"),
-    ("hkust-v3", "equal-asset", "geometry_shell_hzb_equal_asset_hkust"),
-    ("ifcbench_fantasy_metropolis_instanced_v2", "lossless", "geometry_shell_hzb_lossless_ifcbench"),
-    ("ifcbench_fantasy_metropolis_instanced_v2", "equal-asset", "geometry_shell_hzb_equal_asset_ifcbench"),
+HZB_SHELL_ARTIFACTS = (
+    ("hkust_lossless_shell", "geometry_shell_hzb_lossless_hkust/shell_meta.json"),
+    ("hkust_equal_asset_shell", "geometry_shell_hzb_equal_asset_hkust/shell_meta.json"),
+    ("ifcbench_lossless_shell", "geometry_shell_hzb_lossless_ifcbench/shell_meta.json"),
+    ("ifcbench_equal_asset_shell", "geometry_shell_hzb_equal_asset_ifcbench/shell_meta.json"),
 )
 ABLATION_METRICS = (
     "posePrecision", "poseRecall", "poseWeightedRecall", "poseAccuracy",
@@ -124,15 +124,25 @@ def build_runtime(source: Path, output: Path) -> dict[str, Any]:
     rows = list(summary.get("groups") or [])
     if not rows:
         raise ValueError("runtime summary has no groups")
-    fields = ("device", "backend", "timingSource", "sessionCount", "sampleCount", "runtimeAssetMiB", "candidateMean", "candidateP95", "modelInferenceP50Ms", "modelInferenceP50Ci95", "modelInferenceP95Ms", "modelInferenceP95Ci95", "near10kSampleCount", "near10kP95Ms")
+    if any(not item.get("scene") for item in rows):
+        raise ValueError("formal runtime groups must identify their scene")
+    if any(int(item.get("sessionCount", 0)) < 5 for item in rows):
+        raise ValueError("formal runtime groups require at least five sessions")
+    fields = ("scene", "device", "backend", "timingSource", "sessionCount", "sampleCount", "runtimeAssetMiB", "candidateMean", "candidateP95", "modelInferenceP50Ms", "modelInferenceP50Ci95", "modelInferenceP95Ms", "modelInferenceP95Ci95", "near10kSampleCount", "near10kP95Ms")
     serializable = []
     for item in rows:
         row = {field: item.get(field) for field in fields}
         for field in ("modelInferenceP50Ci95", "modelInferenceP95Ci95"):
             row[field] = json.dumps(row[field], separators=(",", ":"))
         serializable.append(row)
-    write_csv(output / "mobile_runtime/hkust_webgpu_summary.csv", serializable, fields)
-    return {"groupCount": len(rows), "scene": "hkust", "backend": "webgpu"}
+    runtime_output = output / "mobile_runtime/runtime_summary.csv"
+    write_csv(runtime_output, serializable, fields)
+    return {
+        "groupCount": len(rows),
+        "scenes": sorted({str(item["scene"]) for item in rows}),
+        "backends": sorted({str(item.get("backend")) for item in rows}),
+        "output": str(runtime_output.resolve()),
+    }
 
 
 def build_images(inputs: Mapping[str, Path], output: Path) -> dict[str, Any]:
@@ -168,9 +178,14 @@ def _artifact_specs(data_root: Path, output: Path, *, hzb: Path, curves: Path, s
         ("imageMetrics", "test_image_metrics", test_image if test_image.is_file() else test_image / "*test*.json"),
         ("ablation", "core_ablation", output / "ablation/core_ablation.csv"),
         ("rankSweep", "rank_capacity", output / "rank_sweep/rank_capacity.csv"),
-        ("runtime", "mobile_runtime", output / "mobile_runtime/hkust_webgpu_summary.csv"),
+        ("runtime", "runtime_summary", output / "mobile_runtime/runtime_summary.csv"),
     ]
-    specs.extend(("hzb", name, hzb / f"{name}.offline.json") for _scene, _variant, name in HZB_ARTIFACTS)
+    specs.extend(("hzb", name, hzb / relative) for name, relative in HZB_SHELL_ARTIFACTS)
+    specs.append((
+        "hzb",
+        "formal_execution",
+        hzb / "geometry_shell_hzb_paper_2026-09-09/execution_summary.json",
+    ))
     specs.extend([
         ("thresholdCurves", "threshold_curves", curves), ("streaming", "streaming", streaming),
         ("gtConvergence", "gt_convergence", gt), ("preprocessing", "preprocessing", output / "preprocessing"),
@@ -218,7 +233,7 @@ def main() -> None:
     roots = {
         "hzb": _optional_root(args.hzb_dir, data_root, "neural_instance_culling/benchmark/out/paper_results/hzb"),
         "curves": _optional_root(args.threshold_curves_dir, data_root, "neural_instance_culling/benchmark/out/paper_results/threshold_curves"),
-        "streaming": _optional_root(args.streaming_dir, data_root, "neural_instance_culling/benchmark/out/paper_results/streaming"),
+        "streaming": _optional_root(args.streaming_dir, data_root, "neural_instance_culling/benchmark/out/paper_results/streaming_formal"),
         "gt": _optional_root(args.gt_convergence_dir, data_root, "neural_instance_culling/benchmark/out/paper_results/gt_convergence"),
         "figures": _optional_root(args.figures_dir, data_root, "neural_instance_culling/benchmark/out/paper_results/figures"),
         "test_image": _optional_root(args.test_image_dir, data_root, "neural_instance_culling/benchmark/out/paper_results/image_metrics"),

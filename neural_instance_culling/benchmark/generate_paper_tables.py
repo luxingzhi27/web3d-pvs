@@ -15,10 +15,21 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_DIR = ROOT / "neural_instance_culling/benchmark/out/paper_results"
 UNAVAILABLE = "unavailable"
 TABLE2_METRICS = (
-    "aggregate_precision", "aggregate_recall", "aggregate_weighted_recall",
-    "aggregate_weighted_recall_lcb", "aggregate_average_precision",
-    "pose_average_precision", "useful_cull", "bad_cull", "avg_pred_count",
-    "glb_byte_reduction",
+    "pose_average_precision", "pose_positive_rate", "pose_ap_lift",
+    "pose_precision", "pose_recall", "pose_false_occlusion_rate",
+    "pose_specificity", "pose_balanced_accuracy", "aggregate_average_precision",
+    "aggregate_positive_rate", "aggregate_ap_lift", "aggregate_precision",
+    "aggregate_recall", "aggregate_false_occlusion_rate",
+    "aggregate_specificity", "aggregate_balanced_accuracy",
+    "aggregate_weighted_recall", "aggregate_weighted_recall_lcb",
+    "useful_cull", "bad_cull", "avg_pred_count", "glb_byte_reduction",
+)
+TABLE2_DISPLAY_METRICS = (
+    "pose_average_precision", "pose_positive_rate", "pose_ap_lift",
+    "pose_precision", "pose_recall", "pose_false_occlusion_rate",
+    "pose_specificity", "pose_balanced_accuracy", "aggregate_weighted_recall",
+    "aggregate_weighted_recall_lcb", "useful_cull", "bad_cull",
+    "avg_pred_count", "glb_byte_reduction",
 )
 ARTIFACT_FIELDS = ("section", "artifactId", "path", "status", "reason")
 
@@ -79,6 +90,8 @@ def _metric_row(
     def metric(*names: str) -> Any:
         return _value(metrics, *names)
 
+    aggregate_recall = metric("recall", "agg_recall")
+    pose_recall = _value(pose, "recall")
     return {
         "scene": scene, "method": method,
         "test_pose_count": _value(payload, "poseCount", "evaluatedPoseCount", default=summary.get("evaluatedPoses")),
@@ -88,7 +101,10 @@ def _metric_row(
         "checkpoint": _value(payload, "checkpoint", default=summary.get("checkpoint", "")),
         "calibration": _value(payload, "calibration", "calibrationSummary", default=summary.get("calibration", "")),
         "aggregate_precision": metric("precision", "agg_precision"),
-        "aggregate_recall": metric("recall", "agg_recall"),
+        "aggregate_recall": aggregate_recall,
+        "aggregate_false_occlusion_rate": (
+            1.0 - float(aggregate_recall) if aggregate_recall is not None else None
+        ),
         "aggregate_weighted_recall": metric("weightedRecall", "aggregateWeightedRecall", "agg_weighted_recall"),
         "aggregate_weighted_recall_lcb": metric("weightedRecallLowerConfidenceBound", "aggregateWeightedRecallLowerConfidenceBound", "aggregate_weighted_recall_lower_confidence_bound"),
         "aggregate_f1": metric("f1", "agg_f1"),
@@ -99,7 +115,10 @@ def _metric_row(
         "aggregate_positive_rate": metric("positiveRate", "aggregatePositiveRate"),
         "aggregate_ap_lift": metric("apLift", "aggregateApLift"),
         "pose_precision": _value(pose, "precision"),
-        "pose_recall": _value(pose, "recall"),
+        "pose_recall": pose_recall,
+        "pose_false_occlusion_rate": (
+            1.0 - float(pose_recall) if pose_recall is not None else None
+        ),
         "pose_weighted_recall": _value(pose, "weightedRecall"),
         "pose_f1": _value(pose, "f1"),
         "pose_accuracy": _value(pose, "accuracy"),
@@ -121,7 +140,10 @@ def _metric_row(
 
 
 def _base_method(method: str) -> str:
-    return re.sub(r"_seed\d+$", "", method)
+    base = re.sub(r"_seed\d+$", "", method)
+    if base == "finetune_boundary_half_rvl030_boundary010_margin050_temp025_lr2e-5":
+        return "full_v4"
+    return base
 
 
 def collect_test_metric_rows(test_metrics_dir: str | Path, scenes: Sequence[str]) -> list[dict[str, Any]]:
@@ -214,7 +236,7 @@ def generate_tables(scene_statistics: Path, test_metrics_dir: Path, output_dir: 
     table2_fields = ["scene", "method", "seed_count", "test_pose_count"] + [f"{field}_{suffix}" for field in TABLE2_METRICS for suffix in ("mean", "std")]
     table2 = _write_csv(output_dir / "table2_test_visibility.csv", table2_rows, table2_fields)
     _markdown_table(output_dir / "table1_scene_statistics.md", "Table 1. Scene Statistics", stats, (("scene", "Scene"), ("instance_count", "Instances"), ("glb_count", "GLBs"), ("prototype_triangle_count", "Prototype triangles"), ("expanded_triangle_count", "Expanded triangles"), ("instance_glb_reuse_factor", "Instance/GLB reuse"), ("glb_bytes_total", "GLB bytes"), ("test_pose_count", "Test poses"), ("test_candidate_count_mean", "Test candidates/pose"), ("test_gt_count_mean", "Test GT/pose"), ("test_zero_gt_pose_count", "Zero-GT test poses")))
-    _markdown_table(output_dir / "table2_test_visibility.md", "Table 2. Frozen Test Visibility (mean +/- std)", table2_rows, (("scene", "Scene"), ("method", "Method"), ("seed_count", "Seeds"), ("test_pose_count", "Test poses")) + tuple((f"{field}_display", field) for field in TABLE2_METRICS))
+    _markdown_table(output_dir / "table2_test_visibility.md", "Table 2. Frozen Test Visibility (mean +/- std)", table2_rows, (("scene", "Scene"), ("method", "Method"), ("seed_count", "Seeds"), ("test_pose_count", "Test poses")) + tuple((f"{field}_display", field) for field in TABLE2_DISPLAY_METRICS))
     manifest = bundle_manifest.resolve() if bundle_manifest is not None else output_dir / "bundle_manifest.json"
     if bundle_manifest is not None and not manifest.is_file():
         raise FileNotFoundError(f"bundle manifest does not exist: {manifest}")

@@ -10,7 +10,7 @@
 
 ## 变更文件
 
-- `neural_instance_culling/benchmark/export_glb_streaming_scores.py`：读取并校验 AABB formal test sidecar；
+- `neural_instance_culling/benchmark/export_glb_streaming_scores.py`：读取并校验 Full 与 AABB formal test sidecar，复用同一次 frozen-test 连续分数；
 - `neural_instance_culling/benchmark/simulate_glb_streaming.py`：接入 Region66 实例集合、稳定 visible-first 排列和 unavailable 状态；
 - `neural_instance_culling/benchmark/build_real_scheduler_plan.py`：让 12-pose 计划复用正式输入；
 - `neural_instance_culling/benchmark/generate_streaming_paper_outputs.py`：阻止非正式 AABB/HZB 行进入表格和曲线；
@@ -90,7 +90,7 @@ mkdir -p neural_instance_culling/benchmark/out/paper_results/streaming_formal
 conda run -n slm_pvs python neural_instance_culling/benchmark/export_glb_streaming_scores.py \
   --dataset-dir <hkust-test-dataset> \
   --runtime-meta <hkust-runtimeVisibilityMeta.json> \
-  --model-spec 'full|bounded_relation_survival_moment_v4|<hkust-full-checkpoint>|<hkust-runtime-features>|<hkust-full-calibration-summary>' \
+  --full-test-sidecar <hkust-full-test-sidecar-or-test-json> \
   --aabb-test-sidecar <hkust-aabb-ray-seed-sidecar-or-test-json> \
   --result-dir neural_instance_culling/benchmark/out/paper_results/streaming_formal/hkust_scores \
   --split test --device cuda --poses-per-batch 4 \
@@ -100,7 +100,7 @@ conda run -n slm_pvs python neural_instance_culling/benchmark/export_glb_streami
 conda run -n slm_pvs python neural_instance_culling/benchmark/export_glb_streaming_scores.py \
   --dataset-dir <ifcbench-test-dataset> \
   --runtime-meta <ifcbench-runtimeVisibilityMeta.json> \
-  --model-spec 'full|bounded_relation_survival_moment_v4|<ifcbench-full-checkpoint>|<ifcbench-runtime-features>|<ifcbench-full-calibration-summary>' \
+  --full-test-sidecar <ifcbench-full-test-sidecar-or-test-json> \
   --aabb-test-sidecar <ifcbench-aabb-ray-seed-sidecar-or-test-json> \
   --result-dir neural_instance_culling/benchmark/out/paper_results/streaming_formal/ifcbench_scores \
   --split test --device cuda --poses-per-batch 4 \
