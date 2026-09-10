@@ -1,6 +1,6 @@
 # 统一 PVS 论文评价与指标报告协议
 
-更新时间：2026-09-05
+更新时间：2026-09-10
 
 本文是当前实例级 PVS 论文、正式实验报告和对外汇报的唯一指标口径。模型、数据集、图像评价和前端资产边界分别以
 [架构技术文档](../current/neuralstreamweb3d_architecture_technical.md)、
@@ -8,12 +8,13 @@
 [图像评价协议](viewcell_image_per_evaluation.md) 和
 [当前版本清单](../current/current_instance_pvs_versions.md) 为准。
 
-本文解决四个经常混淆的问题：
+本文解决五个经常混淆的问题：
 
 - 一个指标是逐 pose 宏平均，还是把全部候选合并后的 aggregate；
 - 一个指标是否依赖 calibration 冻结阈值；
 - PR-AUC 对应的正样本比例和随机基线是什么；
 - 哪些指标证明画面安全，哪些指标只说明分类、剔除、资源或运行效率。
+- GLB 连续下载排序如何把神经可见性、资源字节和可选的投影效用分开计算。
 
 ## 1. 评价对象与基本集合
 
@@ -256,7 +257,54 @@ Validation 使用同一冻结阈值报告 weighted recall，并用于比较 chec
 
 实例级预测和 GLB 下载是不同粒度。GLB 指标不能反向替代实例 precision，也不能把同一 GLB 内未预测的实例自动当成可见实例。
 
-### 6.3 模型资产和运行成本
+### 6.3 Progressive streaming 排序
+
+正式 streaming 在每个完整 test pose 上从空缓存开始。所有方法必须使用同一个由 CSR candidate instance 映射得到的完整 candidate GLB 集合；一个 GLB 只有在全部字节到达后才累计 coverage。主 utility 为该 test pose 的 `visible_weights` 按 GLB 求和，必须写作 **visible-weight coverage**，不能改称像素 coverage。
+
+模型首先把实例连续可见性分数聚合为 GLB 可见性：
+
+\[
+p_g=\max_{i\in g}p_i.
+\]
+
+纯神经排序按 `p_g` 降序。成本感知神经排序定义为：
+
+\[
+S_g^{neural-cost}=\frac{p_g}{Bytes_g^{\alpha}}.
+\]
+
+其中 `Bytes_g` 是完整 GLB 文件字节，`alpha=0` 退化为纯神经排序，`alpha=1` 是可见性分数/字节，`alpha=0.5` 是对小文件偏好更温和的可见性分数/平方根字节。`alpha` 必须只在 calibration/validation 上按预先登记的候选集合选择；模型、聚合规则和 `alpha` 冻结后，test 只报告一次。不得根据 test 的 `Bytes@99` 为不同场景临时选择不同公式。
+
+AABB 投影不是神经成本排序的必要输入。若额外评价视觉效用调制，必须单列为：
+
+\[
+S_g^{neural-area-cost}=\frac{\max_{i\in g}(p_i A_i)}{Bytes_g^{\alpha}},
+\]
+
+其中 `A_i` 是同一 pose 下实例 AABB 八角点投影得到的裁剪屏幕矩形面积。它不能与 `p_g / Bytes_g^alpha` 混名，也不能在一个场景使用面积、另一个场景不用面积后仍称为同一方法。
+
+廉价启发式 baseline 必须从每个 candidate instance 的 AABB 计算，再按 GLB 聚合：
+
+\[
+A_g=\max_{i\in g}A_i,\qquad
+D_g=\min_{i\in g}D_i.
+\]
+
+比较项至少包括 `Distance`、`Projected AABB area` 和 `Projected AABB area / byte`。不得先把空间分离的多个实例合成一个巨大 GLB AABB 再投影，因为空区域会抬高面积，并使相机到合并 AABB 的距离失真。Region66 visible-weight 实验使用 view-cell 中心的 `66` 度查询投影；真实当前画面实验必须另用 `60` 度相机和 Point60/像素 GT，二者不能混用。
+
+冻结阈值过滤与连续排序继续分开：过滤只报告预测 GLB 子集、字节削减和 coverage ceiling；threshold-free ranking 对完整 candidate GLB 集合排序。真实前端的 `urgent/warm/speculative` 队列可以由冻结安全阈值分层，但必须另外标为 scheduler replay，并报告组内使用的固定排序分数。
+
+正式排序至少报告：
+
+- `Bytes@95/99/99.9/100`；
+- `waste-before-99` 和达到目标时的 GLB rank；
+- `10/25/50/100 Mbps` 下的换算时间，正文至少给出 25/50 Mbps；
+- coverage ceiling 与目标不可达 pose 比例；
+- 纯神经 `p_g`、成本感知神经 `p_g/Bytes_g^alpha`、AABB 启发式、AABB MLP、HZB visible-first、随机/原始顺序和 GT utility/byte oracle。
+
+`p_g/Bytes_g^alpha` 衡量“预测需要程度相对下载成本”，仍不等于真实视觉效用。任何关于画面恢复速度的结论都必须同时由 visible-weight coverage 和固定子集的 reference-frontmost/真实重渲染检查支撑。
+
+### 6.4 模型资产和运行成本
 
 | 类别 | 必须报告 |
 |---|---|
@@ -354,6 +402,8 @@ Pose-macro 是论文叙述“平均视点”的主口径；aggregate 必须同�
 - [ ] PR-AUC 标明 pose-macro 或 aggregate，并给出同口径正样本比例；
 - [ ] 同时报 useful cull、bad cull 和平均预测数；
 - [ ] 同时报图像漏检、GLB 数/字节和运行资产/延迟，缺失项写 `not_available`；
+- [ ] Streaming 明确 utility 来源、完整 candidate GLB 集合、冷缓存、GLB 完整到达语义和排序公式；
+- [ ] 成本指数及其他调度参数只由 calibration/validation 确定，test 不参与规则选择；
 - [ ] 三种子报告 mean ± sample standard deviation；
 - [ ] 消融使用相同 pose 的 paired bootstrap，而不是比较两个独立均值；
 - [ ] test 未参与阈值、checkpoint 或配置选择。

@@ -973,8 +973,8 @@ def member_calibration_argument(member: FinalMember) -> bool:
 
 
 def _run_job(job: Mapping[str, Any], gpu_id: int | None = None) -> dict[str, Any]:
-    stdout_path = Path(os.path.abspath(str(Path(str(job["stdout"]).expanduser()))))
-    stderr_path = Path(os.path.abspath(str(Path(str(job["stderr"]).expanduser()))))
+    stdout_path = Path(os.path.abspath(str(Path(str(job["stdout"])).expanduser())))
+    stderr_path = Path(os.path.abspath(str(Path(str(job["stderr"])).expanduser())))
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     if _target_exists(stdout_path) or _target_exists(stderr_path):
         raise FileExistsError(f"job log target already exists: {stdout_path} or {stderr_path}")
@@ -1118,7 +1118,7 @@ def execute_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
         "testEvaluationCount": len(job_outcomes),
     }
     manifest_path = Path(
-        os.path.abspath(str(Path(str(plan["targets"]["manifest"]).expanduser())))
+        os.path.abspath(str(Path(str(plan["targets"]["manifest"])).expanduser()))
     )
     _write_new_json(manifest_path, manifest)
     return manifest

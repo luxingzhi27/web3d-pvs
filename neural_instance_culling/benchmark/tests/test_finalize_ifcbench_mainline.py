@@ -17,6 +17,7 @@ from finalize_ifcbench_mainline import (  # noqa: E402
     SEEDS,
     FinalMember,
     _assert_new_targets,
+    _run_job,
     build_export_command,
     freeze_decision,
     load_confirmation_summary,
@@ -253,6 +254,21 @@ class FinalizeIfcbenchMainlineTests(unittest.TestCase):
             target.write_text("keep", encoding="utf-8")
             with self.assertRaisesRegex(FileExistsError, "overwrite"):
                 _assert_new_targets([target])
+
+    def test_run_job_accepts_string_log_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            outcome = _run_job(
+                {
+                    "job": "path-smoke",
+                    "command": [sys.executable, "-c", "print('ok')"],
+                    "stdout": str(root / "stdout.log"),
+                    "stderr": str(root / "stderr.log"),
+                }
+            )
+            self.assertEqual(outcome["returnCode"], 0)
+            self.assertEqual((root / "stdout.log").read_text(encoding="utf-8"), "ok\n")
+            self.assertEqual((root / "stderr.log").read_text(encoding="utf-8"), "")
 
 
 if __name__ == "__main__":

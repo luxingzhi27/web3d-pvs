@@ -1,6 +1,6 @@
 # Strict Cold-Cache GLB Streaming
 
-日期：2026-09-09
+日期：2026-09-09；2026-09-10 追加 visible-weight 成本排序探索
 
 ## 目的
 
@@ -64,6 +64,29 @@ conda run -n slm_pvs python neural_instance_culling/benchmark/generate_streaming
 完整方法行（Full、AABB、original、distance、projected area、projected area/byte、20 个 fixed random、HZB visible-first、GT utility/byte oracle）以及 10/25/50/100 Mbps 时间、coverage ceiling 和每个 target 的 unreachable ratio 在 `table5_streaming_ranking.csv` 中。两场景所有 ranking 方法的 coverage ceiling 均为 100%，因为正式 candidate 集合包含对应 GT GLB；每个 pose 的完整缺失资源诊断仍保存在 per-pose 输出中。
 
 独立 threshold filtering 的 Full 结果为：HKUST 平均预测 `161.8` 个 GLB、`36.843` MiB、coverage ceiling `97.651%`，`99%` unreachable ratio `12.57%`；IFCBench 平均预测 `679.3` 个 GLB、`15.486` MiB、coverage ceiling `99.744%`，`99%` unreachable ratio `5.02%`。这些 predicted bytes 没有写入 ranking 的 `Bytes@...` 字段。
+
+### 2026-09-10 visible-weight 成本排序探索
+
+本节只用于确定正式计算规则，不是论文最终 test 表。它读取现有 HKUST `684` 和 IFCBench `2710` 个 test pose 的旧 score sidecar，以 region-union `visible_weights` 作为 utility；IFCBench 分数仍来自最终微调冻结前的现有模型。当前面积项还使用合并 GLB AABB，正式启发式必须改为逐实例 AABB 投影后聚合，因此这里只能比较趋势。纯 `p/Bytes^alpha` 不依赖 AABB，不受该面积口径影响。
+
+`p` 表示 `p_g=max_i(p_i)`；`B` 是完整 GLB 字节；`A` 是当前探索性投影面积。表中为每 pose Bytes@coverage 的均值，单位 MiB。
+
+| 场景 | 排序 | Bytes@95 | Bytes@99 | Bytes@99.9 | Bytes@100 |
+|---|---|---:|---:|---:|---:|
+| HKUST | `p` | 8.842 | 18.031 | 26.187 | 40.076 |
+| HKUST | `p/sqrt(B)` | 5.771 | 10.511 | 17.680 | 33.722 |
+| HKUST | `p/B` | 6.108 | 10.819 | 18.052 | 35.240 |
+| HKUST | `p*A/B` | 4.679 | 8.630 | 16.612 | 38.291 |
+| HKUST | `A/B` | 8.227 | 12.199 | 23.801 | 64.395 |
+| HKUST | 安全阈值分层，组内 `p/sqrt(B)` | 5.515 | 11.028 | 18.807 | 34.812 |
+| IFCBench | `p` | 4.968 | 8.078 | 10.593 | 15.689 |
+| IFCBench | `p/sqrt(B)` | 4.059 | 7.927 | 12.244 | 14.315 |
+| IFCBench | `p/B` | 4.177 | 8.282 | 12.865 | 14.527 |
+| IFCBench | `p*A/B` | 15.952 | 19.813 | 25.739 | 33.577 |
+| IFCBench | `A/B` | 21.323 | 27.293 | 35.836 | 44.121 |
+| IFCBench | 安全阈值分层，组内 `p/sqrt(B)` | 3.952 | 7.660 | 11.821 | 14.443 |
+
+探索结果说明：神经分数不需要强制乘 AABB 面积。`p/sqrt(B)` 相对纯 `p` 将 HKUST Bytes@99 从 `18.031` MiB 降至 `10.511` MiB，在 IFCBench 也从 `8.078` MiB 降至 `7.927` MiB；带面积的 `p*A/B` 虽在 HKUST 更低，却在 IFCBench 明显退化，不具备跨场景稳定性。正式方法因此把 `p/Bytes^alpha` 作为成本感知神经排序族，`alpha` 必须在 calibration/validation 上冻结；AABB 投影仅作为独立启发式或明确命名的面积调制消融。
 
 ## 指标口径
 

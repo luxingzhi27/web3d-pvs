@@ -1,6 +1,6 @@
 # GLB Streaming Formal Artifact Contract
 
-日期：2026-09-09
+日期：2026-09-09；2026-09-10 补充成本感知神经排序规则
 
 ## 目的
 
@@ -32,6 +32,20 @@
 - `predictedIds`、阈值和 GT 标签不参与 threshold-free 排序。
 
 exporter 将该 `scores` 数组写入 streaming sidecar 的 `aabb` 字段，并在 `scoreSources.aabb` 登记 `kind=formal_aabb_test_sidecar`。没有该输入时，`aabb` 不会调用 runner fallback，后续 summary 和 paper table 将明确标为 unavailable。
+
+### 成本感知神经排序与启发式
+
+2026-09-10 冻结以下论文计算规则；对应方法字段尚需接入模拟器后才能生成正式值，现有探索脚本结果不能替代正式产物。
+
+- 先对同一 GLB 的候选实例可见性取 `p_g=max_i(p_i)`。
+- 纯神经排序为 `p_g`；成本感知排序为 `p_g / Bytes_g^alpha`。
+- `alpha` 只允许从预先登记的候选集合在 calibration/validation 上选择，选择完成后写入方法元数据并冻结到 test。test 不得重新选择指数或公式。
+- AABB 面积不是成本感知神经排序的必需输入。带面积的神经变体必须单列为 `max_i(p_i * projectedArea_i) / Bytes_g^alpha`。
+- `Distance`、`Projected AABB area` 和 `Projected AABB area / byte` 必须从 candidate instance AABB 分别计算，再以最小距离或最大面积聚合到 GLB；不再接受空间合并 GLB AABB 的投影作为正式启发式结果。
+- Region66 streaming 使用 view-cell 中心的 66 度投影并评价 region-union `visible_weights`；真实 60 度当前画面属于独立 Point60/像素评价。
+- threshold-free ranking 仍不读取安全阈值。冻结阈值分层加组内成本排序只进入单独的真实 scheduler replay，不能混入连续分数排序曲线。
+
+正式 `ranking_summary.json` 的方法元数据必须记录实例到 GLB 的聚合方式、成本指数、是否使用 AABB 面积、字节来源和参数选择 split。论文正文至少并列纯神经分数与成本感知神经分数，证明收益来自遮挡可见性还是单纯资源大小修正。
 
 ### HZB visible-first
 
