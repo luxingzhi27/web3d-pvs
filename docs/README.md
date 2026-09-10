@@ -1,8 +1,8 @@
 # NeuralStreamWeb3D 文档索引
 
-更新时间：2026-09-09
+更新时间：2026-09-10
 
-当前论文主线是 HKUST 与 Metropolis/IFCBench 两场景的 V4 实例级可见性模型：离线固定实例特征和遮挡生存系数，浏览器以 `66°` 后退视锥建立候选，以真实 `60°` 视锥完成显示过滤。HKUST 最终模型已冻结；IFCBench 三种子微调确认完成后按 validation 规则冻结最终成员。
+当前论文主线是 HKUST 与 Metropolis/IFCBench 两场景的 V4 实例级可见性模型：离线固定实例特征和遮挡生存系数，浏览器以 `66°` 后退视锥建立候选，以真实 `60°` 视锥完成显示过滤。两场景三种子正式 test 已完成，运行成员均按 validation 规则冻结。
 
 2026-09-09 已将源码收敛到当前 V4 训练、六项核心消融、容量实验、数据重建、统一评价和前端部署链路。旧 M4-M12、OWRB、方向代理、失败的额外打分头、完整三角形 HZB 及迁移前 Windows/ROCm 入口已从当前源码删除；清理前状态保存在 Git 提交 `30e15f7`，不再以兼容开关保留。
 
@@ -58,5 +58,6 @@
 |---|---|
 | [`experiments/pvs_paper_experiments_2026-09-09.md`](experiments/pvs_paper_experiments_2026-09-09.md) | 论文核心实验、图表、IFCBench 微调和一周执行计划 |
 | [`experiments/pvs_third_scene_and_geometry_shell_hzb_baseline_2026-09-08.md`](experiments/pvs_third_scene_and_geometry_shell_hzb_baseline_2026-09-08.md) | 独立来源第三 BIM 场景选择与 Geometry-only shell HZB 基线计划 |
+| [`experiments/pvs_standard_graphics_scene_generality_2026-09-10.md`](experiments/pvs_standard_graphics_scene_generality_2026-09-10.md) | Sponza/Viking/Big City 等标准场景的一单位一资源转换、训练、Hi-Z 对比和 non-BIM 泛化方案 |
 | [`current/browser_instance_visibility_streaming_patent_application_2026-09-02.md`](current/browser_instance_visibility_streaming_patent_application_2026-09-02.md) | 浏览器区域可见性、资源调度和增量加载专利正文 |
 | [`current/browser_visibility_streaming_patent_figures_plan_2026-09-01.md`](current/browser_visibility_streaming_patent_figures_plan_2026-09-01.md) | 专利附图规划、参考标号、可编辑图源和导出规范 |

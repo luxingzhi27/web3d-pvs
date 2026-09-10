@@ -1,211 +1,119 @@
-# Geometry-shell HZB 评价报告
+# WebGPU Batched Geometry-shell Hi-Z 评价报告
 
-日期：2026-09-09
-状态：MVP 已实现；完整 CPU 外壳导出已完成；浏览器结果目前只属于并发硬件 smoke，尚未形成正式 HZB 硬件计时或 test visibility 结论。
+日期：2026-09-09；2026-09-10 更新
 
-## 目的与边界
+状态：四套 v2 外壳已完成。修正后的 calibration、frozen test 与 120-pose timing 正在独占 A6000 上执行，尚未形成完整 test 结论。
 
-本基线用预下载的 LOD0 不透明几何外壳构造层次深度缓冲区，再对同一候选集合做批量实例 AABB 遮挡测试。它用于和神经 PVS 比较启动资产大小、GPU 深度/HZB 查询路径、实例输出和 GLB 聚合成本，不修改训练、PVS 评价或 streaming 主线。
+## 目的
 
-输入根目录必须显式传入：
+该基线在正式场景 GLB 到达前预下载不透明几何外壳，通过 WebGPU 深度光栅、max-depth pyramid 和候选 AABB 测试生成实例级 PVS。它与神经方法比较启动资产、画面安全、剔除效率和运行压力。
 
-- HKUST：`/mnt/sda/rhyang/slm/hkust-v3`；
-- IFCBench：`/mnt/sda/rhyang/slm/ifcbench_fantasy_metropolis_instanced_v2`；
-- 也可传入直接包含 `sceneWeb.json`、`glbIndex.json` 和 `runtimeVisibilityMeta.json` 的 assets/data 目录。
+正式名称固定为 **WebGPU Batched Geometry-shell Hi-Z**。实现借鉴经典 Hierarchical Z-Buffer 和现代 GPU 批量查询方法，但不称为 HROC 复现。它不包含对象 BVH、连续帧可见集、fragment-ray traversal 或 indirect multidraw。
 
-所有新生成资产都写在 worktree 的 `neural_instance_culling/benchmark/out/paper_results/hzb/`，未创建软链接。
+## 输入与外壳语义
 
-## 真实 GLB/schema 核查
-
-| 场景 | GLB | 实例 | 源 GLB 字节 | 材质/结构核查 |
+| 场景 | GLB | 实例 | 源 GLB 字节 | 可作外壳的几何 |
 |---|---:|---:|---:|---|
-| HKUST | 3,273 | 18,831 | 563,269,492 | 3,042 个 GLB 含确定 OPAQUE primitive；229 个 BLEND primitive；384 个 GLB 使用 `EXT_mesh_gpu_instancing` |
-| IFCBench Metropolis | 3,669 | 41,298 | 183,335,200 | 全部 3,669 个 primitive 为确定 OPAQUE；2,765 个 GLB 使用 `EXT_mesh_gpu_instancing` |
+| HKUST | 3,273 | 18,831 | 563,269,492 | 3,042 个确定 OPAQUE primitive；18,566 个 occluder 实例 |
+| IFCBench Metropolis | 3,669 | 41,298 | 183,335,200 | 3,669 个确定 OPAQUE primitive；41,298 个 occluder 实例 |
 
-HKUST 中发现 2 个真实空占位 GLB：runtime 元数据登记了实例，但 GLB 的默认 scene 无 node、无 mesh 且 buffer 长度为零。exporter 将它们标为 `empty-source-placeholder`，不作为深度 occluder；对其他非空 GLB，runtime 实例数量与源 instancing 数量不一致会直接报错。
+HKUST 的 229 个 BLEND primitive 和 2 个空占位 GLB 不写遮挡深度。透明、alpha-cutout、材质 alpha 小于 1、透明材质扩展和未知材质扩展均按非遮挡物处理；对应候选仍能作为 occludee 被外壳测试。
 
-## Exporter schema
+`geometry-shell-hzb-v2` 运行资产包含：
 
-输出 schema 为 `geometry-shell-hzb-v1`，由 `shell_meta.json` 描述：
+- Meshopt 压缩的 POSITION、INDEX 和实例变换；
+- 全部实例 AABB 与 instance-to-GLB 映射；
+- 外壳实例对应的真实 `componentGlobalId`；
+- 每实例是否进入外壳的二值表；
+- `shell_meta.json`。
 
-- 每个确定 OPAQUE primitive 保留原始 `POSITION` float32、索引三角形顺序和最终 node/`EXT_mesh_gpu_instancing` float32 变换；
-- 用独立 meshopt `ATTRIBUTES`/`TRIANGLES` segment 压缩 POSITION、INDEX 和 transforms；不写入纹理、UV、法线、切线、颜色和材质；
-- 透明、alpha-cutout、材质 alpha 小于 1、透明材质扩展、未知材质扩展和空占位均不作 occluder；
-- runtime 仍保留所有实例 AABB、instance-to-GLB 映射和 instance occluder mask；mask 为 `1` 的已选外壳实例是深度贡献者，查询时直接保留且不计 uncertainty，mask 为 `0` 的所有其他候选统一对已渲染外壳执行保守 AABB/HZB 测试；
-- lossless 逐 primitive 输出完整几何，不做顶点移动、三角形简化或 primitive 内切分；
-- `equal-asset` 只按固定 train 中心视点的投影面积/压缩字节排序，并删除完整 primitive，作为资产敏感性分析。
-- `shell_meta.json` 只保留已选 prototype、segment、实例表和聚合统计；逐 primitive 审计写入 output 目录之外的
-  `<output-dir>.offline.json`，该文件明确标记 `runtimeAsset=false`，不属于启动下载资产。
-- equal-asset 的预算是实际需要下载的六个二进制文件加 `shell_meta.json` 的文件字节；日志、目录块和 offline sidecar
-  不计入传输集合。exporter 写完文件后再次逐文件求和，并断言 `selection.totalAssetBytes <= selection.budgetBytes`。
-- `queryContract.occluderSet` 固定记录上述二值语义：`selectedValue=1` 只作 selected-self 保留，`nonSelectedValue=0` 必须进入 AABB/HZB；透明和不确定材质不会写入外壳深度，但其候选仍可被外壳保守测试。
+法线、切线、UV、颜色、纹理和 PBR 参数不进入运行资产。逐 primitive 审计只存在于目录外的 `.offline.json`，不计入启动下载。
 
-## 完整 CPU 导出结果
+## 资产结果
 
-字节均为实际文件字节数；“传输几何”是三个 meshopt stream，“运行时展开几何”是 POSITION/INDEX/transforms 解码到 float32/uint32 后的大小。
+以下字节来自 v2 运行目录内实际下载文件。解码内存是 POSITION/INDEX/transforms 展开后加固定 runtime 表，不包括 HZB 纹理和浏览器实现。
 
-| 场景 | 输出 prototype | prototype 三角形 | 实例展开三角形 | POSITION / INDEX / transforms 压缩字节 | 传输几何 | 固定 runtime payload | binary payload | 运行时展开几何 |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| HKUST lossless | 3,042 | 54,771,324 | 55,537,431 | 338,880,643 / 56,327,956 / 606,477 | 395,815,076 | 602,592 | 396,417,668 | 1,779,745,256 |
-| IFCBench lossless | 3,669 | 8,648,833 | 25,556,160 | 25,951,283 / 27,735,937 / 1,503,387 | 55,190,607 | 1,321,536 | 56,512,143 | 160,744,560 |
+| 场景 | 变体 | 传输字节 | 传输 MiB | 解码运行内存 MiB | prototype | 展开三角形 | occluder 实例 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| HKUST | lossless | 399,388,459 | 380.89 | 1,697.87 | 3,042 | 55,537,431 | 18,566 |
+| HKUST | equal-asset | 5,476,306 | 5.22 | 19.34 | 91 | 822,121 | 1,257 |
+| IFCBench | lossless | 60,089,560 | 57.31 | 154.56 | 3,669 | 25,556,160 | 41,298 |
+| IFCBench | equal-asset | 11,835,015 | 11.29 | 26.20 | 1,412 | 6,267,776 | 31,909 |
 
-lossless HKUST 的 229 个 BLEND primitive 和 2 个空占位没有进入外壳 occluder；最终 `occluderInstanceCount=18,566`。IFCBench `occluderInstanceCount=41,298`。
-lossless runtime 下载总量还包括 `shell_meta.json`：HKUST 为 `399,388,459 B`（metadata `2,970,791 B`），IFCBench 为
-`60,089,560 B`（metadata `3,577,417 B`）；这两个 metadata 也不含逐 primitive audit。
+神经运行资产为 HKUST `5,479,213 B`、IFCBench `11,883,919 B`。因此 equal-asset 外壳分别保持在对应神经预算以内。Equal-asset 只删除完整 primitive，不移动顶点；它按 128 个固定 train 中心视点的投影面积/压缩字节选择外壳，是资产敏感性对照，不是保守简化上界。
 
-对应完整输出目录：
+## GPU 查询
 
-- `geometry_shell_hzb_lossless_hkust/`
-- `geometry_shell_hzb_lossless_ifcbench/`
+每个 subpose 执行：
 
-逐 segment meshopt 解码检查通过：HKUST 3,042 个 prototype、IFCBench 3,669 个 prototype 的 positions/indices/transforms 均无尾部字节，解码值有限。
+```text
+RenderBundle depth + nearest component ID
+  -> nearest-ID attachment 压缩成实例 bitset
+  -> max-depth mip chain
+  -> 候选实例 AABB/bitset 查询
+  -> 可见实例和 GLB flag 压缩
+  -> 只回读最终编号和阶段计时
+```
 
-## Equal-asset 敏感性
+已经进入外壳的实例只有在贡献最近深度像素时才保留。没有进入外壳的候选使用保守 AABB/Hi-Z 测试。只有 `hzbMax + depthBiasM < candidateNear` 才剔除；相机位于 AABB 内、穿越近裁剪面、投影非有限或 footprint 越界时保留。
 
-预算取现有同场景神经 runtime asset 目录的实际文件总字节，重要性使用固定 128 个 train 中心视点；这不是正式准确性结论。
+固定绘制命令预录为 WebGPU `RenderBundle`，避免每个 pose 在 JavaScript 中重新提交数千个 draw。当前候选已经由同一 `66°` candidate CSR 完成视锥筛选，Hi-Z 查询对候选一线程一个 AABB。对象 BVH 只可能减少这一阶段，不会减少外壳下载、解码、深度光栅和 mip 构建成本。
 
-| 场景 | 神经资产预算 | shell binary payload | runtime 总量余量 | 选中完整 primitive | 候选 primitive | occluder 实例 |
-|---|---:|---:|---:|---:|---:|---:|
-| HKUST | 5,479,213 | 5,384,833 | 2,907 | 91 | 3,042 | 1,257 |
-| IFCBench | 11,883,919 | 10,470,682 | 48,904 | 1,412 | 3,669 | 31,909 |
+## Point60 与 Region66
 
-两项 meta 都明确写入 `selection.mode=complete-primitive-deletion-only`，没有 primitive 内拆分。对应目录为 `geometry_shell_hzb_equal_asset_hkust/` 和 `geometry_shell_hzb_equal_asset_ifcbench/`。
-最终 runtime 下载集合还包括 metadata：HKUST `shell_meta.json=91,473 B`、总计 `5,476,306 B`；IFCBench
-`shell_meta.json=1,364,333 B`、总计 `11,835,015 B`。两者分别低于预算 `2,907 B` 和 `48,904 B`；这两个值由六个二进制文件和
-`shell_meta.json` 的实际文件字节再次求和得到。
-两个目录之外的 offline audit 分别为 `1,205,941 B` 和 `1,347,295 B`，不计入上述总量。
+- `Point60`：真实 `60°` canonical 相机只运行一次，GT 来自该 view-cell 的 `subpose_id=0` 硬件 Color-ID 重渲染。
+- `Region66`：使用和学习方法相同的区域候选，对登记 subpose 分别执行 Hi-Z 后取可见实例并集。
 
-## HZB runtime MVP
+Point60 不读取 Region66 的可见并集。Region66 的 `1/5/9/all` 子集按空间覆盖选择，不读取可见标签；所有 subpose 查询时间都计入基线成本。
 
-浏览器 runtime `GeometryShellHZB` 提供：
+## 正式矩阵
 
-1. depth-only pass：正线性眼空间深度，背景为 far，普通 depth attachment 取最近表面；
-2. max mip：每个 2x2 block 取最大正深度，完整处理奇数宽高到 1x1；
-3. 保守 AABB：投影 8 个角点，向外取整覆盖矩形；相机在 AABB 内、近裁剪面穿越、非有限投影和空/越界 footprint 都保留；selected occluder 自身直接保留，其他候选（包括 non-occluder）执行 HZB 测试；
-4. 只有 `hzbMax + depthBiasM < candidateNear` 才允许剔除；
-5. `queryPoint60` 对单个真实 60°相机查询，`queryRegion66` 对离线 subpose 分别查询后取实例并集；Point60 准确率必须使用单个 Color-ID raw canonical subpose GT，不能使用 Region union；
-6. GPU 只回读计数、最终可见实例编号和 GLB flag，实例输出保持 component 粒度，GLB 队列由可见实例聚合得到。
+唯一正式入口：
 
-WebGPU MVP 明确固定 color/HZB texture、depth texture 和 render pipeline 为 `sampleCount=1`，不做 MSAA 或 resolve；
-所有 mip 的源/目标宽高由 uniform 传入，WGSL 不依赖 `textureDimensions`，以兼容当前 Chrome WebGPU storage texture
-路径。Region66 每个子姿态单独完成 depth/HZB/query/readback，最后对 component ID 取并集，`passCount` 和分阶段 timing
-随结果保存。
+```bash
+conda run --no-capture-output -n slm_pvs \
+  python neural_instance_culling/benchmark/run_geometry_shell_hzb_paper.py all
+```
 
-## 浏览器 smoke 与 GPU 证据
+执行顺序为 `preflight -> calibration -> selection -> frozen test -> timing`：
 
-已执行 2 pose、128x72 的小型浏览器 smoke，使用正式 Chrome Vulkan 参数、`VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json`；当前结果为修正后的 query contract 实现。
-Point60 结果文件为：
+| 阶段 | HKUST | IFCBench |
+|---|---:|---:|
+| Calibration | `512x288/1024x576` × `0.1/1/10 mm`，lossless | 相同 |
+| Frozen test | Region `1/5/9/all` × lossless/equal-asset | Region `1/all` × lossless/equal-asset |
+| Timing | 120 个固定 test pose × 5 轮 × 两种外壳 | 相同 |
 
-`neural_instance_culling/benchmark/out/paper_results/hzb/smoke_point60_v4/point60.json`
+Calibration 只决定分辨率和 depth bias。选择器要求 weighted recall 与其单侧 95% LCB 均严格大于 `0.99`，安全成员中先比较 useful cull，再比较 balanced accuracy、specificity、precision 和延迟。Equal-asset 复用 lossless 冻结配置，不重新校准。
 
-Region66 结果文件为：
+正式浏览器结果必须具有 NVIDIA WebGPU adapter、NVIDIA ANGLE/Vulkan 辅助 renderer、`formalReady=true`、`executionClass=formal-hardware-gpu`、无 WebGPU validation error，以及同一窗口无其他 GPU 计算进程的 `nvidia-smi/pmon` 证据。
 
-`neural_instance_culling/benchmark/out/paper_results/hzb/smoke_region66_v4/region66.json`
+## 指标
 
-实际结果：
+所有方法使用相同 candidate CSR、GT、split 和 evaluator。正文报告：
 
-- WebGPU adapter：`vendor=nvidia`、`architecture=ampere`；
-- browser result 和旁路 evidence 均保存 `gpuBackend`（API=`webgpu`、adapter 字段）以及独立 `gpuGate`；
-- WebGL 辅助 renderer：NVIDIA RTX A6000 的 ANGLE Vulkan；
-- Point60：2 个 pose、91 个候选引用，平均 45.5 个候选和 44 个保留实例；timing total p50=`34.00 ms`、p95=`58.57 ms`。每个 pose 保留数为 `32/33`、`56/58`。这次历史 smoke 的 accuracy/GLB 数字使用了 Region-union `visible_ids.bin`，在本 follow-up 后只保留为 runtime 路径诊断，不进入 Point60 accuracy 表；它仍是并发 smoke，不是正式 timing 或完整 test 结论；
-- Region66：2 个 pose、4 个子姿态/pose，平均 6,433 个候选和 5,705 个并集保留实例；timing total p50=`36.10 ms`、p95=`44.74 ms`。aggregate precision=`0.140316`、recall=`0.995647`、specificity=`0.128708`、balanced accuracy=`0.562178`、useful cull=`0.112622`、bad cull=`0.000544`、weighted recall=`0.999021`、weighted recall lower95=`0.998910`。两个 pose 的保留数为 `5,611/6,013`、`5,799/6,853`，每个 pose 的 4 个 subpose 查询后取并集；该结果使用重新生成的 contract asset，仍为并发 smoke，不是正式 test 结论；
-- 两个 smoke 均报告 WebGPU adapter `vendor=nvidia`、`architecture=ampere`，WebGL 辅助 renderer 为 NVIDIA RTX A6000 ANGLE Vulkan，`gpuValidationErrors=[]` 且无 page error；同一窗口的 `nvidia-smi pmon` 检出 GPU 0-3 上的 IFCBench `python` 计算进程，因此写入 `formalReady=false`、`executionClass=hardware-smoke-concurrent`。
-- GLB 资源统计按 pose 内去重后再做 pose macro 平均，不再把跨 pose union 作为主指标。Region66 的主 `glb.poseMacro` 为 `932`、`277`、`277`，源 GLB 字节为 `27,644,000 / 6,357,804 / 6,357,804 B`；两个 pose predicted 数/字节为 `842/21,871,312 B`、`1,022/33,416,688 B`。Point60 旧 `glb.poseMacro`（`44/3/3`，字节 `3,580,428/106,684/106,684 B`）同样使用了 union GT，只作无效 runtime 诊断，不进入资源准确率表。`glb.unionDiagnostic` 仅作跨 pose 重复度诊断；bytes 来自显式 `glbIndex.json` 与 `--glb-root` 的 `stat().st_size`。
+- pose-macro 与 aggregate precision、Visible Recall、Occlusion Recall、False Occlusion Rate、balanced accuracy；
+- weighted recall 及其单侧 95% LCB；
+- Useful Cull Ratio、Bad Cull Ratio、平均保留实例和 GLB 数/字节；
+- image PER、miss-pixel、wrong-ID 和 extra-pixel；
+- 外壳传输字节、解码内存、depth/ID/mip/query/compaction/readback 与总时间 p50/p95。
 
-每个 smoke 目录旁都有 `geometry_shell_hzb_gpu_evidence.json`，保存 `gpuBackend`、adapter/WebGL gate、Chrome 参数、同窗口
-`nvidia-smi` 和 `pmon` before/during/after。并发 smoke 的 timing 字段只用于确认路径可运行，不进入正式性能汇总。
+本项目以可见为正类：`Occlusion Recall = specificity = TN/(TN+FP)`，`False Occlusion Rate = 1-recall = FN/GT`。`usefulCull=TN/candidate`、`badCull=FN/candidate` 使用不同分母，不能互相替代。完整定义见[统一评价协议](unified_pvs_metrics_evaluation.md)。
 
-页面仍有 Chrome 的 `A valid external Instance reference no longer exists.` warning；它未形成 WebGPU validation error，需在正式计时前继续定位。favicon 请求已由 benchmark server 处理为 204。
+## 验证与当前状态
 
-## 画面损失与剔除效率口径
+2026-09-10 已通过：
 
-本轮没有正式全量 HZB visibility test，因此尚未产生可用于论文结论的 pose/aggregate precision、recall、weighted recall 及其置信下界、specificity、balanced accuracy、useful cull、bad cull、image PER、miss pixel、wrong-ID pixel、GLB byte reduction 和正式冷启动/端侧延迟。2 pose smoke 的上述诊断值已单独标注，不能替代完整 test。
+- v2 exporter、Meshopt 解码、visible-ID compaction 和 Region 选择专项测试；
+- 48 个 HZB、图像和 streaming Python `unittest`；
+- 完整 `slm2viewer npm test`；
+- 32 项正式 dry-run；
+- NVIDIA A6000 无头 WebGPU adapter 门。
 
-正式评价需使用与 PVS 相同的 candidate CSR、split 和可追溯的 GT visible IDs/weights：
-
-- Region66 使用 Pose CSR 的 `visible_ids.bin/visible_weights.bin` union GT；
-- Point60 不得读取该 union GT。必须传入对应场景 Color-ID raw 目录，固定按每个 view-cell 的 `subpose_id=0` 读取一个 source row 的 `visible_component_ids/component_weights`。没有该参数时 evaluator 直接拒绝生成 Point60 accuracy/GLB 指标，而不是退回 union；输出的 `groundTruth.mode=canonical-subpose`、`groundTruth.source=raw_three_color_id_jsonl` 和 `groundTruth.subposeId=0` 是正式口径字段；
-- 画面损失指标：weighted recall、miss pixel、image PER、wrong-ID pixel；
-- 剔除效率指标：useful cull、specificity、预测/候选比例、bad cull、GLB 数量/字节削减；
-- 资源/运行指标：shell 传输字节、解码后 GPU 内存、depth/mip/query/readback 分阶段时间和总调度时间。
-
-`evaluate_geometry_shell_hzb.py` 已实现上述集合口径、pose macro/aggregate 计数、visible weights 加权召回和按 pose 的 GLB 计数；传入 `--glb-index` 与 `--glb-root` 时还会输出每 pose/pose macro/union diagnostic 的源 GLB 字节。主资源指标是 `glb.poseMacro`，跨 pose union 只在 `glb.unionDiagnostic`。
+当前没有可报告的正式 HZB test 或图像数字。早期两 pose smoke、旧 selected-self 逻辑和使用 Region union 作为 Point60 GT 的结果均已删除；后续只从当前正式根目录生成论文表格和 streaming 输入。详细任务目录、恢复规则和失败诊断见[HZB 正式执行文档](pvs_hzb_formal_execution_2026-09-09.md)。
 
 ## 变更记录
 
-日期：2026-09-09。目的：完成 Geometry-shell HZB 的 lossless 外壳导出、严格 equal-asset 传输预算、WebGPU depth/HZB MVP、Point60/Region66 接口及可审计的硬件 smoke 路径；不改训练、PVS evaluation 或 streaming。
-
-修改文件：`neural_instance_culling/benchmark/geometry_shell_hzb_exporter.mjs`、`neural_instance_culling/benchmark/evaluate_geometry_shell_hzb.py`、对应 exporter/evaluator 测试，以及 `slm2viewer/src/GeometryShellHZB*.js`、benchmark page/runner 和 core 测试。追加修正把 selected occluder 自保留与非 selected AABB/HZB 测试写入 WGSL、CPU contract 和 `queryContract`，并把 GLB 主指标改为 per-pose macro。依赖为现有 `meshoptimizer`、Three.js/Parcel、Chrome WebGPU 和显式 scene/data root；源场景只读取主工作区的 HKUST/IFCBench 目录，输出写入本 worktree。
-
-CPU 导出命令使用 `--scene-root`、`--output-dir`、`--variant`；equal-asset 另传 `--budget-from-dir`、`--importance-pose-plan` 和 `--importance-pose-count 128`。代表性命令如下：
-
-```bash
-node neural_instance_culling/benchmark/geometry_shell_hzb_exporter.mjs \
-  --scene-root /mnt/sda/rhyang/slm/ifcbench_fantasy_metropolis_instanced_v2 \
-  --output-dir neural_instance_culling/benchmark/out/paper_results/hzb/geometry_shell_hzb_equal_asset_ifcbench \
-  --variant equal-asset --budget-from-dir <neural-runtime-dir> \
-  --importance-pose-plan <ifcbench-pose-plan.jsonl> --importance-pose-count 128 --overwrite
-```
-
-浏览器结果评价在可得源 GLB 字节时显式传入 index/root，例如：
-
-```bash
-conda run -n slm_pvs python neural_instance_culling/benchmark/evaluate_geometry_shell_hzb.py \
-  --result neural_instance_culling/benchmark/out/paper_results/hzb/smoke_region66_v4/region66.json \
-  --dataset-dir <ifcbench-csr-dataset> \
-  --runtime-meta /mnt/sda/rhyang/slm/ifcbench_fantasy_metropolis_instanced_v2/assets/runtimeVisibilityMeta.json \
-  --output neural_instance_culling/benchmark/out/paper_results/hzb/smoke_region66_v4/metrics.json \
-  --glb-index /mnt/sda/rhyang/slm/ifcbench_fantasy_metropolis_instanced_v2/assets/glbIndex.json \
-  --glb-root /mnt/sda/rhyang/slm/ifcbench_fantasy_metropolis_instanced_v2/assets
-```
-
-该版本保留为论文 Geometry-shell HZB 基线/资产敏感性对照；当前风险是外壳仍未完成独占 GPU 的全 test visibility、图像损失和端侧正式计时，Chrome 还有 external Instance warning。
-
-## Follow-up：公平 Region 抽样与 Point60 GT
-
-日期：2026-09-09。目的：补齐论文计划中的 Region 子姿态抽样契约，并阻止 view-cell union 被误当作 Point60 同点 GT。
-
-Region runner 新增 `--region-sample-count`，只接受 `0/1/5/9`，默认 `0`。`0` 保留该 view-cell 的全部实际 source subpose，并按 source ordinal 发送；非零值先选择距 `viewcell_centers.bin` canonical query center 最近的点，之后每次选择到已选世界位置集合最小距离最大的点，完全不读取任何 visible label。距离相同按 source ordinal 决定。请求数大于 available 数时选择全部 available 点。每个 workload pose 记录 `availableSubposeCount`、`selectedSubposeCount`、选中 ordinal/source pose index、`selectionMode`、`strategy` 和 `labelSource=none`；workload/result 汇总记录 workload 范围内的总数与均值/范围。
-
-Point60 的正式 evaluator 现在要求显式 `--point-gt-raw-dir`，从顶层 `*.jsonl` 中按 `viewcell_id` 固定取 `subpose_id=0`，保留该行的逐组件 ID 和权重；Region66 仍读取 CSR union。代表性命令为：
-
-```bash
-conda run -n slm_pvs python neural_instance_culling/benchmark/evaluate_geometry_shell_hzb.py \
-  --result <point60-result.json> \
-  --dataset-dir <pose-csr-dataset> \
-  --runtime-meta <scene-root>/assets/runtimeVisibilityMeta.json \
-  --point-gt-raw-dir <scene-viewcell-colorid-raw-dir> \
-  --output <point60-metrics.json>
-```
-
-HKUST raw source 为 `neural_instance_culling/sampler/out/hkust_v3_viewcell_fov66/color_id`，IFCBench raw source 为 `neural_instance_culling/sampler/out/ifcbench_fantasy_metropolis_instanced_v2/viewcell_colorid_k4`。`subpose_id=0` 是 source 中固定的 canonical representative；它不是把整个区域可见集合复制到 Point60。若后续正式协议要求几何中心的精确 Color-ID 重渲染，需要另行登记中心点 reference，不能把这里的 source representative 改称为精确中心测量。
-
-对已有 2-pose Point60 浏览器输出做的 CPU-only raw-GT 诊断得到 `gtCount=5`、`tp=5`、aggregate recall=`1.0`、precision=`0.056818`、weighted recall=`1.0`；该数字只验证 evaluator 的逐 subpose 对齐，不是新的浏览器 smoke，也不构成正式 test 结论。
-
-本 follow-up 未启动浏览器或 GPU；已有 Point60/Region66 结果仍是上一轮并发硬件 smoke，Point60 的旧 accuracy 只作无效口径诊断，Region66 的旧结果仍是全 4 subpose 的并发 smoke。正式独占硬件 timing、Point60 raw-GT 全 test visibility、Region 子集 `1/5/9` 的 GPU 结果和图像评价均未执行。
-
-## 验证与剩余工作
-
-已通过：
-
-- `node neural_instance_culling/benchmark/test_geometry_shell_hzb_exporter.mjs`；
-- `node slm2viewer/scripts/test_geometry_shell_hzb_core.mjs`；
-- `node slm2viewer/scripts/test_geometry_shell_hzb_runner.mjs`；
-- `conda run -n slm_pvs python -m unittest neural_instance_culling.benchmark.tests.test_evaluate_geometry_shell_hzb`；
-- 修正后的 Point60/Region66 browser smoke，均有 WebGPU adapter 和 before/during/after GPU evidence；
-- 两场景完整 lossless/equal-asset CPU exporter，runtime 文件总量和 equal-asset 硬预算均已复核；
-- 四个 runtime 目录无 `primitiveAudits`，四个对应的 `.offline.json` sidecar 含离线审计且不在 runtime 目录；
-- 两场景完整 meshopt stream 解码与长度/有限性检查；
-- Parcel benchmark bundle 构建；
-- `npm run probe:webgpu-hardware`（独立硬件门）。
-
-`npm test` 未能完成：第一项 `test_current.mjs` 找不到 worktree 内的 `assets/scenes/hkust-v3/glbIndex.json`；单独运行的其余现有前端测试中 11 项通过，`test_instance_pvs_wasm_runtime.mjs` 因 `/model/model_meta.json` 缺失失败。这些是缺少前端测试资产造成的环境阻碍，不是 HZB 专项失败。
-
-剩余正式运行：
-
-1. 等待 GPU 0-3 的 IFCBench 扫描结束，在独占 GPU 窗口重做 Point60 和 Region66 小规模验证，并分别运行 Region `1/5/9/0`；当前 v4 两次 smoke 均因并发明确标为 `hardware-smoke-concurrent`；
-2. 按计划校准 resolution/depth bias，并在完整 test split 上执行 HZB visibility 与图像评价；
-3. 在 A6000、M2 和真实移动设备分别记录冷启动、depth-only、mip、AABB/query/readback p50/p95；
-4. 定位 Chrome external Instance warning 后再冻结正式 HZB 性能表。
-
-本报告不把并发 smoke 或 CPU 导出耗时当作正式硬件性能结论。
+- 修改代码：`geometry_shell_hzb_exporter.mjs`、`evaluate_geometry_shell_hzb.py`、`run_geometry_shell_hzb_paper.py`、`GeometryShellHZB*.js`、benchmark runner/page 及对应测试。
+- 依赖：现有场景 GLB/runtime meta、Pose CSR、Region source、Meshopt、Chrome WebGPU 和硬件证据入口。
+- 主线决定：保留 lossless 为完整几何基线，equal-asset 为同启动预算敏感性；两者都不替代 Full V4。
+- 待完成：正式 Region66/Point60、test 图像、A6000/移动端计时和 visible-weight streaming 接入。

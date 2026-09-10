@@ -176,7 +176,7 @@ async function runBenchmark(config) {
   const gpuBackend = { api: 'webgpu', ...adapterInfo };
   const webglInfo = getWebGLInfo();
   const result = {
-    schema: 'geometry-shell-hzb-browser-result-v1',
+    schema: 'geometry-shell-hzb-browser-result-v2',
     mode: config.mode || 'Point60',
     assetBaseUrl: config.assetBaseUrl,
     workload: {

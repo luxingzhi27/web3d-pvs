@@ -26,7 +26,7 @@ except ImportError:
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RENDERER = ROOT / "benchmark" / "render_local_glb_color_id_browser.mjs"
 GPU_EVIDENCE_SCHEMA = "pvs-browser-hardware-gpu-evidence-v1"
-HZB_RESULT_SCHEMA = "geometry-shell-hzb-browser-result-v1"
+HZB_RESULT_SCHEMA = "geometry-shell-hzb-browser-result-v2"
 SOFTWARE_GPU_PATTERN = re.compile(
     r"swiftshader|llvmpipe|softpipe|swrast|software|no-webgl",
     re.IGNORECASE,

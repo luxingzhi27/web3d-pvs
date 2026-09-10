@@ -36,8 +36,8 @@ POINT60_PLAN_BUILDER = BENCHMARK_DIR / "build_hzb_point60_gt_plan.py"
 SAMPLER = ROOT / "neural_instance_culling" / "sampler" / "run_sampler.mjs"
 
 EXPERIMENT = "baseline_geometry_shell_hzb_paper_2026-09-09"
-RESULT_SCHEMA = "geometry-shell-hzb-browser-result-v1"
-METRICS_SCHEMA = "geometry-shell-hzb-metrics-v1"
+RESULT_SCHEMA = "geometry-shell-hzb-browser-result-v2"
+METRICS_SCHEMA = "geometry-shell-hzb-metrics-v2"
 SELECTION_SCHEMA = "geometry-shell-hzb-calibration-selection-v1"
 PREFLIGHT_SCHEMA = "geometry-shell-hzb-paper-preflight-v1"
 TASK_SCHEMA = "geometry-shell-hzb-paper-task-v1"
@@ -294,7 +294,7 @@ def _check_glb_index(path: Path, root: Path, expected_count: int) -> dict[str, A
 def _check_shell(path: Path, scene: SceneSpec, variant: str, num_instances: int) -> dict[str, Any]:
     _require_dir(path, f"{scene.key} {variant} geometry shell")
     meta = _read_json(_require_file(path / "shell_meta.json", "geometry shell metadata"))
-    if meta.get("schema") != "geometry-shell-hzb-v1":
+    if meta.get("schema") != "geometry-shell-hzb-v2":
         raise ValueError(f"unsupported geometry shell schema: {path}")
     if meta.get("variant") != ("equal-asset" if variant == "equal_asset" else "lossless"):
         raise ValueError(f"geometry shell variant mismatch: {path}")
@@ -308,6 +308,7 @@ def _check_shell(path: Path, scene: SceneSpec, variant: str, num_instances: int)
         "instance_occluder_uint32.bin",
         "instance_to_glb_uint32.bin",
         "positions.meshopt.bin",
+        "shell_instance_component_ids_uint32.bin",
         "transforms.meshopt.bin",
     ):
         file = _require_file(path / name, f"geometry shell {name}")
@@ -318,6 +319,12 @@ def _check_shell(path: Path, scene: SceneSpec, variant: str, num_instances: int)
     for name in ("instance_occluder_uint32.bin", "instance_to_glb_uint32.bin"):
         if (path / name).stat().st_size != num_instances * 4:
             raise ValueError(f"geometry shell {name} length does not match instanceCount")
+    shell_instance_count = sum(
+        _int(prototype.get("instanceCount", -1), "shell prototype instanceCount")
+        for prototype in meta.get("prototypes", [])
+    )
+    if (path / "shell_instance_component_ids_uint32.bin").stat().st_size != shell_instance_count * 4:
+        raise ValueError("geometry shell component ID table length does not match packed shell instances")
     return {
         "variant": meta["variant"],
         "instanceCount": num_instances,

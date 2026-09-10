@@ -22,6 +22,7 @@ def _hzb_fixture(root: Path, scene: str, variant: str) -> None:
         "positions.meshopt.bin": b"123",
         "indices.meshopt.bin": b"1234",
         "transforms.meshopt.bin": b"12345",
+        "shell_instance_component_ids_uint32.bin": b"12345678",
         "instance_aabb_fp32.bin": b"12",
         "instance_to_glb_uint32.bin": b"123",
         "instance_occluder_uint32.bin": b"1234",
@@ -29,13 +30,14 @@ def _hzb_fixture(root: Path, scene: str, variant: str) -> None:
     for name, data in files.items():
         (directory / name).write_bytes(data)
     shell = {
-        "schema": "geometry-shell-hzb-v1", "variant": variant,
+        "schema": "geometry-shell-hzb-v2", "variant": variant,
         "sceneName": scene, "instanceCount": 3, "globalGlbCount": 2,
         "occluderInstanceCount": 2 if variant == "lossless" else 1, "prototypeCount": 2,
         "files": {
             "instanceAabbs": {"file": "instance_aabb_fp32.bin"},
             "instanceToGlb": {"file": "instance_to_glb_uint32.bin"},
             "instanceOccluder": {"file": "instance_occluder_uint32.bin"},
+            "shellInstanceIds": {"file": "shell_instance_component_ids_uint32.bin"},
         },
         "streams": {
             "positions": {"file": "positions.meshopt.bin", "segments": [{"byteLength": 3, "decodedByteLength": 12}]},
@@ -43,8 +45,8 @@ def _hzb_fixture(root: Path, scene: str, variant: str) -> None:
             "transforms": {"file": "transforms.meshopt.bin", "segments": [{"byteLength": 5, "decodedByteLength": 20}]},
         },
         "stats": {
-            "compressedGeometryBytes": 12, "binaryPayloadBytes": 21,
-            "runtimePayloadBytes": 9, "prototypeTriangles": 4,
+            "compressedGeometryBytes": 12, "binaryPayloadBytes": 29,
+            "runtimePayloadBytes": 17, "prototypeTriangles": 4,
             "rasterizedTriangleInstanceCount": 6, "sourceGlbCount": 2,
             "opaquePrimitiveCount": 2,
         },
@@ -127,9 +129,9 @@ class AssetRuntimeTableTests(unittest.TestCase):
             self.assertEqual(len(rows), 9)
             hzb_row = next(row for row in rows if row["scene"] == "hkust" and row["variant"] == "lossless")
             shell_bytes = (hzb / "geometry_shell_hzb_lossless_hkust/shell_meta.json").stat().st_size
-            self.assertEqual(hzb_row["transfer_bytes"], str(21 + shell_bytes))
+            self.assertEqual(hzb_row["transfer_bytes"], str(29 + shell_bytes))
             self.assertEqual(hzb_row["expanded_geometry_bytes"], "48")
-            self.assertEqual(hzb_row["expanded_memory_bytes"], "57")
+            self.assertEqual(hzb_row["expanded_memory_bytes"], "65")
             self.assertEqual(hzb_row["expanded_triangles"], "6")
             neural_row = next(row for row in rows if row["scene"] == "hkust" and row["method"] == "neural")
             self.assertEqual(neural_row["transfer_bytes"], str(sum(p.stat().st_size for p in neural["hkust"].iterdir())))

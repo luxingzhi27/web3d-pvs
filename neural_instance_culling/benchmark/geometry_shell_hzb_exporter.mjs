@@ -15,9 +15,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { MeshoptDecoder } from 'meshoptimizer/decoder';
 import { MeshoptEncoder } from 'meshoptimizer/encoder';
 
-export const SHELL_SCHEMA = 'geometry-shell-hzb-v1';
+export const SHELL_SCHEMA = 'geometry-shell-hzb-v2';
 export const SHELL_VARIANTS = new Set(['lossless', 'equal-asset']);
 export const OFFLINE_REPORT_SCHEMA = 'geometry-shell-hzb-offline-report-v1';
+const SHELL_INSTANCE_IDS_FILE = 'shell_instance_component_ids_uint32.bin';
 const GLB_MAGIC = 0x46546c67;
 const GLB_VERSION = 2;
 const JSON_CHUNK_TYPE = 0x4e4f534a;
@@ -394,10 +395,16 @@ async function inspectSourceEntry(entry, assetsDir, expectedComponentIds) {
   const nodes = meshNodes(parsed);
   const instancesByNode = [];
   let instanceCount = 0;
+  let componentCursor = 0;
   for (const node of nodes) {
     const matrices = await nodeInstances(parsed, node);
-    instancesByNode.push({ node, matrices });
-    instanceCount += matrices.length / 16;
+    const nodeInstanceCount = matrices.length / 16;
+    const componentIds = expectedComponentIds == null
+      ? null
+      : Uint32Array.from(expectedComponentIds.slice(componentCursor, componentCursor + nodeInstanceCount));
+    instancesByNode.push({ node, matrices, componentIds });
+    componentCursor += nodeInstanceCount;
+    instanceCount += nodeInstanceCount;
   }
   const declaredBuffers = parsed.json.buffers || [];
   const emptyPlaceholder = Boolean(
@@ -414,12 +421,13 @@ async function inspectSourceEntry(entry, assetsDir, expectedComponentIds) {
     );
   }
   const primitives = [];
-  for (const { node, matrices } of instancesByNode) {
+  for (const { node, matrices, componentIds } of instancesByNode) {
     const mesh = parsed.json.meshes?.[node.meshIndex];
     if (!mesh) throw new Error(`${entry.path}: mesh ${node.meshIndex} is missing.`);
     for (const primitive of mesh.primitives || []) {
       const inspectedPrimitive = await readPrimitive(parsed, node, primitive, primitives.length);
       inspectedPrimitive.instanceMatrices = matrices;
+      inspectedPrimitive.instanceComponentIds = componentIds;
       primitives.push(inspectedPrimitive);
     }
   }
@@ -673,6 +681,7 @@ function buildShellMeta({
       removedAttributes: ['NORMAL', 'TANGENT', 'TEXCOORD_0', 'TEXCOORD_1', 'COLOR_0', 'material', 'texture'],
       occluderRule: 'only certain OPAQUE primitives; transparent, alpha-cutout, unsupported or uncertain materials are not occluders',
       backfaceCulling: false,
+      visibleShellInstances: 'nearest-surface component IDs emitted by the depth pass',
     },
     queryContract: {
       depthEncoding: 'positive_linear_view_depth_meters',
@@ -683,7 +692,7 @@ function buildShellMeta({
       occluderSet: {
         selectedValue: 1,
         nonSelectedValue: 0,
-        selectedBehavior: 'retain selected occluder itself without uncertainty; it contributed shell depth',
+        selectedBehavior: 'retain only when the selected shell instance contributes a nearest-depth pixel',
         nonSelectedBehavior: 'run conservative AABB/HZB test against the rendered selected shell',
       },
       uncertainty: 'non-finite, near-plane crossing, camera-inside-AABB and outside-screen projections are retained; non-selected candidates are still HZB-tested',
@@ -700,6 +709,11 @@ function buildShellMeta({
       instanceAabbs: { file: aabbFile, encoding: 'float32-little-endian', byteLength: binaryBytes[aabbFile] },
       instanceToGlb: { file: mappingFile, encoding: 'uint32-little-endian', byteLength: binaryBytes[mappingFile] },
       instanceOccluder: { file: occluderFile, encoding: 'uint32-little-endian', byteLength: binaryBytes[occluderFile] },
+      shellInstanceIds: {
+        file: SHELL_INSTANCE_IDS_FILE,
+        encoding: 'uint32-little-endian',
+        byteLength: binaryBytes[SHELL_INSTANCE_IDS_FILE],
+      },
     },
     stats: {
       ...counters,
@@ -707,8 +721,10 @@ function buildShellMeta({
       compressedIndexBytes: binaryBytes[streams.indices.file],
       compressedTransformBytes: binaryBytes[streams.transforms.file],
       compressedGeometryBytes,
-      runtimePayloadBytes: binaryBytes[aabbFile] + binaryBytes[mappingFile] + binaryBytes[occluderFile],
-      binaryPayloadBytes: binaryBytes[aabbFile] + binaryBytes[mappingFile] + binaryBytes[occluderFile] + compressedGeometryBytes,
+      runtimePayloadBytes: binaryBytes[aabbFile] + binaryBytes[mappingFile]
+        + binaryBytes[occluderFile] + binaryBytes[SHELL_INSTANCE_IDS_FILE],
+      binaryPayloadBytes: binaryBytes[aabbFile] + binaryBytes[mappingFile]
+        + binaryBytes[occluderFile] + binaryBytes[SHELL_INSTANCE_IDS_FILE] + compressedGeometryBytes,
       prototypeCount: prototypes.length,
       prototypeTriangles: prototypes.reduce((sum, prototype) => sum + prototype.triangleCount, 0),
       rasterizedTriangleInstanceCount: prototypes.reduce((sum, prototype) => sum + prototype.triangleCount * prototype.instanceCount, 0),
@@ -825,6 +841,7 @@ function writeCandidateSegments(candidate, stageDir) {
   fs.writeFileSync(path.join(base, 'positions.bin'), Buffer.from(candidate.positionEncoded));
   fs.writeFileSync(path.join(base, 'indices.bin'), Buffer.from(candidate.indexEncoded));
   fs.writeFileSync(path.join(base, 'transforms.bin'), Buffer.from(candidate.transformEncoded));
+  fs.writeFileSync(path.join(base, 'component_ids.bin'), Buffer.from(typedBytes(candidate.componentIds)));
   return base;
 }
 
@@ -851,6 +868,10 @@ function layoutCandidate(candidate, streams, offsets, ranges) {
   const positionRange = ranges.position;
   const indexRange = ranges.index;
   const transformRange = ranges.transform;
+  const componentIdRange = ranges.componentId;
+  if (componentIdRange.byteLength !== transformSegment.count * 4) {
+    throw new Error('shell component ID stream does not match transform instance count.');
+  }
   const positionDescriptor = segmentDescriptor(positionSegment, positionRange);
   const indexDescriptor = segmentDescriptor(indexSegment, indexRange);
   const transformDescriptor = segmentDescriptor(transformSegment, transformRange);
@@ -879,9 +900,11 @@ function layoutCandidate(candidate, streams, offsets, ranges) {
   offsets.positionByteOffset += positionRange.byteLength;
   offsets.indexByteOffset += indexRange.byteLength;
   offsets.transformByteOffset += transformRange.byteLength;
+  offsets.componentIdByteOffset += componentIdRange.byteLength;
   return {
     prototype,
-    encodedBytes: positionRange.byteLength + indexRange.byteLength + transformRange.byteLength,
+    encodedBytes: positionRange.byteLength + indexRange.byteLength
+      + transformRange.byteLength + componentIdRange.byteLength,
   };
 }
 
@@ -890,6 +913,9 @@ function candidateEncodedBytes(candidate) {
     position: candidate.positionEncoded || readSegment(path.join(candidate.stageDir, 'positions.bin')),
     index: candidate.indexEncoded || readSegment(path.join(candidate.stageDir, 'indices.bin')),
     transform: candidate.transformEncoded || readSegment(path.join(candidate.stageDir, 'transforms.bin')),
+    componentId: candidate.componentIds
+      ? typedBytes(candidate.componentIds)
+      : readSegment(path.join(candidate.stageDir, 'component_ids.bin')),
   };
 }
 
@@ -899,6 +925,7 @@ function appendCandidate(candidate, writers, streams, offsets) {
     position: writers.positions.write(encoded.position),
     index: writers.indices.write(encoded.index),
     transform: writers.transforms.write(encoded.transform),
+    componentId: writers.componentIds.write(encoded.componentId),
   });
   return emitted;
 }
@@ -913,6 +940,7 @@ function projectCandidates(candidates) {
     positionByteOffset: 0,
     indexByteOffset: 0,
     transformByteOffset: 0,
+    componentIdByteOffset: 0,
   };
   const prototypes = [];
   for (const candidate of candidates) {
@@ -921,6 +949,7 @@ function projectCandidates(candidates) {
       position: { offset: offsets.positionByteOffset, byteLength: encoded.position.byteLength },
       index: { offset: offsets.indexByteOffset, byteLength: encoded.index.byteLength },
       transform: { offset: offsets.transformByteOffset, byteLength: encoded.transform.byteLength },
+      componentId: { offset: offsets.componentIdByteOffset, byteLength: encoded.componentId.byteLength },
     });
     prototypes.push(emitted.prototype);
   }
@@ -929,10 +958,15 @@ function projectCandidates(candidates) {
 
 function projectedBinaryBytes(runtime, streams) {
   const streamBytes = (stream) => stream.segments.reduce((sum, segment) => sum + segment.byteLength, 0);
+  const shellInstanceIdBytes = streams.transforms.segments.reduce(
+    (sum, segment) => sum + segment.count * 4,
+    0,
+  );
   return {
     [streams.positions.file]: streamBytes(streams.positions),
     [streams.indices.file]: streamBytes(streams.indices),
     [streams.transforms.file]: streamBytes(streams.transforms),
+    [SHELL_INSTANCE_IDS_FILE]: shellInstanceIdBytes,
     'instance_aabb_fp32.bin': runtime.aabbs.byteLength,
     'instance_to_glb_uint32.bin': runtime.instanceToGlb.byteLength,
     'instance_occluder_uint32.bin': runtime.instanceCount * 4,
@@ -995,6 +1029,7 @@ async function buildExport(args) {
     positions: new BinaryWriter(path.join(args.outputDir, streams.positions.file)),
     indices: new BinaryWriter(path.join(args.outputDir, streams.indices.file)),
     transforms: new BinaryWriter(path.join(args.outputDir, streams.transforms.file)),
+    componentIds: new BinaryWriter(path.join(args.outputDir, SHELL_INSTANCE_IDS_FILE)),
   };
   const offsets = {
     prototypeCount: 0,
@@ -1004,6 +1039,7 @@ async function buildExport(args) {
     positionByteOffset: 0,
     indexByteOffset: 0,
     transformByteOffset: 0,
+    componentIdByteOffset: 0,
   };
   const prototypes = [];
   const candidates = [];
@@ -1080,6 +1116,10 @@ async function buildExport(args) {
       }
       counters.opaquePrimitiveCount += 1;
       const matrices = primitive.instanceMatrices;
+      const componentIdsForPrimitive = primitive.instanceComponentIds;
+      if (!componentIdsForPrimitive || componentIdsForPrimitive.length !== primitiveInstanceCount) {
+        throw new Error(`${entry.path}: primitive ${primitive.primitiveIndex} has no aligned component IDs.`);
+      }
       const positionEncoded = encodeStream(primitive.positions, primitive.vertexCount, 12, 'ATTRIBUTES');
       const indexEncoded = encodeStream(primitive.indices, primitive.indices.length, 4, 'TRIANGLES');
       const transformEncoded = encodeStream(matrices, matrices.length / 16, 64, 'ATTRIBUTES');
@@ -1092,11 +1132,13 @@ async function buildExport(args) {
         indexCount: primitive.indices.length,
         triangleCount: primitive.triangleCount,
         matrices,
+        componentIds: Uint32Array.from(componentIdsForPrimitive),
         bounds: primitive.bounds,
         positionEncoded,
         indexEncoded,
         transformEncoded,
-        compressedBytes: positionEncoded.byteLength + indexEncoded.byteLength + transformEncoded.byteLength,
+        compressedBytes: positionEncoded.byteLength + indexEncoded.byteLength
+          + transformEncoded.byteLength + componentIdsForPrimitive.byteLength,
         stageDir: null,
         audit: primitiveAudit,
       };
@@ -1215,6 +1257,7 @@ async function buildExport(args) {
   writers.positions.close();
   writers.indices.close();
   writers.transforms.close();
+  writers.componentIds.close();
   if (stageDir) fs.rmSync(stageDir, { recursive: true, force: true });
 
   const scannedGlbIds = new Set(selectedEntries.map((entry) => Number(entry.globalId)));
@@ -1236,6 +1279,7 @@ async function buildExport(args) {
     streams.positions.file,
     streams.indices.file,
     streams.transforms.file,
+    SHELL_INSTANCE_IDS_FILE,
     aabbFile,
     mappingFile,
     occluderFile,

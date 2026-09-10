@@ -468,7 +468,7 @@ class GlbStreamingContractTests(unittest.TestCase):
         import tempfile
 
         payload = {
-            "schema": "geometry-shell-hzb-browser-result-v1",
+            "schema": "geometry-shell-hzb-browser-result-v2",
             "mode": "Region66",
             "formalReady": True,
             "executionClass": "formal-hardware-gpu",
@@ -540,7 +540,7 @@ class GlbStreamingContractTests(unittest.TestCase):
         import tempfile
 
         payload = {
-            "schema": "geometry-shell-hzb-browser-result-v1",
+            "schema": "geometry-shell-hzb-browser-result-v2",
             "mode": "Region66",
             "formalReady": True,
             "executionClass": "formal-hardware-gpu",

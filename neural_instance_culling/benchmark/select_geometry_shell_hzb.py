@@ -9,7 +9,7 @@ from typing import Any, Mapping, Sequence
 
 
 SELECTION_SCHEMA = "geometry-shell-hzb-calibration-selection-v1"
-METRICS_SCHEMA = "geometry-shell-hzb-metrics-v1"
+METRICS_SCHEMA = "geometry-shell-hzb-metrics-v2"
 
 
 def _read_json(path: Path) -> dict[str, Any]:

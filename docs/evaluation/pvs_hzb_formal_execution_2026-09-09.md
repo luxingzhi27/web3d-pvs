@@ -4,6 +4,33 @@
 
 状态：正式 `all` 已于 2026-09-10 启动；WebGPU 大 buffer 问题与结果协议问题已修正，当前从 HKUST calibration 恢复执行，尚未形成完整 HZB 结论。
 
+## 2026-09-10 外壳实例可见性语义修正
+
+恢复运行后，HKUST lossless `512x288` 的三个 depth-bias 配置均保留约 `99.55%` 候选。代码审查确认这不是正常的 HZB 精度/效率权衡：旧查询把所有 `instance_occluder=1` 的外壳实例无条件加入可见集合。HKUST lossless 外壳覆盖 `18,566/18,831` 个实例，IFCBench lossless 覆盖 `41,298/41,298` 个实例，因此旧实现会结构性退化为 Keep-All。该规则是本项目 MVP 的保守扩展，不是 Greene 等人的经典 HZB 或 Lee 等人的 HROC 所要求的对象可见性判定。旧正式矩阵已停止，其 calibration 数字作废，不进入论文表格、选择或 streaming。
+
+论文基线采用与冷启动任务匹配的 WebGPU geometry-shell HZB，而不宣称完整复现依赖连续帧、对象 BVH、fragment-ray traversal 和完整驻留几何的 HROC。修正后的唯一语义为：
+
+1. 外壳实例流为每个实例变换保存真实 `componentGlobalId`；
+2. depth-only pass 同时写正线性深度和最近表面的 component ID；
+3. GPU 将 ID attachment 压缩成外壳实例可见 bitset；
+4. 已选外壳实例只有在真实贡献最近深度像素时才保留；
+5. 未选入外壳的候选继续执行保守 AABB/max-depth-HZB 测试；
+6. Region66 仍对同一 view-cell 的登记 subpose 分别执行并取实例并集。
+
+修正会提升 runtime schema，不保留旧 selected-self 兼容路径。重新导出 lossless/equal-asset 外壳后，仍只在 calibration 选择分辨率和 depth bias；最终 HZB 与 Full V4 必须使用同一冻结 test split、同一 candidate CSR、同一 Region66 GT 和同一指标实现。HROC 作为现代层次 GPU 遮挡查询相关工作引用，不作为当前代码的复现名称。
+
+### 基线定位与对象 BVH 决策
+
+正式名称固定为 **WebGPU Batched Geometry-shell Hi-Z**。它使用图像空间 max-depth pyramid，并对已经由同一 `66°` candidate CSR 完成视锥筛选的实例执行一线程一个 AABB 的 GPU 批量查询。它不是 HROC 的完整复现；没有实现 HROC 的连续帧可见集、对象 BVH、occludee-group extraction、fragment-ray traversal 或 indirect multidraw，因此论文不得用 HROC 名称或直接对照 HROC 论文时间。
+
+不增加对象 BVH 是本实验的明确设计，而不是遗漏：神经模型和该基线都接收相同候选并具有 `O(N_candidate)` 的轻量逐实例查询，能够直接输出 component ID。旧执行的时间只能用于诊断阶段构成、不能用于可见性结论；其 HKUST `512x288` 单 subpose 中值约为 depth raster `19.08 ms`、HZB build `4.43 ms`、AABB test `4.42 ms`、压缩/回读 `7.67 ms`。对象 BVH直接影响的 AABB 阶段约占总时间 `12%`，主要成本仍是外壳光栅、mip 和结果传输。正式 v2 timing 将重新测量这些数字，并给 candidate-count scaling。
+
+为避免几千个 prototype 的 JavaScript draw 编码把几何基线人为做弱，正式实现使用预录 WebGPU `RenderBundle` 复用固定外壳 draw commands。论文同时报告各阶段时间和 `depth + visible-ID + mip` 的查询无关成本，使读者可以判断即使采用更激进的对象层次查询，外壳预下载与深度构建成本仍有多少。若描述相关工作，Greene 等人的 HZB 是基础，CHC++ 与 HROC 是完整几何驻留条件下的现代层次查询代表；本实验只声称实现经过 GPU 批处理的实际 Web Hi-Z 基线。
+
+### 遮挡指标显示名称
+
+本项目以可见为正类。HZB 与神经模型同表时，论文使用 `Visible Recall = recall`、`Occlusion Recall = specificity` 和 `False Occlusion Rate = 1 - recall`。`usefulCull = TN/candidate`、`badCull = FN/candidate` 继续单列；二者不能分别替代 `specificity` 和 `1-recall`。所有字段同时输出 pose-macro 与 aggregate，正式表头及分母以统一指标协议为准。
+
 ## 2026-09-10 正式启动与 WebGPU limit 修正
 
 首次正式 HKUST lossless calibration 在资产上传阶段失败。外壳解码后的 POSITION 和 INDEX buffer 分别约为 `1.12 GB` 与 `657 MB`，而 `GeometryShellHZB` 仍以 WebGPU 默认 `maxBufferSize=256 MB` 请求 device；A6000 adapter 实际声明支持约 `4 GB`。该失败发生在首个 pose 前，`formalReady=false`，没有进入 evaluator。

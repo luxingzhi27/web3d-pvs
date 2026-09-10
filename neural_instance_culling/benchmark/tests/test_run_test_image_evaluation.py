@@ -121,7 +121,7 @@ class FrozenTestImageEvaluationTests(unittest.TestCase):
             source_result = root / "region66.json"
             source_result.write_text(
                 json.dumps({
-                    "schema": "geometry-shell-hzb-browser-result-v1",
+                    "schema": "geometry-shell-hzb-browser-result-v2",
                     "mode": "Region66",
                     "formalReady": True,
                     "executionClass": "formal-hardware-gpu",

@@ -109,17 +109,21 @@ const result = await buildExport({
   overwrite: false,
 });
 await MeshoptDecoder.ready;
-assert.equal(result.meta.schema, 'geometry-shell-hzb-v1');
+assert.equal(result.meta.schema, 'geometry-shell-hzb-v2');
 assert.equal(result.meta.prototypeCount, 1);
 assert.equal(result.meta.stats.sourcePrimitiveCount, 2);
 assert.equal(result.meta.stats.opaquePrimitiveCount, 1);
 assert.equal(result.meta.stats.excludedByReason['alpha-mode-blend'], 1);
 assert.deepEqual(Array.from(readTyped(path.join(outputDir, 'instance_occluder_uint32.bin'), Uint32Array)), [1, 0]);
+assert.deepEqual(Array.from(readTyped(
+  path.join(outputDir, 'shell_instance_component_ids_uint32.bin'),
+  Uint32Array,
+)), [0]);
 assert.equal(result.meta.queryContract.sampleCount, 1);
 assert.match(result.meta.queryContract.mipDimensions, /explicit/);
 assert.equal(result.meta.queryContract.occluderSet.selectedValue, 1);
 assert.equal(result.meta.queryContract.occluderSet.nonSelectedValue, 0);
-assert.match(result.meta.queryContract.occluderSet.selectedBehavior, /without uncertainty/);
+assert.match(result.meta.queryContract.occluderSet.selectedBehavior, /nearest-depth pixel/);
 assert.match(result.meta.queryContract.occluderSet.nonSelectedBehavior, /AABB\/HZB/);
 assert.equal(result.meta.primitiveAudits, undefined);
 const losslessOfflineReport = JSON.parse(fs.readFileSync(result.offlineReportPath, 'utf8'));

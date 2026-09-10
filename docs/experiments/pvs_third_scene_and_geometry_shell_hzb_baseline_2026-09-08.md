@@ -2,7 +2,7 @@
 
 日期：2026-09-08
 
-状态：方案记录，尚未下载第三场景、导出几何外壳或产生正式 HZB 实测结果。
+状态：第三 BIM 场景尚未下载；Geometry-shell HZB 已进入正式重跑阶段，当前实现与结果只以[HZB 正式执行文档](../evaluation/pvs_hzb_formal_execution_2026-09-09.md)为准。本文保留第三场景选择依据和基线设计背景。
 
 ## 目的
 
@@ -89,16 +89,9 @@ IFC 转换与实例化
 
 Bistro、Power Plant、San Miguel 等场景不是第三个 BIM 主场景。它们最多作为图形学补充场景，用于和传统遮挡剔除工作建立联系。
 
-图形学场景通常没有 IFC 构件语义。转换时应按以下顺序定义实例：
+图形学场景通常没有 IFC 构件语义，也不需要恢复或制造 GLB 原型复用。正式协议统一称为 renderable unit：保留源 scene-graph object，只有超大 primitive 才按固定字节目标做确定性空间切分；每个单位分配一个 component ID 和一个独立 resource ID。即使 `instanceCount == resourceCount`，现有模型和指标仍然成立。
 
-1. 源 glTF/FBX 场景节点中的独立可渲染对象作为 component；
-2. 多个节点引用同一个 Mesh 时直接保留为同一原型的多个实例；
-3. 对未显式共享的对象，只在局部几何、拓扑、材质类别和刚体配准严格一致时复用原型；
-4. 无法恢复对象边界的大网格只能按空间簇定义 render cluster，论文中不能称为 BIM 构件；
-5. 每个原型导出为 `task-*/glb/LOD0/sub_<prototype>.glb`，重复出现位置使用 `EXT_mesh_gpu_instancing`；
-6. 为每个出现位置分配独立实例 ID，并生成 `sceneWeb.json`、`glbIndex.json` 和 `runtimeVisibilityMeta.json`。
-
-当前 [`tools/glb_instancer`](../../neural_instance_culling/tools/glb_instancer/README.md) 的推荐模式能够处理“一个 `sub_*.glb` 已经代表一个完整构件”的场景。其单体 GLB 模式只支持一个 indexed triangle primitive，并按连通区域拆分，不能直接作为复杂图形学场景的正式转换器。若引入 Bistro 等补充场景，应先增加保留多节点、多 primitive 和源对象身份的通用 glTF 导入路径。
+标准图形学场景主要证明非 BIM 单位级剔除、图像安全、启动资产和运行时间，不与 BIM 的 GLB 复用 streaming 收益混合。转换不继续扩展当前只面向构件复用的 `tools/glb_instancer`，而使用独立通用导入器。场景选择、固定 `128 KiB` 单位协议、`64/128/256 KiB` 敏感性、透明材质边界和 NeuralPVS 可比性详见[标准图形学场景的 PVS 泛化实验方案](pvs_standard_graphics_scene_generality_2026-09-10.md)。
 
 ## 正式基线矩阵
 

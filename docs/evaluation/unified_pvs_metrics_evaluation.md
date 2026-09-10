@@ -227,6 +227,41 @@ Validation 使用同一冻结阈值报告 weighted recall，并用于比较 chec
 
 `useful cull` 必须和 bad cull、普通 recall、weighted recall 同表展示。预测集合过小可能同时得到较高 useful cull 和较高漏检，不能解释为模型更好。
 
+### 5.5 面向图形学读者的遮挡术语
+
+本项目以“可见”为正类：`target=True` 表示 GT 可见，`pred=True` 表示预测可见并保留。因此同一个混淆矩阵可以从可见性预测和遮挡剔除两个方向解释：
+
+```text
+GT visible  + Pred visible  = TP
+GT occluded + Pred visible  = FP
+GT visible  + Pred occluded = FN
+GT occluded + Pred occluded = TN
+```
+
+论文面向图形学读者时使用以下显示名称，但机器结果字段不重命名：
+
+| 论文显示名称 | 现有字段 | 公式 | 含义 |
+|---|---|---|---|
+| Visible Recall | `recall` | `TP / (TP + FN)` | 真正可见实例中被保留的比例 |
+| Occlusion Recall | `specificity` | `TN / (TN + FP)` | 真正遮挡实例中被正确剔除的比例 |
+| False Occlusion Rate | `1 - recall`，等价于 `FN / GT` | `FN / (TP + FN)` | 真正可见实例中被错误剔除的比例 |
+| Useful Cull Ratio | `usefulCull` | `TN / |C|` | 所有候选中被正确剔除的比例 |
+| Bad Cull Ratio | `badCull` | `FN / |C|` | 所有候选中属于错误剔除的比例 |
+
+`Occlusion Recall` 与 `Useful Cull Ratio` 的分母不同；`False Occlusion Rate` 与 `Bad Cull Ratio` 的分母也不同。论文不得把较小的 `badCull` 解释为“可见实例误剔除率”。例如 `badCull=0.2%` 只说明 FN 占全部候选的 `0.2%`，实际可见实例误剔除率必须读取 `1-recall`。
+
+上述等价关系必须分别在 pose-macro 和 aggregate 口径内成立：
+
+\[
+\mathrm{FOR}_{pose}=\frac{1}{N}\sum_p\frac{FN_p}{TP_p+FN_p}=1-\mathrm{Recall}_{pose},
+\]
+
+\[
+\mathrm{FOR}_{agg}=\frac{\sum_p FN_p}{\sum_p(TP_p+FN_p)}=1-\mathrm{Recall}_{agg}.
+\]
+
+正文安全与剔除表推荐使用 `Visible Recall`、`Occlusion Recall`、`False Occlusion Rate`、`Weighted Recall`、`Useful Cull Ratio` 和 `Bad Cull Ratio`；表注给出与机器字段的映射。Precision、balanced accuracy 和正样本比例仍需保留，避免遮挡术语掩盖过量保留问题。
+
 ## 6. 图像、资源与运行指标
 
 ### 6.1 图像质量

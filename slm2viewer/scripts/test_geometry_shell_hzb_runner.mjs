@@ -30,7 +30,7 @@ function makeSyntheticRegionWorkload({ sceneName = 'synthetic', cameraView = nul
   fs.mkdirSync(datasetDir);
   fs.mkdirSync(regionDir);
   fs.writeFileSync(path.join(shellDir, 'shell_meta.json'), JSON.stringify({
-    schema: 'geometry-shell-hzb-v1',
+    schema: 'geometry-shell-hzb-v2',
     sceneName,
     instanceCount: 4,
   }));
@@ -136,7 +136,7 @@ try {
   assert.equal(sampled.workload.regionSampling.labelSource, 'none');
   assert.equal(fs.existsSync(path.join(synthetic.datasetDir, 'visible_ids.bin')), false);
   const enriched = attachRegionSamplingToResult({
-    schema: 'geometry-shell-hzb-browser-result-v1',
+    schema: 'geometry-shell-hzb-browser-result-v2',
     workload: { poseCount: 1 },
     samples: [{ poseId: 0, visibleCount: 4 }],
   }, sampled.workload);
@@ -144,7 +144,7 @@ try {
   assert.equal(enriched.workload.regionSampling.selectionMode, 'deterministic-fps-subset');
   assert.equal(enriched.samples[0].regionSampling.availableSubposeCount, 4);
   const withProvenance = attachWorkloadProvenance({
-    schema: 'geometry-shell-hzb-browser-result-v1',
+    schema: 'geometry-shell-hzb-browser-result-v2',
     workload: {},
   }, sampled.workload);
   assert.equal(withProvenance.workload.mode, 'Region66');
@@ -181,24 +181,30 @@ try {
   assert.equal(planned.workload.provenance.configuration.depthBiasM, 0.001);
   assert.deepEqual(planned.workload.provenance.configuration.resolution, [8, 8]);
   assert.equal(planned.workload.provenance.aspect.fixedAspectUsed, true);
-  assert.equal(planned.workload.provenance.timingDefinition.stages.total, 'depthRaster + hzbBuild + aabbTest + compaction');
+  assert.equal(
+    planned.workload.provenance.timingDefinition.stages.total,
+    'depthRaster + visibleIdCompaction + hzbBuild + aabbTest + compaction',
+  );
 
   const roundResults = [
     { samples: [{ poseId: 0, candidateCount: 4, timings: {
-      depthRasterMs: 1, hzbBuildMs: 2, aabbTestMs: 3, compactionMs: 4, totalMs: 10,
+      depthRasterMs: 1, visibleIdCompactionMs: 0.5, hzbBuildMs: 2,
+      aabbTestMs: 3, compactionMs: 4, totalMs: 10.5,
     } }] },
     { samples: [{ poseId: 0, candidateCount: 4, timings: {
-      depthRasterMs: 2, hzbBuildMs: 3, aabbTestMs: 4, compactionMs: 5, totalMs: 14,
+      depthRasterMs: 2, visibleIdCompactionMs: 0.5, hzbBuildMs: 3,
+      aabbTestMs: 4, compactionMs: 5, totalMs: 14.5,
     } }] },
   ];
   const timingSummary = summarizeTimingRounds(roundResults);
   assert.equal(timingSummary.roundCount, 2);
   assert.equal(timingSummary.sampleCount, 2);
   assert.equal(timingSummary.stages.depthRaster.p50Ms, 1.5);
-  assert.equal(timingSummary.stages.total.p95Ms, 13.8);
+  assert.equal(timingSummary.stages.visibleIdCompaction.p50Ms, 0.5);
+  assert.equal(timingSummary.stages.total.p95Ms, 14.3);
   const combined = combineTimingResults(roundResults, planned.workload);
-  assert.equal(combined.summary.totalP50Ms, 12);
-  assert.equal(combined.summary.totalP95Ms, 13.8);
+  assert.equal(combined.summary.totalP50Ms, 12.5);
+  assert.equal(combined.summary.totalP95Ms, 14.3);
   assert.equal(combined.timingRounds.length, 2);
   assert.equal(combined.timingRounds[1].samples[0].round, 2);
 

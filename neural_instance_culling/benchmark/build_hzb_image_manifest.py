@@ -30,7 +30,7 @@ except ImportError:
     from run_test_image_evaluation import validate_test_manifest
 
 
-HZB_RESULT_SCHEMA = "geometry-shell-hzb-browser-result-v1"
+HZB_RESULT_SCHEMA = "geometry-shell-hzb-browser-result-v2"
 HZB_WORKLOAD_SCHEMA = "geometry-shell-hzb-browser-workload-v1"
 HZB_REGION_SCHEMA = "geometry-shell-hzb-region-sampling-v1"
 POSE_STRIDE_BYTES = 64
@@ -478,7 +478,7 @@ def _validate_optional_shell_provenance(
     if not shell_meta_path.is_file():
         return
     shell_meta = read_json(shell_meta_path)
-    if shell_meta.get("schema") != "geometry-shell-hzb-v1":
+    if shell_meta.get("schema") != "geometry-shell-hzb-v2":
         raise ValueError("HZB result shell metadata has an unsupported schema")
     if shell_meta.get("sceneName") != expected_scene:
         raise ValueError("HZB shell scene does not match the base manifest/HZB result")

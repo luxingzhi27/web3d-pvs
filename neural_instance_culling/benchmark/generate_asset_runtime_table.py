@@ -108,7 +108,7 @@ def read_hzb_asset(scene: str, variant: str, hzb_root: Path) -> dict[str, Any]:
     offline_path = hzb_root / f"{stem}.offline.json"
     meta = load_json(shell_path)
     offline = load_json(offline_path)
-    if meta.get("schema") != "geometry-shell-hzb-v1":
+    if meta.get("schema") != "geometry-shell-hzb-v2":
         raise ValueError(f"unexpected HZB shell schema: {shell_path}")
     if offline.get("schema") != "geometry-shell-hzb-offline-report-v1":
         raise ValueError(f"unexpected HZB offline schema: {offline_path}")

@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 
 
-RESULT_SCHEMA = "geometry-shell-hzb-browser-result-v1"
+RESULT_SCHEMA = "geometry-shell-hzb-browser-result-v2"
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -477,7 +477,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     if glb_source is not None:
         glb_output["byteSource"] = glb_source
     output = {
-        "schema": "geometry-shell-hzb-metrics-v1",
+        "schema": "geometry-shell-hzb-metrics-v2",
         "sourceResult": args.result.name,
         "dataset": args.dataset_dir.name,
         "split": split,

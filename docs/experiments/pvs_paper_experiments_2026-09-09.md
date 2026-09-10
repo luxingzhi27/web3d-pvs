@@ -21,7 +21,7 @@
 | 生存场 rank | 2/4/8/12 已完成 | rank 4 固定 |
 | Validation 图像 | seed 2 已完成 | seed 2 已完成 |
 
-本周使用两个现有场景。第三场景、动态漫游和额外手机不阻塞论文核心结果。
+本周冻结结果仍以两个现有场景为主。标准图形学场景作为独立的 non-BIM generality 扩展：采用一 renderable unit 对应一 resource 的协议，不要求 GLB 原型复用；它不阻塞 HKUST/IFCBench 的 HZB、图像和 streaming 主结果。完整转换、训练和表图要求见[标准图形学场景方案](pvs_standard_graphics_scene_generality_2026-09-10.md)。
 
 ## 统一评价协议
 
@@ -84,6 +84,7 @@ Calibration 扫描固定 HZB 分辨率 `512x288 / 1024x576` 和偏置 `0.1/1/10 
 | 安全效率曲线 | Validation 的 WR-useful cull 和 WR-GLB bytes | Fig. 4 |
 | GT 收敛 | 每场景100个分层 validation cell，嵌套采样到128点 | 附录图 |
 | 离线成本 | 采样、关系、编码、训练、校准、导出时间与峰值资源 | 附录表 |
+| 标准图形场景泛化 | Sponza 加大型室外场景，固定 128 KiB renderable units，一单位一资源；同单位比较 Keep-All、AABB MLP、Hi-Z 与 Full | Generality 表、资产-剔除 Pareto、定性图 |
 
 正文保留五张表：场景统计、test 可见性、消融、资产与运行时间、streaming。核心图为系统总览、模型架构、生存场可视化、安全效率曲线、候选数量延迟曲线、下载覆盖曲线和定性对比。研究图输出 PDF、SVG、PNG 和源 CSV；架构图保留可编辑源文件。
 
@@ -179,6 +180,7 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 | Test 图像 | 部分完成 | HKUST Full 的 684 view-cell formal-v2 manifest 已冻结；HZB manifest 转换与 IFCBench checkpoint 专属精确 calibration 接入已完成；硬件渲染、IFCBench 最终成员和 AABB/HZB 图像结果待 GPU 独占窗口 |
 | GT 收敛 | 部分完成 | 两场景各 100 cell x 128 点水平圆盘计划已生成，IFCBench 半径为 `2.5 m`；新 evaluator 已按计划/raw 三元组对齐，正式 Vulkan Color-ID 采样待执行 |
 | 离线成本 / 结果包 | 完成当前可得项 | 六阶段成本、artifact registry、三种子 Table 2 汇总已生成；未记录时间保持 unavailable，不作推算 |
+| 标准图形场景 | 方案冻结，尚未执行 | 一单位一资源，不要求原型复用；先做 Sponza 转换和端到端 smoke，再做三 seed 与大型室外场景。该项不占用当前正式 HZB 独占窗口 |
 
 当前执行顺序固定为：IFCBench v2 与正式 test 已完成；现在在无训练并发的窗口执行 HZB 32 项正式矩阵；最后用最终 Full、AABB 和 HZB 输入在 validation 冻结成本指数，再运行两场景完整 test streaming、真实 scheduler replay并重建表图与结果包。任何中间指标都不取消 HZB 或 streaming 正式矩阵。
 

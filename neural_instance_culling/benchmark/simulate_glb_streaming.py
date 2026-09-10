@@ -56,7 +56,7 @@ from glb_streaming_io import (  # noqa: E402
 from pose_csr_dataset import PoseCSRDataset  # noqa: E402
 
 
-FORMAL_HZB_RESULT_SCHEMA = "geometry-shell-hzb-browser-result-v1"
+FORMAL_HZB_RESULT_SCHEMA = "geometry-shell-hzb-browser-result-v2"
 FORMAL_HZB_WORKLOAD_SCHEMA = "geometry-shell-hzb-browser-workload-v1"
 FORMAL_HZB_MODE = "Region66"
 FORMAL_HZB_REGION_FOV_DEG = 66.0
@@ -237,7 +237,7 @@ def load_formal_region66_test_result(
     result = _read_json_object(resolved, "Region66 HZB result")
     if result.get("schema") != FORMAL_HZB_RESULT_SCHEMA:
         raise StreamingContractError(
-            "Region66 HZB input must use geometry-shell-hzb-browser-result-v1"
+            "Region66 HZB input must use geometry-shell-hzb-browser-result-v2"
         )
     if result.get("mode") != FORMAL_HZB_MODE:
         raise StreamingContractError("HZB visible-first requires mode=Region66")

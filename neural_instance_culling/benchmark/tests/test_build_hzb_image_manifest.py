@@ -82,7 +82,7 @@ def make_inputs(root: Path) -> tuple[dict, dict, Path]:
     }
     pose_aspects = [{"poseId": 7, "aspect": 16.0 / 9.0, "fovYDeg": 66, "candidateCount": 3}]
     result = {
-        "schema": "geometry-shell-hzb-browser-result-v1", "mode": "Region66",
+        "schema": "geometry-shell-hzb-browser-result-v2", "mode": "Region66",
         "formalReady": True, "executionClass": "formal-hardware-gpu",
         "gpuGate": {"required": True, "hardware": True},
         "datasetDir": str(dataset.resolve()),

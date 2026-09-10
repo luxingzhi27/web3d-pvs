@@ -22,15 +22,18 @@ const CAMERA_VIEW_END_BYTES = CAMERA_VIEW_OFFSET_BYTES + 8;
 const SOFTWARE_PATTERN = /swiftshader|llvmpipe|softpipe|swrast|software/i;
 const REGION_SAMPLE_COUNTS = new Set([0, 1, 5, 9]);
 const REGION_SELECTION_STRATEGY = 'canonical-nearest-then-farthest-point-world-position';
-const HZB_TIMING_STAGES = ['depthRaster', 'hzbBuild', 'aabbTest', 'compaction', 'total'];
+const HZB_TIMING_STAGES = [
+  'depthRaster', 'visibleIdCompaction', 'hzbBuild', 'aabbTest', 'compaction', 'total',
+];
 const HZB_TIMING_DEFINITION = {
   source: 'browser-performance-now-wall-clock',
   stages: {
     depthRaster: 'depth-only render submission through queue completion',
+    visibleIdCompaction: 'nearest-surface component-ID bitset compute submission through queue completion',
     hzbBuild: 'explicit HZB mip-chain compute submission through queue completion',
     aabbTest: 'candidate AABB/HZB classification dispatch through queue completion; shader append is included',
     compaction: 'result copy, readback, ID sorting and GLB aggregation after the classification dispatch',
-    total: 'depthRaster + hzbBuild + aabbTest + compaction',
+    total: 'depthRaster + visibleIdCompaction + hzbBuild + aabbTest + compaction',
   },
 };
 
@@ -426,6 +429,7 @@ function timingValue(timings, stage) {
   if (stage === 'depthRaster') {
     return Number(timings?.depthRasterMs ?? timings?.depthRasterAndMipMs);
   }
+  if (stage === 'visibleIdCompaction') return Number(timings?.visibleIdCompactionMs);
   if (stage === 'hzbBuild') return Number(timings?.hzbBuildMs);
   if (stage === 'aabbTest') return Number(timings?.aabbTestMs ?? timings?.queryMs);
   if (stage === 'compaction') return Number(timings?.compactionMs ?? timings?.readbackMs);
@@ -740,7 +744,7 @@ function buildWorkload(options) {
   const regionSampleCount = options.regionSampleCount ?? 0;
   const datasetMeta = readJson(requireFile(options.datasetDir, 'dataset_meta.json'));
   const shellMeta = readJson(requireFile(options.shellDir, 'shell_meta.json'));
-  if (shellMeta.schema !== 'geometry-shell-hzb-v1') throw new Error('shell directory has an unsupported schema.');
+  if (shellMeta.schema !== 'geometry-shell-hzb-v2') throw new Error('shell directory has an unsupported schema.');
   if (Number(datasetMeta.numInstances) !== Number(shellMeta.instanceCount)) {
     throw new Error('dataset and geometry shell instance counts disagree.');
   }
@@ -1241,7 +1245,7 @@ async function main() {
               : 'hardware-gate-failed';
     const capture = {
       ...(result || {
-        schema: 'geometry-shell-hzb-browser-result-v1',
+        schema: 'geometry-shell-hzb-browser-result-v2',
         mode: options.mode,
         workload: workloadInfo.workload,
         provenance: workloadInfo.workload.provenance,

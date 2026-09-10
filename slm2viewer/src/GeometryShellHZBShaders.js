@@ -11,6 +11,7 @@ struct RenderUniforms {
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
   @location(0) view_depth: f32,
+  @location(1) @interpolate(flat) instance_id: u32,
 };
 
 @vertex
@@ -20,6 +21,7 @@ fn depth_vertex_main(
   @location(2) matrix_column_1: vec4<f32>,
   @location(3) matrix_column_2: vec4<f32>,
   @location(4) matrix_column_3: vec4<f32>,
+  @location(5) instance_id: u32,
 ) -> VertexOutput {
   let instance_matrix = mat4x4<f32>(
     matrix_column_0,
@@ -32,14 +34,46 @@ fn depth_vertex_main(
   var output: VertexOutput;
   output.position = uniforms.view_proj * world_position;
   output.view_depth = max(-view_position.z, uniforms.depth_range.y);
+  output.instance_id = instance_id;
   return output;
 }
 `;
 
 export const GEOMETRY_SHELL_DEPTH_FRAGMENT_SHADER = /* wgsl */ `
+struct DepthFragmentOutput {
+  @location(0) linear_depth: vec4<f32>,
+  @location(1) instance_id: u32,
+};
+
 @fragment
-fn depth_fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
-  return vec4<f32>(input.view_depth, 0.0, 0.0, 1.0);
+fn depth_fragment_main(input: VertexOutput) -> DepthFragmentOutput {
+  var output: DepthFragmentOutput;
+  output.linear_depth = vec4<f32>(input.view_depth, 0.0, 0.0, 1.0);
+  output.instance_id = input.instance_id + 1u;
+  return output;
+}
+`;
+
+export const GEOMETRY_SHELL_VISIBLE_ID_SHADER = /* wgsl */ `
+struct VisibleIdUniforms {
+  width: u32,
+  height: u32,
+  instance_count: u32,
+  padding: u32,
+};
+
+@group(0) @binding(0) var nearest_instance_ids: texture_2d<u32>;
+@group(0) @binding(1) var<storage, read_write> visible_instance_words: array<atomic<u32>>;
+@group(0) @binding(2) var<uniform> uniforms: VisibleIdUniforms;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= uniforms.width || id.y >= uniforms.height) { return; }
+  let encoded_id = textureLoad(nearest_instance_ids, vec2<i32>(id.xy), 0).r;
+  if (encoded_id == 0u) { return; }
+  let instance_id = encoded_id - 1u;
+  if (instance_id >= uniforms.instance_count) { return; }
+  atomicOr(&visible_instance_words[instance_id >> 5u], 1u << (instance_id & 31u));
 }
 `;
 
@@ -89,6 +123,7 @@ struct QueryUniforms {
 @group(0) @binding(6) var<storage, read> instance_to_glb: array<u32>;
 @group(0) @binding(7) var<storage, read_write> glb_flags: array<atomic<u32>>;
 @group(0) @binding(8) var<storage, read> instance_occluder: array<u32>;
+@group(0) @binding(9) var<storage, read_write> visible_occluder_words: array<atomic<u32>>;
 
 fn append_visible(candidate_id: u32) {
   let output_index = atomicAdd(&result_words[0], 1u);
@@ -116,10 +151,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     append_visible(candidate_id);
     return;
   }
-  // Selected shell occluders already contributed depth. Keep them to avoid
-  // self-occlusion; every other candidate must be tested against that shell.
+  // Selected shell instances are visible only if they contributed a nearest
+  // depth pixel. Every other candidate is tested against the shell HZB.
   if (instance_occluder[candidate_id] == 1u) {
-    append_visible(candidate_id);
+    let visibility_word = atomicLoad(&visible_occluder_words[candidate_id >> 5u]);
+    if ((visibility_word & (1u << (candidate_id & 31u))) != 0u) {
+      append_visible(candidate_id);
+    }
     return;
   }
 

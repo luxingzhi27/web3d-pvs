@@ -1,7 +1,7 @@
 // CPU-reference HZB operations shared by tests and offline diagnostics.
 // The browser runtime uses the same projection and comparison contract in WGSL.
 
-export const GEOMETRY_SHELL_HZB_SCHEMA = 'geometry-shell-hzb-v1';
+export const GEOMETRY_SHELL_HZB_SCHEMA = 'geometry-shell-hzb-v2';
 export const LINEAR_DEPTH_ENCODING = 'positive_linear_view_depth_meters';
 
 const EPSILON = 1e-8;
@@ -317,6 +317,12 @@ export function queryAabbsAgainstMaxMip(levels, camera, aabbs, candidateIds = nu
   const records = [];
   const shellMask = options.shellMask || null;
   const hasShellMask = shellMask !== null;
+  const shellVisibleIds = options.shellVisibleIds == null
+    ? null
+    : new Set(Array.from(options.shellVisibleIds, Number));
+  if (hasShellMask && shellVisibleIds === null) {
+    throw new Error('shellVisibleIds is required when a shell mask is provided.');
+  }
   for (let index = 0; index < count; index += 1) {
     const projection = projectAabbConservatively(aabbs.subarray
       ? aabbs.subarray(index * 6, index * 6 + 6)
@@ -325,10 +331,11 @@ export function queryAabbsAgainstMaxMip(levels, camera, aabbs, candidateIds = nu
     const maskValue = hasShellMask ? Number(shellMask[ids[index]]) : 0;
     if (hasShellMask && maskValue === 1) {
       result = {
-        visible: true,
-        occluded: false,
+        visible: shellVisibleIds.has(Number(ids[index])),
+        occluded: !shellVisibleIds.has(Number(ids[index])),
         uncertain: false,
-        reason: 'selected-occluder',
+        reason: shellVisibleIds.has(Number(ids[index]))
+          ? 'visible-shell-surface' : 'occluded-shell-instance',
       };
     } else if (hasShellMask && maskValue !== 0) {
       result = {
