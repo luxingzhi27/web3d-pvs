@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  attachWorkloadProvenance,
   attachRegionSamplingToResult,
   combineTimingResults,
   buildWorkload,
@@ -142,6 +143,12 @@ try {
   assert.equal(enriched.regionSampling.selectedSubposeCount, 4);
   assert.equal(enriched.workload.regionSampling.selectionMode, 'deterministic-fps-subset');
   assert.equal(enriched.samples[0].regionSampling.availableSubposeCount, 4);
+  const withProvenance = attachWorkloadProvenance({
+    schema: 'geometry-shell-hzb-browser-result-v1',
+    workload: {},
+  }, sampled.workload);
+  assert.equal(withProvenance.workload.mode, 'Region66');
+  assert.equal(withProvenance.workload.split, 'test');
 
   const allOptions = parseArgs([...commonArgs, '--output', path.join(synthetic.root, 'out', 'all.json')]);
   const all = buildWorkload(allOptions);

@@ -2,13 +2,17 @@
 
 日期：2026-09-09
 
-状态：正式 `all` 已于 2026-09-10 启动；当前正在执行 HKUST calibration，尚未形成完整 HZB 结论。
+状态：正式 `all` 已于 2026-09-10 启动；WebGPU 大 buffer 问题与结果协议问题已修正，当前从 HKUST calibration 恢复执行，尚未形成完整 HZB 结论。
 
 ## 2026-09-10 正式启动与 WebGPU limit 修正
 
 首次正式 HKUST lossless calibration 在资产上传阶段失败。外壳解码后的 POSITION 和 INDEX buffer 分别约为 `1.12 GB` 与 `657 MB`，而 `GeometryShellHZB` 仍以 WebGPU 默认 `maxBufferSize=256 MB` 请求 device；A6000 adapter 实际声明支持约 `4 GB`。该失败发生在首个 pose 前，`formalReady=false`，没有进入 evaluator。
 
 `GeometryShellHZB.init()` 现根据 shell metadata 的顶点、索引、变换和实例表实际大小计算所需 `maxBufferSize`，确认不超过 adapter limit 后通过 `requestDevice({ requiredLimits.maxBufferSize` 显式申请。修改不改变外壳内容、HZB 算法、候选集合、深度偏置或评价口径。失败目录保留为 `h288_b0p0001.failed_default_max_buffer_2026-09-10`，新正式任务从原路径重新执行；完整前端测试已通过。
+
+修正 buffer limit 后，HKUST lossless `512x288 / 0.0001 m` 已由 A6000 硬件完成全部 `659` 个 calibration view-cell，耗时约 `14` 分钟。浏览器结果顶层正确记录了 `mode=Region66`，但写入嵌套 `workload` 摘要时字段白名单漏掉 `mode`，编排器因此在浏览器任务完成后拒绝接收，尚未生成 `metrics.json` 和 `task.json`。该目录改名保留为 `h288_b0p0001.failed_missing_nested_mode_2026-09-10`，不得作为正式 calibration 结果。
+
+生产端 `attachWorkloadProvenance()` 已补齐 `workload.mode`，并新增测试确认 `mode` 和 `split` 会同时进入正式结果。修正仅补齐既有 workload 元数据，不放宽编排器校验，也不改变 HZB 输出。`slm2viewer npm test` 与 Python HZB 编排器测试均已通过，正式矩阵从空出的原任务路径重新执行。
 
 ## 目的与入口
 
@@ -78,7 +82,7 @@ conda run --no-capture-output -n slm_pvs \
   all --dry-run
 ```
 
-实际独占硬件窗口中，去掉 `--dry-run` 后运行 `all`；入口会把每个子进程 stdout/stderr 写入对应任务目录，并沿用现有 runner 的 Chrome Vulkan hardware gate。正式 `all` 尚未执行；不占 GPU 的 `preflight` 已执行。
+实际独占硬件窗口中，去掉 `--dry-run` 后运行 `all`；入口会把每个子进程 stdout/stderr 写入对应任务目录，并沿用现有 runner 的 Chrome Vulkan hardware gate。正式 `all` 正在恢复执行；已完成的 preflight 会直接复用，失败诊断目录不会进入选择和汇总。
 
 本次已通过：
 
