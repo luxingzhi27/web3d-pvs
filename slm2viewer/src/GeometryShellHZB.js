@@ -205,7 +205,25 @@ export class GeometryShellHZB {
     }
     if (!this.adapter) throw new Error('WebGPU requestAdapter returned null.');
     this.webgpuInfo = { api: 'webgpu', adapter: adapterInfo(this.adapter) };
-    this.device = await this.adapter.requestDevice();
+    const requiredMaxBufferSize = Math.max(
+      this.decodedCounts.vertices * 12,
+      this.decodedCounts.indices * 4,
+      this.decodedCounts.instances * 64,
+      Number(this.meta.instanceCount) * 6 * 4,
+    );
+    const supportedMaxBufferSize = Number(this.adapter.limits.maxBufferSize);
+    if (!Number.isSafeInteger(requiredMaxBufferSize)
+        || requiredMaxBufferSize <= 0
+        || requiredMaxBufferSize > supportedMaxBufferSize) {
+      throw new Error(
+        `geometry shell requires maxBufferSize=${requiredMaxBufferSize}, `
+        + `adapter supports ${supportedMaxBufferSize}`,
+      );
+    }
+    this.device = await this.adapter.requestDevice({
+      requiredLimits: { maxBufferSize: requiredMaxBufferSize },
+    });
+    this.webgpuInfo.requiredLimits = { maxBufferSize: requiredMaxBufferSize };
     this.gpuValidationErrors = [];
     this.device.addEventListener?.('uncapturederror', (event) => {
       this.gpuValidationErrors.push(gpuErrorMessage(event.error || 'uncaptured WebGPU error'));

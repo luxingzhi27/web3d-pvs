@@ -2,7 +2,13 @@
 
 日期：2026-09-09
 
-状态：窄范围 orchestrator 与 CPU preflight 已完成；两场景输入、两档分辨率和 120-pose 计划均通过。尚未启动 Chrome、WebGPU 或 GPU 正式实验，也没有产生新的 HZB visibility、图像或性能结论。
+状态：正式 `all` 已于 2026-09-10 启动；当前正在执行 HKUST calibration，尚未形成完整 HZB 结论。
+
+## 2026-09-10 正式启动与 WebGPU limit 修正
+
+首次正式 HKUST lossless calibration 在资产上传阶段失败。外壳解码后的 POSITION 和 INDEX buffer 分别约为 `1.12 GB` 与 `657 MB`，而 `GeometryShellHZB` 仍以 WebGPU 默认 `maxBufferSize=256 MB` 请求 device；A6000 adapter 实际声明支持约 `4 GB`。该失败发生在首个 pose 前，`formalReady=false`，没有进入 evaluator。
+
+`GeometryShellHZB.init()` 现根据 shell metadata 的顶点、索引、变换和实例表实际大小计算所需 `maxBufferSize`，确认不超过 adapter limit 后通过 `requestDevice({ requiredLimits.maxBufferSize` 显式申请。修改不改变外壳内容、HZB 算法、候选集合、深度偏置或评价口径。失败目录保留为 `h288_b0p0001.failed_default_max_buffer_2026-09-10`，新正式任务从原路径重新执行；完整前端测试已通过。
 
 ## 目的与入口
 
