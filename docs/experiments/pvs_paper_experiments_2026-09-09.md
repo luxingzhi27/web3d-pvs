@@ -1,8 +1,8 @@
 # PVS 论文核心实验与一周执行计划
 
-日期：2026-09-09；2026-09-10 更新正式执行状态
+日期：2026-09-09；2026-09-10、2026-09-11 更新正式执行状态
 
-状态：执行中。本文是论文实验、图表、结果目录和执行顺序的唯一计划。
+状态：执行中。截至 2026-09-11，HKUST/IFCBench 神经主线和 AABB 对照已有登记结果；HZB 已完成四套外壳与 CPU preflight，`36 tasks` 正式硬件矩阵正在执行。Streaming 已完成 validation 侧输入和协议验证，test 表及 scheduler replay 仍待上游正式输入。本文是论文实验、图表、结果目录和执行顺序的唯一计划。
 
 ## 论文需要证明的内容
 
@@ -21,7 +21,7 @@
 | 生存场 rank | 2/4/8/12 已完成 | rank 4 固定 |
 | Validation 图像 | seed 2 已完成 | seed 2 已完成 |
 
-本周冻结结果仍以两个现有场景为主。标准图形学场景作为独立的 non-BIM generality 扩展：采用一 renderable unit 对应一 resource 的协议，不要求 GLB 原型复用；它不阻塞 HKUST/IFCBench 的 HZB、图像和 streaming 主结果。完整转换、训练和表图要求见[标准图形学场景方案](pvs_standard_graphics_scene_generality_2026-09-10.md)。
+本周冻结结果仍以两个现有场景为主。标准图形学场景作为独立的 non-BIM generality 扩展：采用一 renderable unit 对应一 resource 的协议，不要求 GLB 原型复用。Big City 官方 NeuralPVS 资产已完成来源审计，并按固定 `128 KiB` 目标转换为 `2734` 个单位；其采样、训练、test 和性能结果仍未形成，不阻塞 HKUST/IFCBench 的 HZB、图像和 streaming 主结果。完整转换、训练和表图要求见[标准图形学场景方案](pvs_standard_graphics_scene_generality_2026-09-10.md)。
 
 ## 统一评价协议
 
@@ -53,18 +53,27 @@ AABB MLP 正式版改用与 Full 相同的逐 pose 平衡、weighted-recall 保�
 
 附加 `geometry_shell_hzb_equal_asset`：资产字节限制为同场景神经资产大小，从原始不透明 primitive 中按固定 128 个 train 中心视点的投影面积累计值/压缩字节选择 occluder，只删除完整 primitive，不移动顶点。该项用于资产敏感性，不宣称保守或最优简化。
 
-当前运行路径为：遍历外壳 prototype/instance 提交深度绘制，使用普通 depth attachment 保留最近表面，并在 `rgba32float` 颜色载荷中保存正向线性眼空间深度；背景写 far，各 mip 对 2x2 取最大深度，随后批量测试候选 AABB、压缩实例和聚合 GLB。投影矩形向外取整并检查覆盖 mip 的全部 texel；仅当 `HZBMax + bias < candidateNear` 时剔除。近裁剪面、非有限投影、相机位于 AABB 内和其他不确定情况全部保留。现阶段不把尚未实现的 cluster BVH 或 R32Float 计入性能叙述。
+当前唯一 HZB 算法为 `opaque depth -> max pyramid -> conservative projected AABB test`：只将确定不透明外壳写入深度，构建 max pyramid，再对同一 candidate CSR 中的每个候选执行保守 projected AABB test。四套外壳的 `shell_meta.json` 使用修正后的 `geometry-shell-hzb-v2` schema。投影矩形向外取整并检查覆盖 mip 的全部 texel；仅当 `HZBMax + bias < candidateNear` 时剔除。近裁剪面、非有限投影、相机位于 AABB 内和其他不确定情况全部保留。HZB 论文口径只保留这条算法路径。
 
-Calibration 扫描固定 HZB 分辨率 `512x288 / 1024x576` 和偏置 `0.1/1/10 mm`，按安全条件下 useful cull 最高选取；平局选择耗时更低配置。投影矩阵逐 pose 使用真实 aspect，HZB 纹理分辨率作为基线自身预算固定，不冒充前端图像分辨率。
+四套已导出外壳的交接资产统计如下；这些是启动资产和解码内存数字，不是 HZB 可见性或性能结果：
+
+| 场景 | 变体 | 传输 B | 展开几何 MiB | 展开运行时 MiB | prototype | prototype 三角形 | 展开三角形 | occluder 实例 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| HKUST | lossless | 399,312,852 | 1,697.30 | 1,697.80 | 3,042 | 54,771,324 | 55,537,431 | 18,566 |
+| HKUST | equal-asset | 5,147,576 | 17.78 | 18.29 | 81 | 682,664 | 780,713 | 1,257 |
+| IFCBench | lossless | 59,924,084 | 153.30 | 154.40 | 3,669 | 8,648,833 | 25,556,160 | 41,298 |
+| IFCBench | equal-asset | 11,819,713 | 25.43 | 26.54 | 1,405 | 1,342,146 | 6,290,848 | 31,909 |
+
+正式 HZB 编排固定为 `36 tasks`：`2 preflight + 16 calibration + 2 select + 12 frozen test + 4 timing`。其中 calibration 为 `512x288 / 1024x576` × depth bias `0.01/1/10/100 m`，每场景 8 个 lossless 配置、每配置一次 invocation；按安全条件下 useful cull 最高选取，平局选择耗时更低配置。投影矩阵逐 pose 使用真实 aspect，HZB 纹理分辨率作为基线自身预算固定，不冒充前端图像分辨率。
 
 完整 calibration 和 frozen test 每个 pose 只执行一轮可见性查询，避免把精度矩阵重复五遍；独立的 120-pose 性能任务才对每个 pose 执行五轮并统计 p50/p95。两类任务都必须通过同一硬件 GPU 和无并发计算证据门。
 
-六组 calibration 由 `select_geometry_shell_hzb.py` 冻结配置：安全池要求 weighted recall 及其单侧 95% 下界均严格大于 `0.99`，安全池内按 useful cull、balanced accuracy、specificity、precision 和延迟排序；没有安全成员时仍输出诊断配置，但不得标成安全 HZB。
+八个 lossless calibration task 由 `select_geometry_shell_hzb.py` 冻结配置：安全池要求 weighted recall 及其单侧 95% 下界均严格大于 `0.99`，安全池内按 useful cull、balanced accuracy、specificity、precision 和延迟排序；没有安全成员时仍输出诊断配置，但不得标成安全 HZB。
 
 公平比较分为：
 
 - Point60：canonical center 的真实相机和同点 GT。
-- Region66：相同区域候选，对多个真实 subpose 做 HZB 后取并集。HKUST 比较 `1/5/9/all-32-or-48`；IFCBench 比较 `1/all-4`。子集由中心最近点开始做最远点空间覆盖，不读取可见标签。
+- Region66：相同区域候选，对多个真实 subpose 做 HZB 后取并集。HKUST 比较 `1/5/9/all`；IFCBench 比较 `1/all`。子集由中心最近点开始做最远点空间覆盖，不读取可见标签。
 - 全 subpose HZB 是区域质量参照，多次查询的总耗时全部计入；有限点结果不宣称连续区域保证。
 
 主要相关工作包括 Greene 等人的 Hierarchical Z-Buffer Visibility、HROC 的 GPU 批量组织方式，以及 Occluder Simplification using Planar Sections。论文只数值实现一个现代 GPU HZB 管线，不冒称复现这些完整系统。
@@ -84,7 +93,7 @@ Calibration 扫描固定 HZB 分辨率 `512x288 / 1024x576` 和偏置 `0.1/1/10 
 | 安全效率曲线 | Validation 的 WR-useful cull 和 WR-GLB bytes | Fig. 4 |
 | GT 收敛 | 每场景100个分层 validation cell，嵌套采样到128点 | 附录图 |
 | 离线成本 | 采样、关系、编码、训练、校准、导出时间与峰值资源 | 附录表 |
-| 标准图形场景泛化 | Sponza 加大型室外场景，固定 128 KiB renderable units，一单位一资源；同单位比较 Keep-All、AABB MLP、Hi-Z 与 Full | Generality 表、资产-剔除 Pareto、定性图 |
+| 标准图形场景泛化 | Sponza/Big City 等标准场景，固定 128 KiB renderable units，一单位一资源；同单位比较 Keep-All、AABB MLP、Hi-Z 与 Full | Generality 表、资产-剔除 Pareto、定性图 |
 
 正文保留五张表：场景统计、test 可见性、消融、资产与运行时间、streaming。核心图为系统总览、模型架构、生存场可视化、安全效率曲线、候选数量延迟曲线、下载覆盖曲线和定性对比。研究图输出 PDF、SVG、PNG 和源 CSV；架构图保留可编辑源文件。
 
@@ -103,15 +112,15 @@ Calibration 扫描固定 HZB 分辨率 `512x288 / 1024x576` 和偏置 `0.1/1/10 
 
 ## Progressive streaming
 
-每个 test pose 都从空缓存开始。过滤和连续排序分开评价。
+每个 test pose 都从空缓存开始。结果明确分成三类且不混合：`threshold filtering` 使用冻结阈值形成预测资源集合；`threshold-free ranking` 在完整 candidate GLB 集合上排序，不读取阈值；`scheduler replay` 单独重放 urgent/warm/speculative 调度状态机并计入资源处理过程。
 
-过滤实验使用冻结阈值，报告候选到预测 GLB 的数量/字节、最终 GT 覆盖上限以及漏掉的必需资源。
+过滤实验使用 calibration 冻结的阈值，报告候选到预测 GLB 的数量/字节、最终 visible-weight coverage 上限以及漏掉的必需资源。
 
-排序实验对所有方法使用相同完整 candidate GLB set，不应用阈值。比较 Full、AABB MLP、原始顺序、距离、投影面积、投影面积/字节、20个固定随机种子、HZB visible-first 和 GT-informed utility/byte oracle。
+排序实验对所有方法使用相同完整 candidate GLB set，不应用阈值。神经 GLB 分数先按 `p_g=max_i(p_i)` 聚合；成本感知分数为 `p_g/Bytes_g^alpha`，`alpha` 只能在 validation 从 `{0,0.5,1}` 选择并写入冻结 manifest，test 只读取该 manifest。比较 Full、AABB MLP、原始顺序、距离、投影面积、投影面积/字节、20 个固定随机种子、HZB visible-first 和 GT-informed utility/byte oracle。Distance 与 projected AABB area 必须先逐候选实例计算，再按 GLB 聚合为 `distance=min`、`area=max`；不使用合并 GLB AABB 的投影结果。
 
 每个 GLB 完整到达后才累计 coverage。主要指标为 Bytes@95/99/99.9/100、99%前无用字节、必需资源平均排名；时间按 `10/25/50/100 Mbps` 换算，正文展示25和50 Mbps。Oracle 按 GT utility/byte 贪心排序，并另给分数背包字节下界，不能把贪心值称为所有目标的全局最优。
 
-全 test pixel coverage 使用 reference Color-ID 中最前实例的像素直方图映射到 GLB。每场景16个固定 subpose在四个下载阶段真实重渲染，核验前景移除后露出的 wrong-ID；直方图值只称为 reference-frontmost coverage。
+全 test 的主覆盖字段明确为 visible-weight coverage：使用数据集提供的 `visible_weights`，在实例映射到 GLB 后累计可见权重；Color-ID 屏幕覆盖权重按 view-cell subpose 最大值解释，不解释为隐藏表面总覆盖。若补充 reference-frontmost screen utility，则单独用于四个下载阶段的真实重渲染核验，核验前景移除后露出的 wrong-ID，不替代 visible-weight coverage。
 
 真实调度在每场景12个固定 test pose、25/50 Mbps、每项3次，调用现有 urgent/warm/speculative 状态机，取消与固定首页位置相关的 startup-100 前缀。计入方法资产、初始化、GLB 下载、解析、挂载和首个正确画面。无法达到目标时报告未达到和覆盖上限。
 
@@ -172,16 +181,16 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 | HKUST Full test | 完成 | 三种子均通过安全门；WR `0.997082 +/- 0.001634`，LCB `0.994334 +/- 0.003271`，useful cull `0.901758 +/- 0.007830` |
 | IFCBench 微调与 test | 完成 | v2 边界减半三种子 confirmation 的 validation LCB 为 `0.991106/0.990764/0.990215`，均通过；正式 `2710` test 的 pose PR-AUC `0.482290 +/- 0.021681`、WR `0.991179 +/- 0.000668`、LCB `0.990523 +/- 0.000552`、useful cull `0.602498 +/- 0.015504`，三份 test 各读取一次。运行资产使用 validation useful cull 最高的 seed01 |
 | AABB + Ray MLP | 完成 | 两场景三种子 `40 x 900` 与 frozen test 已完成。IFCBench pose PR-AUC `0.28504 +/- 0.00047`、prevalence `0.12232`、useful cull `0.03942`；HKUST 与 Full 的正式对照产物也已登记 |
-| HZB 外壳与运行时 | 正式执行就绪 | 四套外壳、逐 pose aspect、Region `1/5/9/all`、正式硬件失败门、`512x288 / 1024x576` 六组 calibration 选择器和两场景 120-pose timing 计划已通过；32 项 dry-run 与 NVIDIA A6000 WebGPU 硬件门已再次通过。等待 IFCBench refine 结束后独占 GPU 执行 `all` |
+| HZB 外壳与运行时 | `36 tasks` 正式硬件矩阵执行中 | 四套外壳已通过 schema/资源预检；每场景 8 个 `512x288 / 1024x576 × 0.01/1/10/100 m` calibration task，随后自动选择、全 test 与 120-pose timing。只有完整矩阵及每项硬件证据通过后才生成论文数字 |
 | 资产与容量 | 完成 | 神经资产为 lossless shell 的 `1.37%`（HKUST）和 `19.78%`（IFCBench）；rank Pareto、Table 4 及 PDF/SVG/PNG 已生成 |
 | 端侧模型前向 | 部分完成 | HKUST M2 与 vivo 各五 session 正式完成；IFCBench 移动端和 A6000 独占结果仍缺失，不以并发 smoke 代替 |
 | Safety-efficiency | 完成 | 六个核心变体的 calibration-safe validation 曲线及论文图已生成 |
-| Streaming | 正式代码完成，结果待重跑 | 已实现 `p_g=max_i p_i`、`p_g/Bytes_g^alpha`、validation 从 `{0,0.5,1}` 选择并冻结 alpha、逐实例 AABB 投影后按 GLB 聚合、visible-weight coverage、完整 test 校验，以及 filtering/ranking/scheduler replay 三套独立口径。旧 test 探索值不晋级；等待最终 IFCBench 与 HZB 输入后重导两场景 validation/test sidecar 并生成 Table 5 |
+| Streaming | validation 产物完成，正式 test 待上游输入 | 两场景 validation score sidecar、ranking/filtering simulation 和冻结 alpha manifest 已生成；当前 manifest 记录 HKUST `alpha=1.0`、IFCBench `alpha=0.5`，候选集为完整 validation split。正式 AABB test sidecar、HZB Region66 test 结果、两场景完整 test streaming 表和 scheduler replay 仍缺失，validation 数字不晋级为 test 结论 |
 | Test 图像 | 部分完成 | HKUST Full 的 684 view-cell formal-v2 manifest 已冻结；HZB manifest 转换与 IFCBench checkpoint 专属精确 calibration 接入已完成；硬件渲染、IFCBench 最终成员和 AABB/HZB 图像结果待 GPU 独占窗口 |
 | GT 收敛 | 部分完成 | 两场景各 100 cell x 128 点水平圆盘计划已生成，IFCBench 半径为 `2.5 m`；新 evaluator 已按计划/raw 三元组对齐，正式 Vulkan Color-ID 采样待执行 |
 | 离线成本 / 结果包 | 完成当前可得项 | 六阶段成本、artifact registry、三种子 Table 2 汇总已生成；未记录时间保持 unavailable，不作推算 |
-| 标准图形场景 | 方案冻结，尚未执行 | 一单位一资源，不要求原型复用；先做 Sponza 转换和端到端 smoke，再做三 seed 与大型室外场景。该项不占用当前正式 HZB 独占窗口 |
+| 标准图形场景 | Big City/Sponza 资产与相机计划完成，正式 PVS 待执行 | Big City 已转换为 `2734` 个、Sponza 已转换为 `132` 个 `128 KiB` 目标 renderable units，均为一单位一资源。Big City/Sponza 分别生成 `8088/2424` 个原始查询 pose 的四路空间块计划，并为固定 view-cell 预留 0.8 m 几何安全半径。两场景均尚未生成正式 Color-ID、Pose CSR、训练、Hi-Z 或 test 数字 |
 
-当前执行顺序固定为：IFCBench v2 与正式 test 已完成；现在在无训练并发的窗口执行 HZB 32 项正式矩阵；最后用最终 Full、AABB 和 HZB 输入在 validation 冻结成本指数，再运行两场景完整 test streaming、真实 scheduler replay并重建表图与结果包。任何中间指标都不取消 HZB 或 streaming 正式矩阵。
+截至 2026-09-11，IFCBench v2 与正式 test 已完成；HZB 正在独占硬件窗口执行 `36 tasks` 正式矩阵。矩阵完成后补齐正式 AABB test sidecar 与 HZB Region66 test 输入，再用 validation 冻结的 alpha 重跑两场景完整 test streaming，并单独完成 12-pose scheduler replay 和 Table 5。Big City 和 Sponza 已完成固定单位转换、合法相机和空间隔离 split，下一步直接执行硬件 view-cell Color-ID，再生成关系特征、三 seed 训练与冻结 test。任何中间指标都不替代上述正式阶段。
 
 本轮实现回归已通过 benchmark `167` 项、model `48` 项、完整前端 `npm test` 和 sampler `7` 项测试；测试过程禁用 CUDA，不作为任何正式性能结果。

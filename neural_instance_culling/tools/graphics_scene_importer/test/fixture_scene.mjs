@@ -85,11 +85,12 @@ function buildFixtureJson(binaryLength, views, imageView) {
     scene: 0,
     scenes: [{ name: 'g1_fixture', nodes: [0] }],
     nodes: [
-      { name: 'FixtureRoot', translation: [10, 20, 30], children: [1, 2, 3, 4] },
+      { name: 'FixtureRoot', translation: [10, 20, 30], children: [1, 2, 3, 4, 5] },
       { name: 'OpaqueGrid', mesh: 0, translation: [1, 2, 3] },
       { name: 'MaskTriangle', mesh: 1, translation: [-2, 0, 0] },
       { name: 'BlendTriangle', mesh: 2, translation: [2, 0, 0] },
       { name: 'OpaqueGridCopy', mesh: 0, translation: [30, 0, 0] },
+      { name: 'MaskTriangleCopy', mesh: 1, translation: [4, 0, 0] },
     ],
     meshes: [
       {
@@ -185,6 +186,69 @@ export function createFixtureScene(directory) {
   const glbPath = path.join(root, 'fixture.glb');
   const gltfPath = path.join(root, 'fixture.gltf');
   const binPath = path.join(root, 'fixture.bin');
+  writeGlb(glbPath, json, binary);
+  fs.writeFileSync(binPath, binary);
+  fs.writeFileSync(gltfPath, `${JSON.stringify(json, null, 2)}\n`, 'utf8');
+  return { glbPath, gltfPath, binPath, json, binaryBytes: binary.length };
+}
+
+function nonClosedShellGeometry() {
+  const positions = [];
+  const indices = [];
+  const addWall = (corners) => {
+    const base = positions.length / 3;
+    positions.push(...corners);
+    indices.push(base, base + 2, base + 1, base + 1, base + 2, base + 3);
+  };
+  addWall([2, 0, 2, 2, 4, 2, 2, 0, 14, 2, 4, 14]);
+  addWall([14, 0, 14, 14, 4, 14, 14, 0, 2, 14, 4, 2]);
+  addWall([14, 0, 2, 14, 4, 2, 2, 0, 2, 2, 4, 2]);
+  addWall([2, 0, 14, 2, 4, 14, 14, 0, 14, 14, 4, 14]);
+  return {
+    positions: Float32Array.from(positions),
+    indices: Uint16Array.from(indices),
+  };
+}
+
+export function createNonClosedShellScene(directory) {
+  const root = path.resolve(directory);
+  fs.mkdirSync(root, { recursive: true });
+  const geometry = nonClosedShellGeometry();
+  const parts = [];
+  const state = { length: 0 };
+  const positionView = appendTyped(parts, state, geometry.positions);
+  const indexView = appendTyped(parts, state, geometry.indices);
+  const binary = Buffer.concat(parts);
+  const json = {
+    asset: {
+      version: '2.0',
+      generator: 'slm-graphics-scene-importer-g1-shell-fixture',
+      extras: { unit: 'meter' },
+    },
+    scene: 0,
+    scenes: [{ name: 'non_closed_shell', nodes: [0] }],
+    nodes: [{ name: 'NonClosedShell', mesh: 0 }],
+    meshes: [{
+      name: 'non_closed_shell',
+      primitives: [{ attributes: { POSITION: 0 }, indices: 1, material: 0, mode: 4 }],
+    }],
+    materials: [{
+      name: 'OpaqueShell',
+      pbrMetallicRoughness: { baseColorFactor: [0.6, 0.6, 0.6, 1] },
+    }],
+    buffers: [{ byteLength: binary.length, uri: 'shell.bin' }],
+    bufferViews: [
+      { buffer: 0, byteOffset: positionView.byteOffset, byteLength: positionView.byteLength, target: 34962 },
+      { buffer: 0, byteOffset: indexView.byteOffset, byteLength: indexView.byteLength, target: 34963 },
+    ],
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: geometry.positions.length / 3, type: 'VEC3' },
+      { bufferView: 1, componentType: 5123, count: geometry.indices.length, type: 'SCALAR' },
+    ],
+  };
+  const glbPath = path.join(root, 'non_closed_shell.glb');
+  const gltfPath = path.join(root, 'non_closed_shell.gltf');
+  const binPath = path.join(root, 'shell.bin');
   writeGlb(glbPath, json, binary);
   fs.writeFileSync(binPath, binary);
   fs.writeFileSync(gltfPath, `${JSON.stringify(json, null, 2)}\n`, 'utf8');

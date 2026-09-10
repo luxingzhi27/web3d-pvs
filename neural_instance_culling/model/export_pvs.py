@@ -1218,15 +1218,9 @@ def _viewcell_contract(
         else None
     )
     for value in (
-        source_checkpoint.get("viewcell")
-        if isinstance(source_checkpoint, Mapping)
-        else checkpoint.get("viewcell"),
-        source_checkpoint.get("viewCell")
-        if isinstance(source_checkpoint, Mapping)
-        else checkpoint.get("viewCell"),
-        source_checkpoint.get("queryContract")
-        if isinstance(source_checkpoint, Mapping)
-        else checkpoint.get("queryContract"),
+        checkpoint.get("viewcell"),
+        checkpoint.get("viewCell"),
+        checkpoint.get("queryContract"),
         source_protocol.get("viewcell")
         if isinstance(source_protocol, Mapping)
         else None,
@@ -1239,6 +1233,15 @@ def _viewcell_contract(
         protocol.get("viewCell") if isinstance(protocol, Mapping) else None,
         checkpoint.get("datasetMeta"),
         protocol,
+        source_checkpoint.get("viewcell")
+        if isinstance(source_checkpoint, Mapping)
+        else None,
+        source_checkpoint.get("viewCell")
+        if isinstance(source_checkpoint, Mapping)
+        else None,
+        source_checkpoint.get("queryContract")
+        if isinstance(source_checkpoint, Mapping)
+        else None,
     ):
         if isinstance(value, Mapping):
             candidates.append(value)

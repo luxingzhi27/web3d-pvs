@@ -2,6 +2,8 @@ import * as THREE from '/node_modules/three/build/three.module.js';
 import { GLTFLoader } from '/node_modules/three/examples/jsm/loaders/GLTFLoader.js';
 import { DRACOLoader } from '/node_modules/three/examples/jsm/loaders/DRACOLoader.js';
 import { MeshoptDecoder } from '/node_modules/three/examples/jsm/libs/meshopt_decoder.module.js';
+import { buildComponentIdsByGlb } from './component_mapping.js';
+import { patchColorIdAlphaFragmentShader } from './color_id_alpha.js';
 
 THREE.ColorManagement.enabled = false;
 
@@ -42,35 +44,41 @@ function normalizeVector(values, fallback) {
   return v.normalize();
 }
 
-function buildHashToComponentIds(runtimeMeta) {
-  const map = new Map();
-  for (const record of runtimeMeta.componentRecords || []) {
-    const hash = record.glbHash;
-    if (!map.has(hash)) map.set(hash, []);
-    map.get(hash).push(Number(record.componentGlobalId));
-  }
-  for (const ids of map.values()) ids.sort((a, b) => a - b);
-  return map;
+function preserveCutoutAlpha(material, sourceMaterial) {
+  if (!sourceMaterial?.map || !(Number(sourceMaterial.alphaTest) > 0)) return material;
+  material.map = sourceMaterial.map;
+  material.alphaTest = Number(sourceMaterial.alphaTest);
+  material.onBeforeCompile = (shader) => {
+    shader.fragmentShader = patchColorIdAlphaFragmentShader(shader.fragmentShader);
+  };
+  material.customProgramCacheKey = () => `component-color-id-alpha-v1:${material.alphaTest}`;
+  return material;
 }
 
-function makeFlatMaterial(componentId) {
-  return new THREE.MeshBasicMaterial({
+function makeFlatMaterial(componentId, sourceMaterial) {
+  return preserveCutoutAlpha(new THREE.MeshBasicMaterial({
     color: colorFromComponentId(componentId),
     depthTest: true,
     depthWrite: true,
     side: THREE.DoubleSide,
     toneMapped: false,
-  });
+  }), sourceMaterial);
 }
 
-function makeInstanceColorMaterial() {
-  return new THREE.MeshBasicMaterial({
+function makeInstanceColorMaterial(sourceMaterial) {
+  return preserveCutoutAlpha(new THREE.MeshBasicMaterial({
     vertexColors: true,
     depthTest: true,
     depthWrite: true,
     side: THREE.DoubleSide,
     toneMapped: false,
-  });
+  }), sourceMaterial);
+}
+
+function replaceMaterials(source, factory) {
+  return Array.isArray(source)
+    ? source.map((material) => factory(material))
+    : factory(source);
 }
 
 function forceWhiteVertexColors(geometry) {
@@ -103,7 +111,7 @@ function assignColorIdMaterials(root, componentIds) {
       // evaluated. Color-ID sampling must render the full placement set.
       mesh.frustumCulled = false;
       forceWhiteVertexColors(mesh.geometry);
-      mesh.material = makeInstanceColorMaterial();
+      mesh.material = replaceMaterials(mesh.material, makeInstanceColorMaterial);
       for (let i = 0; i < count; i += 1) {
         // Instanced scene assets map placements into the source component ID
         // space. If a future mapping supplies one ID per placement, consume
@@ -115,18 +123,33 @@ function assignColorIdMaterials(root, componentIds) {
       cursor += Math.min(count, componentIds.length);
     }
     for (const mesh of meshes) {
-      if (!mesh.isInstancedMesh) mesh.material = makeFlatMaterial(componentIds[0]);
+      if (!mesh.isInstancedMesh) {
+        mesh.material = replaceMaterials(
+          mesh.material,
+          (sourceMaterial) => makeFlatMaterial(componentIds[0], sourceMaterial),
+        );
+      }
     }
     return;
   }
 
   if (componentIds.length === meshes.length) {
-    for (let i = 0; i < meshes.length; i += 1) meshes[i].material = makeFlatMaterial(componentIds[i]);
+    for (let i = 0; i < meshes.length; i += 1) {
+      meshes[i].material = replaceMaterials(
+        meshes[i].material,
+        (sourceMaterial) => makeFlatMaterial(componentIds[i], sourceMaterial),
+      );
+    }
     return;
   }
 
   const componentId = componentIds[0];
-  for (const mesh of meshes) mesh.material = makeFlatMaterial(componentId);
+  for (const mesh of meshes) {
+    mesh.material = replaceMaterials(
+      mesh.material,
+      (sourceMaterial) => makeFlatMaterial(componentId, sourceMaterial),
+    );
+  }
 }
 
 function disposeObject(root) {
@@ -150,8 +173,8 @@ async function loadSceneObjects(options, runtimeMeta, glbIndex) {
   loader.setDRACOLoader(dracoLoader);
   loader.setMeshoptDecoder(MeshoptDecoder);
 
-  const hashToComponentIds = buildHashToComponentIds(runtimeMeta);
   const entries = Array.isArray(glbIndex.entries) ? glbIndex.entries : [];
+  const componentIdsByGlb = buildComponentIdsByGlb(runtimeMeta, glbIndex);
   const allowedGlbIds = Array.isArray(options.glbIdList)
     ? new Set(options.glbIdList.map((value) => Number(value)).filter(Number.isFinite))
     : null;
@@ -176,8 +199,8 @@ async function loadSceneObjects(options, runtimeMeta, glbIndex) {
         skipped += 1;
         continue;
       }
-      const componentIds = hashToComponentIds.get(entry.hash) || [];
-      if (componentIds.length === 0) { skipped += 1; continue; }
+      const componentIds = componentIdsByGlb.get(Number(entry.globalId));
+      if (!componentIds) throw new Error(`globalGlbId ${entry.globalId} has no component mapping`);
       const url = `/assets/${entry.path || `task-${entry.taskId}/glb/LOD0/sub_${entry.baseId}.glb`}`;
       batch.push(
         loader.loadAsync(url).then((gltf) => {

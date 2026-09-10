@@ -753,10 +753,10 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = self._checkpoint(root)
-            source["viewcell"]["radiusM"] = 2.5
+            source["viewcell"]["radiusM"] = 2.0
             source["protocol"]["viewcell"] = {
                 "shape": "horizontal_disk",
-                "radiusM": 2.5,
+                "radiusM": 2.0,
             }
             source_path = root / "source.pt"
             torch.save(source, source_path)
@@ -768,7 +768,7 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
             checkpoint["protocol"].pop("dataset")
             checkpoint["protocol"].pop("runtimeMeta")
             checkpoint["protocol"].pop("viewcell")
-            checkpoint["viewcell"]["radiusM"] = 2.0
+            checkpoint["viewcell"]["radiusM"] = 2.5
             checkpoint["initialization"] = {
                 "mode": "from-checkpoint",
                 "checkpoint": str(source_path),

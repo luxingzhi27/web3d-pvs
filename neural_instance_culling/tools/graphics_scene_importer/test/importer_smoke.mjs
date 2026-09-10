@@ -31,8 +31,8 @@ try {
   const gltfScene = await readGltfScene(fixture.gltfPath);
   assert.equal(glbScene.source.format, 'glb');
   assert.equal(gltfScene.source.format, 'gltf');
-  assert.equal(glbScene.source.nodeCount, 5);
-  assert.equal(glbScene.renderables.length, 3);
+  assert.equal(glbScene.source.nodeCount, 6);
+  assert.equal(glbScene.renderables.length, 4);
   assert.equal(glbScene.excluded.length, 1);
   assert.equal(glbScene.excluded[0].reason, 'blend-always-resident');
   assert.equal(glbScene.excluded[0].alwaysResident, true);
@@ -86,7 +86,9 @@ try {
   const outputScene = await readGltfScene(firstOutput);
   assert.equal(outputScene.renderables.length, 1);
   assert.ok(outputScene.renderables[0].triangleCount > 0);
-  const maskRecord = manifest.units.find((unit) => unit.alphaMode === 'MASK');
+  const maskRecords = manifest.units.filter((unit) => unit.alphaMode === 'MASK');
+  assert.equal(maskRecords.length, 2);
+  const maskRecord = maskRecords[0];
   assert.ok(maskRecord);
   const maskOutput = path.join(outputAssets, maskRecord.path);
   const maskJson = (() => {
@@ -99,6 +101,11 @@ try {
   assert.equal(maskJson.samplers[0].wrapS, 10497);
   assert.equal(maskJson.materials[0].pbrMetallicRoughness.baseColorTexture.index, 0);
   assert.equal(maskJson.images[0].uri, 'shared/images/image_0.png');
+  const secondMaskOutput = path.join(outputAssets, maskRecords[1].path);
+  const secondMaskBytes = fs.readFileSync(secondMaskOutput);
+  const secondMaskJsonLength = secondMaskBytes.readUInt32LE(12);
+  const secondMaskJson = JSON.parse(secondMaskBytes.toString('utf8', 20, 20 + secondMaskJsonLength).trim());
+  assert.equal(secondMaskJson.images[0].uri, maskJson.images[0].uri);
   const maskOutputScene = await readGltfScene(maskOutput);
   assert.equal(maskOutputScene.renderables[0].material.alphaMode, 'MASK');
   assert.equal(maskOutputScene.renderables[0].material.baseColorTexture.available, true);

@@ -301,10 +301,12 @@ function main() {
     renderFovY: args.renderFovY,
     baseFovY: args.baseFovY,
     modelFovY: args.modelFovY,
-    referenceGroundTruthPositionsPerViewcell: Number(NEURALPVS_FOV_PROTOCOL.groundTruthPositionsPerViewcell),
+    relatedWorkReferenceGroundTruthPositionsPerViewcell: Number(
+      NEURALPVS_FOV_PROTOCOL.groundTruthPositionsPerViewcell,
+    ),
     backOffsetFormula: NEURALPVS_FOV_PROTOCOL.backOffsetFormula,
     categoryCounts,
-    semantics: 'Each viewcell emits K same-direction random camera positions inside the viewcell; model sampling and candidate inference use 66 degrees, while the frontend display camera uses 60 degrees.',
+    semantics: 'Each viewcell emits K same-direction deterministic pseudo-random camera positions inside the viewcell; model sampling and candidate inference use 66 degrees, while the frontend display camera uses 60 degrees.',
   };
   const summaryPath = args.summary || args.output.replace(/\.jsonl$/i, '_summary.json');
   fs.writeFileSync(summaryPath, JSON.stringify(summary, null, 2), 'utf8');

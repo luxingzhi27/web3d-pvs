@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Deterministic glTF/GLB renderable-unit importer for standard graphics scenes.",
   "scripts": {
-    "test": "node test/importer_smoke.mjs"
+    "test": "node test/importer_smoke.mjs && node test/pose_plan_smoke.mjs"
   },
   "dependencies": {
     "meshoptimizer": "^1.2.0"

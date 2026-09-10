@@ -1,12 +1,14 @@
 # 当前 PVS 论文主线
 
-日期：2026-08-23；本页更新于 2026-09-09
+日期：2026-08-23；本页更新于 2026-09-11
 
 ## 目标与边界
 
 当前论文模型只处理后退扩大视锥候选上的实例可见性。模型使用同一 view-cell 的保守可见并集作为监督，在 calibration 上为每个 checkpoint 冻结安全阈值；validation 在同一阈值下报告 weighted recall 及其单侧 95% 下界，用于 checkpoint 和配置比较。test 不参与训练、阈值选择或 checkpoint 排名。
 
 当前 HKUST 前端已导出该主线的冻结 V4 成员，运行目录为 `pvs_mainline_v4`，阈值为 `0.6800000071525574`。视觉效用、独立下载优先级和 GLB 字节预算没有进入本轮可见性损失；当前下载调度使用实例可见性概率聚合，不能描述成已训练的独立下载头。
+
+IFCBench 最终运行资产来自 `pvs_ifcbench_v4_calibration_finetune_v2_refine` 的 seed `20260801`，冻结阈值为 `0.6882505416870117`。2026-09-11 修正了 warm-start 导出时的 view-cell 来源优先级：最终 checkpoint 的 `2.5 m` 契约优先，初始化 checkpoint 只补最终成员缺失的协议字段。运行资产已在原正式目录重导，`model_meta.json` 的 `viewcell.radiusM` 与 `query.viewcellRadiusM` 均为 `2.5`；错误的 `2.0 m` 导出未保留。
 
 ## 固定架构
 
