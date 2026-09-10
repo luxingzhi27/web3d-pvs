@@ -33,7 +33,15 @@ CATEGORY_IDS = {
     "far": 5,
     "unknown": 255,
 }
-SPLIT_IDS = {"train": 0, "val": 1, "test": 2, "unknown": 255}
+SPLIT_IDS = {
+    "train": 0,
+    "validation": 1,
+    "calibration": 2,
+    "test": 3,
+    "guard": 254,
+    "unknown": 255,
+}
+FORMAL_SPLITS = frozenset({"train", "validation", "calibration", "test", "guard"})
 MODEL_INPUT_FOV_Y_DEG = 66.0
 FRONTEND_RENDER_FOV_Y_DEG = 60.0
 DIRECTIONAL_POSE_DTYPE = np.dtype(
@@ -84,11 +92,6 @@ def parse_args() -> argparse.Namespace:
             "The default 1 preserves the original view-cell aggregation."
         ),
     )
-    parser.add_argument(
-        "--stratified-subpose-split",
-        action="store_true",
-        help="For derived local cells, assign train/val/test with the stable view-cell hash instead of inheriting the source split.",
-    )
     parser.add_argument("--default-fov-y", type=float, default=MODEL_INPUT_FOV_Y_DEG)
     parser.add_argument("--default-aspect", type=float, default=16.0 / 9.0)
     parser.add_argument(
@@ -101,6 +104,17 @@ def parse_args() -> argparse.Namespace:
 
 def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def link_or_copy(source: Path, target: Path) -> None:
+    if target.exists():
+        if os.path.samefile(source, target):
+            return
+        target.unlink()
+    try:
+        os.link(source, target)
+    except OSError:
+        shutil.copyfile(source, target)
 
 
 def iter_jsonl(path_or_dir: Path, raw_glob: str, max_rows: int = 0) -> list[dict[str, Any]]:
@@ -213,19 +227,25 @@ def normalize_points(points: np.ndarray, bounds: dict[str, Any]) -> np.ndarray:
     return np.clip((points - mn[None, :]) / np.maximum(size[None, :], 1e-6), 0.0, 1.0).astype(np.float32, copy=False)
 
 
-def stable_split(viewcell_id: int, seed: int = 20260623) -> str:
-    state = np.uint32(viewcell_id ^ seed)
-    state ^= state >> np.uint32(16)
-    state = np.uint32(state * np.uint32(2246822507))
-    state ^= state >> np.uint32(13)
-    state = np.uint32(state * np.uint32(3266489909))
-    state ^= state >> np.uint32(16)
-    ratio = float(int(state)) / float(2**32)
-    if ratio < 0.8:
-        return "train"
-    if ratio < 0.9:
-        return "val"
-    return "test"
+def backed_candidate_camera(center: np.ndarray, forward: np.ndarray, back_offset: float) -> np.ndarray:
+    if not math.isfinite(float(back_offset)) or float(back_offset) <= 0.0:
+        raise ValueError(f"pvs_back_offset must be positive and finite; got {back_offset!r}")
+    unit_forward = normalize(
+        np.asarray(forward, dtype=np.float32),
+        np.asarray([0.0, 0.0, -1.0], dtype=np.float32),
+    )
+    return (
+        np.asarray(center, dtype=np.float32) - unit_forward * np.float32(back_offset)
+    ).astype(np.float32, copy=False)
+
+
+def formal_split_name(value: Any, *, viewcell_id: int) -> str:
+    if not isinstance(value, str) or value not in FORMAL_SPLITS:
+        raise ValueError(
+            f"viewcell {viewcell_id} must carry one explicit formal split from "
+            f"{sorted(FORMAL_SPLITS)}; got {value!r}"
+        )
+    return value
 
 
 def aggregate_viewcells(rows: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -235,6 +255,7 @@ def aggregate_viewcells(rows: list[dict[str, Any]], args: argparse.Namespace) ->
     for index, source_row in enumerate(rows):
         row = dict(source_row)
         source_viewcell_id = int(row.get("viewcell_id", row.get("pose_index", index)))
+        formal_split_name(row.get("split"), viewcell_id=source_viewcell_id)
         if group_count == 1:
             group_index = 0
         elif group_count == 4:
@@ -257,8 +278,6 @@ def aggregate_viewcells(rows: list[dict[str, Any]], args: argparse.Namespace) ->
         row["source_viewcell_id"] = source_viewcell_id
         row["subpose_group_id"] = group_index
         row["viewcell_id"] = viewcell_id
-        if group_count > 1 and args.stratified_subpose_split:
-            row["split"] = stable_split(viewcell_id)
         grouped[viewcell_id].append(row)
 
     viewcells: list[dict[str, Any]] = []
@@ -268,8 +287,37 @@ def aggregate_viewcells(rows: list[dict[str, Any]], args: argparse.Namespace) ->
         if len(ok) < int(args.min_success_subposes):
             continue
         first = ok[0]
+        split = formal_split_name(first.get("split"), viewcell_id=viewcell_id)
+        conflicting_splits = {
+            formal_split_name(row.get("split"), viewcell_id=viewcell_id) for row in ok
+        }
+        if conflicting_splits != {split}:
+            raise ValueError(
+                f"viewcell {viewcell_id} contains conflicting formal splits: "
+                f"{sorted(conflicting_splits)}"
+            )
         subpose_positions = np.asarray(
             [row.get("camera_pos") or row.get("viewcell_center") or [0, 0, 0] for row in ok],
+            dtype=np.float32,
+        )
+        subpose_forwards = np.asarray(
+            [row.get("camera_forward") or row.get("viewcell_forward") or [0, 0, -1] for row in ok],
+            dtype=np.float32,
+        )
+        subpose_pose_indices = np.asarray(
+            [int(row.get("pose_index", index)) for index, row in enumerate(ok)],
+            dtype=np.uint32,
+        )
+        subpose_params = np.asarray(
+            [
+                [
+                    float(row.get("fov_y", args.default_fov_y)),
+                    float(row.get("aspect", args.default_aspect)),
+                    float(row.get("width", 0.0)),
+                    float(row.get("height", 0.0)),
+                ]
+                for row in ok
+            ],
             dtype=np.float32,
         )
         declared_center = first.get("viewcell_center")
@@ -313,7 +361,17 @@ def aggregate_viewcells(rows: list[dict[str, Any]], args: argparse.Namespace) ->
                 "tan_y": float(tan_y),
                 "fov_y": float(fov_y),
                 "aspect": float(aspect),
-                "split": str(first.get("split") or stable_split(int(viewcell_id))),
+                "viewcell_radius": float(first.get("viewcell_radius", 0.0)),
+                "pvs_fov_x": float(
+                    first.get(
+                        "pvs_fov_x",
+                        math.degrees(2.0 * math.atan(math.tan(math.radians(fov_y) * 0.5) * aspect)),
+                    )
+                ),
+                "pvs_back_offset": float(first.get("pvs_back_offset", 0.0)),
+                "yaw_deg": float(first.get("viewcell_yaw_deg", first.get("yaw_deg", 0.0))),
+                "pitch_deg": float(first.get("viewcell_pitch_deg", first.get("pitch_deg", 0.0))),
+                "split": split,
                 "category": str(first.get("viewcell_category") or first.get("sample_category") or "unknown"),
                 "category_id": int(first.get("sample_category_id", CATEGORY_IDS.get(str(first.get("sample_category", "unknown")), 255))),
                 "subpose_count": int(len(subposes)),
@@ -322,6 +380,9 @@ def aggregate_viewcells(rows: list[dict[str, Any]], args: argparse.Namespace) ->
                 "weights": np.asarray([weights_by_id[int(cid)] for cid in visible], dtype=np.float32),
                 "hits": np.asarray([hits_by_id[int(cid)] for cid in visible], dtype=np.uint16),
                 "subpose_positions": subpose_positions,
+                "subpose_forwards": subpose_forwards,
+                "subpose_pose_indices": subpose_pose_indices,
+                "subpose_params": subpose_params,
             }
         )
     return viewcells
@@ -343,9 +404,13 @@ def main() -> None:
         raise RuntimeError("No valid viewcells after aggregation.")
 
     centers = np.asarray([vc["center"] for vc in viewcells], dtype=np.float32)
+    candidate_cameras = np.asarray(
+        [backed_candidate_camera(vc["center"], vc["forward"], vc["pvs_back_offset"]) for vc in viewcells],
+        dtype=np.float32,
+    )
     scene_min, scene_max, _scene_size = scene_min_max(runtime_meta["sceneBounds"])
-    cam_min = np.minimum(scene_min, centers.min(axis=0))
-    cam_max = np.maximum(scene_max, centers.max(axis=0))
+    cam_min = np.minimum(scene_min, candidate_cameras.min(axis=0))
+    cam_max = np.maximum(scene_max, candidate_cameras.max(axis=0))
     pad = np.maximum((cam_max - cam_min) * 0.05, 1.0)
     camera_bounds = {
         "min": (cam_min - pad).astype(float).tolist(),
@@ -355,11 +420,11 @@ def main() -> None:
     }
 
     poses = np.zeros((len(viewcells),), dtype=DIRECTIONAL_POSE_DTYPE)
-    poses["camera_norm"] = normalize_points(centers, camera_bounds)
-    poses["camera_world"] = centers
+    poses["camera_norm"] = normalize_points(candidate_cameras, camera_bounds)
+    poses["camera_world"] = candidate_cameras
     poses["camera_forward"] = np.asarray([vc["forward"] for vc in viewcells], dtype=np.float32)
     poses["camera_view"] = np.asarray([[vc["tan_x"], vc["tan_y"]] for vc in viewcells], dtype=np.float32)
-    poses["split"] = np.asarray([SPLIT_IDS.get(vc["split"], SPLIT_IDS["unknown"]) for vc in viewcells], dtype=np.uint8)
+    poses["split"] = np.asarray([SPLIT_IDS[vc["split"]] for vc in viewcells], dtype=np.uint8)
     poses["category"] = np.asarray([vc["category_id"] for vc in viewcells], dtype=np.uint8)
     poses.tofile(output_dir / "poses.bin")
 
@@ -371,6 +436,9 @@ def main() -> None:
     visible_weights_all: list[float] = []
     visible_hits_all: list[int] = []
     subpose_positions_all: list[list[float]] = []
+    subpose_forwards_all: list[list[float]] = []
+    subpose_pose_indices_all: list[int] = []
+    subpose_params_all: list[list[float]] = []
     stats = {
         "rawRows": int(len(rows)),
         "viewcellCount": int(len(viewcells)),
@@ -389,7 +457,7 @@ def main() -> None:
     candidate_path = output_dir / "candidate_ids.bin"
     with candidate_path.open("wb") as candidate_file:
         for i, vc in enumerate(tqdm(viewcells, desc="pack viewcell csr")):
-            mvps[i] = conservative_mvp(vc["center"], vc["forward"], vc["tan_x"], vc["tan_y"])
+            mvps[i] = conservative_mvp(candidate_cameras[i], vc["forward"], vc["tan_x"], vc["tan_y"])
             visible = vc["visible"]
             weights = vc["weights"]
             hits = vc["hits"]
@@ -398,6 +466,9 @@ def main() -> None:
             visible_hits_all.extend(int(v) for v in hits.tolist())
             visible_offsets[i + 1] = len(visible_ids_all)
             subpose_positions_all.extend(np.asarray(vc["subpose_positions"], dtype=np.float32).tolist())
+            subpose_forwards_all.extend(np.asarray(vc["subpose_forwards"], dtype=np.float32).tolist())
+            subpose_pose_indices_all.extend(int(value) for value in vc["subpose_pose_indices"].tolist())
+            subpose_params_all.extend(np.asarray(vc["subpose_params"], dtype=np.float32).tolist())
             subpose_offsets[i + 1] = len(subpose_positions_all)
             if visible.size == 0:
                 stats["emptyVisible"] += 1
@@ -431,10 +502,36 @@ def main() -> None:
             stats["maxCandidate"] = max(int(stats["maxCandidate"]), int(candidates.size))
 
     mvps.tofile(output_dir / "mvp.bin")
+    np.asarray([vc["viewcell_id"] for vc in viewcells], dtype="<u4").tofile(output_dir / "viewcell_ids.bin")
     visible_offsets.tofile(output_dir / "visible_offsets.bin")
     np.asarray([vc["center"] for vc in viewcells], dtype="<f4").tofile(output_dir / "viewcell_centers.bin")
+    centers.astype("<f4", copy=False).tofile(output_dir / "query_center_world.bin")
+    candidate_cameras.astype("<f4", copy=False).tofile(output_dir / "candidate_camera_world.bin")
+    np.asarray([vc["viewcell_radius"] for vc in viewcells], dtype="<f4").tofile(output_dir / "viewcell_radius_m.bin")
+    np.asarray([vc["forward"] for vc in viewcells], dtype="<f4").tofile(output_dir / "viewcell_forwards.bin")
+    np.asarray(
+        [
+            [
+                vc["viewcell_radius"],
+                vc["fov_y"],
+                vc["fov_y"],
+                vc["pvs_fov_x"],
+                vc["pvs_back_offset"],
+                vc["yaw_deg"],
+                vc["pitch_deg"],
+                vc["subpose_count"],
+            ]
+            for vc in viewcells
+        ],
+        dtype="<f4",
+    ).tofile(output_dir / "viewcell_params.bin")
+    np.asarray([vc["category_id"] for vc in viewcells], dtype="u1").tofile(output_dir / "viewcell_category_ids.bin")
+    np.asarray([SPLIT_IDS[vc["split"]] for vc in viewcells], dtype="u1").tofile(output_dir / "viewcell_split_ids.bin")
     subpose_offsets.tofile(output_dir / "subpose_offsets.bin")
     np.asarray(subpose_positions_all, dtype="<f4").tofile(output_dir / "subpose_camera_pos.bin")
+    np.asarray(subpose_forwards_all, dtype="<f4").tofile(output_dir / "subpose_camera_forward.bin")
+    np.asarray(subpose_pose_indices_all, dtype="<u4").tofile(output_dir / "subpose_pose_indices.bin")
+    np.asarray(subpose_params_all, dtype="<f4").tofile(output_dir / "subpose_params.bin")
     np.asarray(visible_ids_all, dtype="<u4").tofile(output_dir / "visible_ids.bin")
     np.asarray(visible_weights_all, dtype="<f4").tofile(output_dir / "visible_weights.bin")
     np.asarray(visible_hits_all, dtype="<u2").tofile(output_dir / "visible_hit_counts.bin")
@@ -445,12 +542,8 @@ def main() -> None:
     if not args.allow_candidate_visible_union:
         raw_candidate_path = output_dir / "raw_candidate_ids.bin"
         raw_offsets_path = output_dir / "raw_candidate_offsets.bin"
-        try:
-            os.link(candidate_path, raw_candidate_path)
-            os.link(output_dir / "candidate_offsets.bin", raw_offsets_path)
-        except OSError:
-            shutil.copyfile(candidate_path, raw_candidate_path)
-            shutil.copyfile(output_dir / "candidate_offsets.bin", raw_offsets_path)
+        link_or_copy(candidate_path, raw_candidate_path)
+        link_or_copy(output_dir / "candidate_offsets.bin", raw_offsets_path)
 
     category_counts: dict[str, int] = {}
     for vc in viewcells:
@@ -461,15 +554,16 @@ def main() -> None:
         if name != "unknown"
     }
     if args.source_sampler == "three_color_id":
-        schema = "viewcell-csr-color-id-fov66-v2"
+        source_aggregation_schema = "viewcell-csr-color-id-fov66-v3"
         gt_semantics = "visible_ids are unioned Three.js color-id visible component ids over all same-direction subposes in the viewcell"
         weight_semantics = "Three.js color-id screen coverage in parts per million, max-pooled over subposes"
     else:
-        schema = "viewcell-csr-rvc-fov66-v2"
+        source_aggregation_schema = "viewcell-csr-rvc-fov66-v3"
         gt_semantics = "visible_ids are unioned rvcServer visible component ids over all successful same-direction subposes in the viewcell"
         weight_semantics = "rvcServer component_weights max-pooled over subposes"
     meta = {
-        "schema": schema,
+        "schema": "pose-csr-explicit-four-way-split-v1",
+        "sourceAggregationSchema": source_aggregation_schema,
         "experiment": args.experiment,
         "sourceSampler": args.source_sampler,
         "runtimeMeta": args.runtime_meta.as_posix(),
@@ -489,8 +583,12 @@ def main() -> None:
         "rawCandidateFile": "raw_candidate_ids.bin" if not args.allow_candidate_visible_union else None,
         "rawCandidateOffsets": "raw_candidate_offsets.bin" if not args.allow_candidate_visible_union else None,
         "rawCandidateSemantics": "AABB candidate union computed before any visible-positive union",
-        "cameraSemantics": "camera_world is the canonical viewcell plan center; candidates are the union over dense subpose positions",
+        "cameraSemantics": "poses.camera_world is candidate_camera_world = query_center_world - normalize(viewcell_forward) * pvs_back_offset",
+        "queryCenterSemantics": "canonical center of the same-direction view-cell visibility union",
+        "candidateCameraSemantics": "single backed 66-degree model camera; stored candidate IDs remain the conservative union over all dense subpose cameras",
         "viewcellGeometrySemantics": "viewcell_centers are canonical plan centers; subpose_camera_pos stores every successful dense subpose position",
+        "sourceViewcellCount": int(len(viewcells)),
+        "sourceSubposeCount": int(len(subpose_positions_all)),
         "gtSemantics": gt_semantics,
         "visibleWeightSemantics": weight_semantics,
         "visibleWeightDtype": "float32",
@@ -512,9 +610,20 @@ def main() -> None:
         "files": {
             "poses": "poses.bin",
             "mvp": "mvp.bin",
+            "viewcellIds": "viewcell_ids.bin",
             "viewcellCenters": "viewcell_centers.bin",
+            "queryCenterWorld": "query_center_world.bin",
+            "candidateCameraWorld": "candidate_camera_world.bin",
+            "viewcellRadiusM": "viewcell_radius_m.bin",
+            "viewcellForwards": "viewcell_forwards.bin",
+            "viewcellParams": "viewcell_params.bin",
+            "viewcellCategoryIds": "viewcell_category_ids.bin",
+            "viewcellSplitIds": "viewcell_split_ids.bin",
             "subposeOffsets": "subpose_offsets.bin",
             "subposeCameraPos": "subpose_camera_pos.bin",
+            "subposeCameraForward": "subpose_camera_forward.bin",
+            "subposePoseIndices": "subpose_pose_indices.bin",
+            "subposeParams": "subpose_params.bin",
             "visibleOffsets": "visible_offsets.bin",
             "visibleIds": "visible_ids.bin",
             "visibleWeights": "visible_weights.bin",

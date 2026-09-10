@@ -52,8 +52,6 @@ def main() -> None:
     dataset = PoseCSRDataset(args.dataset_dir, num_instances=int(json.loads(Path(args.runtime_meta).read_text())["instanceCount"]))
     world_aabbs, _mapping, runtime_meta = load_runtime_meta(args.runtime_meta)
     source = json.loads(Path(args.source_render_manifest).read_text(encoding="utf-8"))
-    if source.get("schema") != "local-true-component-id-render-manifest-v2":
-        raise ValueError("source render manifest must be the audited component-ID manifest")
     if source.get("instanceBindings", {}).get("schema") != "component-instance-binding-preflight-v1":
         raise ValueError("source render manifest has no audited component bindings")
     if args.split not in dataset.split_ids:

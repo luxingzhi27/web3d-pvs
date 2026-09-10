@@ -87,6 +87,15 @@ def _int(value: Any, label: str) -> int:
     return value
 
 
+def _object_key_int(value: Any, label: str) -> int:
+    if not isinstance(value, str) or not value.isdecimal():
+        raise ValueError(f"{label} must be a decimal object key: {value!r}")
+    result = int(value)
+    if str(result) != value:
+        raise ValueError(f"{label} must use canonical decimal form: {value!r}")
+    return result
+
+
 def _ids(value: Any, label: str) -> list[int]:
     if not isinstance(value, list):
         raise ValueError(f"{label} must be a list of component IDs")
@@ -435,7 +444,7 @@ def _base_scene_contract(base_manifest: dict[str, Any]) -> tuple[str, Path, dict
                 raise ValueError("base runtimeMeta contains conflicting component mappings")
             runtime_components[component_id] = global_glb_id
         expected_components = {
-            _int(component_id, "base componentGlobalId"): _int(
+            _object_key_int(component_id, "base componentGlobalId"): _int(
                 binding.get("globalGlbId"), "base component globalGlbId"
             )
             for component_id, binding in component_to_binding.items()

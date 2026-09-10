@@ -2,7 +2,7 @@
 
 日期：2026-09-09；2026-09-11 更新
 
-状态：四套 v2 外壳已完成。修正后的 calibration、frozen test 与 120-pose timing 正在独占 A6000 上执行，尚未形成完整 test 结论。
+状态：HKUST/IFCBench 的四套 v2 外壳、calibration、frozen test、120-pose timing 和真实 60 度图像评价均已完成。
 
 ## 目的
 
@@ -101,21 +101,45 @@ Calibration 只决定分辨率和 depth bias。选择器要求 weighted recall �
 
 本项目以可见为正类：`Occlusion Recall = specificity = TN/(TN+FP)`，`False Occlusion Rate = 1-recall = FN/GT`。`usefulCull=TN/candidate`、`badCull=FN/candidate` 使用不同分母，不能互相替代。完整定义见[统一评价协议](unified_pvs_metrics_evaluation.md)。
 
-## 验证与当前状态
+## 正式结果
+
+两场景都在 calibration 选择 `512x288`、`depth bias=100 m`。冻结选择只读取 lossless calibration；equal-asset 复用相同参数。
+
+| 场景 | 变体 | Region66 test WR | WR 95% LCB | Pose useful cull | 查询 p50 | 查询 p95 |
+|---|---|---:|---:|---:|---:|---:|
+| HKUST | lossless | 0.997633 | 0.996552 | 0.328166 | 989.55 ms | 1555.02 ms |
+| HKUST | equal-asset | 0.997657 | 0.996581 | 0.025224 | 692.25 ms | 1107.22 ms |
+| IFCBench | lossless | 0.995325 | 0.994716 | 0.237997 | 120.15 ms | 151.62 ms |
+| IFCBench | equal-asset | 0.995326 | 0.994717 | 0.222659 | 83.00 ms | 119.70 ms |
+
+HKUST lossless 的阶段 p50 为 depth raster `459.30 ms`、HZB build `142.95 ms`、AABB test `144.25 ms`、compaction `244.10 ms`。这些总时间包含 Region66 全 subpose 查询，不得与单次神经 forward 混写。
+
+硬件 Color-ID 图像结果如下。IFCBench AABB 因几乎全保留而图像误差最低，但 useful cull 只有约 `3.94%`；因此论文比较的是安全约束下的剔除效率，而不是只按最低 PER 排名。
+
+| 场景 | 方法 | Aggregate PER | Miss pixel | Wrong-ID | Mean PER | p95 PER |
+|---|---|---:|---:|---:|---:|---:|
+| HKUST | Full V4 | 0.3662% | 0.1418% | 0.2244% | 0.3027% | 0.4479% |
+| HKUST | AABB MLP | 0.8613% | 0.3362% | 0.5250% | 0.5535% | 0.7792% |
+| HKUST | lossless HZB | 0.3128% | 0.0318% | 0.2810% | 0.4422% | 0.6878% |
+| IFCBench | Full V4 | 0.5011% | 0.0562% | 0.4450% | 0.6300% | 2.7102% |
+| IFCBench | AABB MLP | 0.0583% | 0.0129% | 0.0454% | 0.0787% | 0.3348% |
+| IFCBench | lossless HZB | 0.5312% | 0.2806% | 0.2506% | 0.7558% | 3.5876% |
+
+## 验证状态
 
 2026-09-11 已通过：
 
 - v2 exporter、Meshopt 解码、candidate component-ID compaction 和 Region 选择专项测试；
 - HZB、图像和 streaming Python 专项 `unittest`；
 - 完整 `slm2viewer npm test`；
-- 36 项正式 dry-run；
+- 全部 `36/36` 正式任务；
 - NVIDIA A6000 无头 WebGPU adapter 门。
 
-当前没有可报告的正式 HZB test 或图像数字。后续只从当前正式根目录生成论文表格和 streaming 输入。详细任务目录、恢复规则和失败诊断见[HZB 正式执行文档](pvs_hzb_formal_execution_2026-09-09.md)。
+正式结果已进入 `benchmark/out/paper_results/hzb/`、`image_metrics/` 和 `streaming_formal/`。详细任务目录、恢复规则和失败诊断见[HZB 正式执行文档](pvs_hzb_formal_execution_2026-09-09.md)。
 
 ## 变更记录
 
 - 修改代码：`geometry_shell_hzb_exporter.mjs`、`evaluate_geometry_shell_hzb.py`、`run_geometry_shell_hzb_paper.py`、`GeometryShellHZB*.js`、benchmark runner/page 及对应测试。
 - 依赖：现有场景 GLB/runtime meta、Pose CSR、Region source、Meshopt、Chrome WebGPU 和硬件证据入口。
 - 主线决定：保留 lossless 为完整几何基线，equal-asset 为同启动预算敏感性；两者都不替代 Full V4。
-- 待完成：正式 Region66/Point60、test 图像、A6000/移动端计时和 visible-weight streaming 接入。
+- 待完成：移动端 HZB 计时；A6000、正式 test 图像和 visible-weight streaming 已完成。

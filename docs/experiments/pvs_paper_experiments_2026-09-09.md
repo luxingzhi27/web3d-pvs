@@ -2,7 +2,7 @@
 
 日期：2026-09-09；2026-09-10、2026-09-11 更新正式执行状态
 
-状态：执行中。截至 2026-09-11，HKUST/IFCBench 神经主线和 AABB 对照已有登记结果；HZB 已完成四套外壳与 CPU preflight，`36 tasks` 正式硬件矩阵正在执行。Streaming 已完成 validation 侧输入和协议验证，test 表及 scheduler replay 仍待上游正式输入。本文是论文实验、图表、结果目录和执行顺序的唯一计划。
+状态：执行中。截至 2026-09-11，HKUST/IFCBench 的神经、AABB、正式 HZB、test 图像、A6000 runtime 和全 test streaming 模拟均已完成；真实 scheduler replay、GT 收敛和标准图形场景扩展仍在执行。本文是论文实验、图表、结果目录和执行顺序的唯一计划。
 
 ## 论文需要证明的内容
 
@@ -181,16 +181,16 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 | HKUST Full test | 完成 | 三种子均通过安全门；WR `0.997082 +/- 0.001634`，LCB `0.994334 +/- 0.003271`，useful cull `0.901758 +/- 0.007830` |
 | IFCBench 微调与 test | 完成 | v2 边界减半三种子 confirmation 的 validation LCB 为 `0.991106/0.990764/0.990215`，均通过；正式 `2710` test 的 pose PR-AUC `0.482290 +/- 0.021681`、WR `0.991179 +/- 0.000668`、LCB `0.990523 +/- 0.000552`、useful cull `0.602498 +/- 0.015504`，三份 test 各读取一次。运行资产使用 validation useful cull 最高的 seed01 |
 | AABB + Ray MLP | 完成 | 两场景三种子 `40 x 900` 与 frozen test 已完成。IFCBench pose PR-AUC `0.28504 +/- 0.00047`、prevalence `0.12232`、useful cull `0.03942`；HKUST 与 Full 的正式对照产物也已登记 |
-| HZB 外壳与运行时 | `36 tasks` 正式硬件矩阵执行中 | 四套外壳已通过 schema/资源预检；每场景 8 个 `512x288 / 1024x576 × 0.01/1/10/100 m` calibration task，随后自动选择、全 test 与 120-pose timing。只有完整矩阵及每项硬件证据通过后才生成论文数字 |
+| HZB 外壳与运行时 | 完成 | `36/36` 正式任务完成；两场景都冻结 `512x288 / 100 m`。Lossless Region66 test 的 WR/LCB/useful cull 为 HKUST `0.997633/0.996552/0.328166`、IFCBench `0.995325/0.994716/0.237997`；总查询 p50 分别 `989.55/120.15 ms` |
 | 资产与容量 | 完成 | 神经资产为 lossless shell 的 `1.37%`（HKUST）和 `19.78%`（IFCBench）；rank Pareto、Table 4 及 PDF/SVG/PNG 已生成 |
-| 端侧模型前向 | 部分完成 | HKUST M2 与 vivo 各五 session 正式完成；IFCBench 移动端和 A6000 独占结果仍缺失，不以并发 smoke 代替 |
+| 端侧模型前向 | 部分完成 | A6000 两场景五 session 已完成：HKUST/IFCBench WebGPU kernel p50 `1.568/1.385 ms`、p95 `3.555/3.590 ms`；WASM p50 `3.7/46.8 ms`、p95 `100.5/143.2 ms`。HKUST M2 与 vivo 已完成，IFCBench 移动端仍缺失 |
 | Safety-efficiency | 完成 | 六个核心变体的 calibration-safe validation 曲线及论文图已生成 |
-| Streaming | test 分数已完成，正式模拟待 HZB | 两场景 validation ranking/filtering 与冻结 alpha 已生成，HKUST `alpha=1.0`、IFCBench `alpha=0.5`。正式 test sidecar 直接复用同一次 frozen-test 连续分数：HKUST 为 `684 poses / 3,174,148 candidate rows`，IFCBench 为 `2710 / 27,061,482`，均包含 Full 与 AABB。待 HZB Region66 test 后执行完整 test simulation、12-pose scheduler replay 和 Table 5 |
-| Test 图像 | 四份输入已冻结，硬件渲染待执行 | HKUST 与 IFCBench 的 Full/AABB formal-v2 manifest 已直接复用 frozen-test sidecar 生成，分别覆盖 `684/2710` 个 view-cell 和 `23,856/10,840` 个真实 60 度 subpose；AABB 阈值解析已修正为 calibration `bestSafe`。待 HZB Region66 test 后生成两场景 HZB manifest，再逐方法执行独占 Vulkan/ANGLE 渲染 |
+| Streaming | 全 test 模拟完成；真实 replay 执行中 | Visible-weight Bytes@99：HKUST Full/成本感知/面积字节/HZB 为 `18.031/10.819/12.881/17.498 MiB`；IFCBench 为 `8.078/7.119/13.426/13.404 MiB`。冻结 alpha 为 `1.0/0.5`；HKUST 真实 scheduler replay 正在运行，随后执行 IFCBench |
+| Test 图像 | 完成 | 六组正式硬件 Vulkan/ANGLE 图像评价完成，均无失败 subpose 或缺失 GLB。HKUST Full/AABB/HZB aggregate PER 为 `0.3662/0.8613/0.3128%`；IFCBench 为 `0.5011/0.0583/0.5312%` |
 | GT 收敛 | 部分完成 | 两场景各 100 cell x 128 点水平圆盘计划已生成，IFCBench 半径为 `2.5 m`；新 evaluator 已按计划/raw 三元组对齐，正式 Vulkan Color-ID 采样待执行 |
 | 离线成本 / 结果包 | 完成当前可得项 | 六阶段成本、artifact registry、三种子 Table 2 汇总已生成；未记录时间保持 unavailable，不作推算 |
-| 标准图形场景 | Big City/Sponza 资产与相机计划完成，正式 PVS 待执行 | Big City 已转换为 `2734` 个、Sponza 已转换为 `132` 个 `128 KiB` 目标 renderable units，均为一单位一资源。Big City/Sponza 分别生成 `8088/2424` 个原始查询 pose 的四路空间块计划，并为固定 view-cell 预留 0.8 m 几何安全半径。两场景均尚未生成正式 Color-ID、Pose CSR、训练、Hi-Z 或 test 数字 |
+| 标准图形场景 | Sponza 训练中；Big City 采样中 | Sponza `38,784` 个硬件 Color-ID subpose、`2,424` Pose CSR 和 train-only 稀疏关系已完成，Full 三种子与 AABB 扫描已启动。Big City `129,408` 个 subpose 正在正式硬件采样 |
 
-截至 2026-09-11，IFCBench v2 与正式 test 已完成；HZB 正在独占硬件窗口执行 `36 tasks` 正式矩阵。两场景正式 Full/AABB test sidecar 已完成，矩阵结束后只需接入 HZB Region66 test，再用 validation 冻结的 alpha 运行完整 test streaming，并单独完成 12-pose scheduler replay 和 Table 5。两场景 runtime workload 也已按最终运行资产重建：HKUST 为 684 个 test view-cell、平均 `4640.57` candidates；IFCBench 为 2710 个、平均 `9985.79` candidates。Big City 和 Sponza 已完成固定单位转换、合法相机和空间隔离 split，下一步直接执行硬件 view-cell Color-ID，再生成关系特征、三 seed 训练与冻结 test。任何中间指标都不替代上述正式阶段。
+截至 2026-09-11，现有两个主场景只剩真实 scheduler replay、GT 收敛和缺失的移动端组合。标准场景按同一显式四分割、同一 V4 和同一 AABB/HZB 评价口径执行；Sponza 正式训练期间继续采样 Big City，任何中间指标都不替代三种子 validation 选择和一次 frozen test。
 
 本轮实现回归已通过 benchmark `167` 项、model `48` 项、完整前端 `npm test` 和 sampler `7` 项测试；测试过程禁用 CUDA，不作为任何正式性能结果。

@@ -58,6 +58,8 @@ Color-ID 的权重可以用于视觉重要性监督，但它不是深度缓冲�
 6. 正式模式不补入可见正样本；如果可见并集不属于候选并集，直接使数据构建失败，并保存漏正样本诊断。只有显式的探索性开关才允许补入；
 7. 保存 view-cell 中心作为模型查询相机。
 
+构建器要求每条正式 raw row 显式携带 `train/validation/calibration/test/guard` 之一；不再随机补 split，也不接受旧 `val` 名称。它同时写出 `query_center_world` 和 `candidate_camera_world = query_center_world - forward * pvs_back_offset`，其中前者进入区域查询，后者与 `poses.camera_world`、MVP 和候选相机语义一致。
+
 因此，候选集合不是“中心相机一次视锥的候选”，而是所有位置扰动 subpose 的候选并集；可见集合也不是某个 subpose 的可见集合，而是整个 view-cell 内潜在可见集合的并集。正式数据必须直接证明 `visible_ids ⊆ candidate_ids`，不能用标签补入制造这个关系；这样训练标签与 NeuralPVS 的 from-region PVS 语义一致，也能把候选生成错误暴露出来。
 
 这些 subpose 不进入浏览器运行时。前端以当前相机建立一个 view-cell 预测锚点，通过一次后退扩展候选和一次模型批查询输出整个区域的保守潜在可见集；相机仍在该 cell 的空间与方向门限内时复用结果，越界后才建立新锚点并重新查询。真实 `60` 度视锥随后只对保守集合做当前帧实例级过滤。因而，只在某个边缘 subpose 可见的实例是合法正例，不是中心点的误报。
@@ -87,7 +89,10 @@ CSR（压缩稀疏行）用一个 offsets 数组描述每个 pose 的连续 ID �
 | 文件 | 类型 | 语义 |
 |---|---|---|
 | `poses.bin` | 固定 64 字节结构 | 归一化相机位置、世界相机位置、前向、`tan_x/tan_y`、split、类别 |
-| `mvp.bin` | float32[pose,16] | 与查询相机一致的保守投影矩阵 |
+| `mvp.bin` | float32[pose,16] | 与后退候选相机一致的 66 度保守投影矩阵 |
+| `query_center_world.bin` | float32[pose,3] | view-cell 的规范查询中心 |
+| `candidate_camera_world.bin` | float32[pose,3] | 单次模型查询使用的后退 66 度候选相机 |
+| `viewcell_radius_m.bin` | float32[pose] | 区域空间半径 |
 | `visible_offsets.bin` | uint64 | 每个 pose 的可见 ID 起止位置 |
 | `visible_ids.bin` | uint32 | pose 级 GT 可见实例编号 |
 | `visible_weights.bin` | float32 | 与 `visible_ids` 对齐的权重 |
@@ -119,6 +124,7 @@ CSR（压缩稀疏行）用一个 offsets 数组描述每个 pose 的连续 ID �
 |---|---|---|---|---|
 | `pose_csr_hkust_v3_main_stratified_calibration_fov66_v1` | HKUST Color-ID view-cell + 显式 split | 66° Y | 60° Y | 屏幕覆盖率 parts-per-million |
 | `pose_csr_ifcbench_fantasy_metropolis_main_stratified_calibration_fov66_v1` | IFCBench Metropolis Color-ID view-cell + 显式 split | 66° Y | 60° Y | 屏幕覆盖率 parts-per-million |
+| `pose_csr_sponza_standard_graphics_128k_fov66_v1` | Sponza 128 KiB renderable units + 显式空间 split | 66° Y | 60° Y | 屏幕覆盖率 parts-per-million |
 
 正式训练数据使用上表中带显式 split 的目录。`build_color_id_pose_csr.py` 只把每条 JSONL 记录作为一个 pose 打包，不会聚合 subpose；需要 NeuralPVS view-cell 并集时使用 `build_rvc_viewcell_pose_csr.py`，实际数据来源以 `sourceSampler` 和 `dataset_meta.json` 为准。
 

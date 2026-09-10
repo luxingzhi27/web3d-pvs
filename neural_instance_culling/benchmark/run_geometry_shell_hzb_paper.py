@@ -1032,6 +1032,18 @@ def _validate_formal_result(task: TaskSpec) -> dict[str, Any]:
         raise FormalArtifactError("browser workload depth bias does not match task")
     if _int(workload.get("timingRounds", -1), "workload timingRounds") != _int(task.config.get("runnerTimingRounds", task.config.get("timingRounds", -1)), "task timingRounds"):
         raise FormalArtifactError("browser workload timing round count does not match task")
+    candidate_file = workload.get("candidateFile")
+    if (
+        not isinstance(candidate_file, str)
+        or not candidate_file
+        or Path(candidate_file).name != candidate_file
+        or workload.get("candidateDtype") != "uint32-little-endian"
+    ):
+        raise FormalArtifactError("browser workload candidate file metadata is invalid")
+    candidate_path = task.directory / candidate_file
+    candidate_count = _int(workload.get("candidateCount", -1), "workload candidateCount")
+    if not candidate_path.is_file() or candidate_path.stat().st_size != candidate_count * 4:
+        raise FormalArtifactError("browser workload candidate file does not match candidateCount")
     region_sampling = workload.get("regionSampling")
     if not isinstance(region_sampling, Mapping) or _int(region_sampling.get("requestedCount", -1), "region requestedCount") != _int(task.config["regionSampleCount"], "task regionSampleCount"):
         raise FormalArtifactError("browser workload region sampling does not match task")

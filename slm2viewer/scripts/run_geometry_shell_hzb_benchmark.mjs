@@ -504,7 +504,8 @@ function summarizeTimingRounds(roundResults) {
 
 function attachWorkloadProvenance(browserResult, workload) {
   const fields = [
-    'scene', 'split', 'mode', 'poseCount', 'candidateCount', 'width', 'height', 'resolution', 'aspect',
+    'scene', 'split', 'mode', 'poseCount', 'candidateCount', 'candidateFile', 'candidateDtype',
+    'width', 'height', 'resolution', 'aspect',
     'fallbackAspect', 'aspectSource', 'fovYDeg', 'near', 'far', 'depthBiasM', 'timingRounds',
     'warmupCount', 'timingDefinition', 'poseSelection', 'poseIndexPlan', 'provenance',
   ];

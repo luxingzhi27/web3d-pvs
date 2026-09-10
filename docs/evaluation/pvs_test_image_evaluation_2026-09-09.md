@@ -2,7 +2,7 @@
 
 日期：2026-09-09
 
-状态：入口为单场景薄 runner。正式 test 图像渲染须在选择配置和候选语义冻结后执行一次；本 worktree 本次只做 schema/选择测试，不启动 GPU 或 Chrome。
+状态：HKUST/IFCBench 的 Full、AABB MLP 和 lossless HZB 共六组正式 test 图像渲染已完成，入口和硬件证据继续作为唯一执行协议。
 
 ## 输入契约
 
@@ -51,7 +51,7 @@ summary 报告 `formalImageEvaluationReady=true` 时才成功。HKUST 与 IFCBen
 
 神经与 AABB manifest 由 `evaluate_viewcell_image_per.py --score-sidecar` 直接复用正式 test sidecar 的 `predictedIds`，不再次执行模型。入口要求 sidecar 覆盖完整 test split，并逐 pose 核对其 candidate 顺序与 Pose CSR 完全一致；阈值仍从 sidecar 登记的 calibration 文件解析并与 sidecar threshold 相等。AABB calibration 使用唯一的 `pvs-aabb-ray-mlp-calibration-v1.bestSafe.selection`，不再从通用 threshold rows 二次选择。`--render-schema-only` 只构造渲染 manifest，因此不计算 froxel 诊断，也不报告推理耗时。
 
-截至 2026-09-11 已完成四份 formal-v2 schema-only 输入：HKUST Full/AABB 均覆盖 `684` 个 test view-cell、`23,856` 个真实 60 度 subpose，阈值分别为 `0.6800000072/0.4799999893`；IFCBench Full/AABB 均覆盖 `2710` 个 test view-cell、`10,840` 个 subpose，阈值分别为 `0.6882505417/0.5199999809`。这些 manifest 的 `formalImageEvaluationReady=true` 表示输入契约完整，不是硬件图像结果；对应 `summary.json` 在 schema-only 阶段仍为 false。HZB manifest 必须等 calibration-frozen Region66 test 输出后再构造。
+截至 2026-09-11，四份神经/AABB 和两份 HZB formal-v2 manifest 均已完成硬件渲染。HKUST Full/AABB/HZB aggregate PER 为 `0.3662/0.8613/0.3128%`，IFCBench 为 `0.5011/0.0583/0.5312%`；六组均使用 NVIDIA RTX A6000 Vulkan/ANGLE WebGL 2，失败 subpose 和缺失 GLB 都为零。完整 miss、wrong-ID、mean 和 p95 见[HZB 评价报告](geometry_shell_hzb_evaluation_2026-09-09.md)。
 
 不启动浏览器的 schema 检查：
 
@@ -121,5 +121,4 @@ python -m unittest \
 ```
 
 结果：`16 tests`、`OK`。测试使用 schema-only Node renderer、fake renderer 和
-fake `nvidia-smi`，不启动 GPU、Chrome 或正式 Color-ID 渲染。正式 test 图像数值
-结果需在硬件空闲且所有输入冻结后，通过上述单场景入口执行。
+fake `nvidia-smi`；正式数值来自随后完成的独立硬件执行，不来自这些 fixture。

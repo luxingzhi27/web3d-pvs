@@ -1,6 +1,6 @@
 # Strict Cold-Cache GLB Streaming
 
-日期：2026-09-09；2026-09-10 追加 visible-weight 成本排序探索
+日期：2026-09-09；2026-09-11 完成正式 visible-weight test 模拟
 
 ## 目的
 
@@ -11,7 +11,7 @@
 - `threshold_filtering` 读取 checkpoint calibration 冻结阈值，输出预测 GLB 子集及其覆盖上限。
 - `threshold_free_ranking` 不应用可见性阈值，给完整 candidate GLB 集合排序并计算 `Bytes@95/99/99.9/100`。
 
-本次 coverage source 是 `gt_glb_presence`，即 GT 中出现的 GLB 等权存在性，不是像素覆盖率。AABB 行使用现有的确定性 `aabb_ray` 几何基线；没有可用的独立 AABB MLP checkpoint，因此不能将该行解释为训练得到的 AABB MLP。
+正式 coverage source 是 Pose CSR 的 `visible_weights`。Color-ID 场景中它表示每个实例在 view-cell subpose 上最大池化的前景屏幕覆盖权重，不是隐藏表面覆盖或单张图像像素并集。AABB 行读取正式 AABB MLP frozen-test sidecar。
 
 ## 输入与运行
 
@@ -20,7 +20,7 @@
 - HKUST dataset：`/mnt/sda/rhyang/slm/neural_instance_culling/dataset/out/pose_csr_hkust_v3_main_stratified_calibration_fov66_v1`
 - IFCBench dataset：`/mnt/sda/rhyang/slm/neural_instance_culling/dataset/out/pose_csr_ifcbench_fantasy_metropolis_main_stratified_calibration_fov66_v1`
 - scene runtime metadata、`glbIndex.json` 和 GLB root 使用各自场景的显式路径。
-- score sidecar：`neural_instance_culling/benchmark/out/paper_results/streaming/{hkust_scores,ifcbench_scores}`
+- score sidecar：`neural_instance_culling/benchmark/out/paper_results/streaming_formal/{hkust_scores,ifcbench_scores}`
 
 主要入口：
 
@@ -35,60 +35,39 @@ conda run -n slm_pvs python neural_instance_culling/benchmark/simulate_glb_strea
   --dataset-dir <dataset> --runtime-meta <runtimeVisibilityMeta.json> \
   --glb-index <glbIndex.json> --glb-root <asset-root> \
   --result-dir <score-result> --output-dir <simulation-output> --split test \
-  --utility-source binary_gt
+  --utility-source visible_weights
 
 conda run -n slm_pvs python neural_instance_culling/benchmark/generate_streaming_paper_outputs.py \
   --summary <hkust>/ranking_summary.json --summary <ifcbench>/ranking_summary.json \
   --filter-summary <hkust>/filtering_summary.json \
   --filter-summary <ifcbench>/filtering_summary.json \
-  --output-dir neural_instance_culling/benchmark/out/paper_results/figures
+  --output-dir neural_instance_culling/benchmark/out/paper_results/streaming_formal/figures
 ```
 
 实际 test 读取规模为 HKUST `684` pose、IFCBench `2710` pose；score sidecar 分别包含 `3,174,148` 和 `27,061,482` candidate instance rows。输出目录还保存 score alignment manifest、per-pose JSONL、ranking/filtering summary、CSV、Markdown 以及 PNG/PDF/SVG 曲线。
 
-## 已有结果
+## 正式 Test 结果
 
-下表为 threshold-free ranking 的每 pose 平均值。字节单位为 MiB；coverage 是 GT GLB presence coverage。
+下表为 threshold-free ranking 的每 pose 平均值，单位 MiB。神经成本指数只在 validation 从 `{0,0.5,1}` 选择，HKUST 冻结为 `1.0`，IFCBench 冻结为 `0.5`。距离和面积先逐 candidate instance AABB 计算，再按 GLB 聚合；没有使用合并 GLB AABB。
 
-| 场景 | 方法 | Bytes@95 | Bytes@99 | Bytes@99.9 | Bytes@100 | waste-before-99 | required rank |
-|---|---|---:|---:|---:|---:|---:|---:|
-| HKUST | Full | 32.048 | 39.129 | 40.075 | 40.076 | 23.357 | 179.6 |
-| HKUST | AABB + ray | 117.762 | 121.284 | 121.725 | 121.726 | 105.484 | 477.6 |
-| HKUST | Projected area / byte | 49.198 | 60.440 | 64.334 | 64.395 | 46.191 | 608.3 |
-| HKUST | GT utility / byte oracle | 6.344 | 11.828 | 15.723 | 15.806 | 0 | 50.7 |
-| IFCBench | Full | 9.705 | 12.150 | 15.561 | 15.561 | 8.131 | 671.2 |
-| IFCBench | AABB + ray | 40.945 | 47.088 | 48.653 | 48.653 | 43.005 | 1288.8 |
-| IFCBench | Projected area / byte | 29.436 | 39.055 | 43.762 | 43.762 | 35.029 | 1299.4 |
-| IFCBench | GT utility / byte oracle | 2.536 | 3.710 | 4.101 | 4.101 | 0 | 240.9 |
+| 场景 | 方法 | Bytes@95 | Bytes@99 | Bytes@99.9 | Bytes@100 | Waste@99 |
+|---|---|---:|---:|---:|---:|---:|
+| HKUST | Neural `p_g` | 8.842 | 18.031 | 26.187 | 40.076 | 6.240 |
+| HKUST | Neural `p_g/B^alpha` | 6.108 | 10.819 | 18.052 | 35.240 | 4.907 |
+| HKUST | AABB MLP | 12.292 | 23.727 | 38.174 | 89.664 | 11.708 |
+| HKUST | Projected area/byte | 8.161 | 12.881 | 25.186 | 65.033 | 6.271 |
+| HKUST | HZB visible-first | 10.976 | 17.498 | 40.952 | 82.051 | 8.779 |
+| HKUST | GT utility/byte oracle | 1.191 | 3.543 | 8.337 | 15.806 | 0 |
+| IFCBench | Neural `p_g` | 4.948 | 8.078 | 11.678 | 15.980 | 4.620 |
+| IFCBench | Neural `p_g/B^alpha` | 3.616 | 7.119 | 11.370 | 13.764 | 4.638 |
+| IFCBench | AABB MLP | 13.097 | 24.639 | 36.623 | 44.304 | 21.405 |
+| IFCBench | Projected area/byte | 5.875 | 13.426 | 25.326 | 37.264 | 10.580 |
+| IFCBench | HZB visible-first | 6.046 | 13.404 | 23.511 | 31.302 | 10.472 |
+| IFCBench | GT utility/byte oracle | 0.689 | 1.616 | 3.087 | 4.101 | 0 |
 
-完整方法行（Full、AABB、original、distance、projected area、projected area/byte、20 个 fixed random、HZB visible-first、GT utility/byte oracle）以及 10/25/50/100 Mbps 时间、coverage ceiling 和每个 target 的 unreachable ratio 在 `table5_streaming_ranking.csv` 中。两场景所有 ranking 方法的 coverage ceiling 均为 100%，因为正式 candidate 集合包含对应 GT GLB；每个 pose 的完整缺失资源诊断仍保存在 per-pose 输出中。
+完整方法行、20 个 fixed-random seeds、10/25/50/100 Mbps 换算、coverage ceiling 和不可达率在 `streaming_formal/figures/table5_streaming_ranking.csv`。所有 threshold-free 方法共享完整 candidate GLB 集合，因此 coverage ceiling 为 1。
 
-独立 threshold filtering 的 Full 结果为：HKUST 平均预测 `161.8` 个 GLB、`36.843` MiB、coverage ceiling `97.651%`，`99%` unreachable ratio `12.57%`；IFCBench 平均预测 `679.3` 个 GLB、`15.486` MiB、coverage ceiling `99.744%`，`99%` unreachable ratio `5.02%`。这些 predicted bytes 没有写入 ranking 的 `Bytes@...` 字段。
-
-### 2026-09-10 visible-weight 成本排序探索
-
-本节只用于确定正式计算规则，不是论文最终 test 表。它读取现有 HKUST `684` 和 IFCBench `2710` 个 test pose 的旧 score sidecar，以 region-union `visible_weights` 作为 utility；IFCBench 分数仍来自最终微调冻结前的现有模型。当前面积项还使用合并 GLB AABB，正式启发式必须改为逐实例 AABB 投影后聚合，因此这里只能比较趋势。纯 `p/Bytes^alpha` 不依赖 AABB，不受该面积口径影响。
-
-`p` 表示 `p_g=max_i(p_i)`；`B` 是完整 GLB 字节；`A` 是当前探索性投影面积。表中为每 pose Bytes@coverage 的均值，单位 MiB。
-
-| 场景 | 排序 | Bytes@95 | Bytes@99 | Bytes@99.9 | Bytes@100 |
-|---|---|---:|---:|---:|---:|
-| HKUST | `p` | 8.842 | 18.031 | 26.187 | 40.076 |
-| HKUST | `p/sqrt(B)` | 5.771 | 10.511 | 17.680 | 33.722 |
-| HKUST | `p/B` | 6.108 | 10.819 | 18.052 | 35.240 |
-| HKUST | `p*A/B` | 4.679 | 8.630 | 16.612 | 38.291 |
-| HKUST | `A/B` | 8.227 | 12.199 | 23.801 | 64.395 |
-| HKUST | 安全阈值分层，组内 `p/sqrt(B)` | 5.515 | 11.028 | 18.807 | 34.812 |
-| IFCBench | `p` | 4.968 | 8.078 | 10.593 | 15.689 |
-| IFCBench | `p/sqrt(B)` | 4.059 | 7.927 | 12.244 | 14.315 |
-| IFCBench | `p/B` | 4.177 | 8.282 | 12.865 | 14.527 |
-| IFCBench | `p*A/B` | 15.952 | 19.813 | 25.739 | 33.577 |
-| IFCBench | `A/B` | 21.323 | 27.293 | 35.836 | 44.121 |
-| IFCBench | 安全阈值分层，组内 `p/sqrt(B)` | 3.952 | 7.660 | 11.821 | 14.443 |
-
-探索结果说明：神经分数不需要强制乘 AABB 面积。`p/sqrt(B)` 相对纯 `p` 将 HKUST Bytes@99 从 `18.031` MiB 降至 `10.511` MiB，在 IFCBench 也从 `8.078` MiB 降至 `7.927` MiB；带面积的 `p*A/B` 虽在 HKUST 更低，却在 IFCBench 明显退化，不具备跨场景稳定性。正式方法因此把 `p/Bytes^alpha` 作为成本感知神经排序族，`alpha` 必须在 calibration/validation 上冻结；AABB 投影仅作为独立启发式或明确命名的面积调制消融。
-
-对应正式代码已于 2026-09-10 接入，但上述数字仍是规则确定前的探索结果。新流水线会在 validation 选择 `alpha`，完整 test 只读取冻结 manifest；距离与投影面积也改为逐 candidate instance AABB 计算后按 GLB 聚合。最终 Table 5 必须等待 IFCBench 最终模型和 HZB 正式结果后整体重跑，不能混用本节数字。
+冻结阈值过滤单独报告：HKUST Full 平均保留 `161.76` GLB、`36.84 MiB`，平均 coverage ceiling `0.996914`；IFCBench Full 保留 `561.25` GLB、`11.66 MiB`，coverage ceiling `0.997467`。过滤集合不参与上表的 threshold-free Bytes@x 排名。
 
 ## 指标口径
 
@@ -103,13 +82,13 @@ conda run -n slm_pvs python neural_instance_culling/benchmark/generate_streaming
 
 `build_reference_frontmost_histogram.py` 输出的 schema 名称是 `reference-frontmost-pixel-histogram-v1`。它把 Color-ID buffer 中的 `componentGlobalId + 1` 映射到 GLB，并统计每个 pose 的最前表面像素。
 
-该直方图只表示 front-most surface proxy：看不到隐藏面，不等于完整可见性计数，也没有表示解码成本、交互重要性或下载后新暴露表面。分多个 subpose 求和时，它是 view-cell utility proxy，不是一个物理图像的像素总数。本轮主 test streaming 没有完整对应的 test reference buffer，因此没有把 `visible_weights` 或 GT 结果改名成像素 coverage；图轴明确使用 `GT GLB presence coverage (%)`。
+该直方图只表示 front-most surface proxy：看不到隐藏面，不等于完整可见性计数，也没有表示解码成本、交互重要性或下载后新暴露表面。正式主图使用 `Visible-weight coverage (%)`；reference-frontmost 只作为补充核验，不能替代它。
 
 ## 真实调度状态
 
 `slm2viewer/scripts/run_real_scheduler_streaming.mjs` 和 `build_real_scheduler_plan.py` 已实现并通过 synthetic fixture。计划固定每场景 12 个 test pose，支持 25/50 Mbps、每项 3 次，调用现有 `classifyGlbSchedule` 和 `GlbResourceScheduler` 的 `urgent/warm/speculative` 状态机，且计划和驱动都显式记录 `startup100Enabled=false`、不使用 startup tier。
 
-正式真实调度 replay 尚未运行，等待主线程安排以避免和 IFCBench 训练/扫描争用；本轮不把 synthetic/local-file smoke 当作桌面或移动端性能结论。驱动使用真实 GLB 响应和空应用缓存，但 Node 阶段只做 GLB container parse 与 mount phase 计时，不构造 Three.js 场景。
+HKUST 正式真实调度 replay 正在执行，结束后按同一配置执行 IFCBench。驱动使用真实 GLB 响应和空应用缓存，但 Node 阶段只做 GLB container parse 与 mount phase 计时，不构造 Three.js 场景；该结果是 loader 调度复现，不冒充完整浏览器首帧渲染时间。
 
 ## 文件与测试
 

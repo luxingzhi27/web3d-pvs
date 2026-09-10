@@ -32,7 +32,16 @@ def make_inputs(root: Path) -> tuple[dict, dict, Path]:
     scene = root.name
     runtime_meta_path = root / "runtimeVisibilityMeta.json"
     runtime_meta_path.write_text(
-        json.dumps({"sceneName": scene, "instanceCount": 3}), encoding="utf-8"
+        json.dumps({
+            "sceneName": scene,
+            "instanceCount": 3,
+            "componentRecords": [
+                {"componentGlobalId": 0, "globalGlbId": 0},
+                {"componentGlobalId": 1, "globalGlbId": 0},
+                {"componentGlobalId": 2, "globalGlbId": 1},
+            ],
+        }),
+        encoding="utf-8",
     )
     base.update({
         "scene": scene,

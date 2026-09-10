@@ -149,6 +149,8 @@ try {
   }, sampled.workload);
   assert.equal(withProvenance.workload.mode, 'Region66');
   assert.equal(withProvenance.workload.split, 'test');
+  assert.equal(withProvenance.workload.candidateFile, 'geometry_shell_hzb_candidates_uint32.bin');
+  assert.equal(withProvenance.workload.candidateDtype, 'uint32-little-endian');
 
   const allOptions = parseArgs([...commonArgs, '--output', path.join(synthetic.root, 'out', 'all.json')]);
   const all = buildWorkload(allOptions);
