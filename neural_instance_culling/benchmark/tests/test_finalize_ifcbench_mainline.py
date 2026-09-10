@@ -19,6 +19,7 @@ from finalize_ifcbench_mainline import (  # noqa: E402
     _assert_new_targets,
     _run_job,
     build_export_command,
+    execute_plan,
     freeze_decision,
     load_confirmation_summary,
     prepare_plan,
@@ -269,6 +270,50 @@ class FinalizeIfcbenchMainlineTests(unittest.TestCase):
             self.assertEqual(outcome["returnCode"], 0)
             self.assertEqual((root / "stdout.log").read_text(encoding="utf-8"), "ok\n")
             self.assertEqual((root / "stderr.log").read_text(encoding="utf-8"), "")
+
+    def test_resume_export_verifies_existing_tests_without_rerunning_them(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plan = {
+                "resumeExport": True,
+                "decision": {"selectedFamily": "finetune"},
+                "runtimeSelection": {"seed": SEEDS[0]},
+                "testJobs": [
+                    {
+                        "job": f"test_seed{seed}",
+                        "seed": seed,
+                        "output": str(root / f"seed{seed}.json"),
+                        "sidecar": str(root / f"seed{seed}.sidecar"),
+                        "stdout": str(root / f"seed{seed}.stdout.log"),
+                        "stderr": str(root / f"seed{seed}.stderr.log"),
+                    }
+                    for seed in SEEDS
+                ],
+                "exportJob": {
+                    "job": "export",
+                    "outputDir": str(root / "runtime"),
+                    "stdout": str(root / "export.stdout.log"),
+                    "stderr": str(root / "export.stderr.log"),
+                },
+                "targets": {"manifest": str(root / "manifest.json")},
+                "gpuIds": [0, 1, 2],
+            }
+            with patch(
+                "finalize_ifcbench_mainline._verify_test_output",
+                side_effect=lambda job: {"seed": job["seed"]},
+            ) as verify_test, patch(
+                "finalize_ifcbench_mainline._run_job",
+                return_value={"returnCode": 0},
+            ) as run_job, patch(
+                "finalize_ifcbench_mainline._verify_export",
+                return_value={"outputDir": str(root / "runtime")},
+            ):
+                result = execute_plan(plan)
+
+            self.assertEqual(verify_test.call_count, len(SEEDS))
+            run_job.assert_called_once_with(plan["exportJob"])
+            self.assertEqual(result["formalTestEvaluationCount"], len(SEEDS))
+            self.assertTrue((root / "manifest.json").is_file())
 
 
 if __name__ == "__main__":

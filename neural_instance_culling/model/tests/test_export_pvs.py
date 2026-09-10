@@ -32,6 +32,7 @@ from export_pvs import (  # noqa: E402
     SPECTRAL_FREQUENCY_COUNT,
     SURVIVAL_PARAMETER_DIM,
     SURVIVAL_RANK,
+    V4_VARIANT_CONTRACTS,
     _check_neural_asset_budget,
     _neural_asset_budget_limit,
     _runtime_weight_specs,
@@ -43,6 +44,15 @@ from export_pvs import (  # noqa: E402
 class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
     hidden_dim = 4
     num_instances = 3
+
+    def test_current_ifcbench_refine_variant_is_registered(self) -> None:
+        self.assertEqual(
+            V4_VARIANT_CONTRACTS[
+                "ifcbench_warm_start_boundary_half_rvl030_boundary010_"
+                "margin050_temp025_lr2e-5"
+            ],
+            ("pose_balanced_rvl_contrastive", "residual"),
+        )
     num_glbs = 2
 
     def _checkpoint(self, root: Path) -> dict:

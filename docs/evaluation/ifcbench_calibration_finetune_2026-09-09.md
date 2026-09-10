@@ -2,7 +2,31 @@
 
 日期：2026-09-09
 
-状态：执行中。本文记录 IFCBench 精确校准、warm-start 微调扫描和确认实验；在长任务完成后回填实际指标，不把未完成任务写成模型结论。
+状态：v2 refine、三种子确认、正式 test 与运行资产导出已完成。
+
+## 2026-09-10 v2 refine 与正式 test
+
+v1 去边界确认中 seed `20260802` 的 validation LCB 为 `0.989920`，因此没有直接放弃微调。v2 从三份 v1 confirmation checkpoint 继续：seed02 扫描边界减半、RVL `0.35` 和低学习率三项 `2 x 900`，随后选择 validation 安全的边界减半配置，完成三种子 `4 x 900`。全过程在 confirmation 完成前保持 `testRead=false`。
+
+三种子 confirmation 的 validation WR LCB 为 `0.991106 / 0.990764 / 0.990215`，全部严格大于 `0.99`；平均 useful cull 为 `0.60279`，高于原 Full 的约 `0.487`。因此 v2 晋级 IFCBench 最终模型。
+
+冻结后对 `2710` 个 test pose 各读取一次，结果为：
+
+| 指标 | 三种子均值 +/- sample std | 中文含义 |
+|---|---:|---|
+| Pose PR-AUC | `0.482290 +/- 0.021681` | 每个 pose 独立计算 PR-AUC 后宏平均 |
+| Pose positive prevalence | `0.122323` | pose PR-AUC 的随机排序期望基线 |
+| Pose precision | `0.297316 +/- 0.005942` | 每个 pose 预测实例中真实可见的比例 |
+| Pose recall | `0.942848 +/- 0.018900` | 每个 pose 可见实例被找回的比例 |
+| Pose accuracy | `0.712167 +/- 0.006515` | 每个 pose 全候选分类正确率 |
+| Pose balanced accuracy | `0.811706 +/- 0.010044` | pose recall 与 specificity 的均值 |
+| Aggregate weighted recall | `0.991179 +/- 0.000668` | 按 visible_weights 汇总的重要可见实例召回 |
+| WR 95% LCB | `0.990523 +/- 0.000552` | weighted recall 的单侧 95% bootstrap 下界 |
+| Useful cull | `0.602498 +/- 0.015504` | 全候选中被正确剔除的不可见实例比例 |
+| Bad cull | `0.006932 +/- 0.002931` | 全候选中被错误剔除的可见实例比例 |
+| Avg predicted instances | `3900.14 +/- 178.79` | 每个 pose 平均保留实例数；平均候选为 `9884.24` |
+
+三个 test checkpoint 的 WR LCB 分别为 `0.990462 / 0.991102 / 0.990003`，均满足冻结安全口径。运行资产选择 validation useful cull 最高的 seed `20260801` 导出。首次导出发现导出器没有登记当前边界减半变体；修复变体契约后只重试运行资产导出，三份已成功 test 结果没有重新执行。最终 manifest 为 `benchmark/out/paper_results/finalize/ifcbench_fantasy_metropolis/finalize_manifest.json`。
 
 ## 目的与边界
 
@@ -70,7 +94,7 @@ conda run --no-capture-output -n slm_pvs \
 
 截至本记录写入时，scan runner PID 为 `1715972`，四个首批配置已到 `epoch 1 / step 180`，每组约 `559 s`；四张 RTX A6000 显存约 `18.6 GiB`，GPU 利用率处于计算状态，stderr 为空。第五组会在首批任务完成后启动。日志目录为 `benchmark/out/pvs_ifcbench_v4_calibration_finetune_v1/logs/scan/`，模型目录为 `model/out/pvs_ifcbench_v4_calibration_finetune_v1/scan/`。
 
-## 未完成任务
+## 历史未完成任务记录
 
 以下任务尚未产生可报告的正式结果：
 

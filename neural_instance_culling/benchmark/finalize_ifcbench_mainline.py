@@ -833,6 +833,7 @@ def prepare_plan(
     device: str = "cuda",
     poses_per_batch: int = 2,
     gpu_ids: Sequence[int] = (0, 1, 2),
+    resume_export: bool = False,
 ) -> dict[str, Any]:
     contract = preflight_inputs(data_root)
     summary = load_confirmation_summary(confirmation_summary_path)
@@ -916,13 +917,14 @@ def prepare_plan(
             }
         )
         targets.extend((output, sidecar, stdout, stderr))
-    export_stdout = (
-        logs_root
-        / f"export_{runtime_member.method_name}_seed{runtime_member.seed}.stdout.log"
+    export_log_suffix = ".resume" if resume_export else ""
+    export_stdout = logs_root / (
+        f"export_{runtime_member.method_name}_seed{runtime_member.seed}"
+        f"{export_log_suffix}.stdout.log"
     )
-    export_stderr = (
-        logs_root
-        / f"export_{runtime_member.method_name}_seed{runtime_member.seed}.stderr.log"
+    export_stderr = logs_root / (
+        f"export_{runtime_member.method_name}_seed{runtime_member.seed}"
+        f"{export_log_suffix}.stderr.log"
     )
     export_command = build_export_command(
         runtime_member,
@@ -942,7 +944,16 @@ def prepare_plan(
         "explicitCalibrationArgument": member_calibration_argument(runtime_member),
     }
     targets.extend((export_stdout, export_stderr))
-    _assert_new_targets(targets)
+    if resume_export:
+        _assert_new_targets((manifest, runtime_dir, export_stdout, export_stderr))
+        for job in test_jobs:
+            for name in ("output", "sidecar", "stdout", "stderr"):
+                if not _target_exists(Path(str(job[name]))):
+                    raise FileNotFoundError(
+                        f"resume-export requires the completed test artifact: {job[name]}"
+                    )
+    else:
+        _assert_new_targets(targets)
     if device == "cuda" and len(gpu_ids) < len(members):
         raise ValueError("three-seed CUDA finalization requires at least three GPU IDs")
     return {
@@ -966,6 +977,7 @@ def prepare_plan(
         "testJobs": test_jobs,
         "exportJob": export_job,
         "gpuIds": [int(value) for value in gpu_ids],
+        "resumeExport": bool(resume_export),
         "targets": {
             "testRoot": _new_target(test_root),
             "logsRoot": _new_target(logs_root),
@@ -1094,22 +1106,36 @@ def execute_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
     job_targets.extend(
         Path(str(export_job[name])) for name in ("outputDir", "stdout", "stderr")
     )
-    _assert_new_targets(job_targets)
+    resume_export = plan.get("resumeExport") is True
+    if resume_export:
+        _assert_new_targets(
+            [
+                Path(str(plan["targets"]["manifest"])),
+                Path(str(export_job["outputDir"])),
+                Path(str(export_job["stdout"])),
+                Path(str(export_job["stderr"])),
+            ]
+        )
+    else:
+        _assert_new_targets(job_targets)
     test_jobs = list(plan["testJobs"])
     gpu_ids = [int(value) for value in plan.get("gpuIds") or []]
     job_outcomes = []
-    with ThreadPoolExecutor(max_workers=len(test_jobs)) as executor:
-        futures = {
-            executor.submit(
-                _run_job,
-                job,
-                gpu_ids[index] if gpu_ids else None,
-            ): job
-            for index, job in enumerate(test_jobs)
-        }
-        for future in as_completed(futures):
-            future.result()
-            job_outcomes.append(_verify_test_output(futures[future]))
+    if resume_export:
+        job_outcomes = [_verify_test_output(job) for job in test_jobs]
+    else:
+        with ThreadPoolExecutor(max_workers=len(test_jobs)) as executor:
+            futures = {
+                executor.submit(
+                    _run_job,
+                    job,
+                    gpu_ids[index] if gpu_ids else None,
+                ): job
+                for index, job in enumerate(test_jobs)
+            }
+            for future in as_completed(futures):
+                future.result()
+                job_outcomes.append(_verify_test_output(futures[future]))
     job_outcomes.sort(key=lambda row: int(row["seed"]))
     _run_job(export_job)
     export_outcome = _verify_export(export_job)
@@ -1147,7 +1173,9 @@ def _preflight_view(plan: Mapping[str, Any]) -> dict[str, Any]:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("preflight", "dry-run", "finalize"))
+    parser.add_argument(
+        "mode", choices=("preflight", "dry-run", "finalize", "resume-export")
+    )
     parser.add_argument("--data-root", type=Path, default=ROOT)
     parser.add_argument(
         "--confirmation-summary",
@@ -1208,6 +1236,7 @@ def _plan_from_args(args: argparse.Namespace) -> dict[str, Any]:
         device=args.device,
         poses_per_batch=args.poses_per_batch,
         gpu_ids=args.gpu_ids,
+        resume_export=args.mode == "resume-export",
     )
 
 

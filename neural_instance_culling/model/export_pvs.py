@@ -101,6 +101,10 @@ V4_VARIANT_CONTRACTS: dict[str, tuple[str, str]] = {
         "pose_balanced_rvl_contrastive",
         "residual",
     ),
+    "ifcbench_warm_start_boundary_half_rvl030_boundary010_margin050_temp025_lr2e-5": (
+        "pose_balanced_rvl_contrastive",
+        "residual",
+    ),
 }
 
 def _as_mapping(value: Any, name: str) -> Mapping[str, Any]:
