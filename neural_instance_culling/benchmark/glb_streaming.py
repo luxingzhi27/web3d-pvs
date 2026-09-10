@@ -1109,6 +1109,13 @@ def select_neural_cost_alpha(
         )
     if not poses:
         raise StreamingContractError("neural cost alpha selection requires validation poses")
+    coverage_sources = {pose.coverage_source for pose in poses}
+    coverage_units = {pose.coverage_unit for pose in poses}
+    coverage_semantics = {pose.coverage_semantics for pose in poses}
+    if len(coverage_sources) != 1 or len(coverage_units) != 1 or len(coverage_semantics) != 1:
+        raise StreamingContractError(
+            "neural cost alpha selection requires one consistent coverage definition"
+        )
     target = float(target_coverage)
     if not np.isfinite(target) or not 0.0 < target <= 1.0:
         raise StreamingContractError(f"invalid neural cost alpha selection target: {target_coverage}")
@@ -1173,6 +1180,9 @@ def select_neural_cost_alpha(
         "selectionTargetCoverage": target,
         "selectionMetric": "mean_complete_glb_bytes_at_target_coverage",
         "selectionDirection": "minimize",
+        "coverageSource": next(iter(coverage_sources)),
+        "coverageUnit": next(iter(coverage_units)),
+        "coverageSemantics": next(iter(coverage_semantics)),
         "poseCount": len(poses),
         "selectedCandidate": selected,
         "candidates": candidates,

@@ -702,6 +702,9 @@ def validate_neural_cost_manifest(
         )
     if manifest.get("bytesSource") != "complete GLB file bytes":
         raise StreamingContractError(f"{label} has an invalid byte source")
+    for field in ("coverageSource", "coverageUnit", "coverageSemantics"):
+        if not isinstance(manifest.get(field), str) or not manifest[field]:
+            raise StreamingContractError(f"{label} has no {field}")
     normalized = dict(manifest)
     normalized["candidateAlphas"] = normalized_candidates
     normalized["selectedAlpha"] = selected_alpha

@@ -133,6 +133,8 @@ class GlbStreamingContractTests(unittest.TestCase):
         self.assertEqual(manifest["selectionSplit"], "validation")
         self.assertEqual(manifest["candidateAlphas"], list(NEURAL_COST_ALPHA_CANDIDATES))
         self.assertIn(manifest["selectedAlpha"], NEURAL_COST_ALPHA_CANDIDATES)
+        self.assertEqual(manifest["coverageSource"], poses[0].coverage_source)
+        self.assertEqual(manifest["coverageUnit"], poses[0].coverage_unit)
         self.assertEqual(len(manifest["candidates"]), 3)
         with self.assertRaisesRegex(StreamingContractError, "only on the validation"):
             select_neural_cost_alpha(poses, assets(), selection_split="test")
@@ -156,6 +158,9 @@ class GlbStreamingContractTests(unittest.TestCase):
             "formula": "p_g / bytes_g^alpha",
             "instanceProbabilityAggregation": "max",
             "bytesSource": "complete GLB file bytes",
+            "coverageSource": "visible_weight_coverage",
+            "coverageUnit": "rvcServer_component_weight",
+            "coverageSemantics": "visible weights grouped by GLB",
         }
         from glb_streaming_io import validate_neural_cost_manifest
 

@@ -610,6 +610,11 @@ def main() -> None:
                     "test neural-cost ranking requires --neural-cost-manifest from validation"
                 )
             neural_cost_manifest = load_neural_cost_manifest(manifest_path)
+            test_coverage_sources = {pose.coverage_source for pose in records}
+            if test_coverage_sources != {neural_cost_manifest["coverageSource"]}:
+                raise StreamingContractError(
+                    "test coverage definition does not match the validation alpha manifest"
+                )
         else:
             raise StreamingContractError(
                 "neural cost alpha must be selected on validation or read from a frozen manifest for test"
