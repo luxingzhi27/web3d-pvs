@@ -7,15 +7,17 @@
 实例预测写回 `predictionComponentIdsByKey`。转换器只做 schema 和集合契约检查，
 不读取指标、不运行模型、不启动 GPU；renderer 继续使用实例级通用 visibility mask。
 转换前会核对场景、60° 渲染/66° 查询 FOV、逐 pose aspect、完整 test pose 覆盖和
-候选数据 provenance。
+候选数据 provenance；输入 HZB result 必须是当前正式 v2 schema。
 
 ## 输入契约
 
 - base 必须是 `local-true-component-id-formal-render-manifest-v2` 的完整 test
   manifest，并通过 frozen-test 字段和 formal renderer validator；
-- result 必须是 `geometry-shell-hzb-browser-result-v1`、`mode=Region66`，其
+- result 必须是 `geometry-shell-hzb-browser-result-v2`、`mode=Region66`，其
   `workload.schema` 为 `geometry-shell-hzb-browser-workload-v1`、`workload.split=test`，
   并声明 `formalReady=true`、`executionClass=formal-hardware-gpu` 及通过的硬件门；
+- result 若提供 `shellDir`，其 `shell_meta.json` 必须是
+  `geometry-shell-hzb-v2`；
 - result 的 `workload.scene` 必须与 base 的场景和完整实例 runtime metadata 一致，
   Region66 查询 FOV 必须为 `66°`，其 provenance configuration 同时记录 `60°`
   渲染 FOV 和 `66°` 区域 FOV；

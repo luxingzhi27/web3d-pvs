@@ -23,17 +23,16 @@ const SOFTWARE_PATTERN = /swiftshader|llvmpipe|softpipe|swrast|software/i;
 const REGION_SAMPLE_COUNTS = new Set([0, 1, 5, 9]);
 const REGION_SELECTION_STRATEGY = 'canonical-nearest-then-farthest-point-world-position';
 const HZB_TIMING_STAGES = [
-  'depthRaster', 'visibleIdCompaction', 'hzbBuild', 'aabbTest', 'compaction', 'total',
+  'depthRaster', 'hzbBuild', 'aabbTest', 'compaction', 'total',
 ];
 const HZB_TIMING_DEFINITION = {
   source: 'browser-performance-now-wall-clock',
   stages: {
     depthRaster: 'depth-only render submission through queue completion',
-    visibleIdCompaction: 'nearest-surface component-ID bitset compute submission through queue completion',
     hzbBuild: 'explicit HZB mip-chain compute submission through queue completion',
     aabbTest: 'candidate AABB/HZB classification dispatch through queue completion; shader append is included',
     compaction: 'result copy, readback, ID sorting and GLB aggregation after the classification dispatch',
-    total: 'depthRaster + visibleIdCompaction + hzbBuild + aabbTest + compaction',
+    total: 'depthRaster + hzbBuild + aabbTest + compaction',
   },
 };
 
@@ -429,7 +428,6 @@ function timingValue(timings, stage) {
   if (stage === 'depthRaster') {
     return Number(timings?.depthRasterMs ?? timings?.depthRasterAndMipMs);
   }
-  if (stage === 'visibleIdCompaction') return Number(timings?.visibleIdCompactionMs);
   if (stage === 'hzbBuild') return Number(timings?.hzbBuildMs);
   if (stage === 'aabbTest') return Number(timings?.aabbTestMs ?? timings?.queryMs);
   if (stage === 'compaction') return Number(timings?.compactionMs ?? timings?.readbackMs);

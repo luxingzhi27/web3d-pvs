@@ -48,16 +48,18 @@ class GeometryShellHZBPaperOrchestratorTests(unittest.TestCase):
             hkust = _fixture_scene(root)
             ifcbench = _fixture_scene(root, "ifcbench")
             calibration = orchestrator.build_calibration_tasks(hkust, root / "run")
-            self.assertEqual(len(calibration), 6)
+            self.assertEqual(len(calibration), 8)
             self.assertEqual(
                 {(task.config["width"], task.config["height"], task.config["depthBiasM"]) for task in calibration},
                 {
-                    (512, 288, 0.0001),
-                    (512, 288, 0.001),
                     (512, 288, 0.01),
-                    (1024, 576, 0.0001),
-                    (1024, 576, 0.001),
+                    (512, 288, 1.0),
+                    (512, 288, 10.0),
+                    (512, 288, 100.0),
                     (1024, 576, 0.01),
+                    (1024, 576, 1.0),
+                    (1024, 576, 10.0),
+                    (1024, 576, 100.0),
                 },
             )
             self.assertTrue(all(task.config["calibrationInvocations"] == 1 for task in calibration))
@@ -219,7 +221,7 @@ class GeometryShellHZBPaperOrchestratorTests(unittest.TestCase):
                 summary = orchestrator.run(args)
             self.assertTrue(summary["dryRun"])
             self.assertFalse(summary["formalGpuExecuted"])
-            self.assertEqual(len(summary["records"]), 32)
+            self.assertEqual(len(summary["records"]), 36)
             self.assertFalse(output_root.exists())
 
 

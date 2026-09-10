@@ -13,7 +13,6 @@ import {
   GEOMETRY_SHELL_DEPTH_VERTEX_SHADER,
   GEOMETRY_SHELL_MIP_SHADER,
   GEOMETRY_SHELL_QUERY_SHADER,
-  GEOMETRY_SHELL_VISIBLE_ID_SHADER,
 } from '../src/GeometryShellHZBShaders.js';
 import { GEOMETRY_SHELL_HZB_SAMPLE_COUNT } from '../src/GeometryShellHZB.js';
 
@@ -45,45 +44,40 @@ assert.equal(occludedProjection.valid, true);
 assert.equal(queryAabbAgainstMaxMip(plane, occludedProjection.rect, occludedProjection.candidateNear).occluded, true);
 assert.equal(queryAabbAgainstMaxMip(plane, projectAabbConservatively(visibleAabb, camera).rect, 3).visible, true);
 
+const verticallyAsymmetricDepth = buildMaxMipChain(new Float32Array([
+  20, 20, 20, 20,
+  20, 20, 20, 20,
+  2, 2, 2, 2,
+  2, 2, 2, 2,
+]), 4, 4);
+const upperAabb = [-0.2, 1.8, -5, 0.2, 2.2, -4.8];
+const upperResult = queryAabbsAgainstMaxMip(
+  verticallyAsymmetricDepth,
+  camera,
+  new Float32Array(upperAabb),
+  new Uint32Array([6]),
+);
+assert.deepEqual(Array.from(upperResult.visibleIds), [6]);
+assert.equal(upperResult.records[0].hzbMax, 20);
+
 const inside = queryAabbsAgainstMaxMip(
   plane,
   camera,
   new Float32Array([-1, -1, -1, 1, 1, 1, ...occludedAabb]),
   new Uint32Array([7, 8]),
-  { shellMask: new Uint32Array(9).fill(0), shellVisibleIds: [] },
 );
 assert.deepEqual(Array.from(inside.visibleIds), [7]);
 assert.equal(inside.uncertainCount, 1);
 assert.equal(inside.records[0].reason, 'camera-inside-aabb');
-const selectedOccluder = queryAabbsAgainstMaxMip(
+const regularCandidate = queryAabbsAgainstMaxMip(
   plane,
   camera,
   new Float32Array(occludedAabb),
   new Uint32Array([8]),
-  { shellMask: new Uint32Array(9).fill(1), shellVisibleIds: [8] },
 );
-assert.deepEqual(Array.from(selectedOccluder.visibleIds), [8]);
-assert.equal(selectedOccluder.uncertainCount, 0);
-assert.equal(selectedOccluder.records[0].reason, 'visible-shell-surface');
-const hiddenSelectedOccluder = queryAabbsAgainstMaxMip(
-  plane,
-  camera,
-  new Float32Array(occludedAabb),
-  new Uint32Array([8]),
-  { shellMask: new Uint32Array(9).fill(1), shellVisibleIds: [] },
-);
-assert.deepEqual(Array.from(hiddenSelectedOccluder.visibleIds), []);
-assert.equal(hiddenSelectedOccluder.records[0].reason, 'occluded-shell-instance');
-const nonSelectedOccluder = queryAabbsAgainstMaxMip(
-  plane,
-  camera,
-  new Float32Array(occludedAabb),
-  new Uint32Array([8]),
-  { shellMask: new Uint32Array(9).fill(0), shellVisibleIds: [] },
-);
-assert.deepEqual(Array.from(nonSelectedOccluder.visibleIds), []);
-assert.equal(nonSelectedOccluder.uncertainCount, 0);
-assert.equal(nonSelectedOccluder.records[0].occluded, true);
+assert.deepEqual(Array.from(regularCandidate.visibleIds), []);
+assert.equal(regularCandidate.uncertainCount, 0);
+assert.equal(regularCandidate.records[0].occluded, true);
 
 const nearCrossing = projectAabbConservatively([0.5, -0.2, -2, 0.7, 0.2, 0], camera);
 assert.equal(nearCrossing.uncertain, true);
@@ -93,7 +87,6 @@ const nearResult = queryAabbsAgainstMaxMip(
   camera,
   new Float32Array([0.5, -0.2, -2, 0.7, 0.2, 0]),
   new Uint32Array([9]),
-  { shellMask: new Uint32Array(10).fill(0), shellVisibleIds: [] },
 );
 assert.deepEqual(Array.from(nearResult.visibleIds), [9]);
 assert.equal(nearResult.records[0].reason, 'near-plane-crossing');
@@ -117,14 +110,9 @@ assert.match(GEOMETRY_SHELL_MIP_SHADER, /maximum = max/);
 assert.match(GEOMETRY_SHELL_MIP_SHADER, /source_width/);
 assert.doesNotMatch(GEOMETRY_SHELL_MIP_SHADER, /textureDimensions/);
 assert.doesNotMatch(GEOMETRY_SHELL_QUERY_SHADER, /textureDimensions/);
-assert.match(GEOMETRY_SHELL_VISIBLE_ID_SHADER, /visible_instance_words/);
-assert.match(GEOMETRY_SHELL_DEPTH_FRAGMENT_SHADER, /input\.instance_id \+ 1u/);
+assert.doesNotMatch(GEOMETRY_SHELL_DEPTH_FRAGMENT_SHADER, /instance_id/);
 assert.match(GEOMETRY_SHELL_QUERY_SHADER, /depth <= near_plane/);
 assert.match(GEOMETRY_SHELL_QUERY_SHADER, /hzb_max \+ uniforms\.projection\.z < minimum_depth/);
-assert.match(GEOMETRY_SHELL_QUERY_SHADER, /visible_occluder_words/);
-assert.doesNotMatch(
-  GEOMETRY_SHELL_QUERY_SHADER,
-  /instance_occluder\[candidate_id\] == 0u\)[\s\S]{0,180}append_visible\(candidate_id\);[\s\S]{0,30}return;/,
-);
+assert.doesNotMatch(GEOMETRY_SHELL_QUERY_SHADER, /instance_occluder|visible_occluder_words/);
 
 console.log('Geometry-shell HZB core tests passed.');

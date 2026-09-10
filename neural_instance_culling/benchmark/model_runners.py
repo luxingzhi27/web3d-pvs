@@ -50,6 +50,10 @@ DEFAULT_MODEL_SPECS: dict[str, dict[str, str]] = {
         "kind": "viewcell_bitset_train",
     },
 }
+V4_CALIBRATION_SUMMARY_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-calibration-summary-v4"
+EXACT_CALIBRATION_SCHEMA = "pvs-ifcbench-v4-exact-calibration-v1"
+
+
 @dataclass
 class PredictionResult:
     scores: np.ndarray
@@ -1006,11 +1010,39 @@ def load_train_viewcell_bitset_runner(
     )
 
 
-def _v4_frozen_threshold(checkpoint: dict, calibration_path: str | Path) -> float:
+def _v4_frozen_threshold(
+    checkpoint: dict,
+    checkpoint_path: str | Path,
+    calibration_path: str | Path,
+) -> float:
     path = Path(calibration_path)
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("schema") != "pvs-bounded-relation-prior-instance-calibrated-calibration-summary-v4":
-        raise ValueError(f"{path} is not a v4 calibration summary")
+    schema = payload.get("schema")
+    if schema == EXACT_CALIBRATION_SCHEMA:
+        if payload.get("split") != "calibration" or payload.get("testRead") is not False:
+            raise ValueError(f"{path} is not a test-free exact calibration summary")
+        declared_checkpoint = payload.get("checkpoint")
+        if declared_checkpoint is None or Path(str(declared_checkpoint)).resolve() != Path(checkpoint_path).resolve():
+            raise ValueError(f"{path} belongs to a different checkpoint")
+        if payload.get("predictionRule") != "score >= threshold" or payload.get("status") != "safe":
+            raise ValueError(f"{path} has no safe exact calibration workpoint")
+        selection = payload.get("selection")
+        selected = payload.get("selected")
+        if not isinstance(selection, dict) or not isinstance(selected, dict):
+            raise ValueError(f"{path} has no frozen exact calibration workpoint")
+        threshold = float(selection.get("threshold", np.nan))
+        selected_threshold = float(selected.get("threshold", np.nan))
+        weighted_recall = float(selected.get("aggregateWeightedRecall", np.nan))
+        lower_bound = float(selected.get("aggregateWeightedRecallLowerConfidenceBound", np.nan))
+        if not np.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+            raise ValueError("v4 exact calibration threshold is invalid")
+        if not np.isclose(selected_threshold, threshold, rtol=0.0, atol=1e-7):
+            raise ValueError("v4 exact calibration threshold fields disagree")
+        if weighted_recall <= 0.99 or lower_bound <= 0.99:
+            raise ValueError("v4 exact calibration fails the weighted-recall safety gate")
+        return threshold
+    if schema != V4_CALIBRATION_SUMMARY_SCHEMA:
+        raise ValueError(f"{path} is not a supported v4 calibration summary")
     if payload.get("testRead") is not False:
         raise ValueError(f"{path} is not test-free")
     key = "bestSafe" if payload.get("status") == "safe" else "bestDiagnostic"
@@ -1195,7 +1227,7 @@ def load_pvs_v4_runner(
         raise ValueError("v4 runtime bundle geometry schema disagrees with checkpoint provenance")
     if geometry_checkpoint.get("shape") != [num_instances, int(config.get("geometryDim", 96))] or geometry_checkpoint.get("dtype") != "float16":
         raise ValueError("v4 checkpoint geometry provenance is invalid")
-    threshold = _v4_frozen_threshold(checkpoint, calibration_summary)
+    threshold = _v4_frozen_threshold(checkpoint, checkpoint_path, calibration_summary)
     if not np.isclose(float(bundle_meta.get("threshold", np.nan)), threshold, rtol=0.0, atol=1e-7):
         raise ValueError("v4 runtime bundle threshold disagrees with checkpoint calibration")
     values = np.fromfile(runtime_path, dtype=np.float16)

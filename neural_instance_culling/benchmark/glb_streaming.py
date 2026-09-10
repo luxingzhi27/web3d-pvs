@@ -259,7 +259,12 @@ def _coverage_from_utility(loaded_utility: float, total_utility: float) -> float
     return float(np.clip(loaded_utility / total_utility, 0.0, 1.0))
 
 
-def coverage_metadata(source: str) -> dict[str, str]:
+def coverage_metadata(
+    source: str,
+    *,
+    visible_weight_semantics: str | None = None,
+    source_sampler: str | None = None,
+) -> dict[str, str]:
     """Describe the denominator and unit of a streaming coverage value."""
 
     normalized = str(source)
@@ -268,13 +273,26 @@ def coverage_metadata(source: str) -> dict[str, str]:
         "visible_weight_coverage",
         "visible_weights_utility_not_pixel_coverage",
     }:
+        semantics = str(visible_weight_semantics or "").strip()
+        sampler = str(source_sampler or "").strip().lower()
+        if sampler == "three_color_id" and "screen coverage" in semantics.lower():
+            return {
+                "source": "visible_weight_coverage",
+                "metric": "visible_weight_coverage",
+                "unit": "max_pooled_color_id_screen_coverage_ppm",
+                "semantics": (
+                    "sum of dataset-provided Three.js Color-ID screen-coverage weights for "
+                    "GT-visible instances grouped by GLB; weights are max-pooled over view-cell "
+                    "subposes and therefore are not a union pixel count"
+                ),
+            }
         return {
             "source": "visible_weight_coverage",
             "metric": "visible_weight_coverage",
-            "unit": "rvcServer_component_weight",
+            "unit": "dataset_visible_weight",
             "semantics": (
-                "sum of rvcServer component_weights for GT-visible instances grouped by GLB; "
-                "not pixel coverage, screen area, or hidden-surface count"
+                f"sum of dataset visible weights for GT-visible instances grouped by GLB; "
+                f"dataset semantics: {semantics or 'unspecified nonnegative visible weight'}"
             ),
         }
     if normalized in {"reference_frontmost_pixels", "reference-frontmost-pixel-histogram-v1"}:

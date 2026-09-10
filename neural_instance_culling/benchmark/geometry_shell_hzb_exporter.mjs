@@ -18,7 +18,6 @@ import { MeshoptEncoder } from 'meshoptimizer/encoder';
 export const SHELL_SCHEMA = 'geometry-shell-hzb-v2';
 export const SHELL_VARIANTS = new Set(['lossless', 'equal-asset']);
 export const OFFLINE_REPORT_SCHEMA = 'geometry-shell-hzb-offline-report-v1';
-const SHELL_INSTANCE_IDS_FILE = 'shell_instance_component_ids_uint32.bin';
 const GLB_MAGIC = 0x46546c67;
 const GLB_VERSION = 2;
 const JSON_CHUNK_TYPE = 0x4e4f534a;
@@ -386,7 +385,7 @@ async function readPrimitive(parsed, meshNode, primitive, primitiveIndex) {
   };
 }
 
-async function inspectSourceEntry(entry, assetsDir, expectedComponentIds) {
+async function inspectSourceEntry(entry, assetsDir, expectedInstanceCount) {
   const sourcePath = path.resolve(assetsDir, entry.path);
   if (!sourcePath.startsWith(`${path.resolve(assetsDir)}${path.sep}`) || !fs.existsSync(sourcePath)) {
     throw new Error(`GLB entry ${entry.globalId} points to a missing or escaping path: ${entry.path}`);
@@ -395,39 +394,33 @@ async function inspectSourceEntry(entry, assetsDir, expectedComponentIds) {
   const nodes = meshNodes(parsed);
   const instancesByNode = [];
   let instanceCount = 0;
-  let componentCursor = 0;
   for (const node of nodes) {
     const matrices = await nodeInstances(parsed, node);
     const nodeInstanceCount = matrices.length / 16;
-    const componentIds = expectedComponentIds == null
-      ? null
-      : Uint32Array.from(expectedComponentIds.slice(componentCursor, componentCursor + nodeInstanceCount));
-    instancesByNode.push({ node, matrices, componentIds });
-    componentCursor += nodeInstanceCount;
+    instancesByNode.push({ node, matrices });
     instanceCount += nodeInstanceCount;
   }
   const declaredBuffers = parsed.json.buffers || [];
   const emptyPlaceholder = Boolean(
-    expectedComponentIds?.length
+    expectedInstanceCount
       && instanceCount === 0
       && nodes.length === 0
       && (!parsed.json.meshes || parsed.json.meshes.length === 0)
       && declaredBuffers.every((buffer) => Number(buffer.byteLength || 0) === 0)
       && (!parsed.binary || parsed.binary.length === 0),
   );
-  if (expectedComponentIds && expectedComponentIds.length !== instanceCount && !emptyPlaceholder) {
+  if (expectedInstanceCount != null && expectedInstanceCount !== instanceCount && !emptyPlaceholder) {
     throw new Error(
-      `${entry.path}: source instance count ${instanceCount} does not match runtime metadata ${expectedComponentIds.length}.`,
+      `${entry.path}: source instance count ${instanceCount} does not match runtime metadata ${expectedInstanceCount}.`,
     );
   }
   const primitives = [];
-  for (const { node, matrices, componentIds } of instancesByNode) {
+  for (const { node, matrices } of instancesByNode) {
     const mesh = parsed.json.meshes?.[node.meshIndex];
     if (!mesh) throw new Error(`${entry.path}: mesh ${node.meshIndex} is missing.`);
     for (const primitive of mesh.primitives || []) {
       const inspectedPrimitive = await readPrimitive(parsed, node, primitive, primitives.length);
       inspectedPrimitive.instanceMatrices = matrices;
-      inspectedPrimitive.instanceComponentIds = componentIds;
       primitives.push(inspectedPrimitive);
     }
   }
@@ -437,7 +430,7 @@ async function inspectSourceEntry(entry, assetsDir, expectedComponentIds) {
     sourceBytes: fs.statSync(sourcePath).size,
     instancesByNode,
     instanceCount,
-    expectedInstanceCount: expectedComponentIds?.length ?? null,
+    expectedInstanceCount,
     emptyPlaceholder,
     primitives,
   };
@@ -651,7 +644,6 @@ function buildShellMeta({
   selectedEntries,
   runtime,
   counters,
-  instanceOccluderCount,
   streams,
   prototypes,
   binaryBytes,
@@ -661,7 +653,6 @@ function buildShellMeta({
     + binaryBytes[streams.indices.file] + binaryBytes[streams.transforms.file];
   const aabbFile = 'instance_aabb_fp32.bin';
   const mappingFile = 'instance_to_glb_uint32.bin';
-  const occluderFile = 'instance_occluder_uint32.bin';
   return {
     schema: SHELL_SCHEMA,
     variant: args.variant,
@@ -681,7 +672,7 @@ function buildShellMeta({
       removedAttributes: ['NORMAL', 'TANGENT', 'TEXCOORD_0', 'TEXCOORD_1', 'COLOR_0', 'material', 'texture'],
       occluderRule: 'only certain OPAQUE primitives; transparent, alpha-cutout, unsupported or uncertain materials are not occluders',
       backfaceCulling: false,
-      visibleShellInstances: 'nearest-surface component IDs emitted by the depth pass',
+      rasterization: 'opaque geometry contributes positive linear depth; untouched pixels retain camera far depth',
     },
     queryContract: {
       depthEncoding: 'positive_linear_view_depth_meters',
@@ -689,31 +680,19 @@ function buildShellMeta({
       mipDimensions: 'explicit source/target dimensions in uniform buffers; no textureDimensions query',
       hzbReduction: 'max_2x2',
       proof: 'hzbMax + depthBiasM < candidateNear',
-      occluderSet: {
-        selectedValue: 1,
-        nonSelectedValue: 0,
-        selectedBehavior: 'retain only when the selected shell instance contributes a nearest-depth pixel',
-        nonSelectedBehavior: 'run conservative AABB/HZB test against the rendered selected shell',
-      },
-      uncertainty: 'non-finite, near-plane crossing, camera-inside-AABB and outside-screen projections are retained; non-selected candidates are still HZB-tested',
+      candidateTest: 'all-candidate-conservative-aabb-hzb',
+      uncertainty: 'all candidates use conservative projected AABB/HZB tests; non-finite, near-plane crossing, camera-inside-AABB and outside-screen projections are retained',
       point60: 'one current 60-degree camera query',
       region66: 'offline union of independently queried subposes under the 66-degree candidate region contract',
     },
     instanceCount: runtime.instanceCount,
     globalGlbCount: runtime.glbCount,
-    occluderInstanceCount: instanceOccluderCount,
     prototypeCount: prototypes.length,
     prototypes,
     streams,
     files: {
       instanceAabbs: { file: aabbFile, encoding: 'float32-little-endian', byteLength: binaryBytes[aabbFile] },
       instanceToGlb: { file: mappingFile, encoding: 'uint32-little-endian', byteLength: binaryBytes[mappingFile] },
-      instanceOccluder: { file: occluderFile, encoding: 'uint32-little-endian', byteLength: binaryBytes[occluderFile] },
-      shellInstanceIds: {
-        file: SHELL_INSTANCE_IDS_FILE,
-        encoding: 'uint32-little-endian',
-        byteLength: binaryBytes[SHELL_INSTANCE_IDS_FILE],
-      },
     },
     stats: {
       ...counters,
@@ -721,10 +700,8 @@ function buildShellMeta({
       compressedIndexBytes: binaryBytes[streams.indices.file],
       compressedTransformBytes: binaryBytes[streams.transforms.file],
       compressedGeometryBytes,
-      runtimePayloadBytes: binaryBytes[aabbFile] + binaryBytes[mappingFile]
-        + binaryBytes[occluderFile] + binaryBytes[SHELL_INSTANCE_IDS_FILE],
-      binaryPayloadBytes: binaryBytes[aabbFile] + binaryBytes[mappingFile]
-        + binaryBytes[occluderFile] + binaryBytes[SHELL_INSTANCE_IDS_FILE] + compressedGeometryBytes,
+      runtimePayloadBytes: binaryBytes[aabbFile] + binaryBytes[mappingFile],
+      binaryPayloadBytes: binaryBytes[aabbFile] + binaryBytes[mappingFile] + compressedGeometryBytes,
       prototypeCount: prototypes.length,
       prototypeTriangles: prototypes.reduce((sum, prototype) => sum + prototype.triangleCount, 0),
       rasterizedTriangleInstanceCount: prototypes.reduce((sum, prototype) => sum + prototype.triangleCount * prototype.instanceCount, 0),
@@ -841,7 +818,6 @@ function writeCandidateSegments(candidate, stageDir) {
   fs.writeFileSync(path.join(base, 'positions.bin'), Buffer.from(candidate.positionEncoded));
   fs.writeFileSync(path.join(base, 'indices.bin'), Buffer.from(candidate.indexEncoded));
   fs.writeFileSync(path.join(base, 'transforms.bin'), Buffer.from(candidate.transformEncoded));
-  fs.writeFileSync(path.join(base, 'component_ids.bin'), Buffer.from(typedBytes(candidate.componentIds)));
   return base;
 }
 
@@ -868,10 +844,6 @@ function layoutCandidate(candidate, streams, offsets, ranges) {
   const positionRange = ranges.position;
   const indexRange = ranges.index;
   const transformRange = ranges.transform;
-  const componentIdRange = ranges.componentId;
-  if (componentIdRange.byteLength !== transformSegment.count * 4) {
-    throw new Error('shell component ID stream does not match transform instance count.');
-  }
   const positionDescriptor = segmentDescriptor(positionSegment, positionRange);
   const indexDescriptor = segmentDescriptor(indexSegment, indexRange);
   const transformDescriptor = segmentDescriptor(transformSegment, transformRange);
@@ -900,11 +872,10 @@ function layoutCandidate(candidate, streams, offsets, ranges) {
   offsets.positionByteOffset += positionRange.byteLength;
   offsets.indexByteOffset += indexRange.byteLength;
   offsets.transformByteOffset += transformRange.byteLength;
-  offsets.componentIdByteOffset += componentIdRange.byteLength;
   return {
     prototype,
     encodedBytes: positionRange.byteLength + indexRange.byteLength
-      + transformRange.byteLength + componentIdRange.byteLength,
+      + transformRange.byteLength,
   };
 }
 
@@ -913,9 +884,6 @@ function candidateEncodedBytes(candidate) {
     position: candidate.positionEncoded || readSegment(path.join(candidate.stageDir, 'positions.bin')),
     index: candidate.indexEncoded || readSegment(path.join(candidate.stageDir, 'indices.bin')),
     transform: candidate.transformEncoded || readSegment(path.join(candidate.stageDir, 'transforms.bin')),
-    componentId: candidate.componentIds
-      ? typedBytes(candidate.componentIds)
-      : readSegment(path.join(candidate.stageDir, 'component_ids.bin')),
   };
 }
 
@@ -925,7 +893,6 @@ function appendCandidate(candidate, writers, streams, offsets) {
     position: writers.positions.write(encoded.position),
     index: writers.indices.write(encoded.index),
     transform: writers.transforms.write(encoded.transform),
-    componentId: writers.componentIds.write(encoded.componentId),
   });
   return emitted;
 }
@@ -940,7 +907,6 @@ function projectCandidates(candidates) {
     positionByteOffset: 0,
     indexByteOffset: 0,
     transformByteOffset: 0,
-    componentIdByteOffset: 0,
   };
   const prototypes = [];
   for (const candidate of candidates) {
@@ -949,7 +915,6 @@ function projectCandidates(candidates) {
       position: { offset: offsets.positionByteOffset, byteLength: encoded.position.byteLength },
       index: { offset: offsets.indexByteOffset, byteLength: encoded.index.byteLength },
       transform: { offset: offsets.transformByteOffset, byteLength: encoded.transform.byteLength },
-      componentId: { offset: offsets.componentIdByteOffset, byteLength: encoded.componentId.byteLength },
     });
     prototypes.push(emitted.prototype);
   }
@@ -958,18 +923,12 @@ function projectCandidates(candidates) {
 
 function projectedBinaryBytes(runtime, streams) {
   const streamBytes = (stream) => stream.segments.reduce((sum, segment) => sum + segment.byteLength, 0);
-  const shellInstanceIdBytes = streams.transforms.segments.reduce(
-    (sum, segment) => sum + segment.count * 4,
-    0,
-  );
   return {
     [streams.positions.file]: streamBytes(streams.positions),
     [streams.indices.file]: streamBytes(streams.indices),
     [streams.transforms.file]: streamBytes(streams.transforms),
-    [SHELL_INSTANCE_IDS_FILE]: shellInstanceIdBytes,
     'instance_aabb_fp32.bin': runtime.aabbs.byteLength,
     'instance_to_glb_uint32.bin': runtime.instanceToGlb.byteLength,
-    'instance_occluder_uint32.bin': runtime.instanceCount * 4,
   };
 }
 
@@ -1029,7 +988,6 @@ async function buildExport(args) {
     positions: new BinaryWriter(path.join(args.outputDir, streams.positions.file)),
     indices: new BinaryWriter(path.join(args.outputDir, streams.indices.file)),
     transforms: new BinaryWriter(path.join(args.outputDir, streams.transforms.file)),
-    componentIds: new BinaryWriter(path.join(args.outputDir, SHELL_INSTANCE_IDS_FILE)),
   };
   const offsets = {
     prototypeCount: 0,
@@ -1039,12 +997,10 @@ async function buildExport(args) {
     positionByteOffset: 0,
     indexByteOffset: 0,
     transformByteOffset: 0,
-    componentIdByteOffset: 0,
   };
   const prototypes = [];
   const candidates = [];
   const primitiveAudits = [];
-  const glbDecisions = new Array(runtime.glbCount).fill(null).map(() => ({ primitiveCount: 0, allOpaque: true, selected: true }));
   const counters = {
     sourceGlbCount: entries.length,
     scannedGlbCount: selectedEntries.length,
@@ -1063,24 +1019,19 @@ async function buildExport(args) {
   for (let entryIndex = 0; entryIndex < selectedEntries.length; entryIndex += 1) {
     const entry = selectedEntries[entryIndex];
     const globalRecord = globalRecords[Number(entry.globalId)];
-    const componentIds = globalRecord?.componentGlobalIds?.map(Number) || [];
-    const inspected = await inspectSourceEntry(entry, assetsDir, componentIds);
+    const expectedInstanceCount = globalRecord?.componentGlobalIds?.length ?? 0;
+    const inspected = await inspectSourceEntry(entry, assetsDir, expectedInstanceCount);
     counters.sourceGlbBytes += inspected.sourceBytes;
-    const decision = glbDecisions[Number(entry.globalId)];
     if (inspected.emptyPlaceholder) {
       counters.emptyPlaceholderGlbCount += 1;
       counters.emptyPlaceholderInstanceCount += inspected.expectedInstanceCount;
-      decision.allOpaque = false;
       counters.excludedByReason['empty-source-placeholder'] =
         (counters.excludedByReason['empty-source-placeholder'] || 0) + 1;
     }
-    decision.primitiveCount = inspected.primitives.length;
-    if (inspected.primitives.length === 0) decision.allOpaque = false;
     for (const primitive of inspected.primitives) {
       counters.sourcePrimitiveCount += 1;
       const primitiveInstanceCount = primitive.instanceMatrices.length / 16;
       if (!primitive.supported) {
-        decision.allOpaque = false;
         counters.excludedPrimitiveCount += 1;
         counters.excludedByReason[primitive.reason] = (counters.excludedByReason[primitive.reason] || 0) + 1;
         primitiveAudits.push({
@@ -1109,17 +1060,12 @@ async function buildExport(args) {
       };
       primitiveAudits.push(primitiveAudit);
       if (!primitive.material.occluder) {
-        decision.allOpaque = false;
         counters.excludedPrimitiveCount += 1;
         counters.excludedByReason[primitive.material.reason] = (counters.excludedByReason[primitive.material.reason] || 0) + 1;
         continue;
       }
       counters.opaquePrimitiveCount += 1;
       const matrices = primitive.instanceMatrices;
-      const componentIdsForPrimitive = primitive.instanceComponentIds;
-      if (!componentIdsForPrimitive || componentIdsForPrimitive.length !== primitiveInstanceCount) {
-        throw new Error(`${entry.path}: primitive ${primitive.primitiveIndex} has no aligned component IDs.`);
-      }
       const positionEncoded = encodeStream(primitive.positions, primitive.vertexCount, 12, 'ATTRIBUTES');
       const indexEncoded = encodeStream(primitive.indices, primitive.indices.length, 4, 'TRIANGLES');
       const transformEncoded = encodeStream(matrices, matrices.length / 16, 64, 'ATTRIBUTES');
@@ -1132,13 +1078,12 @@ async function buildExport(args) {
         indexCount: primitive.indices.length,
         triangleCount: primitive.triangleCount,
         matrices,
-        componentIds: Uint32Array.from(componentIdsForPrimitive),
         bounds: primitive.bounds,
         positionEncoded,
         indexEncoded,
         transformEncoded,
         compressedBytes: positionEncoded.byteLength + indexEncoded.byteLength
-          + transformEncoded.byteLength + componentIdsForPrimitive.byteLength,
+          + transformEncoded.byteLength,
         stageDir: null,
         audit: primitiveAudit,
       };
@@ -1150,7 +1095,6 @@ async function buildExport(args) {
       }
       candidates.push(candidate);
     }
-    if (decision.primitiveCount === 0) decision.allOpaque = false;
     if (args.progressEvery > 0 && (entryIndex + 1) % args.progressEvery === 0) {
       console.log(`[geometry-shell-hzb] scanned ${entryIndex + 1}/${selectedEntries.length} GLBs; opaque primitives=${counters.opaquePrimitiveCount}`);
     }
@@ -1162,8 +1106,7 @@ async function buildExport(args) {
   if (args.variant === 'equal-asset') {
     importance = await readImportancePoses(args.importancePosePlan, args.importancePoseCount);
     budgetBytes = args.budgetBytes > 0 ? args.budgetBytes : directoryBytes(args.budgetFromDir);
-    const fixedPayloadBytes = runtime.aabbs.byteLength
-      + runtime.instanceToGlb.byteLength + runtime.instanceCount * 4;
+    const fixedPayloadBytes = runtime.aabbs.byteLength + runtime.instanceToGlb.byteLength;
     const available = budgetBytes - fixedPayloadBytes;
     if (available < 0) throw new Error(`equal-asset budget ${budgetBytes} is smaller than fixed runtime payload ${fixedPayloadBytes}.`);
     for (const candidate of candidates) candidate.importanceScore = candidateImportance(candidate, importance);
@@ -1172,117 +1115,96 @@ async function buildExport(args) {
       const densityB = b.importanceScore / Math.max(1, b.compressedBytes);
       return densityB - densityA || a.sourceGlobalGlbId - b.sourceGlobalGlbId || a.sourcePrimitiveIndex - b.sourcePrimitiveIndex;
     });
-    let initialUsed = 0;
-    const initiallySelected = new Set();
-    for (const candidate of ranked) {
-      if (initialUsed + candidate.compressedBytes > available) continue;
-      initiallySelected.add(candidate);
-      initialUsed += candidate.compressedBytes;
-    }
-    const initialLayout = projectCandidates(candidates.filter((candidate) => initiallySelected.has(candidate)));
-    const initialBinaryBytes = projectedBinaryBytes(runtime, initialLayout.streams);
-    const initialSelection = {
-      mode: 'complete-primitive-deletion-only',
-      budgetBytes,
-      fixedRuntimePayloadBytes: fixedPayloadBytes,
-      selectedCompressedGeometryBytes: initialUsed,
-      selectedPrimitiveCount: initiallySelected.size,
-      candidatePrimitiveCount: candidates.length,
-      importancePoseCount: importance.length,
-      importancePosePlan: path.basename(args.importancePosePlan),
-      metadataReserveBytes: 0,
-      shellMetaBytes: 0,
-      totalAssetBytes: 0,
-    };
-    const initialMeta = buildShellMeta({
-      args,
-      assetsDir,
-      sceneWeb,
-      runtimeMeta,
-      glbIndex,
-      entries,
-      selectedEntries,
-      runtime,
-      counters,
-      instanceOccluderCount: 0,
-      streams: initialLayout.streams,
-      prototypes: initialLayout.prototypes,
-      binaryBytes: initialBinaryBytes,
-      selection: initialSelection,
-    });
-    const metadataReserveBytes = jsonFileBytes(initialMeta);
-    const geometryBudget = available - metadataReserveBytes;
-    if (geometryBudget < 0) {
-      throw new Error(`equal-asset budget ${budgetBytes} cannot fit fixed runtime payload and shell metadata ${metadataReserveBytes}.`);
-    }
     let used = 0;
-    const selected = new Set();
+    const selectedRanked = [];
     for (const candidate of ranked) {
-      if (used + candidate.compressedBytes > geometryBudget) continue;
-      selected.add(candidate);
+      if (used + candidate.compressedBytes > available) continue;
+      selectedRanked.push(candidate);
       used += candidate.compressedBytes;
     }
-    for (const candidate of candidates) {
-      if (!selected.has(candidate)) continue;
+    const settleProjectedSelection = () => {
+      const selectedSet = new Set(selectedRanked);
+      const selectedCandidates = candidates.filter((candidate) => selectedSet.has(candidate));
+      const layout = projectCandidates(selectedCandidates);
+      const projectedBytes = projectedBinaryBytes(runtime, layout.streams);
+      const projectedSelection = {
+        mode: 'complete-primitive-deletion-only',
+        budgetBytes,
+        fixedRuntimePayloadBytes: fixedPayloadBytes,
+        selectedCompressedGeometryBytes: used,
+        selectedPrimitiveCount: selectedCandidates.length,
+        candidatePrimitiveCount: candidates.length,
+        importancePoseCount: importance.length,
+        importancePosePlan: path.basename(args.importancePosePlan),
+        metadataReserveBytes: 0,
+        shellMetaBytes: 0,
+        totalAssetBytes: 0,
+      };
+      let projectedMeta = null;
+      for (let iteration = 0; iteration < 8; iteration += 1) {
+        projectedMeta = buildShellMeta({
+          args,
+          assetsDir,
+          sceneWeb,
+          runtimeMeta,
+          glbIndex,
+          entries,
+          selectedEntries,
+          runtime,
+          counters,
+          streams: layout.streams,
+          prototypes: layout.prototypes,
+          binaryBytes: projectedBytes,
+          selection: projectedSelection,
+        });
+        const shellMetaBytes = jsonFileBytes(projectedMeta);
+        const totalAssetBytes = projectedMeta.stats.binaryPayloadBytes + shellMetaBytes;
+        if (projectedSelection.shellMetaBytes === shellMetaBytes
+            && projectedSelection.totalAssetBytes === totalAssetBytes) {
+          return { selectedSet, selectedCandidates, selection: projectedSelection };
+        }
+        projectedSelection.metadataReserveBytes = shellMetaBytes;
+        projectedSelection.shellMetaBytes = shellMetaBytes;
+        projectedSelection.totalAssetBytes = totalAssetBytes;
+      }
+      throw new Error('equal-asset projected metadata byte accounting did not converge.');
+    };
+    let projected = settleProjectedSelection();
+    while (projected.selection.totalAssetBytes > budgetBytes && selectedRanked.length > 0) {
+      const excess = projected.selection.totalAssetBytes - budgetBytes;
+      let removedBytes = 0;
+      while (selectedRanked.length > 0 && removedBytes < excess) {
+        const removed = selectedRanked.pop();
+        removedBytes += removed.compressedBytes;
+        used -= removed.compressedBytes;
+      }
+      projected = settleProjectedSelection();
+    }
+    if (projected.selection.totalAssetBytes > budgetBytes) {
+      throw new Error(`equal-asset budget ${budgetBytes} cannot fit fixed runtime payload and shell metadata.`);
+    }
+    for (const candidate of projected.selectedCandidates) {
       const emitted = appendCandidate(candidate, writers, streams, offsets);
       prototypes.push(emitted.prototype);
       candidate.audit.selected = true;
     }
-    selection = {
-      mode: 'complete-primitive-deletion-only',
-      budgetBytes,
-      fixedRuntimePayloadBytes: fixedPayloadBytes,
-      selectedCompressedGeometryBytes: used,
-      selectedPrimitiveCount: selected.size,
-      candidatePrimitiveCount: candidates.length,
-      importancePoseCount: importance.length,
-      importancePosePlan: path.basename(args.importancePosePlan),
-      metadataReserveBytes,
-      shellMetaBytes: 0,
-      totalAssetBytes: 0,
-    };
-  }
-  for (const candidate of candidates) {
-    if (!candidate.audit.selected) {
-      const decision = glbDecisions[candidate.sourceGlobalGlbId];
-      decision.selected = false;
-    }
-  }
-  for (const audit of primitiveAudits) {
-    if (audit.occluder && !audit.selected) {
-      const decision = glbDecisions[audit.sourceGlobalGlbId];
-      decision.selected = false;
-    }
+    selection = projected.selection;
   }
   writers.positions.close();
   writers.indices.close();
   writers.transforms.close();
-  writers.componentIds.close();
   if (stageDir) fs.rmSync(stageDir, { recursive: true, force: true });
 
-  const scannedGlbIds = new Set(selectedEntries.map((entry) => Number(entry.globalId)));
-  const instanceOccluder = new Uint32Array(runtime.instanceCount);
-  for (const record of runtime.recordById) {
-    const glbId = Number(record.globalGlbId);
-    const decision = glbDecisions[glbId];
-    const sourceWasScanned = scannedGlbIds.has(glbId);
-    instanceOccluder[Number(record.componentGlobalId)] = sourceWasScanned && decision.allOpaque && decision.selected ? 1 : 0;
-  }
-  const instanceOccluderCount = instanceOccluder.reduce((sum, value) => sum + value, 0);
   const aabbFile = 'instance_aabb_fp32.bin';
   const mappingFile = 'instance_to_glb_uint32.bin';
-  const occluderFile = 'instance_occluder_uint32.bin';
   writeRaw(path.join(args.outputDir, aabbFile), runtime.aabbs);
   writeRaw(path.join(args.outputDir, mappingFile), runtime.instanceToGlb);
-  writeRaw(path.join(args.outputDir, occluderFile), instanceOccluder);
   const binaryFiles = [
     streams.positions.file,
     streams.indices.file,
     streams.transforms.file,
-    SHELL_INSTANCE_IDS_FILE,
     aabbFile,
     mappingFile,
-    occluderFile,
   ];
   const binaryBytes = Object.fromEntries(binaryFiles.map((file) => [file, fs.statSync(path.join(args.outputDir, file)).size]));
   const buildMeta = () => buildShellMeta({
@@ -1295,7 +1217,6 @@ async function buildExport(args) {
     selectedEntries,
     runtime,
     counters,
-    instanceOccluderCount,
     streams,
     prototypes,
     binaryBytes,
@@ -1351,7 +1272,15 @@ async function buildExport(args) {
   };
 }
 
-export { buildExport, parseArgs, resolveAssetsDir, buildRuntimeArrays, readAccessor, readIndices };
+export {
+  buildExport,
+  buildRuntimeArrays,
+  inspectSourceEntry,
+  parseArgs,
+  readAccessor,
+  readIndices,
+  resolveAssetsDir,
+};
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
   const args = parseArgs(process.argv);

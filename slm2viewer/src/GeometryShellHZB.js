@@ -12,7 +12,6 @@ import {
   GEOMETRY_SHELL_DEPTH_VERTEX_SHADER,
   GEOMETRY_SHELL_MIP_SHADER,
   GEOMETRY_SHELL_QUERY_SHADER,
-  GEOMETRY_SHELL_VISIBLE_ID_SHADER,
 } from './GeometryShellHZBShaders.js';
 
 const SOFTWARE_ADAPTER_PATTERN = /swiftshader|llvmpipe|softpipe|swrast|software/i;
@@ -294,12 +293,8 @@ export class GeometryShellHZB {
         || !String(this.meta.queryContract?.mipDimensions || '').includes('explicit')) {
       throw new Error('shell_meta.json does not declare the single-sample explicit-mip HZB contract.');
     }
-    const occluderSet = this.meta.queryContract?.occluderSet;
-    if (Number(occluderSet?.selectedValue) !== 1
-        || Number(occluderSet?.nonSelectedValue) !== 0
-        || !String(occluderSet?.selectedBehavior || '').includes('nearest-depth pixel')
-        || !String(occluderSet?.nonSelectedBehavior || '').includes('AABB/HZB')) {
-      throw new Error('shell_meta.json does not declare the visible-shell/non-selected-HZB contract.');
+    if (this.meta.queryContract?.candidateTest !== 'all-candidate-conservative-aabb-hzb') {
+      throw new Error('shell_meta.json does not declare the all-candidate conservative AABB/HZB contract.');
     }
     for (const key of ['instanceCount', 'globalGlbCount', 'prototypeCount']) {
       if (!Number.isInteger(Number(this.meta[key])) || Number(this.meta[key]) < 0) {
@@ -307,9 +302,7 @@ export class GeometryShellHZB {
       }
     }
     if (!this.meta.files?.instanceAabbs?.file
-        || !this.meta.files?.instanceToGlb?.file
-        || !this.meta.files?.instanceOccluder?.file
-        || !this.meta.files?.shellInstanceIds?.file) {
+        || !this.meta.files?.instanceToGlb?.file) {
       throw new Error('shell_meta.json is missing candidate runtime files.');
     }
     const prototypes = this.meta.prototypes || [];
@@ -342,19 +335,10 @@ export class GeometryShellHZB {
     const instanceCount = Number(this.meta.instanceCount);
     const aabbBuffer = await fetchBytes(urlFor(this.assetBaseUrl, this.meta.files.instanceAabbs.file));
     const mappingBuffer = await fetchBytes(urlFor(this.assetBaseUrl, this.meta.files.instanceToGlb.file));
-    const occluderBuffer = await fetchBytes(urlFor(this.assetBaseUrl, this.meta.files.instanceOccluder.file));
-    const shellInstanceIdBuffer = await fetchBytes(urlFor(this.assetBaseUrl, this.meta.files.shellInstanceIds.file));
     expectArrayBufferLength(aabbBuffer, instanceCount * 6 * 4, 'instance AABBs');
     expectArrayBufferLength(mappingBuffer, instanceCount * 4, 'instance-to-GLB mapping');
-    expectArrayBufferLength(occluderBuffer, instanceCount * 4, 'instance occluder mask');
-    expectArrayBufferLength(shellInstanceIdBuffer, this.decodedCounts.instances * 4, 'shell instance component IDs');
     this.instanceAabbs = new Float32Array(aabbBuffer);
     this.instanceToGlb = new Uint32Array(mappingBuffer);
-    this.instanceOccluder = new Uint32Array(occluderBuffer);
-    this.shellInstanceIds = new Uint32Array(shellInstanceIdBuffer);
-    if (this.shellInstanceIds.some((value) => value >= instanceCount)) {
-      throw new Error('shell instance component IDs contain an out-of-range value.');
-    }
     this.vertexData = new Uint8Array(this.decodedCounts.vertices * 12);
     this.indexData = new Uint8Array(this.decodedCounts.indices * 4);
     this.transformData = new Uint8Array(this.decodedCounts.instances * 64);
@@ -383,27 +367,22 @@ export class GeometryShellHZB {
       createGpuBuffer(this.device, this.vertexData, GPUBufferUsage.VERTEX, 'geometry-shell-positions'),
       createGpuBuffer(this.device, this.indexData, GPUBufferUsage.INDEX, 'geometry-shell-indices'),
       createGpuBuffer(this.device, this.transformData, GPUBufferUsage.VERTEX, 'geometry-shell-transforms'),
-      createGpuBuffer(this.device, this.shellInstanceIds, GPUBufferUsage.VERTEX, 'geometry-shell-component-ids'),
       createGpuBuffer(this.device, this.instanceAabbs, GPUBufferUsage.STORAGE, 'geometry-shell-aabbs'),
       createGpuBuffer(this.device, this.instanceToGlb, GPUBufferUsage.STORAGE, 'geometry-shell-instance-to-glb'),
-      createGpuBuffer(this.device, this.instanceOccluder, GPUBufferUsage.STORAGE, 'geometry-shell-instance-occluder'),
     );
     [
       this.positionBuffer,
       this.indexBuffer,
       this.transformBuffer,
-      this.shellInstanceIdBuffer,
       this.aabbBuffer,
       this.instanceToGlbBuffer,
-      this.instanceOccluderBuffer,
     ] = this.gpuBuffers;
     this.assetLoadInfo = {
       compressedPositionBytes: positionBytes,
       compressedIndexBytes: indexBytes,
       compressedTransformBytes: transformBytes,
       decodedGeometryBytes: this.vertexData.byteLength + this.indexData.byteLength + this.transformData.byteLength,
-      runtimePayloadBytes: this.instanceAabbs.byteLength + this.instanceToGlb.byteLength
-        + this.instanceOccluder.byteLength + this.shellInstanceIds.byteLength,
+      runtimePayloadBytes: this.instanceAabbs.byteLength + this.instanceToGlb.byteLength,
     };
   }
 
@@ -422,10 +401,8 @@ export class GeometryShellHZB {
     });
     const mipShader = this.device.createShaderModule({ code: GEOMETRY_SHELL_MIP_SHADER });
     const queryShader = this.device.createShaderModule({ code: GEOMETRY_SHELL_QUERY_SHADER });
-    const visibleIdShader = this.device.createShaderModule({ code: GEOMETRY_SHELL_VISIBLE_ID_SHADER });
     for (const [name, shader] of [
       ['depth', depthShader],
-      ['visible-id', visibleIdShader],
       ['mip', mipShader],
       ['query', queryShader],
     ]) {
@@ -453,17 +430,12 @@ export class GeometryShellHZB {
               { shaderLocation: 4, offset: 48, format: 'float32x4' },
             ],
           },
-          {
-            arrayStride: 4,
-            stepMode: 'instance',
-            attributes: [{ shaderLocation: 5, offset: 0, format: 'uint32' }],
-          },
         ],
       },
       fragment: {
         module: depthShader,
         entryPoint: 'depth_fragment_main',
-        targets: [{ format: 'rgba32float' }, { format: 'r32uint' }],
+        targets: [{ format: 'rgba32float' }],
       },
       primitive: {
         topology: 'triangle-list',
@@ -484,7 +456,7 @@ export class GeometryShellHZB {
       ],
     });
     const renderBundleEncoder = this.device.createRenderBundleEncoder({
-      colorFormats: ['rgba32float', 'r32uint'],
+      colorFormats: ['rgba32float'],
       depthStencilFormat: 'depth32float',
       sampleCount: GEOMETRY_SHELL_HZB_SAMPLE_COUNT,
     });
@@ -494,7 +466,6 @@ export class GeometryShellHZB {
     renderBundleEncoder.setIndexBuffer(this.indexBuffer, 'uint32');
     for (const prototype of this.meta.prototypes) {
       renderBundleEncoder.setVertexBuffer(1, this.transformBuffer, Number(prototype.instanceOffset) * 64);
-      renderBundleEncoder.setVertexBuffer(2, this.shellInstanceIdBuffer, Number(prototype.instanceOffset) * 4);
       renderBundleEncoder.drawIndexed(
         Number(prototype.indexCount),
         Number(prototype.instanceCount),
@@ -511,13 +482,6 @@ export class GeometryShellHZB {
         entryPoint: 'main',
       },
     });
-    this.visibleIdPipeline = this.device.createComputePipeline({
-      layout: 'auto',
-      compute: {
-        module: visibleIdShader,
-        entryPoint: 'main',
-      },
-    });
     this.queryPipeline = this.device.createComputePipeline({
       layout: 'auto',
       compute: {
@@ -525,16 +489,6 @@ export class GeometryShellHZB {
         entryPoint: 'main',
       },
     });
-    const visibleWordBytes = Math.max(4, align4(Math.ceil(Number(this.meta.instanceCount) / 32) * 4));
-    this.visibleOccluderWordsBuffer = this.device.createBuffer({
-      size: visibleWordBytes,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    this.visibleIdUniformBuffer = this.device.createBuffer({
-      size: 16,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-    this.gpuBuffers.push(this.visibleOccluderWordsBuffer, this.visibleIdUniformBuffer);
     this.queryResultBuffer = null;
     this.queryReadbackBuffer = null;
     this.visibleIdsBuffer = null;
@@ -565,12 +519,6 @@ export class GeometryShellHZB {
       format: 'depth32float',
       usage: GPUTextureUsage.RENDER_ATTACHMENT,
     });
-    const nearestInstanceIdTexture = this.device.createTexture({
-      size: { width, height, depthOrArrayLayers: 1 },
-      sampleCount: GEOMETRY_SHELL_HZB_SAMPLE_COUNT,
-      format: 'r32uint',
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    });
     const mipUniformBuffers = [];
     const mipBindGroups = [];
     for (let mip = 1; mip < mipCount; mip += 1) {
@@ -592,20 +540,6 @@ export class GeometryShellHZB {
     }
     const renderDepthView = linearDepthTexture.createView({ baseMipLevel: 0, mipLevelCount: 1 });
     const hzbView = linearDepthTexture.createView({ baseMipLevel: 0, mipLevelCount: mipCount });
-    const nearestInstanceIdView = nearestInstanceIdTexture.createView();
-    this.device.queue.writeBuffer(
-      this.visibleIdUniformBuffer,
-      0,
-      new Uint32Array([width, height, Number(this.meta.instanceCount), 0]),
-    );
-    const visibleIdBindGroup = this.device.createBindGroup({
-      layout: this.visibleIdPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: nearestInstanceIdView },
-        { binding: 1, resource: { buffer: this.visibleOccluderWordsBuffer } },
-        { binding: 2, resource: { buffer: this.visibleIdUniformBuffer } },
-      ],
-    });
     this.targets = {
       width,
       height,
@@ -613,17 +547,13 @@ export class GeometryShellHZB {
       sampleCount: GEOMETRY_SHELL_HZB_SAMPLE_COUNT,
       linearDepthTexture,
       depthTexture,
-      nearestInstanceIdTexture,
       mipUniformBuffers,
       mipBindGroups,
       renderDepthView,
       hzbView,
-      nearestInstanceIdView,
-      visibleIdBindGroup,
       destroy: () => {
         linearDepthTexture.destroy();
         depthTexture.destroy();
-        nearestInstanceIdTexture.destroy();
         for (const buffer of mipUniformBuffers) buffer.destroy();
       },
     };
@@ -715,8 +645,6 @@ export class GeometryShellHZB {
         { binding: 5, resource: this.targets.hzbView },
         { binding: 6, resource: { buffer: this.instanceToGlbBuffer } },
         { binding: 7, resource: { buffer: this.glbFlagsBuffer } },
-        { binding: 8, resource: { buffer: this.instanceOccluderBuffer } },
-        { binding: 9, resource: { buffer: this.visibleOccluderWordsBuffer } },
       ],
     });
   }
@@ -734,12 +662,6 @@ export class GeometryShellHZB {
           loadOp: 'clear',
           storeOp: 'store',
         },
-        {
-          view: this.targets.nearestInstanceIdView,
-          clearValue: { r: 0, g: 0, b: 0, a: 0 },
-          loadOp: 'clear',
-          storeOp: 'store',
-        },
       ],
       depthStencilAttachment: {
         view: this.targets.depthTexture.createView(),
@@ -752,20 +674,6 @@ export class GeometryShellHZB {
     pass.end();
     await this._submitAndWait(depthEncoder, 'depth raster');
     const depthRasterMs = nowMs() - depthStartedAt;
-
-    const visibleIdStartedAt = nowMs();
-    const visibleIdEncoder = this.device.createCommandEncoder();
-    visibleIdEncoder.clearBuffer(this.visibleOccluderWordsBuffer);
-    const visibleIdPass = visibleIdEncoder.beginComputePass();
-    visibleIdPass.setPipeline(this.visibleIdPipeline);
-    visibleIdPass.setBindGroup(0, this.targets.visibleIdBindGroup);
-    visibleIdPass.dispatchWorkgroups(
-      Math.ceil(this.targets.width / 8),
-      Math.ceil(this.targets.height / 8),
-    );
-    visibleIdPass.end();
-    await this._submitAndWait(visibleIdEncoder, 'visible shell ID compaction');
-    const visibleIdCompactionMs = nowMs() - visibleIdStartedAt;
 
     const hzbStartedAt = nowMs();
     const hzbEncoder = this.device.createCommandEncoder();
@@ -783,9 +691,8 @@ export class GeometryShellHZB {
     const hzbBuildMs = nowMs() - hzbStartedAt;
     return {
       depthRasterMs,
-      visibleIdCompactionMs,
       hzbBuildMs,
-      depthRasterAndMipMs: depthRasterMs + visibleIdCompactionMs + hzbBuildMs,
+      depthRasterAndMipMs: depthRasterMs + hzbBuildMs,
     };
   }
 
@@ -909,7 +816,6 @@ export class GeometryShellHZB {
     const renderTiming = await this._renderAndBuildHzb(camera);
     const result = await this._queryCurrent(camera, candidateIds, { ...options, mode: 'Point60' });
     result.timings.depthRasterMs = renderTiming.depthRasterMs;
-    result.timings.visibleIdCompactionMs = renderTiming.visibleIdCompactionMs;
     result.timings.hzbBuildMs = renderTiming.hzbBuildMs;
     result.timings.depthRasterAndMipMs = renderTiming.depthRasterAndMipMs;
     result.timings.totalMs = renderTiming.depthRasterAndMipMs + result.timings.aabbTestMs + result.timings.compactionMs;
@@ -924,7 +830,6 @@ export class GeometryShellHZB {
     const union = new Set();
     const perPose = [];
     let depthRasterMs = 0;
-    let visibleIdCompactionMs = 0;
     let hzbBuildMs = 0;
     let queryMs = 0;
     let readbackMs = 0;
@@ -938,14 +843,12 @@ export class GeometryShellHZB {
       const renderTiming = await this._renderAndBuildHzb(state);
       const result = await this._queryCurrent(state, ids, { ...options, mode: 'Region66' });
       result.timings.depthRasterMs = renderTiming.depthRasterMs;
-      result.timings.visibleIdCompactionMs = renderTiming.visibleIdCompactionMs;
       result.timings.hzbBuildMs = renderTiming.hzbBuildMs;
       result.timings.depthRasterAndMipMs = renderTiming.depthRasterAndMipMs;
       result.timings.totalMs = renderTiming.depthRasterAndMipMs + result.timings.aabbTestMs + result.timings.compactionMs;
       queryMs += Number(result.timings.queryMs || 0);
       readbackMs += Number(result.timings.readbackMs || 0);
       depthRasterMs += Number(result.timings.depthRasterMs || 0);
-      visibleIdCompactionMs += Number(result.timings.visibleIdCompactionMs || 0);
       hzbBuildMs += Number(result.timings.hzbBuildMs || 0);
       aabbTestMs += Number(result.timings.aabbTestMs || 0);
       compactionMs += Number(result.timings.compactionMs || 0);
@@ -985,15 +888,14 @@ export class GeometryShellHZB {
       backend: 'geometry-shell-hzb-webgpu',
       timings: {
         depthRasterMs,
-        visibleIdCompactionMs,
         hzbBuildMs,
-        depthRasterAndMipMs: depthRasterMs + visibleIdCompactionMs + hzbBuildMs,
+        depthRasterAndMipMs: depthRasterMs + hzbBuildMs,
         aabbTestMs,
         compactionMs,
         regionUnionCompactionMs,
         queryMs,
         readbackMs,
-        totalMs: depthRasterMs + visibleIdCompactionMs + hzbBuildMs + aabbTestMs + compactionMs,
+        totalMs: depthRasterMs + hzbBuildMs + aabbTestMs + compactionMs,
         depthEncoding: LINEAR_DEPTH_ENCODING,
         sampleCount: GEOMETRY_SHELL_HZB_SAMPLE_COUNT,
         depthBiasM: Number(options.depthBiasM ?? 0.001),

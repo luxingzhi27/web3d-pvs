@@ -22,7 +22,7 @@ TABLE_FIELDS = (
     "row_type", "scene", "method", "variant", "status", "device", "backend",
     "timing_source", "transfer_bytes", "transfer_mib", "expanded_geometry_bytes",
     "expanded_memory_bytes", "instance_count", "glb_count", "prototype_count",
-    "prototype_triangles", "expanded_triangles", "occluder_instance_count",
+    "prototype_triangles", "expanded_triangles",
     "transfer_to_lossless_ratio", "neural_to_lossless_ratio", "formal_sessions",
     "sample_count", "candidate_mean", "candidate_p95",
     "latency_mean_ms", "latency_mean_ci95_low_ms", "latency_mean_ci95_high_ms",
@@ -98,7 +98,7 @@ def read_neural_asset(scene: str, directory: Path) -> dict[str, Any]:
         "expanded_memory_bytes": None, "instance_count": meta.get("numInstances"),
         "glb_count": meta.get("numGlbs"), "prototype_count": None,
         "prototype_triangles": None, "expanded_triangles": None,
-        "occluder_instance_count": None, "source": str(directory.resolve()),
+        "source": str(directory.resolve()),
     }
 
 def read_hzb_asset(scene: str, variant: str, hzb_root: Path) -> dict[str, Any]:
@@ -178,7 +178,6 @@ def read_hzb_asset(scene: str, variant: str, hzb_root: Path) -> dict[str, Any]:
         "prototype_count": meta.get("prototypeCount"),
         "prototype_triangles": stats.get("prototypeTriangles"),
         "expanded_triangles": stats.get("rasterizedTriangleInstanceCount"),
-        "occluder_instance_count": meta.get("occluderInstanceCount"),
         "source": f"{shell_path.resolve()} + {offline_path.resolve()}",
     }
 
@@ -310,23 +309,22 @@ def write_table_markdown(path: Path, asset_rows: Sequence[Mapping[str, Any]], ru
         "# Table 4. 资产与运行时开销", "",
         "日期：2026-09-09。字节来自输入目录内的实际文件 `stat`；HZB 展开运行时内存为三条 meshopt 几何流解码后字节加固定 runtime payload。",
         "", "## 资产", "",
-        "| 场景 | 方案 | 变体 | 传输字节 | 传输 MiB | 展开几何 MiB | 展开运行时 MiB | prototype | prototype 三角形 | 展开三角形 | occluder 实例 | 方案/ lossless | neural/ lossless |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| 场景 | 方案 | 变体 | 传输字节 | 传输 MiB | 展开几何 MiB | 展开运行时 MiB | prototype | prototype 三角形 | 展开三角形 | 方案/ lossless | neural/ lossless |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in asset_rows:
         neural_ratio = fmt_ratio(row["neural_to_lossless_ratio"])
         if row["method"] == "neural":
             neural_ratio = f"**{neural_ratio}**"
-        lines.append("| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+        lines.append("| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
             scene_label(row["scene"]), row["method"], row["variant"], fmt_bytes(row["transfer_bytes"]),
             fmt(row["transfer_mib"]), fmt(None if row["expanded_geometry_bytes"] is None else row["expanded_geometry_bytes"] / 2**20),
             fmt(None if row["expanded_memory_bytes"] is None else row["expanded_memory_bytes"] / 2**20),
             fmt(row["prototype_count"], digits=0), fmt(row["prototype_triangles"], digits=0),
-            fmt(row["expanded_triangles"], digits=0), fmt(row["occluder_instance_count"], digits=0),
-            fmt_ratio(row["transfer_to_lossless_ratio"]), neural_ratio,
+            fmt(row["expanded_triangles"], digits=0), fmt_ratio(row["transfer_to_lossless_ratio"]), neural_ratio,
         ))
     lines.extend([
-        "", "神经资产相对同场景 lossless shell 的比例以最后一列粗体突出；HZB `equal-asset` 仍单独列出，它只表示按神经资产预算删除完整 primitive 的资产敏感性对照，不替代 lossless shell。神经资产的几何展开内存和三角形/occluder 统计不适用，保留为 `unavailable`。",
+        "", "神经资产相对同场景 lossless shell 的比例以最后一列粗体突出；HZB `equal-asset` 仍单独列出，它只表示按神经资产预算删除完整 primitive 的资产敏感性对照，不替代 lossless shell。神经资产的几何展开内存和三角形统计不适用，保留为 `unavailable`。",
         "", "## 正式运行延迟", "",
         "| 场景 | 设备 | 后端 | 状态 | session | 样本 | 候选 mean/p95 | mean ms (95% CI) | p50 ms (95% CI) | p95 ms (95% CI) | 计时字段 | 原因 |",
         "|---|---|---|---|---:|---:|---:|---:|---:|---:|---|---|",

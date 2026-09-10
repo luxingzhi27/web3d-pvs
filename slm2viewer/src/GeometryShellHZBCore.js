@@ -242,9 +242,9 @@ export function projectAabbConservatively(aabb, camera) {
 
 function queryFootprint(level, rect, baseWidth, baseHeight) {
   const x0 = Math.floor(((rect[0] + 1) * 0.5) * level.width);
-  const y0 = Math.floor(((rect[1] + 1) * 0.5) * level.height);
+  const y0 = Math.floor(((1 - rect[3]) * 0.5) * level.height);
   const x1 = Math.ceil(((rect[2] + 1) * 0.5) * level.width) - 1;
-  const y1 = Math.ceil(((rect[3] + 1) * 0.5) * level.height) - 1;
+  const y1 = Math.ceil(((1 - rect[1]) * 0.5) * level.height) - 1;
   return {
     x0: Math.max(0, Math.min(level.width - 1, x0)),
     y0: Math.max(0, Math.min(level.height - 1, y0)),
@@ -315,36 +315,12 @@ export function queryAabbsAgainstMaxMip(levels, camera, aabbs, candidateIds = nu
   const visibleIds = [];
   const uncertainIds = [];
   const records = [];
-  const shellMask = options.shellMask || null;
-  const hasShellMask = shellMask !== null;
-  const shellVisibleIds = options.shellVisibleIds == null
-    ? null
-    : new Set(Array.from(options.shellVisibleIds, Number));
-  if (hasShellMask && shellVisibleIds === null) {
-    throw new Error('shellVisibleIds is required when a shell mask is provided.');
-  }
   for (let index = 0; index < count; index += 1) {
     const projection = projectAabbConservatively(aabbs.subarray
       ? aabbs.subarray(index * 6, index * 6 + 6)
       : aabbs.slice(index * 6, index * 6 + 6), camera);
     let result;
-    const maskValue = hasShellMask ? Number(shellMask[ids[index]]) : 0;
-    if (hasShellMask && maskValue === 1) {
-      result = {
-        visible: shellVisibleIds.has(Number(ids[index])),
-        occluded: !shellVisibleIds.has(Number(ids[index])),
-        uncertain: false,
-        reason: shellVisibleIds.has(Number(ids[index]))
-          ? 'visible-shell-surface' : 'occluded-shell-instance',
-      };
-    } else if (hasShellMask && maskValue !== 0) {
-      result = {
-        visible: true,
-        occluded: false,
-        uncertain: true,
-        reason: 'missing-occluder-mask',
-      };
-    } else if (!projection.valid || projection.uncertain) {
+    if (!projection.valid || projection.uncertain) {
       result = {
         visible: true,
         occluded: false,

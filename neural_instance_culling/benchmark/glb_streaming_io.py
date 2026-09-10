@@ -383,7 +383,11 @@ def load_pose_inputs(
     if len(component_records) != len(instance_to_glb):
         raise StreamingContractError("runtime metadata instance count disagrees with the dataset")
     instance_aabbs = _component_instance_aabbs(component_records, len(instance_to_glb))
-    coverage = coverage_metadata(utility_source)
+    coverage = coverage_metadata(
+        utility_source,
+        visible_weight_semantics=dataset.meta.get("visibleWeightSemantics"),
+        source_sampler=dataset.meta.get("sourceSampler"),
+    )
     loaded: list[LoadedPose] = []
     for ordinal, pose_id in enumerate(selected):
         if pose_id < 0 or pose_id >= dataset.poses.size:

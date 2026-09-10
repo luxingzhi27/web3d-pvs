@@ -786,7 +786,17 @@ def main() -> None:
         "limit": int(args.pose_limit),
         "completeTest": args.split == "test",
     }
-    coverage = coverage_metadata(args.utility_source)
+    coverage_sources = {pose.coverage_source for pose in records}
+    coverage_units = {pose.coverage_unit for pose in records}
+    coverage_semantics = {pose.coverage_semantics for pose in records}
+    if len(coverage_sources) != 1 or len(coverage_units) != 1 or len(coverage_semantics) != 1:
+        raise StreamingContractError("streaming poses disagree on coverage metadata")
+    coverage = {
+        "source": next(iter(coverage_sources)),
+        "metric": next(iter(coverage_sources)),
+        "unit": next(iter(coverage_units)),
+        "semantics": next(iter(coverage_semantics)),
+    }
     ranking_summary["coverageSource"] = coverage["source"]
     ranking_summary["coverageMetric"] = coverage["metric"]
     ranking_summary["coverageUnit"] = coverage["unit"]

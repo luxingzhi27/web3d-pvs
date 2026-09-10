@@ -183,28 +183,27 @@ try {
   assert.equal(planned.workload.provenance.aspect.fixedAspectUsed, true);
   assert.equal(
     planned.workload.provenance.timingDefinition.stages.total,
-    'depthRaster + visibleIdCompaction + hzbBuild + aabbTest + compaction',
+    'depthRaster + hzbBuild + aabbTest + compaction',
   );
 
   const roundResults = [
     { samples: [{ poseId: 0, candidateCount: 4, timings: {
-      depthRasterMs: 1, visibleIdCompactionMs: 0.5, hzbBuildMs: 2,
-      aabbTestMs: 3, compactionMs: 4, totalMs: 10.5,
+      depthRasterMs: 1, hzbBuildMs: 2,
+      aabbTestMs: 3, compactionMs: 4, totalMs: 10,
     } }] },
     { samples: [{ poseId: 0, candidateCount: 4, timings: {
-      depthRasterMs: 2, visibleIdCompactionMs: 0.5, hzbBuildMs: 3,
-      aabbTestMs: 4, compactionMs: 5, totalMs: 14.5,
+      depthRasterMs: 2, hzbBuildMs: 3,
+      aabbTestMs: 4, compactionMs: 5, totalMs: 14,
     } }] },
   ];
   const timingSummary = summarizeTimingRounds(roundResults);
   assert.equal(timingSummary.roundCount, 2);
   assert.equal(timingSummary.sampleCount, 2);
   assert.equal(timingSummary.stages.depthRaster.p50Ms, 1.5);
-  assert.equal(timingSummary.stages.visibleIdCompaction.p50Ms, 0.5);
-  assert.equal(timingSummary.stages.total.p95Ms, 14.3);
+  assert.equal(timingSummary.stages.total.p95Ms, 13.8);
   const combined = combineTimingResults(roundResults, planned.workload);
-  assert.equal(combined.summary.totalP50Ms, 12.5);
-  assert.equal(combined.summary.totalP95Ms, 14.3);
+  assert.equal(combined.summary.totalP50Ms, 12);
+  assert.equal(combined.summary.totalP95Ms, 13.8);
   assert.equal(combined.timingRounds.length, 2);
   assert.equal(combined.timingRounds[1].samples[0].round, 2);
 

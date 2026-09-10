@@ -49,7 +49,7 @@ exporter 将该 `scores` 数组写入 streaming sidecar 的 `aabb` 字段，并�
 
 ### HZB visible-first
 
-`--hzb-region66-result` 接受正式 `geometry-shell-hzb-browser-result-v1` JSON。它必须声明 `mode=Region66`、test workload、完整 representative pose selection、`formalReady=true`、`executionClass=formal-hardware-gpu`，并通过 `gpuGate`。结果中的 pose 集合必须与冻结 CSR test split 完全相等；`candidateFile` 中每个 pose 的 uint32 实例编号和 `candidateCount` 都必须逐项等于同 pose 的 CSR candidate 行。`visibleInstanceIds` 再映射到该候选行和 GLB。任何 pose、数量、实例或候选不一致都会使该方法 unavailable。
+`--hzb-region66-result` 只接受正式 `geometry-shell-hzb-browser-result-v2` JSON。它必须声明 `mode=Region66`、test workload、完整 representative pose selection、`formalReady=true`、`executionClass=formal-hardware-gpu`，并通过 `gpuGate`。结果中的 pose 集合必须与冻结 CSR test split 完全相等；`candidateFile` 中每个 pose 的 uint32 实例编号和 `candidateCount` 都必须逐项等于同 pose 的 CSR candidate 行。`visibleInstanceIds` 再映射到该候选行和 GLB。任何 pose、数量、实例或候选不一致都会使该方法 unavailable。结果若提供 `shellDir`，其 `shell_meta.json` 必须声明 `geometry-shell-hzb-v2`。
 
 HZB 不生成连续分数。排序规则是：
 

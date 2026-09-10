@@ -245,6 +245,8 @@ def main() -> None:
     args = parse_args()
     if args.pose_limit < 0:
         raise ValueError("--pose-limit must be non-negative")
+    if args.split == "test" and args.pose_limit != 0:
+        raise ValueError("frozen test score export must cover the complete test split")
     if args.poses_per_batch < 1:
         raise ValueError("--poses-per-batch must be positive")
     specs: list[tuple[str, dict[str, str]]] = [parse_model_spec(value) for value in args.model_spec]

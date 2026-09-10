@@ -43,7 +43,7 @@ PREFLIGHT_SCHEMA = "geometry-shell-hzb-paper-preflight-v1"
 TASK_SCHEMA = "geometry-shell-hzb-paper-task-v1"
 
 CALIBRATION_RESOLUTIONS = ((512, 288), (1024, 576))
-CALIBRATION_DEPTH_BIASES_M = (0.0001, 0.001, 0.01)
+CALIBRATION_DEPTH_BIASES_M = (0.01, 1.0, 10.0, 100.0)
 # One calibration round means one browser task per (height, bias) member.
 CALIBRATION_ROUNDS = 1
 CALIBRATION_INVOCATIONS_PER_CONFIGURATION = 1
@@ -305,10 +305,8 @@ def _check_shell(path: Path, scene: SceneSpec, variant: str, num_instances: int)
     for name in (
         "indices.meshopt.bin",
         "instance_aabb_fp32.bin",
-        "instance_occluder_uint32.bin",
         "instance_to_glb_uint32.bin",
         "positions.meshopt.bin",
-        "shell_instance_component_ids_uint32.bin",
         "transforms.meshopt.bin",
     ):
         file = _require_file(path / name, f"geometry shell {name}")
@@ -316,19 +314,13 @@ def _check_shell(path: Path, scene: SceneSpec, variant: str, num_instances: int)
             raise ValueError(f"geometry shell asset is empty: {file}")
     if (path / "instance_aabb_fp32.bin").stat().st_size != num_instances * 6 * 4:
         raise ValueError("geometry shell AABB table length does not match instanceCount")
-    for name in ("instance_occluder_uint32.bin", "instance_to_glb_uint32.bin"):
-        if (path / name).stat().st_size != num_instances * 4:
-            raise ValueError(f"geometry shell {name} length does not match instanceCount")
-    shell_instance_count = sum(
-        _int(prototype.get("instanceCount", -1), "shell prototype instanceCount")
-        for prototype in meta.get("prototypes", [])
-    )
-    if (path / "shell_instance_component_ids_uint32.bin").stat().st_size != shell_instance_count * 4:
-        raise ValueError("geometry shell component ID table length does not match packed shell instances")
+    if (path / "instance_to_glb_uint32.bin").stat().st_size != num_instances * 4:
+        raise ValueError("geometry shell instance-to-GLB length does not match instanceCount")
+    if meta.get("queryContract", {}).get("candidateTest") != "all-candidate-conservative-aabb-hzb":
+        raise ValueError("geometry shell does not use the all-candidate conservative AABB/HZB contract")
     return {
         "variant": meta["variant"],
         "instanceCount": num_instances,
-        "occluderInstanceCount": _int(meta.get("occluderInstanceCount", -1), "occluderInstanceCount"),
         "path": str(path.resolve()),
     }
 
