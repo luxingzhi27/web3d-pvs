@@ -2,7 +2,7 @@
 
 日期：2026-09-10；2026-09-11 更新执行状态
 
-状态：方案冻结并执行中。Sponza 已完成正式采样、Pose CSR 和 train-only 三角形关系，Full 三种子与 AABB 扫描正在运行；Big City 正在执行正式硬件 Color-ID 采样。
+状态：方案冻结并执行中。Sponza 已完成正式采样、Pose CSR 和 train-only 三角形关系，Full/AABB 三种子正在运行；Big City 已完成正式硬件 Color-ID 和 Pose CSR，train-only 三角形关系正在采样。
 
 ## 1. 结论与实验定位
 
@@ -337,10 +337,10 @@ neural_instance_culling/benchmark/out/paper_results/standard_graphics/
 |---|---|---|
 | G0 来源与资产审计 | Big City 与 Sponza 源文件均已取得并完成 source audit；Sponza 的许可边界已按实际模型文件修正 | 完成或登记 Viking 来源；本地派生场景资产不进入公开结果包 |
 | G1 单位转换 | Big City 已生成 `2734` 个、Sponza 已生成 `132` 个一单位一资源 GLB，并写出 conversion/runtime/audit manifests；Sponza MASK 硬件语义核验通过 | Big City 采样后复核完整实例绑定 |
-| G2 数据、训练、评价 | Sponza `38,784/38,784` subpose 完成，聚合为 `2,424` view-cell，split 为 `1728/132/276/288`；平均 candidate `44.77`、平均 GT `9.07`，无 candidate 漏正。六层关系覆盖全部 train cell，保留 `26,218` 边和 `376,959` 生存观察。Full 三种子与 AABB 扫描运行中；Big City `129,408` subpose 采样运行中 | 完成 Sponza validation 选择、一次 frozen test、Hi-Z/图像/runtime；随后构建 Big City CSR、关系与训练 |
+| G2 数据、训练、评价 | Sponza `38,784/38,784` subpose 聚合为 `2,424` view-cell，平均 candidate/GT 为 `44.77/9.07`；关系保留 `26,218` 边和 `376,959` 生存观察。AABB 扫描冻结 `lr=2e-4`，Full/AABB 三种子运行中。Big City `129,408/129,408` subpose 聚合为 `8,088` view-cell，split 为 `5916/480/984/708`，平均 candidate/GT 为 `767.34/201.33`，无 candidate 漏正；六层 train-only 关系正在采样 | 完成两场景关系、三种子 validation 选择、一次 frozen test、Hi-Z/图像/runtime |
 | G3 表图与敏感性 | 没有标准场景正式指标、图像或性能数字 | 仅在代表场景完成 `64/128/256 KiB` 敏感性，再生成 G1-G3 表、Pareto、延迟和定性图 |
 
-Sponza 当前使用统一入口 `run_standard_graphics_mainline.py`：calibration 冻结每个 checkpoint 的阈值，validation 安全池按 useful cull、balanced accuracy、Occlusion Recall 和 precision 选择成员，只对该成员读取一次 test。AABB 复用 `run_aabb_ray_baseline.py` 的学习率扫描和三种子协议。Big City 在采样完成后使用相同入口，不新建场景专用模型。
+两场景使用统一入口 `run_standard_graphics_mainline.py`：calibration 冻结每个 checkpoint 的阈值，validation 安全池按 useful cull、balanced accuracy、Occlusion Recall 和 precision 选择成员，只对该成员读取一次 test。AABB 复用 `run_aabb_ray_baseline.py` 的学习率扫描和三种子协议，不新建场景专用模型。
 
 标准场景接入检查还修正了 Color-ID sampler 的两项 GT 语义。资源绑定现在只按 `globalGlbId -> componentGlobalIds` 的显式关系完成，并交叉检查 runtime meta 与 GLB index；旧 `glbHash` 关联已删除。HKUST、Big City 和 Sponza 的静态映射核验分别得到 `3273 -> 18831`、`2734 -> 2734` 和 `132 -> 132`，缺失或冲突映射会在渲染前失败，避免生成 component 0 污染的 GT。MASK 的 Color-ID 材质保留原 base-color 纹理 alpha 与 cutoff，但不让纹理 RGB 乘到编码颜色；正式采样前仍需用真实 Sponza MASK primitive 完成硬件像素 smoke。
 

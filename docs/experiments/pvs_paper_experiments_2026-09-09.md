@@ -189,7 +189,7 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 | Test 图像 | 完成 | 六组正式硬件 Vulkan/ANGLE 图像评价完成，均无失败 subpose 或缺失 GLB。HKUST Full/AABB/HZB aggregate PER 为 `0.3662/0.8613/0.3128%`；IFCBench 为 `0.5011/0.0583/0.5312%` |
 | GT 收敛 | 部分完成 | 两场景各 100 cell x 128 点水平圆盘计划已生成，IFCBench 半径为 `2.5 m`；新 evaluator 已按计划/raw 三元组对齐，正式 Vulkan Color-ID 采样待执行 |
 | 离线成本 / 结果包 | 完成当前可得项 | 六阶段成本、artifact registry、三种子 Table 2 汇总已生成；未记录时间保持 unavailable，不作推算 |
-| 标准图形场景 | Sponza 训练中；Big City 采样中 | Sponza `38,784` 个硬件 Color-ID subpose、`2,424` Pose CSR 和 train-only 稀疏关系已完成，Full 三种子与 AABB 扫描已启动。Big City `129,408` 个 subpose 正在正式硬件采样 |
+| 标准图形场景 | 两场景流水线执行中 | Sponza `38,784` 个硬件 Color-ID subpose、`2,424` Pose CSR 和 train-only 稀疏关系已完成；Full/AABB 三种子运行中。Big City `129,408` 个 subpose 与 `8,088` Pose CSR 已完成，平均 candidate/GT `767.34/201.33`、无 candidate 漏正，六层关系采样运行中 |
 
 截至 2026-09-11，现有两个主场景只剩真实 scheduler replay、GT 收敛和缺失的移动端组合。标准场景按同一显式四分割、同一 V4 和同一 AABB/HZB 评价口径执行；Sponza 正式训练期间继续采样 Big City，任何中间指标都不替代三种子 validation 选择和一次 frozen test。
 
