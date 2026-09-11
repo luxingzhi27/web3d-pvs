@@ -70,9 +70,10 @@ conda run -n slm_pvs python \
   --output-dir neural_instance_culling/benchmark/out/paper_results/gt_convergence/<scene>_128_eval
 ```
 
-## 历史结果与当前状态
+## 当前状态
 
-`hkust_existing/` 和 `ifcbench_existing/` 下的旧 CSV/JSON 仍保留可读，用于复现上一轮有限 subpose 初检；它们不是新的 128 点结果，也不作为正式入口或论文表格输入。旧初检的代表数字为：HKUST 在 16/32 点相对旧参考并集的实例覆盖均值为 98.401%/99.668%，IFCBench 在 1/2/4 点为 70.539%/84.382%/100%。这些数字不能替代最终 128 点参考。
+不满足 100×128 计划、三元组对齐和 `G_128` 参考定义的旧有限 subpose
+CSV/JSON 已删除，不再作为历史结果保留或被任何论文表格读取。
 
 新的 128 点 raw 硬件采样尚未在本次修复中执行，因此本文件不登记新的场景数值、硬件延迟或收敛结论。代码验证只使用合成 JSONL、CPU Python 单元测试和 Node wrapper 测试。
 
