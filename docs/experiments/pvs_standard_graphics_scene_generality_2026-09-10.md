@@ -337,12 +337,21 @@ neural_instance_culling/benchmark/out/paper_results/standard_graphics/
 |---|---|---|
 | G0 来源与资产审计 | Big City 与 Sponza 源文件均已取得并完成 source audit；Sponza 的许可边界已按实际模型文件修正 | 完成或登记 Viking 来源；本地派生场景资产不进入公开结果包 |
 | G1 单位转换 | Big City 已生成 `2734` 个、Sponza 已生成 `132` 个一单位一资源 GLB，并写出 conversion/runtime/audit manifests；Sponza MASK 硬件语义核验通过 | Big City 采样后复核完整实例绑定 |
-| G2 数据、训练、评价 | Sponza `38,784/38,784` subpose 聚合为 `2,424` view-cell，平均 candidate/GT 为 `44.77/9.07`；关系保留 `26,218` 边和 `376,959` 生存观察。AABB 扫描冻结 `lr=2e-4`，Full/AABB 三种子运行中。Big City `129,408/129,408` subpose 聚合为 `8,088` view-cell，split 为 `5916/480/984/708`，平均 candidate/GT 为 `767.34/201.33`，无 candidate 漏正；六层 train-only 关系正在采样 | 完成两场景关系、三种子 validation 选择、一次 frozen test、Hi-Z/图像/runtime |
+| G2 数据、训练、评价 | Sponza `38,784/38,784` subpose 聚合为 `2,424` view-cell，平均 candidate/GT 为 `44.77/9.07`；关系保留 `26,218` 边和 `376,959` 生存观察。AABB 扫描冻结 `lr=2e-4`，Full/AABB 三种子运行中。Big City `129,408/129,408` subpose 聚合为 `8,088` view-cell，split 为 `5916/480/984/708`，平均 candidate/GT 为 `767.34/201.33`，无 candidate 漏正；六层 train-only 关系正在采样。统一 HZB runner 已登记两个标准场景并生成各自 120-pose timing plan | 完成两场景关系、三种子 validation 选择、一次 frozen test、Hi-Z/图像/runtime |
 | G3 表图与敏感性 | 没有标准场景正式指标、图像或性能数字 | 仅在代表场景完成 `64/128/256 KiB` 敏感性，再生成 G1-G3 表、Pareto、延迟和定性图 |
 
 两场景使用统一入口 `run_standard_graphics_mainline.py`：calibration 冻结每个 checkpoint 的阈值，validation 安全池按 useful cull、balanced accuracy、Occlusion Recall 和 precision 选择成员，只对该成员读取一次 test。AABB 复用 `run_aabb_ray_baseline.py` 的学习率扫描和三种子协议，不新建场景专用模型。
 
 标准场景接入检查还修正了 Color-ID sampler 的两项 GT 语义。资源绑定现在只按 `globalGlbId -> componentGlobalIds` 的显式关系完成，并交叉检查 runtime meta 与 GLB index；旧 `glbHash` 关联已删除。HKUST、Big City 和 Sponza 的静态映射核验分别得到 `3273 -> 18831`、`2734 -> 2734` 和 `132 -> 132`，缺失或冲突映射会在渲染前失败，避免生成 component 0 污染的 GT。MASK 的 Color-ID 材质保留原 base-color 纹理 alpha 与 cutoff，但不让纹理 RGB 乘到编码颜色；正式采样前仍需用真实 Sponza MASK primitive 完成硬件像素 smoke。
+
+2026-09-11 补充：`run_geometry_shell_hzb_paper.py` 已把 `sponza_128k` 和
+`bigcity_128k` 加入与 HKUST/IFCBench 相同的校准、冻结 test 和五轮 timing
+编排，两个标准场景均使用 `Region66 1/all`，没有标准场景专用 HZB 算法。
+Sponza lossless 外壳已导出，实际启动资产 `1,844,914 B`，包含 `110` 个确定
+不透明 primitive、`227,327` 个三角形；`22` 个 MASK primitive 不作为保守不透明
+遮挡物。Big City lossless 外壳实际启动资产 `106,166,442 B`，包含 `2,734`
+个不透明 primitive、`15,711,990` 个三角形。Equal-asset 外壳必须等对应 Full V4
+运行资产冻结后再按实际字节预算生成。
 
 ## 15. 本次方案登记
 

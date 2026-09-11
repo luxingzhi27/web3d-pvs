@@ -54,11 +54,15 @@ TIMING_ROUNDS = 5
 REGION_COUNTS = {
     "hkust": (1, 5, 9, 0),
     "ifcbench": (1, 0),
+    "sponza_128k": (1, 0),
+    "bigcity_128k": (1, 0),
 }
 VARIANTS = ("lossless", "equal_asset")
 EXPECTED_SPLITS = {
     "hkust": {"train": 5926, "validation": 730, "calibration": 659, "test": 684, "guard": 0},
     "ifcbench": {"train": 19647, "validation": 2712, "calibration": 2183, "test": 2710, "guard": 0},
+    "sponza_128k": {"train": 1728, "validation": 276, "calibration": 132, "test": 288, "guard": 0},
+    "bigcity_128k": {"train": 5916, "validation": 984, "calibration": 480, "test": 708, "guard": 0},
 }
 
 RUNNER_FILES = (
@@ -547,6 +551,40 @@ def _scene_specs(data_root: Path, hzb_root: Path) -> dict[str, SceneSpec]:
             point60_plan_dir=hzb_root / "point60_gt_plans" / "ifcbench_fantasy_metropolis",
             representative_plan=data_root / "neural_instance_culling" / "sampler" / "out" / "ifcbench_fantasy_metropolis_instanced_v2" / "pose_plan_fov66.jsonl",
             expected_splits=EXPECTED_SPLITS["ifcbench"],
+        ),
+        "sponza_128k": SceneSpec(
+            key="sponza_128k",
+            scene_name="sponza",
+            dataset_dir=dataset_root / "pose_csr_sponza_standard_graphics_128k_fov66_v1",
+            region_dataset_dir=dataset_root / "pose_csr_sponza_standard_graphics_128k_fov66_v1",
+            runtime_meta=dataset_root / "standard_graphics_scenes" / "sponza_128k" / "assets" / "runtimeVisibilityMeta.json",
+            glb_index=dataset_root / "standard_graphics_scenes" / "sponza_128k" / "assets" / "glbIndex.json",
+            glb_root=dataset_root / "standard_graphics_scenes" / "sponza_128k" / "assets",
+            shell_dirs={
+                "lossless": hzb_root / "geometry_shell_hzb_lossless_sponza_128k",
+                "equal_asset": hzb_root / "geometry_shell_hzb_equal_asset_sponza_128k",
+            },
+            timing_plan=hzb_root / "sponza_128k_test_timing_120_pose_plan.json",
+            point60_plan_dir=hzb_root / "point60_gt_plans" / "sponza_128k",
+            representative_plan=dataset_root / "standard_graphics_scenes" / "sponza_128k" / "pose_plan.jsonl",
+            expected_splits=EXPECTED_SPLITS["sponza_128k"],
+        ),
+        "bigcity_128k": SceneSpec(
+            key="bigcity_128k",
+            scene_name="neuralpvs_bigcity",
+            dataset_dir=dataset_root / "pose_csr_bigcity_standard_graphics_128k_fov66_v1",
+            region_dataset_dir=dataset_root / "pose_csr_bigcity_standard_graphics_128k_fov66_v1",
+            runtime_meta=dataset_root / "standard_graphics_scenes" / "bigcity_128k" / "assets" / "runtimeVisibilityMeta.json",
+            glb_index=dataset_root / "standard_graphics_scenes" / "bigcity_128k" / "assets" / "glbIndex.json",
+            glb_root=dataset_root / "standard_graphics_scenes" / "bigcity_128k" / "assets",
+            shell_dirs={
+                "lossless": hzb_root / "geometry_shell_hzb_lossless_bigcity_128k",
+                "equal_asset": hzb_root / "geometry_shell_hzb_equal_asset_bigcity_128k",
+            },
+            timing_plan=hzb_root / "bigcity_128k_test_timing_120_pose_plan.json",
+            point60_plan_dir=hzb_root / "point60_gt_plans" / "bigcity_128k",
+            representative_plan=dataset_root / "standard_graphics_scenes" / "bigcity_128k" / "pose_plan.jsonl",
+            expected_splits=EXPECTED_SPLITS["bigcity_128k"],
         ),
     }
 
@@ -1307,14 +1345,25 @@ def _dry_run_selection() -> dict[str, Any]:
 
 
 def _parse_scene_keys(value: str) -> list[str]:
-    aliases = {"hkust": "hkust", "hkust_v3": "hkust", "ifc": "ifcbench", "ifcbench": "ifcbench"}
+    aliases = {
+        "hkust": "hkust",
+        "hkust_v3": "hkust",
+        "ifc": "ifcbench",
+        "ifcbench": "ifcbench",
+        "sponza": "sponza_128k",
+        "sponza_128k": "sponza_128k",
+        "bigcity": "bigcity_128k",
+        "bigcity_128k": "bigcity_128k",
+    }
     keys = []
     for token in str(value).split(","):
         token = token.strip().lower()
         if not token:
             continue
         if token not in aliases:
-            raise ValueError(f"unknown scene {token!r}; choose hkust or ifcbench")
+            raise ValueError(
+                f"unknown scene {token!r}; choose hkust, ifcbench, sponza_128k or bigcity_128k"
+            )
         key = aliases[token]
         if key not in keys:
             keys.append(key)

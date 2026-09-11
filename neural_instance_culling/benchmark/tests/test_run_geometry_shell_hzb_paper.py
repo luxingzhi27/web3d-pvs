@@ -21,10 +21,15 @@ def _argument(command: tuple[str, ...], name: str) -> str:
 
 
 def _fixture_scene(root: Path, key: str = "hkust") -> orchestrator.SceneSpec:
-    scene_name = "hkust-v3" if key == "hkust" else "ifcbench_fantasy_metropolis_instanced_v2"
+    scene_names = {
+        "hkust": "hkust-v3",
+        "ifcbench": "ifcbench_fantasy_metropolis_instanced_v2",
+        "sponza_128k": "sponza",
+        "bigcity_128k": "neuralpvs_bigcity",
+    }
     return orchestrator.SceneSpec(
         key=key,
-        scene_name=scene_name,
+        scene_name=scene_names[key],
         dataset_dir=root / f"{key}-dataset",
         region_dataset_dir=root / f"{key}-region",
         runtime_meta=root / f"{key}-runtime.json",
@@ -47,6 +52,8 @@ class GeometryShellHZBPaperOrchestratorTests(unittest.TestCase):
             root = Path(temporary)
             hkust = _fixture_scene(root)
             ifcbench = _fixture_scene(root, "ifcbench")
+            sponza = _fixture_scene(root, "sponza_128k")
+            bigcity = _fixture_scene(root, "bigcity_128k")
             calibration = orchestrator.build_calibration_tasks(hkust, root / "run")
             self.assertEqual(len(calibration), 8)
             self.assertEqual(
@@ -85,13 +92,19 @@ class GeometryShellHZBPaperOrchestratorTests(unittest.TestCase):
             }
             hkust_test = orchestrator.build_test_tasks(hkust, root / "run", selection)
             ifc_test = orchestrator.build_test_tasks(ifcbench, root / "run", selection)
+            sponza_test = orchestrator.build_test_tasks(sponza, root / "run", selection)
+            bigcity_test = orchestrator.build_test_tasks(bigcity, root / "run", selection)
             self.assertEqual(len(hkust_test), 8)
             self.assertEqual(len(ifc_test), 4)
+            self.assertEqual(len(sponza_test), 4)
+            self.assertEqual(len(bigcity_test), 4)
             self.assertEqual(
                 {task.config["regionSampleCount"] for task in hkust_test},
                 {1, 5, 9, 0},
             )
             self.assertEqual({task.config["regionSampleCount"] for task in ifc_test}, {1, 0})
+            self.assertEqual({task.config["regionSampleCount"] for task in sponza_test}, {1, 0})
+            self.assertEqual({task.config["regionSampleCount"] for task in bigcity_test}, {1, 0})
             self.assertTrue(all(task.config["testRead"] for task in hkust_test + ifc_test))
             self.assertTrue(all(task.config["runnerTimingRounds"] == 1 for task in hkust_test + ifc_test))
             self.assertTrue(
@@ -106,6 +119,12 @@ class GeometryShellHZBPaperOrchestratorTests(unittest.TestCase):
             self.assertEqual(_argument(command, "--timing-rounds"), "5")
             self.assertEqual(_argument(command, "--pose-index-plan"), str(hkust.timing_plan.resolve()))
             self.assertIn("--require-hardware-gpu", command)
+
+    def test_standard_graphics_scene_aliases_are_registered(self) -> None:
+        self.assertEqual(
+            orchestrator._parse_scene_keys("sponza,bigcity_128k"),
+            ["sponza_128k", "bigcity_128k"],
+        )
 
     def test_existing_complete_task_is_skipped_and_partial_task_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
