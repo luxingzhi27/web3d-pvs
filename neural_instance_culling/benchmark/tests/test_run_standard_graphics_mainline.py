@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+import tempfile
 
 from neural_instance_culling.benchmark.run_standard_graphics_mainline import (
     SCENES,
+    VIKING_FINETUNE_MEMBERS,
+    selection_members,
     validation_key,
     validation_safe,
 )
@@ -11,7 +15,7 @@ from neural_instance_culling.benchmark.run_standard_graphics_mainline import (
 
 class StandardGraphicsMainlineTest(unittest.TestCase):
     def test_registered_scenes_have_four_way_splits(self) -> None:
-        for name in ("sponza_128k", "bigcity_128k"):
+        for name in ("sponza_128k", "viking_village_128k", "bigcity_128k"):
             with self.subTest(scene=name):
                 self.assertEqual(
                     set(SCENES[name]["splits"]),
@@ -50,6 +54,20 @@ class StandardGraphicsMainlineTest(unittest.TestCase):
             }
 
         self.assertGreater(validation_key(payload(0.8, 0.7), 2), validation_key(payload(0.7, 0.9), 1))
+
+    def test_viking_finetune_family_requires_all_three_members(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            finetunes = root / "finetunes"
+            rows = selection_members("viking_village_128k", root, finetunes)
+            self.assertEqual(len(rows), 3)
+
+            for name in VIKING_FINETUNE_MEMBERS.values():
+                member = finetunes / name
+                member.mkdir(parents=True)
+                (member / "calibration_ready_summary.json").write_text("{}", encoding="utf-8")
+            rows = selection_members("viking_village_128k", root, finetunes)
+            self.assertEqual(len(rows), 6)
 
 
 if __name__ == "__main__":

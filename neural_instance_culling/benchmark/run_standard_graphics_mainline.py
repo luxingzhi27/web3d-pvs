@@ -17,10 +17,17 @@ from typing import Any, Sequence
 ROOT = Path(__file__).resolve().parents[2]
 TRAIN = ROOT / "neural_instance_culling/model/train_pvs.py"
 EVALUATE = ROOT / "neural_instance_culling/benchmark/evaluate_pvs.py"
+EXPORT = ROOT / "neural_instance_culling/model/export_pvs.py"
 SEEDS = (20260801, 20260802, 20260803)
 EPOCHS = 40
 STEPS_PER_EPOCH = 900
 WEIGHTED_RECALL_FLOOR = 0.99
+VIKING_FINETUNE_ROOT = ROOT / "neural_instance_culling/model/out/pvs_v4_viking_region_stability_finetune_v1"
+VIKING_FINETUNE_MEMBERS = {
+    20260801: "conservative_seed20260801_from_best_safe_lr5e-6_e4x450",
+    20260802: "conservative_seed20260802_from_e032_lr5e-6_e4x450",
+    20260803: "conservative_seed20260803_from_best_safe_lr5e-6_e4x450",
+}
 
 SCENES: dict[str, dict[str, Any]] = {
     "sponza_128k": {
@@ -123,6 +130,41 @@ def member_dir(model_root: Path, scene: str, seed: int) -> Path:
     return model_root / scene / f"full_seed{seed}_e{EPOCHS}"
 
 
+def selection_members(
+    scene: str,
+    model_root: Path,
+    finetune_root: Path = VIKING_FINETUNE_ROOT,
+) -> list[dict[str, Any]]:
+    rows = [
+        {
+            "label": f"full_seed{seed}",
+            "memberType": "full_from_scratch",
+            "seed": seed,
+            "member": member_dir(model_root, scene, seed),
+        }
+        for seed in SEEDS
+    ]
+    if scene != "viking_village_128k":
+        return rows
+    finetunes = [
+        {
+            "label": f"region_stability_seed{seed}",
+            "memberType": "region_stability_finetune",
+            "seed": seed,
+            "member": finetune_root / VIKING_FINETUNE_MEMBERS[seed],
+        }
+        for seed in SEEDS
+    ]
+    if all((row["member"] / "calibration_ready_summary.json").is_file() for row in finetunes):
+        rows.extend(finetunes)
+    return rows
+
+
+def validation_output(benchmark_root: Path, scene: str, row: dict[str, Any]) -> Path:
+    name = f"seed{row['seed']}.json" if row["memberType"] == "full_from_scratch" else f"{row['label']}.json"
+    return benchmark_root / scene / "validation" / name
+
+
 def train_command(scene: str, output: Path, seed: int, *, smoke: bool) -> list[str]:
     p = scene_paths(scene)
     return [
@@ -200,6 +242,7 @@ def evaluate_command(
     seed: int,
     split: str,
     sidecar: Path | None = None,
+    method_name: str = "full_v4",
 ) -> list[str]:
     p = scene_paths(scene)
     command = [
@@ -221,13 +264,23 @@ def evaluate_command(
         "--device", "cuda",
         "--persist-ids",
         "--scene-name", scene,
-        "--method-name", "full_v4",
+        "--method-name", method_name,
     ]
     if split != "test":
         command.append("--allow-unsafe-diagnostic")
     else:
         command.extend(["--persist-scores", "--sidecar-dir", str(sidecar)])
     return command
+
+
+def export_command(scene: str, selected: dict[str, Any], output: Path) -> list[str]:
+    return [
+        sys.executable,
+        str(EXPORT),
+        "--checkpoint", str(selected["checkpoint"]),
+        "--runtime-meta", str(scene_paths(scene)["runtime_meta"]),
+        "--output-dir", str(output),
+    ]
 
 
 def run_jobs(jobs: Sequence[tuple[str, list[str]]], gpu_ids: Sequence[int], log_dir: Path) -> None:
@@ -278,13 +331,16 @@ def validation_key(payload: dict[str, Any], seed: int) -> tuple[float, ...]:
 
 def select_validation_member(scene: str, model_root: Path, benchmark_root: Path) -> dict[str, Any]:
     rows = []
-    for seed in SEEDS:
-        member = member_dir(model_root, scene, seed)
-        validation_path = benchmark_root / scene / "validation" / f"seed{seed}.json"
+    for candidate in selection_members(scene, model_root):
+        seed = int(candidate["seed"])
+        member = Path(candidate["member"])
+        validation_path = validation_output(benchmark_root, scene, candidate)
         validation = read_json(validation_path)
         calibration = read_json(member / "calibration_ready_summary.json")
         rows.append(
             {
+                "label": candidate["label"],
+                "memberType": candidate["memberType"],
                 "seed": seed,
                 "member": member,
                 "checkpoint": selected_checkpoint(member),
@@ -303,9 +359,14 @@ def select_validation_member(scene: str, model_root: Path, benchmark_root: Path)
         "selectionSplit": "validation",
         "rule": "safe pool; useful cull, balanced accuracy, occlusion recall, precision, WR LCB, fewer predictions",
         "selectedSeed": selected["seed"],
-        "safePoolSeeds": [row["seed"] for row in safe],
+        "selectedLabel": selected["label"],
+        "selectedMemberType": selected["memberType"],
+        "selectedMember": str(selected["member"].resolve()),
+        "safePoolMembers": [row["label"] for row in safe],
         "rows": [
             {
+                "label": row["label"],
+                "memberType": row["memberType"],
                 "seed": row["seed"],
                 "checkpoint": str(row["checkpoint"].resolve()),
                 "calibration": str(row["calibration"].resolve()),
@@ -319,6 +380,54 @@ def select_validation_member(scene: str, model_root: Path, benchmark_root: Path)
     }
     write_json(benchmark_root / scene / "selection.json", summary)
     return selected
+
+
+def load_validation_selection(scene: str, model_root: Path, benchmark_root: Path) -> dict[str, Any]:
+    summary = read_json(benchmark_root / scene / "selection.json")
+    if summary.get("testRead") is not False or summary.get("selectionSplit") != "validation":
+        raise ValueError(f"{scene} runtime export requires a frozen validation-only selection")
+    seed = int(summary["selectedSeed"])
+    member = Path(summary["selectedMember"]).resolve()
+    return {
+        "label": summary["selectedLabel"],
+        "memberType": summary["selectedMemberType"],
+        "seed": seed,
+        "member": member,
+        "checkpoint": selected_checkpoint(member),
+        "calibration": member / "calibration_ready_summary.json",
+    }
+
+
+def export_selected_runtime(
+    scene: str,
+    selected: dict[str, Any],
+    model_root: Path,
+    benchmark_root: Path,
+    gpu_ids: Sequence[int],
+) -> None:
+    output = model_root / scene / "runtime_selected_v1"
+    run_jobs(
+        [("export_runtime", export_command(scene, selected, output))],
+        gpu_ids[:1],
+        benchmark_root / scene / "logs/export",
+    )
+    meta = read_json(output / "model_meta.json")
+    write_json(
+        benchmark_root / scene / "runtime_export.json",
+        {
+            "schema": "pvs-standard-graphics-runtime-export-v1",
+            "scene": scene,
+            "selectedSeed": int(selected["seed"]),
+            "selectedLabel": selected["label"],
+            "selectedMemberType": selected["memberType"],
+            "selectionSplit": "validation",
+            "runtimeDir": str(output.resolve()),
+            "runtimeSchema": meta.get("schema"),
+            "threshold": meta.get("threshold"),
+            "numInstances": meta.get("numInstances"),
+            "testRead": False,
+        },
+    )
 
 
 def run_scene(scene: str, mode: str, model_root: Path, benchmark_root: Path, gpu_ids: Sequence[int]) -> None:
@@ -342,20 +451,43 @@ def run_scene(scene: str, mode: str, model_root: Path, benchmark_root: Path, gpu
         run_jobs(jobs, gpu_ids[:3], benchmark_root / scene / "logs/train")
     if mode in {"evaluate", "all"}:
         jobs = []
-        for seed in SEEDS:
-            output = benchmark_root / scene / "validation" / f"seed{seed}.json"
+        for candidate in selection_members(scene, model_root):
+            seed = int(candidate["seed"])
+            output = validation_output(benchmark_root, scene, candidate)
             output.parent.mkdir(parents=True, exist_ok=True)
             jobs.append(
-                (f"validation_seed{seed}", evaluate_command(scene, member_dir(model_root, scene, seed), output, seed, "validation"))
+                (
+                    f"validation_{candidate['label']}",
+                    evaluate_command(
+                        scene,
+                        Path(candidate["member"]),
+                        output,
+                        seed,
+                        "validation",
+                        method_name="full_v4" if candidate["memberType"] == "full_from_scratch" else "full_v4_region_stability_finetune",
+                    ),
+                )
             )
         run_jobs(jobs, gpu_ids[:3], benchmark_root / scene / "logs/validation")
+    selected: dict[str, Any] | None = None
     if mode in {"finalize", "all"}:
         selected = select_validation_member(scene, model_root, benchmark_root)
         output = benchmark_root / scene / "test" / "full_v4.json"
         sidecar = benchmark_root / scene / "test" / "full_v4.sidecar"
         output.parent.mkdir(parents=True, exist_ok=True)
         run_jobs(
-            [("frozen_test", evaluate_command(scene, selected["member"], output, selected["seed"], "test", sidecar))],
+            [(
+                "frozen_test",
+                evaluate_command(
+                    scene,
+                    selected["member"],
+                    output,
+                    selected["seed"],
+                    "test",
+                    sidecar,
+                    method_name="full_v4" if selected["memberType"] == "full_from_scratch" else "full_v4_region_stability_finetune",
+                ),
+            )],
             gpu_ids[:1],
             benchmark_root / scene / "logs/test",
         )
@@ -369,6 +501,8 @@ def run_scene(scene: str, mode: str, model_root: Path, benchmark_root: Path, gpu
                 "schema": "pvs-standard-graphics-full-v4-final-v1",
                 "scene": scene,
                 "selectedSeed": selected["seed"],
+                "selectedLabel": selected["label"],
+                "selectedMemberType": selected["memberType"],
                 "test": str(output.resolve()),
                 "scoreSidecar": str(sidecar.resolve()),
                 "aggregate": test["aggregate"],
@@ -376,11 +510,15 @@ def run_scene(scene: str, mode: str, model_root: Path, benchmark_root: Path, gpu
                 "testRead": True,
             },
         )
+    if mode in {"export", "all"}:
+        if selected is None:
+            selected = load_validation_selection(scene, model_root, benchmark_root)
+        export_selected_runtime(scene, selected, model_root, benchmark_root, gpu_ids)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("preflight", "smoke", "train", "evaluate", "finalize", "all"))
+    parser.add_argument("mode", choices=("preflight", "smoke", "train", "evaluate", "finalize", "export", "all"))
     parser.add_argument("--scenes", default="sponza_128k")
     parser.add_argument(
         "--model-root",

@@ -21,7 +21,7 @@ class PaperRuntimeWorkloadTest(unittest.TestCase):
                     "schema": target.RUNTIME_SCHEMA,
                     "testRead": False,
                     "numInstances": scene["instances"],
-                    "threshold": scene["threshold"],
+                    "threshold": scene["threshold"] if scene["threshold"] is not None else 0.5,
                     "viewcell": {"radiusM": scene["radius"]},
                     "query": {"viewcellRadiusM": scene["radius"]},
                     "calibration": {"safe": True},
@@ -43,8 +43,11 @@ class PaperRuntimeWorkloadTest(unittest.TestCase):
                 self._runtime(root, scene)
             with mock.patch.object(target.subprocess, "run") as run:
                 manifest = target.build(root, viewer)
-            self.assertEqual([row["id"] for row in manifest["scenes"]], ["hkust", "ifcbench"])
-            self.assertEqual(run.call_count, 2)
+            self.assertEqual(
+                [row["id"] for row in manifest["scenes"]],
+                ["hkust", "ifcbench", "sponza", "viking_village", "bigcity"],
+            )
+            self.assertEqual(run.call_count, 5)
             for scene in target.SCENES:
                 copied = viewer / "public/assets/neural_instance_culling" / scene["asset"]
                 target._validate_runtime(copied, scene)

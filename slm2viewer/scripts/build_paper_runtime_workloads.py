@@ -39,6 +39,42 @@ SCENES = (
         "threshold": 0.6882505416870117,
         "radius": 2.5,
     },
+    {
+        "id": "sponza",
+        "label": "Sponza (240 test view-cells)",
+        "dataset": "pose_csr_sponza_standard_graphics_128k_fov66_v1",
+        "source": "neural_instance_culling/model/out/"
+        "pvs_mainline_v4_standard_graphics_v1/sponza_128k/runtime_selected_v1",
+        "asset": "pvs_sponza_128k_v4_selected",
+        "expected": 240,
+        "instances": 132,
+        "threshold": None,
+        "radius": 0.75,
+    },
+    {
+        "id": "viking_village",
+        "label": "Viking Village (156 test view-cells)",
+        "dataset": "pose_csr_viking_village_standard_graphics_128k_fov66_v1",
+        "source": "neural_instance_culling/model/out/"
+        "pvs_mainline_v4_standard_graphics_v1/viking_village_128k/runtime_selected_v1",
+        "asset": "pvs_viking_village_128k_v4_selected",
+        "expected": 156,
+        "instances": 1890,
+        "threshold": None,
+        "radius": 0.75,
+    },
+    {
+        "id": "bigcity",
+        "label": "Big City (804 test view-cells)",
+        "dataset": "pose_csr_bigcity_standard_graphics_128k_fov66_v1",
+        "source": "neural_instance_culling/model/out/"
+        "pvs_mainline_v4_standard_graphics_v1/bigcity_128k/runtime_selected_v1",
+        "asset": "pvs_bigcity_128k_v4_selected",
+        "expected": 804,
+        "instances": 2734,
+        "threshold": None,
+        "radius": 0.75,
+    },
 )
 
 
@@ -66,7 +102,10 @@ def _validate_runtime(source: Path, scene: dict[str, Any]) -> None:
         raise ValueError(f"invalid runtime schema or test provenance: {meta_path}")
     if int(meta.get("numInstances", -1)) != scene["instances"]:
         raise ValueError(f"runtime instance count mismatch for {scene['id']}")
-    if abs(float(meta.get("threshold")) - scene["threshold"]) > 1e-7:
+    threshold = float(meta.get("threshold"))
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError(f"runtime threshold is invalid for {scene['id']}")
+    if scene["threshold"] is not None and abs(threshold - float(scene["threshold"])) > 1e-7:
         raise ValueError(f"runtime threshold mismatch for {scene['id']}")
     viewcell = meta.get("viewcell")
     query = meta.get("query")

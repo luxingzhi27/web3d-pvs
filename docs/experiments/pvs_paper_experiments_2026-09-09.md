@@ -21,7 +21,7 @@
 | 生存场 rank | 2/4/8/12 已完成 | rank 4 固定 |
 | Validation 图像 | seed 2 已完成 | seed 2 已完成 |
 
-本周冻结结果仍以两个现有场景为主。标准图形学场景作为独立的 non-BIM generality 扩展：固定使用 Sponza、Big City 和 Viking Village，采用一 renderable unit 对应一 resource 的协议，不要求 GLB 原型复用。Big City 按固定 `128 KiB` 目标转换为 `2734` 个单位并正在执行新协议硬件采样；Sponza 的新圆盘采样、Pose CSR 和 train-only 关系已完成并已启动 Full/AABB 三种子矩阵；Viking 已转换为 `1890` 个单位，固定几何表、地表代表相机和 32-subpose 计划均已完成。标准场景结果不阻塞 HKUST/IFCBench 的 HZB、图像和 streaming 主结果。完整转换、训练和表图要求见[标准图形学场景方案](pvs_standard_graphics_scene_generality_2026-09-10.md)。
+论文正式评价使用 HKUST、IFCBench/Metropolis、Sponza、Big City 和 Viking Village 五个场景。三个标准图形学场景采用一 renderable unit 对应一 resource 的协议，不要求 GLB 原型复用；它们正式报告可见性、图像、HZB、资产和运行成本。Streaming 资源复用与下载排序实验集中在 HKUST/IFCBench。完整转换、训练和表图要求见[标准图形学场景方案](pvs_standard_graphics_scene_generality_2026-09-10.md)。
 
 ## 统一评价协议
 
@@ -93,7 +93,7 @@ AABB MLP 正式版改用与 Full 相同的逐 pose 平衡、weighted-recall 保�
 | 安全效率曲线 | Validation 的 WR-useful cull 和 WR-GLB bytes | Fig. 4 |
 | GT 收敛 | 每场景100个分层 validation cell，嵌套采样到128点 | 附录图 |
 | 离线成本 | 采样、关系、编码、训练、校准、导出时间与峰值资源 | 附录表 |
-| 标准图形场景泛化 | Sponza/Big City/Viking Village，固定 128 KiB renderable units，一单位一资源；同单位比较 Keep-All、AABB MLP、Hi-Z 与 Full | Generality 表、资产-剔除 Pareto、定性图 |
+| 标准图形学场景主实验 | Sponza/Big City/Viking Village，固定 128 KiB renderable units，一单位一资源；同单位比较 Keep-All、AABB MLP、Hi-Z 与 Full | 正式场景结果表、资产-剔除 Pareto、定性图 |
 
 正文保留五张表：场景统计、test 可见性、消融、资产与运行时间、streaming。核心图为系统总览、模型架构、生存场可视化、安全效率曲线、候选数量延迟曲线、下载覆盖曲线和定性对比。研究图输出 PDF、SVG、PNG 和源 CSV；架构图保留可编辑源文件。
 
@@ -194,3 +194,11 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 截至 2026-09-11，HKUST 与 IFCBench 主结果均按各自预登记的 view-cell 采样协议冻结。标准场景按同一显式四分割、同一 V4 和同一 AABB/HZB 评价口径执行；任何中间指标都不替代三种子 validation 选择和一次 frozen test。
 
 本轮实现回归已通过 benchmark `167` 项、model `48` 项、完整前端 `npm test` 和 sampler `7` 项测试；测试过程禁用 CUDA，不作为任何正式性能结果。
+
+## 2026-09-12 标准场景执行续报
+
+- Sponza Full seed01/02 和 AABB 三种子已完成；Full seed03 正在补齐。已完成 Full 成员的 validation 安全门均通过。
+- Viking AABB 三种子已完成；Full seed02 已完成，seed01/03 正在补齐。区域稳定性前两组短微调均未通过 validation LCB 安全门，第三组保守微调正在执行，不能替代原三种子长训。
+- Big City Full seed01/02 与 AABB seed01/02 正在训练。为使用空闲 GPU 3，Full 编排父进程已暂停，seed03 已提前并行启动；三者完成后由独立队列统一 validation 并只读取一次 test。AABB runner 仍会在前两成员结束后自动接续 seed03。
+- 五场景 `scene_statistics.csv` 已重建；六阶段离线成本汇总扩展为五场景 `30` 行，缺失时间继续标为 `unavailable`。
+- 标准场景 Full runner 已增加独立运行资产导出阶段；端侧前向 workload 清单已登记 Sponza、Viking Village 和 Big City。正式 WebGPU/HZB/图像硬件任务仍等待训练退出后在无并发计算窗口执行。

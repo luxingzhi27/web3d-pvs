@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read the registered HKUST and IFCBench preprocessing evidence."""
+"""Read the registered paper-scene preprocessing evidence."""
 from __future__ import annotations
 
 import argparse
@@ -28,6 +28,9 @@ SEEDS = ("20260801", "20260802", "20260803")
 HKUST_MODEL = "neural_instance_culling/model/out/pvs_v4_integrated_visibility_mainline_v1"
 IFC_MODEL = "neural_instance_culling/model/out/pvs_mainline_v4_ifcbench_fantasy_metropolis_v1"
 IFC_BENCH = "neural_instance_culling/benchmark/out/pvs_mainline_v4_ifcbench_fantasy_metropolis_v1"
+STANDARD_MODEL = "neural_instance_culling/model/out/pvs_mainline_v4_standard_graphics_v1"
+STANDARD_BENCH = "neural_instance_culling/benchmark/out/paper_results/standard_graphics/test_metrics"
+STANDARD_PREPROCESSING = "neural_instance_culling/benchmark/out/paper_results/standard_graphics/preprocessing"
 
 
 def _seed_paths(pattern: str) -> tuple[str, ...]:
@@ -113,6 +116,83 @@ SCENE_SPECS: dict[str, dict[str, dict[str, Any]]] = {
         },
     },
 }
+
+
+def _standard_scene_spec(scene: str, sampler_name: str, relation_name: str, depth_name: str) -> dict[str, dict[str, Any]]:
+    model = f"{STANDARD_MODEL}/{scene}"
+    sampler = f"neural_instance_culling/sampler/out/{sampler_name}"
+    relation = f"neural_instance_culling/dataset/out/{relation_name}"
+    geometry = f"neural_instance_culling/dataset/out/standard_graphics_scenes/{scene}"
+    depth_log = f"{STANDARD_PREPROCESSING}/{depth_name}/run_shards_stdout.log"
+    return {
+        "sampling": {
+            "sources": (f"{sampler}/logs/*_stdout.log", f"{sampler}/gpu_execution_summary.json"),
+            "elapsedSources": (f"{sampler}/logs/*_stdout.log",),
+            "deviceSources": (f"{sampler}/logs/*_stdout.log",),
+            "elapsed": ("elapsedMs", 0.001, "text"), "device": "sampler",
+            "outputs": (f"{sampler}/*.jsonl",),
+            "completeness": "partial",
+            "scope": "sum of formal hardware sampler shard elapsedMs; parallel wall time was not recorded",
+        },
+        "relation": {
+            "sources": (f"{relation}/relation_csr_meta.json", depth_log),
+            "elapsedSources": (depth_log,),
+            "elapsed": ("elapsedSeconds", 1.0, "json"), "successOnly": True,
+            "outputs": (relation,),
+            "completeness": "partial",
+            "scope": "sum of successful hardware depth-and-compaction shard elapsedSeconds; parallel wall time and final merge time were not recorded",
+        },
+        "fixed_geometry": {
+            "sources": (f"{geometry}/instance_geo_features_fp16.json",),
+            "outputs": (f"{geometry}/instance_geo_features_fp16.bin", f"{geometry}/instance_geo_features_fp16.json"),
+            "notes": "The fixed feature output is registered, but its standalone encoding time was not recorded.",
+        },
+        "training": {
+            "sources": _seed_paths(model + "/full_seed{seed}_e40/run_manifest.json") + _seed_paths(model + "/full_seed{seed}_e40/train_metrics.jsonl") + _seed_paths(STANDARD_BENCH + f"/{scene}/logs/train/train_seed{{seed}}.stdout.log"),
+            "elapsedSources": _seed_paths(model + "/full_seed{seed}_e40/train_metrics.jsonl"),
+            "deviceSources": _seed_paths(model + "/full_seed{seed}_e40/run_manifest.json"),
+            "vramSources": _seed_paths(STANDARD_BENCH + f"/{scene}/logs/train/train_seed{{seed}}.stdout.log"),
+            "elapsed": ("elapsedSeconds", 1.0, "json"), "lastPerSource": True,
+            "deviceField": "arguments.device", "vramField": "cudaPeakMemoryAllocatedMiB",
+            "outputs": _seed_paths(model + "/full_seed{seed}_e40/best_safe.pt"),
+            "completeness": "complete",
+            "scope": "sum of the final cumulative elapsedSeconds value from each completed seed history",
+            "notes": "The recorded device field identifies CUDA; GPU model evidence is reported with the experiment execution logs.",
+        },
+        "calibration": {
+            "sources": _seed_paths(model + "/full_seed{seed}_e40/calibration_ready_summary.json"),
+            "outputs": _seed_paths(model + "/full_seed{seed}_e40/calibration_ready_summary.json"),
+        },
+        "export": {
+            "sources": (f"{STANDARD_BENCH}/{scene}/runtime_export.json",),
+            "outputs": (model + "/runtime_selected_v1",),
+            "notes": "Runtime export is registered after validation model selection; no export time is inferred before that stage completes.",
+        },
+    }
+
+
+SCENE_SPECS.update(
+    {
+        "sponza_128k": _standard_scene_spec(
+            "sponza_128k",
+            "sponza_standard_graphics_viewcell_fov66",
+            "sponza_standard_graphics_v4_bounded_relation_csr_v1",
+            "sponza_triangle_depth_train",
+        ),
+        "viking_village_128k": _standard_scene_spec(
+            "viking_village_128k",
+            "viking_village_standard_graphics_viewcell_fov66",
+            "viking_village_standard_graphics_v4_bounded_relation_csr_v1",
+            "viking_triangle_depth_train",
+        ),
+        "bigcity_128k": _standard_scene_spec(
+            "bigcity_128k",
+            "bigcity_standard_graphics_viewcell_fov66",
+            "bigcity_standard_graphics_v4_bounded_relation_csr_v1",
+            "bigcity_triangle_depth_train",
+        ),
+    }
+)
 
 _NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 _SAMPLER_DEVICE = re.compile(r'WebGL backend vendor="([^"]+)" renderer="([^"]+)"')

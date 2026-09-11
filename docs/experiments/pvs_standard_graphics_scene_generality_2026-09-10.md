@@ -1,4 +1,4 @@
-# 标准图形学场景的 PVS 泛化实验方案
+# 标准图形学场景的 PVS 主实验方案
 
 日期：2026-09-10；2026-09-11 更新执行状态
 
@@ -468,5 +468,115 @@ Viking lossless HZB 外壳已经导出：仅 `1,647` 个确定 OPAQUE 单位作�
 - 修改文件：本文、论文实验总计划、第三场景/HZB 背景文档和 `docs/README.md`。
 - 依赖资源：标准场景源文件及许可、现有硬件 Color-ID sampler、Pose CSR、V4 训练、统一 evaluator 和 WebGPU Batched Geometry-shell Hi-Z。
 - 本次运行：停止旧标准场景 Full/AABB 训练；修正 pose 生成、subpose 采样、后退候选和 split 协议；新正式采样从圆盘计划重新开始。
-- 主线决定：保留 HKUST/IFCBench 为论文核心应用与 streaming 场景；标准场景作为 non-BIM generality 扩展，不修改当前默认 checkpoint 或前端资产。
+- 主线决定：HKUST、IFCBench、Sponza、Viking Village 和 Big City 均为论文正式主实验场景；streaming 资源复用实验集中在 HKUST/IFCBench，三个标准图形学场景正式报告可见性、图像、HZB 和运行成本结果。
 - 待验证风险：Big City 派生 GLB 的公开分发边界、固定单位粒度下的候选规模、大型室外场景的硬件采样时间，以及后续 Color-ID/Mask 语义核验。
+
+## 16. 2026-09-12 训练状态与 Viking 短微调登记
+
+截至 2026-09-12，Big City 的 Full V4 seed01/02 和 AABB + Ray MLP seed01/02 已经
+启动；Sponza Full seed01/02、Sponza AABB 三种子和 Viking AABB 三种子已完成登记的
+`40 x 900` 长训，Sponza Full seed03、Viking Full seed01/03 仍在补齐。所有正式 test
+继续关闭，已有长训成员和排队任务不得由短微调替代或取消。
+
+Viking 当前最佳安全成员的 validation Occlusion Recall 为 `49.0648%`（seed01）和
+`50.6960%`（seed02），对应 weighted-recall LCB 为 `99.0304%` 和 `99.1497%`。
+候选覆盖审计为零漏 GT，因此不通过扩大候选集合改善表面指标。新增独立实验
+`pvs_v4_viking_region_stability_finetune_v1`，目标是在保持 validation weighted recall
+及其单侧 95% LCB 均大于 `0.99` 的前提下，提高 Occlusion Recall 和 Useful Cull，并
+降低 calibration 到 validation 的区域波动。
+
+首个成员固定从 test-free 的 seed02 epoch-32 快照初始化，使用新 AdamW、`2e-5` 学习率、
+`8 epoch x 450 step`、每批 8 个 pose。训练只读取原 train split；每 2 epoch 用自身
+calibration 冻结阈值并在 validation 评价。召回保护权重设为 `0.35`，最差 pose 权重设为
+`0.35`，困难边界分离权重设为 `0.25`，困难负例比例设为 `0.02`，实例校准残差正则设为
+`0.03`。输入、96D 几何表、关系 CSR、模型结构和运行时 schema 均不改变。
+
+该成员只作为短微调首个成员，不提前终止 Viking 原三种子长训。源 seed01/03 完成长训
+后按相同配置补齐对应成员。正式保留条件为 validation 安全门通过，且相对各自源最佳
+安全 checkpoint 提高 Occlusion Recall 或 Useful Cull；否则如实记录为无收益微调，论文
+继续使用原始 Full V4。
+
+首个成员运行命令：
+
+```bash
+CUDA_VISIBLE_DEVICES=3 conda run --no-capture-output -n slm_pvs python -u \
+  neural_instance_culling/model/train_pvs.py \
+  --dataset-dir neural_instance_culling/dataset/out/pose_csr_viking_village_standard_graphics_128k_fov66_v1 \
+  --relation-dir neural_instance_culling/dataset/out/viking_village_standard_graphics_v4_bounded_relation_csr_v1 \
+  --runtime-meta neural_instance_culling/dataset/out/standard_graphics_scenes/viking_village_128k/assets/runtimeVisibilityMeta.json \
+  --initial-geo-features neural_instance_culling/dataset/out/standard_graphics_scenes/viking_village_128k/instance_geo_features_fp16.bin \
+  --glb-index neural_instance_culling/dataset/out/standard_graphics_scenes/viking_village_128k/assets/glbIndex.json \
+  --glb-root neural_instance_culling/dataset/out/standard_graphics_scenes/viking_village_128k/assets \
+  --init-checkpoint neural_instance_culling/model/out/pvs_mainline_v4_standard_graphics_v1/viking_village_128k/full_seed20260802_e40/checkpoint_epoch_032.pt \
+  --output-dir neural_instance_culling/model/out/pvs_v4_viking_region_stability_finetune_v1/seed20260802_from_e032_lr2e-5_e8x450 \
+  --experiment-name pvs_v4_viking_region_stability_finetune_v1_seed20260802 \
+  --variant full_integrated_visibility_mainline --occlusion-representation survival \
+  --survival-rank 4 --relation-source bounded_hierarchical --spectral-mode moment_envelope \
+  --instance-calibration-mode residual --loss-variant pose_balanced_rvl_contrastive \
+  --epochs 8 --steps-per-epoch 450 --poses-per-batch 8 --observation-batch-size 8192 \
+  --eval-every 2 --snapshot-every 2 --max-eval-poses 0 \
+  --calibration-bootstrap-replicates 10000 --seed 20260802 --device cuda \
+  --learning-rate 0.00002 --weight-decay 0.00001 --survival-loss-weight 0.25 \
+  --relation-consistency-weight 0.10 --instance-calibration-regularization-weight 0.03 \
+  --instance-calibration-max-abs 4.0 --sparse-instance-penalty 3.0 \
+  --instance-calibration-warmup-fraction 0.0 --instance-calibration-ramp-fraction 0.0 \
+  --relation-gradient-cap 0.25 --integrated-rvl-recall-guard-weight 0.35 \
+  --integrated-rvl-recall-target 0.99 --integrated-rvl-recall-temperature 0.05 \
+  --integrated-rvl-pose-cvar-fraction 0.25 --integrated-rvl-pose-cvar-weight 0.35 \
+  --integrated-separation-weight 0.25 --integrated-tail-ramp-fraction 0.0 \
+  --frontier-positive-mass-fraction 0.005 --frontier-positive-count-cap 64 \
+  --frontier-negative-fraction 0.02 --frontier-negative-count-cap 256 \
+  --frontier-margin 0.50 --frontier-temperature 0.25 \
+  --frontier-positive-importance-floor 0.5 --frontier-positive-importance-power 0.5
+```
+
+### 16.1 首个微调结果与第二成员
+
+seed02 首个成员已于 2026-09-12 完成 `8 x 450`，未读取 test。四次 evaluation 的
+calibration WR LCB 均约为 `99.18%--99.22%`，但对应 validation LCB 仅为
+`97.68%--97.82%`，最终状态为 `no_qualified_safety_workpoint`。其 validation
+Occlusion Recall 约为 `48.84%--53.57%`，没有在安全门内超过源 checkpoint，因此该
+配置不进入正式结果，也不复制到 seed01/03。
+
+第二成员仍从 seed02 epoch-32 的原始冻结快照初始化，不从失败成员继续。配置改为
+`1e-5`、`6 epoch x 450 step`，恢复困难负例比例 `0.01` 和分离权重 `0.20`，将训练期
+weighted-recall 目标提高到 `0.995`、召回保护权重提高到 `0.50`、最差 pose 权重提高到
+`0.50`。目的不是靠降低阈值增加预测数量，而是优先修复跨物理区域的高权重正例尾部；
+正式保留条件仍为 checkpoint 自身 calibration 冻结阈值下 validation WR 与 LCB 均大于
+`0.99`，且遮挡召回或有效剔除超过源最佳安全 checkpoint。
+
+第二成员已完整执行 `6 epoch x 450 step`。epoch 2 最接近安全门：validation WR 为
+`0.994029`，LCB 为 `0.989959`，aggregate Occlusion Recall 为 `0.508776`，Useful Cull
+为 `0.381038`；其后 epoch 4/6 的 LCB 分别降至 `0.977090/0.977657`。因此第二成员仍为
+`no_qualified_safety_workpoint`，不复制到 seed01/03，也不替换原始 Full V4。
+
+第三成员 `conservative_seed20260802_from_e032_lr5e-6_e4x450` 于 2026-09-12 启动，仍从
+原始 seed02 epoch-32 初始化。它使用 `5e-6` 学习率、`4 epoch x 450 step`、每 epoch
+评价，训练期 weighted-recall 目标提高到 `0.997`，召回保护和最差 pose 权重均提高到
+`0.75`；困难边界分离权重和困难负例比例保持原始主线的 `0.20/0.01`。该成员必须完整
+执行，只有自身 calibration 阈值冻结后的 validation WR 与 LCB 均严格大于 `0.99`，且
+Occlusion Recall 或 Useful Cull 超过源 checkpoint 时，才会扩散到另外两个 seed。
+
+同日完成了两项后续流水线接入：统一离线成本汇总现已覆盖 HKUST、IFCBench、Sponza、
+Viking Village 和 Big City 共五个场景；标准场景 Full runner 增加独立 `export` 阶段，
+可在 validation 选择和一次 frozen test 完成后仅导出所选运行资产，不重复读取 test。
+端侧运行时间场景清单也已登记三个标准场景，运行阈值直接读取各自导出资产，不另设
+手工阈值常量。
+
+第三成员 epoch 1 已通过 validation 安全门：WR=`0.995464`、LCB=`0.991894`、aggregate
+Occlusion Recall=`0.508259`、Useful Cull=`0.380651`。它相对源 seed02 epoch-32 的
+安全工作点在安全下界、遮挡召回和有效剔除上均有小幅改善，但仍须完整执行 4 epoch。
+Viking 原 `all` runner 的编排父进程已暂停，两个 Full 训练子进程继续运行；这样可以
+防止微调三种子 validation 比较完成前读取 test。
+
+若第三成员完成后仍保留安全成员，队列会等待原始 Full seed01/03 和 Sponza 占用的 GPU
+任务结束，再从各 seed 自身的 `best_safe.pt` 启动相同 `4 x 450` 配置。三个微调成员全部
+存在时，标准场景 runner 才把它们和三个 from-scratch 成员合并为同一个 validation 安全池；
+选择规则仍是安全池内优先 Useful Cull、balanced accuracy、Occlusion Recall、precision
+和更少预测。选择完成后只运行一次 Viking frozen test。
+
+第三成员已完整执行完毕，最终状态为 `safe`，最佳安全 checkpoint 固定为 epoch 1。其
+validation WR/LCB/Occlusion Recall/Useful Cull 分别为
+`0.995464/0.991894/0.508259/0.380651`。epoch 2--4 的 Occlusion Recall 一度达到
+`0.516998`，但 LCB 仅约 `0.9791`，因此不会被选择。seed01/03 复现和后续六成员
+validation 选择已经进入自动队列；在这一步完成前 Viking test 继续关闭。
