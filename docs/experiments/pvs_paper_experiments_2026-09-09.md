@@ -185,12 +185,12 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 | 资产与容量 | 完成 | 神经资产为 lossless shell 的 `1.37%`（HKUST）和 `19.78%`（IFCBench）；rank Pareto、Table 4 及 PDF/SVG/PNG 已生成 |
 | 端侧模型前向 | 部分完成 | A6000 两场景五 session 已完成：HKUST/IFCBench WebGPU kernel p50 `1.568/1.385 ms`、p95 `3.555/3.590 ms`；WASM p50 `3.7/46.8 ms`、p95 `100.5/143.2 ms`。HKUST M2 与 vivo 已完成，IFCBench 移动端仍缺失 |
 | Safety-efficiency | 完成 | 六个核心变体的 calibration-safe validation 曲线及论文图已生成 |
-| Streaming | 全 test 模拟完成；真实 replay 执行中 | Visible-weight Bytes@99：HKUST Full/成本感知/面积字节/HZB 为 `18.031/10.819/12.881/17.498 MiB`；IFCBench 为 `8.078/7.119/13.426/13.404 MiB`。冻结 alpha 为 `1.0/0.5`；HKUST 真实 scheduler replay 正在运行，随后执行 IFCBench |
+| Streaming | 完成 | Visible-weight Bytes@99：HKUST Full/成本感知/面积字节/HZB 为 `18.031/10.819/12.881/17.498 MiB`；IFCBench 为 `8.078/7.119/13.426/13.404 MiB`。冻结 alpha 为 `1.0/0.5`。两场景真实 scheduler 共 `432` 次无失败；25 Mbps 下 Full 相对 HZB 的首帧调度 median 为 HKUST `0.126 vs 27.317 s`、IFCBench `4.723 vs 7.341 s`，计入启动资产传输后的网络下界为 `1.879 vs 155.097 s` 和 `8.526 vs 26.517 s` |
 | Test 图像 | 完成 | 六组正式硬件 Vulkan/ANGLE 图像评价完成，均无失败 subpose 或缺失 GLB。HKUST Full/AABB/HZB aggregate PER 为 `0.3662/0.8613/0.3128%`；IFCBench 为 `0.5011/0.0583/0.5312%` |
 | GT 收敛 | 部分完成 | 两场景各 100 cell x 128 点水平圆盘计划已生成，IFCBench 半径为 `2.5 m`；新 evaluator 已按计划/raw 三元组对齐，正式 Vulkan Color-ID 采样待执行 |
 | 离线成本 / 结果包 | 完成当前可得项 | 六阶段成本、artifact registry、三种子 Table 2 汇总已生成；未记录时间保持 unavailable，不作推算 |
 | 标准图形场景 | 两场景流水线执行中 | Sponza `38,784` 个硬件 Color-ID subpose、`2,424` Pose CSR 和 train-only 稀疏关系已完成；Full/AABB 三种子运行中。Sponza lossless HZB 外壳为 `1,844,914 B / 227,327 triangles`。Big City `129,408` 个 subpose 与 `8,088` Pose CSR 已完成，平均 candidate/GT `767.34/201.33`、无 candidate 漏正，六层关系采样运行中；lossless HZB 外壳为 `106,166,442 B / 15,711,990 triangles`。两场景已接入统一 HZB runner 并生成 120-pose timing plan |
 
-截至 2026-09-11，现有两个主场景只剩真实 scheduler replay、GT 收敛和缺失的移动端组合。标准场景按同一显式四分割、同一 V4 和同一 AABB/HZB 评价口径执行；Sponza 正式训练期间继续采样 Big City，任何中间指标都不替代三种子 validation 选择和一次 frozen test。
+截至 2026-09-11，现有两个主场景只剩 GT 收敛和缺失的 IFCBench 移动端组合。标准场景按同一显式四分割、同一 V4 和同一 AABB/HZB 评价口径执行；任何中间指标都不替代三种子 validation 选择和一次 frozen test。
 
 本轮实现回归已通过 benchmark `167` 项、model `48` 项、完整前端 `npm test` 和 sampler `7` 项测试；测试过程禁用 CUDA，不作为任何正式性能结果。

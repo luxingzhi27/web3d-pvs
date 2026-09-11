@@ -84,11 +84,22 @@ conda run -n slm_pvs python neural_instance_culling/benchmark/generate_streaming
 
 该直方图只表示 front-most surface proxy：看不到隐藏面，不等于完整可见性计数，也没有表示解码成本、交互重要性或下载后新暴露表面。正式主图使用 `Visible-weight coverage (%)`；reference-frontmost 只作为补充核验，不能替代它。
 
-## 真实调度状态
+## 真实调度结果
 
-`slm2viewer/scripts/run_real_scheduler_streaming.mjs` 和 `build_real_scheduler_plan.py` 已实现并通过 synthetic fixture。计划固定每场景 12 个 test pose，支持 25/50 Mbps、每项 3 次，调用现有 `classifyGlbSchedule` 和 `GlbResourceScheduler` 的 `urgent/warm/speculative` 状态机，且计划和驱动都显式记录 `startup100Enabled=false`、不使用 startup tier。
+`slm2viewer/scripts/run_real_scheduler_streaming.mjs` 和 `build_real_scheduler_plan.py` 固定每场景 12 个 test pose，运行 25/50 Mbps、每项 3 次，调用现有 `classifyGlbSchedule` 和 `GlbResourceScheduler` 的 `urgent/warm/speculative` 状态机，且显式记录 `startup100Enabled=false`、不使用 startup tier。两场景共 `432` 次 replay 全部完成且无下载失败。
 
-HKUST 正式真实调度 replay 正在执行，结束后按同一配置执行 IFCBench。驱动使用真实 GLB 响应和空应用缓存，但 Node 阶段只做 GLB container parse 与 mount phase 计时，不构造 Three.js 场景；该结果是 loader 调度复现，不冒充完整浏览器首帧渲染时间。
+25 Mbps 结果如下；GLB 与 waste 是达到完整 GT GLB 集合时的逐 run 平均值：
+
+| 场景 | 方法 | 调度阶段 median | p95 | GLB MiB | Waste MiB | 启动资产 MiB | 含启动传输 median 下界 | p95 下界 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| HKUST | Full | 0.126 s | 116.208 s | 49.703 | 28.062 | 5.225 | 1.879 s | 117.961 s |
+| HKUST | AABB MLP | 0.800 s | 136.141 s | 99.127 | 77.486 | unavailable | unavailable | unavailable |
+| HKUST | HZB visible-first | 27.317 s | 153.304 s | 151.488 | 129.847 | 380.814 | 155.097 s | 281.084 s |
+| IFCBench | Full | 4.723 s | 7.711 s | 12.098 | 8.493 | 11.334 | 8.526 s | 11.514 s |
+| IFCBench | AABB MLP | 12.287 s | 30.913 s | 43.497 | 39.892 | unavailable | unavailable | unavailable |
+| IFCBench | HZB visible-first | 7.341 s | 22.996 s | 28.985 | 25.381 | 57.148 | 26.517 s | 42.171 s |
+
+调度阶段使用真实 GLB 响应和空应用缓存，但 Node 阶段只校验 GLB container 并执行生产调度状态机，不构造 Three.js 场景，因此不冒充完整浏览器首帧渲染时间。`含启动传输下界` 在调度时间上加对应可见性资产按相同聚合带宽的传输时间，不包含资产解码、模型初始化、HZB 构建或最终绘制。AABB MLP 尚无正式部署 bundle，不能把 replay 中的空 asset list 解释成零字节，故该列保持 unavailable。完整 25/50 Mbps 数据在 `table5_scheduler_replay.csv`。
 
 ## 文件与测试
 
@@ -96,7 +107,7 @@ HKUST 正式真实调度 replay 正在执行，结束后按同一配置执行 IF
 
 已通过：
 
-- `conda run -n slm_pvs python -m unittest neural_instance_culling/benchmark/tests/test_glb_streaming.py -v`：8 个 fixture/契约测试。
+- `conda run -n slm_pvs python -m unittest neural_instance_culling/benchmark/tests/test_glb_streaming.py -v`：27 个 fixture/契约测试。
 - `conda run -n slm_pvs python -m py_compile`：全部新增 Python 入口。
 - `node scripts/test_glb_resource_scheduler.mjs`：现有 scheduler 契约。
 - `node scripts/test_real_scheduler_streaming.mjs`：12 pose synthetic scheduler replay。

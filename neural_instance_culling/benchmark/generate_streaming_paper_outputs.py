@@ -63,6 +63,29 @@ TABLE_FIELDS = [
     "time_at_100mbps_99_mean_s",
 ]
 
+SCHEDULER_TABLE_FIELDS = [
+    "scene",
+    "method",
+    "bandwidth_mbps",
+    "fixed_pose_count",
+    "repeat_count",
+    "run_count",
+    "first_frame_reached_ratio",
+    "scheduler_first_frame_mean_ms",
+    "scheduler_first_frame_median_ms",
+    "scheduler_first_frame_p95_ms",
+    "first_frame_glb_bytes_mean",
+    "waste_before_first_frame_bytes_mean",
+    "startup_asset_status",
+    "startup_asset_bytes",
+    "startup_asset_local_read_ms",
+    "startup_transfer_time_ms",
+    "cold_start_bytes_mean",
+    "cold_start_network_lower_bound_mean_ms",
+    "cold_start_network_lower_bound_median_ms",
+    "cold_start_network_lower_bound_p95_ms",
+]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate streaming paper tables and figures.")
@@ -232,6 +255,96 @@ def validate_scheduler_replay_summary(
         raise ValueError(f"{path}: scheduler replay pose IDs must be unique")
     if summary.get("cacheMode") != "strict_cold_cache_per_pose":
         raise ValueError(f"{path}: scheduler replay must use strict cold-cache poses")
+
+
+def scheduler_replay_rows(
+    summary: dict[str, Any], path: Path
+) -> list[dict[str, Any]]:
+    """Build measured scheduler rows plus a startup-transfer lower bound."""
+
+    validate_scheduler_replay_summary(summary, path)
+    method_assets = summary.get("methodAssets") or {}
+    repeats = int(summary.get("repeats", 0))
+    fixed_pose_count = int(summary["poseCount"])
+    rows: list[dict[str, Any]] = []
+    for measured in summary.get("summaries", []):
+        method = str(measured.get("method", ""))
+        bandwidth = float(measured.get("bandwidthMbps", 0.0))
+        first_frame = measured.get("firstFrameMs") or {}
+        first_frame_bytes = measured.get("firstFrameBytes") or {}
+        waste = measured.get("wasteBeforeFirstFrameBytes") or {}
+        asset = method_assets.get(method) if isinstance(method_assets, dict) else None
+        asset_bytes = int(asset.get("byteCount", 0)) if isinstance(asset, dict) else 0
+        # A zero-byte AABB entry means no deployable baseline bundle was supplied;
+        # it must not become a claimed zero-cost startup result.
+        startup_available = asset_bytes > 0
+        transfer_ms = (
+            asset_bytes * 8.0 / (bandwidth * 1_000_000.0) * 1000.0
+            if startup_available and bandwidth > 0
+            else None
+        )
+        row = {
+            "scene": scene_name(summary, path),
+            "method": method,
+            "bandwidth_mbps": bandwidth,
+            "fixed_pose_count": fixed_pose_count,
+            "repeat_count": repeats,
+            "run_count": first_frame.get("count"),
+            "first_frame_reached_ratio": measured.get("firstFrameReachedRatio"),
+            "scheduler_first_frame_mean_ms": first_frame.get("mean"),
+            "scheduler_first_frame_median_ms": first_frame.get("median"),
+            "scheduler_first_frame_p95_ms": first_frame.get("p95"),
+            "first_frame_glb_bytes_mean": first_frame_bytes.get("mean"),
+            "waste_before_first_frame_bytes_mean": waste.get("mean"),
+            "startup_asset_status": "available" if startup_available else "unavailable",
+            "startup_asset_bytes": asset_bytes if startup_available else None,
+            "startup_asset_local_read_ms": asset.get("loadMs") if startup_available else None,
+            "startup_transfer_time_ms": transfer_ms,
+            "cold_start_bytes_mean": (
+                asset_bytes + float(first_frame_bytes["mean"])
+                if startup_available and first_frame_bytes.get("mean") is not None
+                else None
+            ),
+        }
+        for statistic in ("mean", "median", "p95"):
+            elapsed = first_frame.get(statistic)
+            row[f"cold_start_network_lower_bound_{statistic}_ms"] = (
+                float(elapsed) + float(transfer_ms)
+                if elapsed is not None and transfer_ms is not None
+                else None
+            )
+        rows.append({field: row.get(field) for field in SCHEDULER_TABLE_FIELDS})
+    return rows
+
+
+def write_scheduler_markdown(path: Path, rows: list[dict[str, Any]]) -> None:
+    lines = [
+        "# Real scheduler replay",
+        "",
+        "Scheduler time measures real GLB responses through `GlbResourceScheduler`. The cold-start column adds the visibility startup asset transfer at the same aggregate bandwidth; it is a network lower bound and excludes asset decode, model initialization, HZB construction and final rendering.",
+        "",
+        "| Scene | Method | Mbps | Scheduler median | Scheduler p95 | GLB mean | Waste mean | Visibility asset | Cold-start median lower bound | Cold-start p95 lower bound |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in rows:
+        asset = row["startup_asset_bytes"]
+        cold_median = row["cold_start_network_lower_bound_median_ms"]
+        cold_p95 = row["cold_start_network_lower_bound_p95_ms"]
+        lines.append(
+            "| {scene} | {method} | {bandwidth:.0f} | {median:.3f} s | {p95:.3f} s | {glb:.3f} MiB | {waste:.3f} MiB | {asset} | {cold_median} | {cold_p95} |".format(
+                scene=scene_display_name(str(row["scene"])),
+                method=row["method"],
+                bandwidth=float(row["bandwidth_mbps"]),
+                median=float(row["scheduler_first_frame_median_ms"]) / 1000.0,
+                p95=float(row["scheduler_first_frame_p95_ms"]) / 1000.0,
+                glb=float(row["first_frame_glb_bytes_mean"]) / (1024 * 1024),
+                waste=float(row["waste_before_first_frame_bytes_mean"]) / (1024 * 1024),
+                asset=(f"{float(asset) / (1024 * 1024):.3f} MiB" if asset is not None else "unavailable"),
+                cold_median=(f"{float(cold_median) / 1000.0:.3f} s" if cold_median is not None else "unavailable"),
+                cold_p95=(f"{float(cold_p95) / 1000.0:.3f} s" if cold_p95 is not None else "unavailable"),
+            )
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _ranking_input(summary: dict[str, Any], method_name: str) -> dict[str, Any] | None:
@@ -600,10 +713,12 @@ def main() -> None:
         write_markdown(output_dir / "table5_streaming_filtering.md", filter_rows)
 
     scheduler_summaries = []
+    scheduler_rows = []
     for path in args.scheduler_summary:
         resolved = path.expanduser().resolve()
         summary = read_json(path)
         validate_paper_summary(summary, resolved, DECISION_MODE_SCHEDULER_REPLAY)
+        scheduler_rows.extend(scheduler_replay_rows(summary, resolved))
         scheduler_summaries.append(
             {
                 "path": str(resolved),
@@ -628,6 +743,15 @@ def main() -> None:
             + "\n",
             encoding="utf-8",
         )
+        with (output_dir / "table5_scheduler_replay.csv").open(
+            "w", encoding="utf-8", newline=""
+        ) as handle:
+            writer = csv.DictWriter(handle, fieldnames=SCHEDULER_TABLE_FIELDS)
+            writer.writeheader()
+            writer.writerows(scheduler_rows)
+        write_scheduler_markdown(
+            output_dir / "table5_scheduler_replay.md", scheduler_rows
+        )
 
     manifest = {
         "schema": "pvs-glb-streaming-paper-output-v1",
@@ -650,10 +774,13 @@ def main() -> None:
             "streaming_coverage_curve.svg",
         ],
         "schedulerReplayInputs": "scheduler_replay_inputs.json" if scheduler_summaries else None,
+        "schedulerReplayTable": "table5_scheduler_replay.csv" if scheduler_summaries else None,
+        "schedulerReplayTableMarkdown": "table5_scheduler_replay.md" if scheduler_summaries else None,
         "notes": [
             "Ranking is threshold-free and uses the complete per-pose candidate GLB set.",
             "Filtering is emitted separately and uses frozen score thresholds.",
             "Reference-frontmost pixels are a front-surface utility proxy, not hidden-surface coverage or a complete download utility.",
+            "Scheduler cold-start values add startup visibility-asset transfer time and are network lower bounds, not measured browser first-frame rendering times.",
         ],
     }
     (output_dir / "paper_output_manifest.json").write_text(

@@ -33,6 +33,7 @@ from export_glb_streaming_scores import load_formal_aabb_test_sidecar, load_form
 from export_glb_streaming_scores import _model_sources  # noqa: E402
 from generate_streaming_paper_outputs import (  # noqa: E402
     scene_display_name,
+    scheduler_replay_rows,
     summary_row,
     validate_scheduler_replay_summary,
     validate_paper_summary,
@@ -694,6 +695,51 @@ class GlbStreamingContractTests(unittest.TestCase):
         }
         validate_scheduler_replay_summary(scheduler, Path("scheduler.json"))
         validate_paper_summary(scheduler, Path("scheduler.json"), DECISION_MODE_SCHEDULER_REPLAY)
+
+    def test_scheduler_rows_add_startup_transfer_without_claiming_zero_byte_aabb(self) -> None:
+        scheduler = {
+            "schema": "pvs-real-scheduler-streaming-summary-v1",
+            "scheduler": "GlbResourceScheduler",
+            "schedulerTiers": ["urgent", "warm", "speculative"],
+            "split": "test",
+            "testRead": True,
+            "poseCount": 12,
+            "poseIds": list(range(12)),
+            "startup100Enabled": False,
+            "startupTierUsed": False,
+            "cacheMode": "strict_cold_cache_per_pose",
+            "repeats": 3,
+            "source": {"runtimeMeta": "/tmp/hkust-v3/assets/runtimeVisibilityMeta.json"},
+            "methodAssets": {
+                "full": {"byteCount": 3_125_000, "loadMs": 2.0},
+                "aabb": {"byteCount": 0, "loadMs": 0.0},
+            },
+            "summaries": [
+                {
+                    "method": "full",
+                    "bandwidthMbps": 25,
+                    "firstFrameReachedRatio": 1.0,
+                    "firstFrameMs": {"count": 36, "mean": 1000.0, "median": 900.0, "p95": 1500.0},
+                    "firstFrameBytes": {"mean": 2_000_000.0},
+                    "wasteBeforeFirstFrameBytes": {"mean": 500_000.0},
+                },
+                {
+                    "method": "aabb",
+                    "bandwidthMbps": 25,
+                    "firstFrameReachedRatio": 1.0,
+                    "firstFrameMs": {"count": 36, "mean": 2000.0, "median": 1900.0, "p95": 2500.0},
+                    "firstFrameBytes": {"mean": 4_000_000.0},
+                    "wasteBeforeFirstFrameBytes": {"mean": 1_000_000.0},
+                },
+            ],
+        }
+        rows = scheduler_replay_rows(scheduler, Path("scheduler.json"))
+        full, aabb = rows
+        self.assertEqual(full["startup_transfer_time_ms"], 1000.0)
+        self.assertEqual(full["cold_start_network_lower_bound_median_ms"], 1900.0)
+        self.assertEqual(full["cold_start_bytes_mean"], 5_125_000.0)
+        self.assertEqual(aabb["startup_asset_status"], "unavailable")
+        self.assertIsNone(aabb["cold_start_network_lower_bound_median_ms"])
 
     def test_aabb_runner_spec_never_turns_into_a_fallback_source(self) -> None:
         runner_specs, sidecar, requested = _model_sources(
