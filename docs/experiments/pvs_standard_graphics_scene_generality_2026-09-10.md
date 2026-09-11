@@ -2,7 +2,10 @@
 
 日期：2026-09-10；2026-09-11 更新执行状态
 
-状态：方案冻结并执行中。Sponza 已完成正式采样、Pose CSR 和 train-only 三角形关系，Full/AABB 三种子正在运行；Big City 已完成正式硬件 Color-ID 和 Pose CSR，train-only 三角形关系正在采样。
+状态：2026-09-11 完成主协议纠正并重新冻结。旧标准场景数据把 3D box 标签交给只支持
+水平圆盘的 V4 查询，并把 `0.75 m` 外接半径错误写成 `0.5 m`，实际后退距离仅
+`0.866025 m`；对应训练和中途结果已经停止，不能进入论文。新计划统一使用水平圆盘、
+按物理中心分组的随机 split 和由半径计算的后退距离，重新采样后再启动训练。
 
 ## 1. 结论与实验定位
 
@@ -62,6 +65,14 @@
 
 第一阶段不实现这个跨输出空间映射。标准场景主表比较 Keep-All、AABB + Ray MLP、WebGPU Batched Geometry-shell Hi-Z 和 Full V4；NeuralPVS 作为相关工作和场景选择依据。官方实现能够稳定运行后，再单独登记 NeuralPVS-aligned protocol，不能临时修改当前 test 口径。
 
+本文采用 NeuralPVS 第 3.2 节的 view-cell 后退构造，而不是复现其完整网络和渲染设置。对真实显示 FOV $\theta=60^\circ$ 和场景登记半径 $r$，后退距离固定为
+
+$$
+d_{back}=\frac{r}{\tan(\theta/2)}.
+$$
+
+候选/模型 FOV 固定为 `66°`，即比显示 FOV 每侧增加 `3°`。NeuralPVS 官方实验使用 `90°` 几何/PVS FOV、每 cell 1000 个 GT 位置和 `r=0.3/0.6/0.9 m`；本文的 `66°`、32 个 subpose 和实例级输出是自己的固定协议，不能写成对官方设置的逐项复现。
+
 本项目使用的 Sponza 固定为 Khronos glTF 分发，不声称与 NeuralPVS Unity 工程中的 `Sponza_Modular.FBX` 是逐三角形相同版本；因此 Sponza 只提供共同标准场景语境，不用于直接复现或比较 NeuralPVS 论文数字。Big City 则来自 NeuralPVS 官方资产，但在候选、GT 和输出单位未对齐前同样不放入直接数值行。
 
 ## 4. 场景选择与许可门
@@ -71,14 +82,36 @@
 | 优先级 | 场景 | 作用 | 当前许可/来源状态 |
 |---|---|---|---|
 | P0 | Sponza | 室内、多层遮挡，先打通完整转换和训练链 | 固定为 Khronos `glTF-Sample-Assets/Models/Sponza` 当前检出版本；模型文件声明 CRYENGINE Limited License，实验只保留本地派生资产，不随论文结果包再分发 |
-| P1 | Viking Village | 大型室外村落，与 NeuralPVS 评价场景对齐 | Unity Asset Store EULA；允许本地论文实验不等于允许再分发转换资产 |
+| P1 | Viking Village | 大型室外村落，与 NeuralPVS 评价场景对齐 | 本地统一输入为用户提供的完整 `VikingVillage.glb`；源审计和许可边界已登记，原 Unity 工程不再保留或参与执行链 |
 | P1 | Big City | 大型室外城市，与 NeuralPVS 评价场景对齐 | 已从 NeuralPVS 官方资产取得 `Assets/BigCity/scene.gltf`，来源审计通过，并已完成本项目固定单位转换；派生 GLB 仅作为本地实验产物，不据此声明公开再分发许可 |
 
 NeuralPVS 论文报告的 primitive 规模约为 Sponza `0.3M`、Viking Village `7.2M`、Big City `15.7M`。这些是该论文场景版本的说明；本项目 Big City 的来源审计另记录了 `29` 个源 primitive、`15,711,990` 个源三角形和 `12,855,583` 个源顶点，不能用论文概数替代本项目统计。
 
-如果 Viking Village 因许可或转换失败不能使用，按固定顺序替换为 San Miguel、Bistro 或 Power Plant。替代场景必须先记录来源版本、论文使用许可、是否允许发布派生 GLB 和相机轨迹来源；不能为了得到更好的模型结果临时换场景。
+Viking Village 已固定为 NeuralPVS 官方渲染仓库配套资产包中的版本，不再寻找同名替代模型。若 Unity 批处理导出暴露不可修复的源资产错误，才按固定顺序替换为 San Miguel、Bistro 或 Power Plant；替代场景必须先记录来源版本、论文使用许可、是否允许发布派生 GLB 和相机轨迹来源，不能为了得到更好的模型结果临时换场景。
 
-### 4.2 最小和目标配置
+### 4.2 Viking Village 来源与转换状态
+
+NeuralPVS 第三方许可清单将该场景标为 Unity Technologies 的 Viking Village URP，
+并受 Unity Asset Store EULA 约束；论文可报告统计和结果，但公开 artifact 不分发源
+资产或转换后的 GLB。原 Unity 工程只用于早期来源核验，现已删除，不再作为输入、
+复现依赖或保留资产。
+
+本项目实际转换输入统一存放在
+`dataset/out/standard_graphics_sources/viking_village/VikingVillage.glb`。该文件是由
+Khronos Blender glTF I/O `4.1.63` 生成的完整场景 GLB，source audit 实测为 `1,702`
+个节点、`112` 个 mesh、`1,264` 个静态 renderable primitive、`4,359,435` 个三角形，
+无 animation 或 skin；材质分类为 `1,123 OPAQUE / 133 MASK / 0 BLEND / 8 UNKNOWN`。
+场景世界范围为约 `1088.98 x 132.59 x 827.32`，后续相机生成必须依据这个实际范围，
+不能引用 Unity 工程或 NeuralPVS 论文中的概数。
+
+该 GLB 保留 scene graph 实例、世界变换、材质、纹理和 `KHR_texture_transform`，因此
+直接交给统一 glTF importer，再按固定 `128 KiB` 规则展开为一单位一资源。相邻的
+NeuralPVS 官方 Unity 资产只保留用于来源和许可核验，不再进入执行链。由于本项目尚未
+证明该 Blender 转换与 NeuralPVS 论文运行时场景逐三角形相同，论文应称其为相同公开
+Viking Village 场景来源的本项目转换，并报告上述实测规模；不得把 NeuralPVS 的
+`7.2M primitives` 直接写成本项目场景统计。
+
+### 4.3 最小和目标配置
 
 - 最小可发表补充：Sponza 加一个大型室外标准场景；
 - 目标配置：Sponza、Viking Village、Big City 三个场景；
@@ -86,19 +119,19 @@ NeuralPVS 论文报告的 primitive 规模约为 Sponza `0.3M`、Viking Village 
 
 每个场景在转换前输出 `scene_source_audit.json`，只记录来源、版本、坐标单位、格式、材质类别、三角形/节点统计和许可边界。许可证不清楚时停止该场景，不产生可被误用的正式结果。
 
-### 4.3 Big City 已完成产物
+### 4.4 Big City 已完成产物
 
-Big City 的来源记录为 `neural_instance_culling/dataset/out/standard_graphics_sources/bigcity_source_audit.json`，源文件为 `neural_instance_culling/dataset/out/standard_graphics_sources/neuralpvs_official/repo/Assets/BigCity/scene.gltf`。审计结果为 `29` 个静态 `OPAQUE` primitive、`15,711,990` 个三角形、`12,855,583` 个顶点，无动画、skin、BLEND 或排除 primitive。
+Big City 的来源记录为 `neural_instance_culling/dataset/out/standard_graphics_sources/bigcity/source_audit.json`，源文件为 `neural_instance_culling/dataset/out/standard_graphics_sources/bigcity/scene.gltf`。审计结果为 `29` 个静态 `OPAQUE` primitive、`15,711,990` 个三角形、`12,855,583` 个顶点，无动画、skin、BLEND 或排除 primitive。
 
 固定 `128 KiB` 目标的转换产物位于 `neural_instance_culling/dataset/out/standard_graphics_scenes/bigcity_128k/assets/`，并包含 `scene_source_audit.json`、`scene_audit.json`、`conversionManifest.json`、`runtimeVisibilityMeta.json` 和 `glbIndex.json`。转换 manifest 明确 `oneUnitPerResource=true`，生成 `2734` 个 renderable units、`2734` 个 instance 和 `2734` 个 GLB/resource；实际单位 GLB 字节为 p50 `93,464 B`、p95 `116,968.2 B`、最大 `131,088 B`，总计 `260,906,928 B`。这些是来源与资产转换事实，不是 PVS、图像或运行时性能结果。
 
-### 4.4 Sponza 已完成产物
+### 4.5 Sponza 已完成产物
 
 Sponza 固定为 Khronos `glTF-Sample-Assets` 的 `Models/Sponza/glTF/Sponza.gltf` 分发。来源审计记录 `103` 个静态 primitive、`262,267` 个三角形、`192,496` 个顶点，其中 `89` 个 OPAQUE、`14` 个 MASK，没有 BLEND、动画或 skin。该分发的模型许可文件声明 CRYENGINE Limited License，因此只用于本地论文实验，不将源文件、纹理或派生 GLB 纳入可公开结果包。
 
 固定 `128 KiB` 转换产物位于 `neural_instance_culling/dataset/out/standard_graphics_scenes/sponza_128k/assets/`，生成 `132` 个一单位一资源的 renderable units，总 GLB 字节为 `7,188,496 B`，单元字节 p50 `48,476 B`、p95 `121,103.8 B`、最大 `125,244 B`。其中 `110` 个输出单位为 OPAQUE、`22` 个为保留 alpha 纹理的 MASK。AABB 体积碰撞判定会把非闭合建筑 shell 内部全部排除，因此 Sponza 正式计划改用真实三角形最近表面距离；非闭合 shell 不执行内部实体判定，也不把输出宣称为 navmesh。
 
-### 4.5 固定几何表与标准场景 HZB 外壳
+### 4.6 固定几何表与标准场景 HZB 外壳
 
 两个标准场景均已按每单位 `1024` 个归一化表面点生成离线点缓存。Sponza 为 `132/132` 成功、Big City 为 `2734/2734` 成功，均无 decode failure、fallback 或 empty geometry。随后使用同一个冻结的 HKUST 几何编码器导出 96D float16 固定表，得到 Sponza `[132,96]` 和 Big City `[2734,96]`；两表数值均有限。该编码器不在标准场景上更新，标准场景的 train/calibration/validation/test 只用于后续 PVS 模型，因此不存在目标场景 test 对几何编码器的监督泄漏。论文必须将其描述为共享冻结几何特征提取器，不能描述成标准场景专属预训练。
 
@@ -153,22 +186,24 @@ source scene
   -> one frozen test read
 ```
 
-截至 2026-09-11，Big City 与 Sponza 已完成来源审计、deterministic conversion 和四路空间相机计划。固定 view-cell 半尺寸为 `0.5/0.5/0.25 m`，外接半径 `0.75 m`，另加 `0.05 m` 表面余量，因此中心到障碍的安全半径为 `0.8 m`。Big City 以扩张单位 AABB 保守排除碰撞，得到 `674` 个中心和 `8088` 个 pose，train/calibration/validation/test 为 `5916/480/984/708`；Sponza 以 `262,267` 个真实三角形的最近表面距离排除碰撞，得到 `202` 个中心和 `2424` 个 pose，四路为 `1728/132/276/288`。两场景均尚无 Color-ID subpose 采样、Pose CSR、关系证据、固定特征、Full/AABB 训练、calibration/validation/test、Hi-Z 结果或性能数字；因此本节后续步骤仍是待执行协议。
+截至 2026-09-11，Big City 与 Sponza 已完成来源审计和 renderable-unit 转换。旧 box 采样和由其产生的 Pose CSR、train-only 关系、训练 checkpoint 与 HZB test 计划不再有效。新协议仍保留相同中心集合：Big City `674` 个中心、`8088` 个 oriented view-cell；Sponza `202` 个中心、`2424` 个 oriented view-cell。两场景都重新生成圆盘 subpose 和后续正式产物。
 
 ### 6.1 相机与 view-cell
 
 - 主协议继续使用真实显示相机 `60 degrees` 和后退候选/模型相机 `66 degrees`；aspect 从实际 viewport 读取。
 - 代表相机沿可导航区域自动生成，Sponza 只在建筑可行走空间，室外场景沿道路/开放地面；不得在墙内、地下或几何内部均匀撒点。
-- view-cell 的物理半尺寸根据场景单位尺度预先登记，不能直接套用 HKUST 的 `2 m` 或 IFCBench 的 `2.5 m`。
+- view-cell shape 固定为世界 XZ 水平圆盘；半径根据场景单位尺度预先登记，不能直接套用 HKUST 的 `2 m`。
 - 每个 view-cell 的方向固定，subpose 只改变合法位置；GT 是所有成功 subpose 的可见单位并集。
+- 高空或不同楼层通过不同 Y 的中心采样，不在单个圆盘内增加垂直扰动。HKUST 同样有 `800` 个 sky 和 `640` 个 far 高空/远景中心，并非没有高空采样。
 - 主训练采样数沿用当前可承受的场景协议；另在固定 100 个 validation cells 上补到 128 个嵌套采样点，报告 GT 收敛。不能把 NeuralPVS 的 1000 点数字写成本文已经执行的采样量。
 
-本轮标准场景已预登记 view-cell 半尺寸为 `0.5/0.5/0.25 m`，主数据每 cell 使用 `16` 个确定性伪随机 subpose。由此 Big City 和 Sponza 的待渲染 Color-ID 相机数分别为 `129,408` 和 `38,784`。NeuralPVS 文献中的 `1000 positions/view-cell` 只在 summary 中标为 related-work reference，不是本文实际采样数。
+本轮标准场景固定 `r=0.75 m`，中心到几何表面的 clearance 为 `r+0.05=0.80 m`，每 cell 使用 `32` 个面积均匀、确定性的圆盘 subpose。后退距离固定为 `0.75/tan(30°)=1.299038 m`。Big City 和 Sponza 分别需要 `258,816` 和 `77,568` 次 Color-ID 渲染。半径、clearance、后退距离和 subpose 数必须写入 pose-plan audit 与 Pose CSR meta。
 
 ### 6.2 Split 与模型
 
-- 先按空间区域分块，再在区域层分配 `train/calibration/validation/test`，避免同一走廊或相邻相机泄漏到多个 split；
-- 比例固定为约 `72/8/10/10`，分别对应 train/calibration/validation/test；实际唯一 view-cell 数进入场景统计；
+- 按物理相机中心分组，以 seed `20260911` 做确定性随机交错划分；同一中心的 12 个 yaw/pitch 方向和全部 subpose 不得跨 split；
+- 先形成约 `80/10/10` 的 train/validation/test，再从初始 train 中取约 `10%` 为 calibration，最终约 `72/8/10/10`，与 HKUST 的有效分组语义一致；
+- Sponza 固定为 `146/16/20/20` 个中心，即 `1752/192/240/240` 个 oriented view-cell；Big City 固定为 `486/54/67/67` 个中心，即 `5832/648/804/804`；
 - Full V4 使用现有 96D 几何、28D 结构化生存场和相同综合损失，不增加标准场景专用头；
 - AABB + Ray MLP 使用与 Full 相同的训练步数、三 seed、安全校准规则和候选集合；
 - 每个 checkpoint 只在 calibration 冻结阈值，validation 选模型，test 只读取一次；
@@ -335,12 +370,12 @@ neural_instance_culling/benchmark/out/paper_results/standard_graphics/
 
 | 阶段 | 当前事实 | 后续行动 |
 |---|---|---|
-| G0 来源与资产审计 | Big City 与 Sponza 源文件均已取得并完成 source audit；Sponza 的许可边界已按实际模型文件修正 | 完成或登记 Viking 来源；本地派生场景资产不进入公开结果包 |
-| G1 单位转换 | Big City 已生成 `2734` 个、Sponza 已生成 `132` 个一单位一资源 GLB，并写出 conversion/runtime/audit manifests；Sponza MASK 硬件语义核验通过 | Big City 采样后复核完整实例绑定 |
-| G2 数据、训练、评价 | Sponza `38,784/38,784` subpose 聚合为 `2,424` view-cell，平均 candidate/GT 为 `44.77/9.07`；关系保留 `26,218` 边和 `376,959` 生存观察。AABB 扫描冻结 `lr=2e-4`，Full/AABB 三种子运行中。Big City `129,408/129,408` subpose 聚合为 `8,088` view-cell，split 为 `5916/480/984/708`，平均 candidate/GT 为 `767.34/201.33`，无 candidate 漏正；六层 train-only 关系正在采样。统一 HZB runner 已登记两个标准场景并生成各自 120-pose timing plan | 完成两场景关系、三种子 validation 选择、一次 frozen test、Hi-Z/图像/runtime |
+| G0 来源与资产审计 | Big City 与 Sponza 已完成 source audit；Viking 官方 Unity 场景与完整 FBX/prefab/材质资源已取得，三个场景的许可边界均已登记 | 完成 Viking Unity glTF 导出后的 source audit；本地派生场景资产不进入公开结果包 |
+| G1 单位转换 | Big City 已生成 `2734` 个、Sponza 已生成 `132` 个一单位一资源 GLB，并写出 conversion/runtime/audit manifests；Sponza MASK 硬件语义核验通过；Viking GLB source audit 已完成 | 完成 Viking `128 KiB` 转换及单位化 reference render 核验 |
+| G2 数据、训练、评价 | Sponza 新圆盘 Color-ID、Pose CSR 和 train-only 关系已完成，Full V4 与 AABB 正在训练；Big City 等待同协议重采样；旧 box 数据及训练不进入论文 | 完成 Sponza 三种子 validation 和一次 frozen test；随后串行执行 Big City/Viking 硬件采样、训练、Hi-Z、图像和 runtime |
 | G3 表图与敏感性 | 没有标准场景正式指标、图像或性能数字 | 仅在代表场景完成 `64/128/256 KiB` 敏感性，再生成 G1-G3 表、Pareto、延迟和定性图 |
 
-两场景使用统一入口 `run_standard_graphics_mainline.py`：calibration 冻结每个 checkpoint 的阈值，validation 安全池按 useful cull、balanced accuracy、Occlusion Recall 和 precision 选择成员，只对该成员读取一次 test。AABB 复用 `run_aabb_ray_baseline.py` 的学习率扫描和三种子协议，不新建场景专用模型。
+三个标准场景使用统一入口 `run_standard_graphics_mainline.py`：calibration 冻结每个 checkpoint 的阈值，validation 安全池按 useful cull、balanced accuracy、Occlusion Recall 和 precision 选择成员，只对该成员读取一次 test。Viking 已按实际 split 数加入该入口。AABB 复用 `run_aabb_ray_baseline.py` 的学习率扫描和三种子协议，不新建场景专用模型。
 
 标准场景接入检查还修正了 Color-ID sampler 的两项 GT 语义。资源绑定现在只按 `globalGlbId -> componentGlobalIds` 的显式关系完成，并交叉检查 runtime meta 与 GLB index；旧 `glbHash` 关联已删除。HKUST、Big City 和 Sponza 的静态映射核验分别得到 `3273 -> 18831`、`2734 -> 2734` 和 `132 -> 132`，缺失或冲突映射会在渲染前失败，避免生成 component 0 污染的 GT。MASK 的 Color-ID 材质保留原 base-color 纹理 alpha 与 cutoff，但不让纹理 RGB 乘到编码颜色；正式采样前仍需用真实 Sponza MASK primitive 完成硬件像素 smoke。
 
@@ -353,11 +388,72 @@ Sponza lossless 外壳已导出，实际启动资产 `1,844,914 B`，包含 `110
 个不透明 primitive、`15,711,990` 个三角形。Equal-asset 外壳必须等对应 Full V4
 运行资产冻结后再按实际字节预算生成。
 
+Sponza 新圆盘正式采样于 2026-09-11 完成：`2,424` 个 oriented view-cell、每 cell
+`32` 个 subpose，共 `77,568` 次 Color-ID 渲染；16 个分片均为 NVIDIA RTX A6000
+Vulkan/ANGLE，`gpu_execution_summary.json` 的 `formalReady=true`。聚合后的 Pose CSR
+split 为 `1752/192/240/240`（train/calibration/validation/test），平均候选
+`47.8201`、平均 GT 可见 `9.1465`，全部 subpose 成功且
+`candidateMissVisible=0`。新 train-only 三角形关系使用每个 train cell 的 5 个固定
+空间代表，共 `8,760` 个渲染视点；稀疏合并后保留 `21,904` 条关系边和 `378,757`
+条生存观测。对应 Full V4 三种子与 AABB + Ray MLP 正式矩阵已经启动，尚未产生可汇报
+的 validation/test 结果。
+
+Big City 新圆盘正式采样也已完成：`8,088` 个 oriented view-cell、每 cell `32` 个
+subpose，共 `258,816` 次 Color-ID 渲染，16 个分片全部为 NVIDIA Vulkan/ANGLE，
+`formalReady=true`。新 Pose CSR split 为 `5832/648/804/804`，平均候选
+`781.8077`、平均 GT 可见 `211.1635`，全部 subpose 成功且
+`candidateMissVisible=0`。其中 `988` 个空候选、`1,855` 个零 GT view-cell 按冻结
+协议保留。train-only 关系 manifest 使用 `5,832×5=29,160` 个深度视角，当前按 16
+分片执行稀疏光栅化。
+
+Viking 新圆盘正式采样已完成：`1,536` 个 oriented view-cell、每 cell `32` 个
+subpose，共 `49,152` 次 Color-ID 渲染，16 个分片全部通过 NVIDIA Vulkan/ANGLE
+硬件门。新 Pose CSR split 为 `1104/120/156/156`，平均候选 `585.7337`、平均 GT
+可见 `134.6706`，全部 subpose 成功且 `candidateMissVisible=0`，没有空候选或空 GT。
+train-only 关系 manifest 使用 `1,104×5=5,520` 个深度视角，当前按 16 分片执行。
+
+协议修正前 Sponza/Big City 的绑定 summary、Point60 和重复外壳结果已删除。Sponza
+绑定清单已从当前 Pose CSR 原地重建并核对后退距离为 `1.299038 m`；Big City 绑定清单
+也只从新 Pose CSR 生成。旧错误口径不再保留为兼容结果或 runner 输入。
+
+### 14.1 协议纠正记录
+
+旧标准场景数据存在三项关联错误：标签区域是 `camera_aligned_box`，V4 查询区域是
+`horizontal_disk`；外接半径从 `0.75 m` 被改写为 `0.5 m`；主 split 使用连续空间块而
+HKUST 使用中心组交错划分。2026-09-11 已停止所有基于该数据的 Full/AABB 训练，删除其
+论文资格。正式实验只接受本节冻结的圆盘、`1.299038 m` 后退距离和中心组 split。
+
+实际进入完整流水线的标准场景固定为 Sponza、Big City 和 Viking Village。Viking 的
+统一 GLB 输入、source audit 和 `128 KiB` 单位转换已经完成：共 `1,890` 个一单位一资源
+的 renderable units，包含 `4,359,435` 个三角形，单位 GLB 总计 `98,214,428 B`，p50
+为 `39,568 B`，p95 为 `118,107.4 B`。每单位 `1024` 个点的缓存 `1,890/1,890`
+成功解码，零失败、零回退和零空几何；共享冻结编码器导出的固定几何表为
+`[1890,96]` float16，数值全部有限。
+
+Viking 不使用全场四层均匀 Y 网格。其代表相机采用已冻结的
+`ground_surface_grid`：从相机域中排除 `terrain_far`，在 `24×24` 固定 XZ 网格上向
+`terrain_near` 三角形求最高交点，相机中心置于地面上方 `1.7 m`，再以近地形真实表面
+和非地形单位 AABB 执行 `0.8 m` clearance。实际得到 `128` 个合法物理中心和 `1,536`
+个定向 view-cell，split 为 `1104/120/156/156`，随后生成每 cell `32` 个 subpose，
+共 `49,152` 个硬件 Color-ID 待采样相机。每个 cell 仍严格使用半径 `0.75 m` 的水平
+圆盘、`66°` 模型 FOV、`60°` 显示 FOV 和 `1.299038 m` 后退距离；地表跟随只改变中心
+放置，不改变 PVS 查询契约。
+
+Viking 已同时登记到 `run_standard_graphics_mainline.py`、`run_aabb_ray_baseline.py`
+和 `run_geometry_shell_hzb_paper.py`。在硬件 Color-ID、Pose CSR、train-only relation
+完成前不能开始模型或 HZB 精度评价；lossless HZB 外壳可独立导出，equal-asset 外壳
+仍须等待对应 Full V4 运行资产冻结。
+
+Viking lossless HZB 外壳已经导出：仅 `1,647` 个确定 OPAQUE 单位作为遮挡物，`235`
+个 MASK 与 `8` 个材质不确定单位不写遮挡深度；外壳含 `4,037,221` 个三角形，压缩几何
+`28,408,601 B`，包含 AABB、映射和 metadata 的完整启动资产为 `30,068,115 B`。
+该数字只表示基线预下载成本，不是精度或耗时结果。
+
 ## 15. 本次方案登记
 
 - 变更目的：确定无原型复用标准场景如何进入当前 PVS 框架，并冻结转换、训练、基线和论文汇报边界。
 - 修改文件：本文、论文实验总计划、第三场景/HZB 背景文档和 `docs/README.md`。
 - 依赖资源：标准场景源文件及许可、现有硬件 Color-ID sampler、Pose CSR、V4 训练、统一 evaluator 和 WebGPU Batched Geometry-shell Hi-Z。
-- 本次运行：完成 Big City 官方资产来源审计、`128 KiB` deterministic conversion 和输出 manifest/audit 核对；没有执行 Big City 相机采样、训练、正式 Hi-Z、test 或性能测量。
+- 本次运行：停止旧标准场景 Full/AABB 训练；修正 pose 生成、subpose 采样、后退候选和 split 协议；新正式采样从圆盘计划重新开始。
 - 主线决定：保留 HKUST/IFCBench 为论文核心应用与 streaming 场景；标准场景作为 non-BIM generality 扩展，不修改当前默认 checkpoint 或前端资产。
 - 待验证风险：Big City 派生 GLB 的公开分发边界、固定单位粒度下的候选规模、大型室外场景的硬件采样时间，以及后续 Color-ID/Mask 语义核验。

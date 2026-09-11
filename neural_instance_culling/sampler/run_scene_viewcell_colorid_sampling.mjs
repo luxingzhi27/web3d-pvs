@@ -23,7 +23,7 @@ function parseArgs(argv) {
     outputDir: '',
     outputPrefix: '',
     glbIdList: '',
-    subposesPerViewcell: 8,
+    subposesPerViewcell: 32,
     height: 288,
     width: 512,
     // Training observations and model candidate inference use the same 66°
@@ -68,9 +68,23 @@ function parseArgs(argv) {
 }
 
 function lineCount(file) {
-  const text = fs.readFileSync(file, 'utf8');
-  if (!text) return 0;
-  return text.endsWith('\n') ? text.split('\n').length - 1 : text.split('\n').length;
+  const descriptor = fs.openSync(file, 'r');
+  const buffer = Buffer.allocUnsafe(8 * 1024 * 1024);
+  let count = 0;
+  let bytesRead = 0;
+  let lastByte = -1;
+  try {
+    do {
+      bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, null);
+      for (let index = 0; index < bytesRead; index += 1) {
+        if (buffer[index] === 0x0a) count += 1;
+      }
+      if (bytesRead > 0) lastByte = buffer[bytesRead - 1];
+    } while (bytesRead > 0);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  return lastByte < 0 || lastByte === 0x0a ? count : count + 1;
 }
 
 function gpuEvidencePath(outputPath) {
@@ -256,6 +270,7 @@ async function main() {
 export {
   HOST_GPU_EVIDENCE_FIELDS,
   gpuEvidencePath,
+  lineCount,
   makeJobs,
   parseArgs,
   writeGpuExecutionSummary,

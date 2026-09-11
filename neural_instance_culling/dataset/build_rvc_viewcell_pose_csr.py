@@ -3,11 +3,9 @@
 
 Each output row is one NeuralPVS-style viewcell.  The visible set is the union
 of all successful subpose visibility responses inside the viewcell.  Raw rows
-can come from rvcServer or the Three.js color-id sampler.  Candidate ids are
-computed independently from every successful subpose and then unioned; this
-matches the from-region view-cell semantics.  Ground-truth positive union is
-disabled for formal datasets and is available only as an explicit exploratory
-diagnostic.
+can come from rvcServer or the Three.js color-id sampler.  Candidate ids come
+from the single backed 66-degree camera used by the browser.  Formal builds
+require this candidate set to cover the complete subpose visibility union.
 """
 from __future__ import annotations
 
@@ -296,6 +294,11 @@ def aggregate_viewcells(rows: list[dict[str, Any]], args: argparse.Namespace) ->
                 f"viewcell {viewcell_id} contains conflicting formal splits: "
                 f"{sorted(conflicting_splits)}"
             )
+        shapes = {str(row.get("viewcell_shape", "")) for row in ok}
+        if shapes != {"horizontal_disk"}:
+            raise ValueError(
+                f"viewcell {viewcell_id} must use the V4 horizontal_disk contract; got {sorted(shapes)}"
+            )
         subpose_positions = np.asarray(
             [row.get("camera_pos") or row.get("viewcell_center") or [0, 0, 0] for row in ok],
             dtype=np.float32,
@@ -329,6 +332,8 @@ def aggregate_viewcells(rows: list[dict[str, Any]], args: argparse.Namespace) ->
             center = subpose_positions.mean(axis=0) if subpose_positions.size else np.asarray(
                 first.get("camera_pos") or [0, 0, 0], dtype=np.float32
             )
+        if not np.allclose(subpose_positions[:, 1], center[1], rtol=0.0, atol=1e-4):
+            raise ValueError(f"viewcell {viewcell_id} horizontal_disk subposes must keep a fixed world Y")
         forward = normalize(
             np.asarray(first.get("viewcell_forward") or first.get("camera_forward") or [0, 0, -1], dtype=np.float32),
             np.asarray([0, 0, -1], dtype=np.float32),
@@ -473,17 +478,17 @@ def main() -> None:
             if visible.size == 0:
                 stats["emptyVisible"] += 1
 
-            candidate_set: set[int] = set()
-            for subpose_position in vc.get("subpose_positions", np.asarray([vc["center"]], dtype=np.float32)):
-                candidates = frustum_candidate_ids(
-                    np.asarray(subpose_position, dtype=np.float32),
+            candidate_set = set(
+                int(v)
+                for v in frustum_candidate_ids(
+                    candidate_cameras[i],
                     vc["forward"],
                     vc["tan_x"],
                     vc["tan_y"],
                     aabbs,
                     args.near,
-                )
-                candidate_set.update(int(v) for v in candidates.tolist())
+                ).tolist()
+            )
             missing = np.setdiff1d(visible, np.asarray(sorted(candidate_set), dtype=np.uint32), assume_unique=False)
             if missing.size:
                 stats["candidateMissVisible"] += int(missing.size)
@@ -575,17 +580,17 @@ def main() -> None:
         "visibleCount": int(len(visible_ids_all)),
         "candidateCount": int(candidate_offsets[-1]),
         "candidateSemantics": (
-            "Union of full AABB candidates computed independently for every successful subpose; no GT positive union"
+            "AABB candidates from the single backed 66-degree model camera; no GT positive union"
             if not args.allow_candidate_visible_union
-            else "Union of full AABB candidates over all sampled subpose positions plus unioned visible positives (exploratory only)"
+            else "Backed-camera AABB candidates plus unioned visible positives (exploratory only)"
         ),
         "candidateVisibleUnionAllowed": bool(args.allow_candidate_visible_union),
         "rawCandidateFile": "raw_candidate_ids.bin" if not args.allow_candidate_visible_union else None,
         "rawCandidateOffsets": "raw_candidate_offsets.bin" if not args.allow_candidate_visible_union else None,
-        "rawCandidateSemantics": "AABB candidate union computed before any visible-positive union",
+        "rawCandidateSemantics": "Backed-camera AABB candidates computed before any visible-positive union",
         "cameraSemantics": "poses.camera_world is candidate_camera_world = query_center_world - normalize(viewcell_forward) * pvs_back_offset",
         "queryCenterSemantics": "canonical center of the same-direction view-cell visibility union",
-        "candidateCameraSemantics": "single backed 66-degree model camera; stored candidate IDs remain the conservative union over all dense subpose cameras",
+        "candidateCameraSemantics": "single backed 66-degree model camera used for both stored candidates and browser inference",
         "viewcellGeometrySemantics": "viewcell_centers are canonical plan centers; subpose_camera_pos stores every successful dense subpose position",
         "sourceViewcellCount": int(len(viewcells)),
         "sourceSubposeCount": int(len(subpose_positions_all)),
@@ -637,7 +642,7 @@ def main() -> None:
     (output_dir / "dataset_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     if stats["candidateMissVisible"] and not args.allow_candidate_visible_union:
         raise RuntimeError(
-            "Formal raw-subpose AABB candidates miss visible instances; refusing to declare the dataset usable. "
+            "Formal backed-camera AABB candidates miss visible instances; refusing to declare the dataset usable. "
             f"missing references={stats['candidateMissVisible']} across {stats['candidateMissVisibleViewcells']} viewcells. "
             "Use --allow-candidate-visible-union only for exploratory diagnostics."
         )

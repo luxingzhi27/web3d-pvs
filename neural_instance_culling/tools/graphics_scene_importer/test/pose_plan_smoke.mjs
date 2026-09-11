@@ -39,26 +39,28 @@ try {
   const second = generatePosePlan(source);
   assert.deepEqual(first, second);
   assert.ok(first.rows.length > 0);
-  assert.deepEqual(Object.keys(first.audit.spatialSplit.splitPoseCount).sort(), [
+  assert.deepEqual(Object.keys(first.audit.centerGroupSplit.splitPoseCount).sort(), [
     'calibration', 'test', 'train', 'validation',
   ]);
   assert.equal(first.audit.legalRegion.staticPvsEligibleResourceCount, 0);
   assert.equal(first.audit.legalRegion.alwaysResidentResourceCount, 1);
   assert.equal(first.audit.legalRegion.collisionRejectedPositionCount > 0, true);
-  assert.deepEqual(first.audit.legalRegion.viewcellHalfExtent, [0.5, 0.5, 0.25]);
-  assert.equal(first.audit.legalRegion.viewcellOuterRadius, 0.75);
+  assert.equal(first.audit.legalRegion.viewcellShape, 'horizontal_disk');
+  assert.equal(first.audit.legalRegion.viewcellRadius, 0.75);
   assert.equal(first.audit.legalRegion.surfaceEpsilon, 0.05);
   assert.equal(first.audit.legalRegion.safetyRadius, 0.8);
   assert.equal(first.audit.legalRegion.cameraClearance, 0.8);
 
-  const blockSplits = new Map();
+  const centerSplits = new Map();
   for (const [rowIndex, row] of first.rows.entries()) {
     assert.equal(row.pose_index, rowIndex);
     assert.equal(row.fov_y, 66);
     assert.equal(row.pvs_fov_y, 66);
     assert.equal(row.render_fov_y, 60);
-    assert.deepEqual(row.viewcell_half_extent, [0.5, 0.5, 0.25]);
+    assert.equal(row.viewcell_shape, 'horizontal_disk');
+    assert.deepEqual(row.viewcell_half_extent, [0.75, 0.75, 0]);
     assert.equal(row.viewcell_radius, 0.75);
+    assert.ok(Math.abs(row.pvs_back_offset - 0.75 / Math.tan(Math.PI / 6)) < 1e-12);
     assert.equal(row.width, 512);
     assert.equal(row.height, 288);
     assert.equal(row.aspect, 512 / 288);
@@ -67,16 +69,16 @@ try {
     assert.equal(row.camera_forward.length, 3);
     assert.ok(row.camera_forward.every(Number.isFinite));
     assert.ok(Math.abs(Math.hypot(...row.camera_forward) - 1) < 1e-6);
-    const blockKey = row.spatial_block.join(',');
-    if (blockSplits.has(blockKey)) assert.equal(blockSplits.get(blockKey), row.split);
-    else blockSplits.set(blockKey, row.split);
+    if (centerSplits.has(row.position_index)) assert.equal(centerSplits.get(row.position_index), row.split);
+    else centerSplits.set(row.position_index, row.split);
     const [x, y, z] = row.camera_pos;
     assert.ok(x < 7 - first.audit.legalRegion.cameraClearance || x > 9 + first.audit.legalRegion.cameraClearance
       || z < 7 - first.audit.legalRegion.cameraClearance || z > 9 + first.audit.legalRegion.cameraClearance
       || y < -first.audit.legalRegion.cameraClearance || y > 4 + first.audit.legalRegion.cameraClearance);
   }
-  assert.equal(blockSplits.size, first.audit.legalRegion.occupiedSpatialBlockCount);
-  assert.equal(blockSplits.size >= 4, true);
+  assert.equal(centerSplits.size, first.audit.legalRegion.legalPositionCount);
+  assert.equal(centerSplits.size >= 10, true);
+  assert.equal(first.audit.centerGroupSplit.allOrientationsAtOneCenterStayInOneSplit, true);
 
   const runtimePath = path.join(root, 'runtimeVisibilityMeta.json');
   const outputPath = path.join(root, 'pose_plan.jsonl');
@@ -121,6 +123,59 @@ try {
     '--output', geometryOutput,
   ]);
   assert.equal(fs.readFileSync(geometryOutput, 'utf8').trim().split('\n').length, geometryResult.rows.length);
+
+  const groundPositions = new Float32Array([
+    0, 0, 0,
+    16, 0, 0,
+    16, 0, 16,
+    0, 0, 16,
+  ]);
+  const groundScene = {
+    renderables: [
+      {
+        sourceNodePath: 'Content/Terrain/terrain_near',
+        positions: groundPositions,
+        indices: new Uint32Array([0, 1, 2, 0, 2, 3]),
+        bounds: { min: [0, 0, 0], max: [16, 0, 16] },
+      },
+      {
+        sourceNodePath: 'Content/Terrain/terrain_far',
+        positions: new Float32Array([-100, -1, -100, 100, -1, -100, 0, -1, 100]),
+        indices: new Uint32Array([0, 1, 2]),
+        bounds: { min: [-100, -1, -100], max: [100, -1, 100] },
+      },
+    ],
+  };
+  const groundRuntime = runtimeMeta([
+    obstacle(0, [0, 0, 0], [16, 0, 16], { sourceNodePath: 'Content/Terrain/terrain_near' }),
+    obstacle(1, [-100, -1, -100], [100, -1, 100], { sourceNodePath: 'Content/Terrain/terrain_far' }),
+    obstacle(2, [7, 0, 7], [9, 4, 9], { sourceNodePath: 'Content/Buildings/house' }),
+  ]);
+  groundRuntime.sceneBounds = { min: [-100, -1, -100], max: [100, 4, 100] };
+  const groundResult = generatePosePlan(groundRuntime, {
+    sourceScene: groundScene,
+    placementMode: 'ground_surface_grid',
+  });
+  assert.equal(groundResult.audit.legalRegion.mode, 'ground_surface_grid');
+  assert.deepEqual(groundResult.audit.legalRegion.gridDivisions, [24, 1, 24]);
+  assert.equal(groundResult.audit.legalRegion.groundRenderableCount, 1);
+  assert.equal(groundResult.audit.legalRegion.groundTriangleCount, 2);
+  assert.equal(groundResult.audit.legalRegion.groundCameraHeight, 1.7);
+  assert.equal(groundResult.audit.legalRegion.noGroundIntersectionPositionCount, 0);
+  assert.equal(groundResult.audit.legalRegion.cameraDomainBounds.min[0], 0);
+  assert.equal(groundResult.audit.legalRegion.cameraDomainBounds.max[0], 16);
+  assert.ok(groundResult.rows.length > 0);
+  assert.ok(groundResult.rows.every((row) => row.sample_category === 'ground_surface_grid'));
+  assert.ok(groundResult.rows.every((row) => Math.abs(row.camera_pos[1] - 1.7) < 1e-6));
+  assert.ok(groundResult.rows.every((row) => (
+    row.camera_pos[0] < 7 - 0.8 || row.camera_pos[0] > 9 + 0.8
+      || row.camera_pos[2] < 7 - 0.8 || row.camera_pos[2] > 9 + 0.8
+  )));
+
+  assert.throws(
+    () => generatePosePlan(groundRuntime, { placementMode: 'ground_surface_grid' }),
+    (error) => error instanceof PosePlanBlockedError && /requires --source-scene/.test(error.message),
+  );
 
   assert.throws(
     () => generatePosePlan(runtimeMeta([{}])),

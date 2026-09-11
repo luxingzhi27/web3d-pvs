@@ -8,7 +8,11 @@
 
 当前 HKUST 前端已导出该主线的冻结 V4 成员，运行目录为 `pvs_mainline_v4`，阈值为 `0.6800000071525574`。视觉效用、独立下载优先级和 GLB 字节预算没有进入本轮可见性损失；当前下载调度使用实例可见性概率聚合，不能描述成已训练的独立下载头。
 
-IFCBench 最终运行资产来自 `pvs_ifcbench_v4_calibration_finetune_v2_refine` 的 seed `20260801`，冻结阈值为 `0.6882505416870117`。2026-09-11 修正了 warm-start 导出时的 view-cell 来源优先级：最终 checkpoint 的 `2.5 m` 契约优先，初始化 checkpoint 只补最终成员缺失的协议字段。运行资产已在原正式目录重导，`model_meta.json` 的 `viewcell.radiusM` 与 `query.viewcellRadiusM` 均为 `2.5`；错误的 `2.0 m` 导出未保留。
+IFCBench 最终运行资产来自 `pvs_ifcbench_v4_calibration_finetune_v2_refine` 的 seed
+`20260801`，冻结阈值为 `0.6882505416870117`。其 GT 定义为每个 view-cell 内四个
+`camera_aligned_box` 样本的可见实例并集；训练、calibration、validation、test、图像、
+HZB 和 streaming 结果均按这一固定协议解释。128 点水平圆盘实验只用于诊断把区域
+定义扩大后的新增可见实例，不否定旧协议下模型和测试结果的有效性。
 
 ## 固定架构
 

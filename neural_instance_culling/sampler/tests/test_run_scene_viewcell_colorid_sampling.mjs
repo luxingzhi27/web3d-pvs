@@ -6,11 +6,18 @@ import path from 'node:path';
 import {
   HOST_GPU_EVIDENCE_FIELDS,
   gpuEvidencePath,
+  lineCount,
   writeGpuExecutionSummary,
 } from '../run_scene_viewcell_colorid_sampling.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'viewcell-sampler-wrapper-test-'));
 try {
+  const lineFixture = path.join(root, 'lines.jsonl');
+  fs.writeFileSync(lineFixture, 'one\ntwo\nthree');
+  assert.equal(lineCount(lineFixture), 3);
+  fs.appendFileSync(lineFixture, '\n');
+  assert.equal(lineCount(lineFixture), 3);
+
   const output = path.join(root, 'shard.jsonl');
   const job = {
     output,

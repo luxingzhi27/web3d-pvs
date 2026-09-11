@@ -44,7 +44,7 @@ conda run -n slm_pvs python neural_instance_culling/benchmark/generate_streaming
   --output-dir neural_instance_culling/benchmark/out/paper_results/streaming_formal/figures
 ```
 
-实际 test 读取规模为 HKUST `684` pose、IFCBench `2710` pose；score sidecar 分别包含 `3,174,148` 和 `27,061,482` candidate instance rows。输出目录还保存 score alignment manifest、per-pose JSONL、ranking/filtering summary、CSV、Markdown 以及 PNG/PDF/SVG 曲线。
+实际 test 读取规模为 HKUST `684` pose、IFCBench `2710` pose；score sidecar 分别包含 `3,174,148` 和 `27,061,482` 个 candidate instance rows。IFCBench 指标对应其冻结的四点 `camera_aligned_box` view-cell 协议。输出目录保存 score alignment manifest、per-pose JSONL、ranking/filtering summary、CSV、Markdown 以及 PNG/PDF/SVG 曲线。
 
 ## 正式 Test 结果
 
@@ -67,7 +67,7 @@ conda run -n slm_pvs python neural_instance_culling/benchmark/generate_streaming
 
 完整方法行、20 个 fixed-random seeds、10/25/50/100 Mbps 换算、coverage ceiling 和不可达率在 `streaming_formal/figures/table5_streaming_ranking.csv`。所有 threshold-free 方法共享完整 candidate GLB 集合，因此 coverage ceiling 为 1。
 
-冻结阈值过滤单独报告：HKUST Full 平均保留 `161.76` GLB、`36.84 MiB`，平均 coverage ceiling `0.996914`；IFCBench Full 保留 `561.25` GLB、`11.66 MiB`，coverage ceiling `0.997467`。过滤集合不参与上表的 threshold-free Bytes@x 排名。
+冻结阈值过滤单独报告：HKUST Full 平均保留 `161.76` GLB、`36.84 MiB`，平均 coverage ceiling `0.996914`；IFCBench Full 平均保留 `561.25` GLB、`11.66 MiB`，coverage ceiling `0.997467`。过滤集合不参与上表的 threshold-free Bytes@x 排名。
 
 ## 指标口径
 
@@ -99,7 +99,7 @@ conda run -n slm_pvs python neural_instance_culling/benchmark/generate_streaming
 | IFCBench | AABB MLP | 12.287 s | 30.913 s | 43.497 | 39.892 | unavailable | unavailable | unavailable |
 | IFCBench | HZB visible-first | 7.341 s | 22.996 s | 28.985 | 25.381 | 57.148 | 26.517 s | 42.171 s |
 
-调度阶段使用真实 GLB 响应和空应用缓存，但 Node 阶段只校验 GLB container 并执行生产调度状态机，不构造 Three.js 场景，因此不冒充完整浏览器首帧渲染时间。`含启动传输下界` 在调度时间上加对应可见性资产按相同聚合带宽的传输时间，不包含资产解码、模型初始化、HZB 构建或最终绘制。AABB MLP 尚无正式部署 bundle，不能把 replay 中的空 asset list 解释成零字节，故该列保持 unavailable。完整 25/50 Mbps 数据在 `table5_scheduler_replay.csv`。
+调度阶段使用真实 GLB 响应和空应用缓存，但 Node 阶段只校验 GLB container 并执行生产调度状态机，不构造 Three.js 场景，因此不冒充完整浏览器首帧渲染时间。`含启动传输下界` 在调度时间上加对应可见性资产按相同聚合带宽的传输时间，不包含资产解码、模型初始化、HZB 构建或最终绘制。AABB MLP 尚无正式部署 bundle，不能把 replay 中的空 asset list 解释成零字节，故该列保持 unavailable。完整 25/50 Mbps 数据在 `table5_scheduler_replay.csv`。IFCBench replay 与其模型测试统一使用四点 box GT 和原 test split。
 
 ## 文件与测试
 

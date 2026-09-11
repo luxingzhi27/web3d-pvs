@@ -143,3 +143,10 @@ HKUST lossless 的阶段 p50 为 depth raster `459.30 ms`、HZB build `142.95 ms
 - 依赖：现有场景 GLB/runtime meta、Pose CSR、Region source、Meshopt、Chrome WebGPU 和硬件证据入口。
 - 主线决定：保留 lossless 为完整几何基线，equal-asset 为同启动预算敏感性；两者都不替代 Full V4。
 - 待完成：移动端 HZB 计时；A6000、正式 test 图像和 visible-weight streaming 已完成。
+
+2026-09-11 增加标准场景后，exporter 同时检查 GLB 材质与
+`runtimeVisibilityMeta.componentRecords[].occluder`。只要运行时元数据明确标记
+`occluder=false`，即使转换后的子 GLB 使用默认 OPAQUE 材质，也不得写入 HZB 深度。
+该修正使 Viking Village 的 `8` 个源材质不确定单位与 `235` 个 MASK 单位一起退出
+遮挡外壳；对应测试覆盖了“GLB 为 OPAQUE、运行时资格为 false”的情况。旧错误外壳已
+原地替换，不保留兼容结果。

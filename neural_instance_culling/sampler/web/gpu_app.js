@@ -308,6 +308,9 @@ function buildRecord(pose, renderInfo, counts) {
     weight_semantics: 'screen_coverage_ppm',
     weight_scale: WEIGHT_SCALE,
     pose_index: Number(pose.pose_index ?? 0),
+    source_pose_index: Number.isFinite(Number(pose.source_pose_index))
+      ? Number(pose.source_pose_index)
+      : undefined,
     viewcell_id: Number.isFinite(Number(pose.viewcell_id)) ? Number(pose.viewcell_id) : undefined,
     subpose_id: Number.isFinite(Number(pose.subpose_id)) ? Number(pose.subpose_id) : undefined,
     viewcell_category: pose.viewcell_category,

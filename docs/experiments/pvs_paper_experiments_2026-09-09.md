@@ -21,7 +21,7 @@
 | 生存场 rank | 2/4/8/12 已完成 | rank 4 固定 |
 | Validation 图像 | seed 2 已完成 | seed 2 已完成 |
 
-本周冻结结果仍以两个现有场景为主。标准图形学场景作为独立的 non-BIM generality 扩展：采用一 renderable unit 对应一 resource 的协议，不要求 GLB 原型复用。Big City 官方 NeuralPVS 资产已完成来源审计，并按固定 `128 KiB` 目标转换为 `2734` 个单位；其采样、训练、test 和性能结果仍未形成，不阻塞 HKUST/IFCBench 的 HZB、图像和 streaming 主结果。完整转换、训练和表图要求见[标准图形学场景方案](pvs_standard_graphics_scene_generality_2026-09-10.md)。
+本周冻结结果仍以两个现有场景为主。标准图形学场景作为独立的 non-BIM generality 扩展：固定使用 Sponza、Big City 和 Viking Village，采用一 renderable unit 对应一 resource 的协议，不要求 GLB 原型复用。Big City 按固定 `128 KiB` 目标转换为 `2734` 个单位并正在执行新协议硬件采样；Sponza 的新圆盘采样、Pose CSR 和 train-only 关系已完成并已启动 Full/AABB 三种子矩阵；Viking 已转换为 `1890` 个单位，固定几何表、地表代表相机和 32-subpose 计划均已完成。标准场景结果不阻塞 HKUST/IFCBench 的 HZB、图像和 streaming 主结果。完整转换、训练和表图要求见[标准图形学场景方案](pvs_standard_graphics_scene_generality_2026-09-10.md)。
 
 ## 统一评价协议
 
@@ -93,7 +93,7 @@ AABB MLP 正式版改用与 Full 相同的逐 pose 平衡、weighted-recall 保�
 | 安全效率曲线 | Validation 的 WR-useful cull 和 WR-GLB bytes | Fig. 4 |
 | GT 收敛 | 每场景100个分层 validation cell，嵌套采样到128点 | 附录图 |
 | 离线成本 | 采样、关系、编码、训练、校准、导出时间与峰值资源 | 附录表 |
-| 标准图形场景泛化 | Sponza/Big City 等标准场景，固定 128 KiB renderable units，一单位一资源；同单位比较 Keep-All、AABB MLP、Hi-Z 与 Full | Generality 表、资产-剔除 Pareto、定性图 |
+| 标准图形场景泛化 | Sponza/Big City/Viking Village，固定 128 KiB renderable units，一单位一资源；同单位比较 Keep-All、AABB MLP、Hi-Z 与 Full | Generality 表、资产-剔除 Pareto、定性图 |
 
 正文保留五张表：场景统计、test 可见性、消融、资产与运行时间、streaming。核心图为系统总览、模型架构、生存场可视化、安全效率曲线、候选数量延迟曲线、下载覆盖曲线和定性对比。研究图输出 PDF、SVG、PNG 和源 CSV；架构图保留可编辑源文件。
 
@@ -179,18 +179,18 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 |---|---|---|
 | 场景统计 | 完成 | 两场景规模、三角形、GLB 字节、split、候选/GT 分布已进入 Table 1 |
 | HKUST Full test | 完成 | 三种子均通过安全门；WR `0.997082 +/- 0.001634`，LCB `0.994334 +/- 0.003271`，useful cull `0.901758 +/- 0.007830` |
-| IFCBench 微调与 test | 完成 | v2 边界减半三种子 confirmation 的 validation LCB 为 `0.991106/0.990764/0.990215`，均通过；正式 `2710` test 的 pose PR-AUC `0.482290 +/- 0.021681`、WR `0.991179 +/- 0.000668`、LCB `0.990523 +/- 0.000552`、useful cull `0.602498 +/- 0.015504`，三份 test 各读取一次。运行资产使用 validation useful cull 最高的 seed01 |
+| IFCBench 微调与 test | 完成 | 四点 camera-aligned-box 协议下，v2 边界减半三种子 validation LCB 为 `0.991106/0.990764/0.990215`；正式 `2710` test 的 pose PR-AUC `0.482290 +/- 0.021681`、WR `0.991179 +/- 0.000668`、LCB `0.990523 +/- 0.000552`、useful cull `0.602498 +/- 0.015504`。运行资产使用 validation useful cull 最高的 seed01 |
 | AABB + Ray MLP | 完成 | 两场景三种子 `40 x 900` 与 frozen test 已完成。IFCBench pose PR-AUC `0.28504 +/- 0.00047`、prevalence `0.12232`、useful cull `0.03942`；HKUST 与 Full 的正式对照产物也已登记 |
-| HZB 外壳与运行时 | 完成 | `36/36` 正式任务完成；两场景都冻结 `512x288 / 100 m`。Lossless Region66 test 的 WR/LCB/useful cull 为 HKUST `0.997633/0.996552/0.328166`、IFCBench `0.995325/0.994716/0.237997`；总查询 p50 分别 `989.55/120.15 ms` |
-| 资产与容量 | 完成 | 神经资产为 lossless shell 的 `1.37%`（HKUST）和 `19.78%`（IFCBench）；rank Pareto、Table 4 及 PDF/SVG/PNG 已生成 |
+| HZB 外壳与运行时 | 完成 | 两场景冻结 `512x288 / 100 m`。Lossless Region66 test 的 WR/LCB/useful cull 为 HKUST `0.997633/0.996552/0.328166`、IFCBench `0.995325/0.994716/0.237997`；总查询 p50 分别为 `989.55/120.15 ms` |
+| 资产与容量 | 完成 | 神经资产为 lossless shell 的 `1.37%`（HKUST）和 `19.78%`（IFCBench）；rank Pareto 与 Table 4 已生成 |
 | 端侧模型前向 | 部分完成 | A6000 两场景五 session 已完成：HKUST/IFCBench WebGPU kernel p50 `1.568/1.385 ms`、p95 `3.555/3.590 ms`；WASM p50 `3.7/46.8 ms`、p95 `100.5/143.2 ms`。HKUST M2 与 vivo 已完成，IFCBench 移动端仍缺失 |
 | Safety-efficiency | 完成 | 六个核心变体的 calibration-safe validation 曲线及论文图已生成 |
-| Streaming | 完成 | Visible-weight Bytes@99：HKUST Full/成本感知/面积字节/HZB 为 `18.031/10.819/12.881/17.498 MiB`；IFCBench 为 `8.078/7.119/13.426/13.404 MiB`。冻结 alpha 为 `1.0/0.5`。两场景真实 scheduler 共 `432` 次无失败；25 Mbps 下 Full 相对 HZB 的首帧调度 median 为 HKUST `0.126 vs 27.317 s`、IFCBench `4.723 vs 7.341 s`，计入启动资产传输后的网络下界为 `1.879 vs 155.097 s` 和 `8.526 vs 26.517 s` |
-| Test 图像 | 完成 | 六组正式硬件 Vulkan/ANGLE 图像评价完成，均无失败 subpose 或缺失 GLB。HKUST Full/AABB/HZB aggregate PER 为 `0.3662/0.8613/0.3128%`；IFCBench 为 `0.5011/0.0583/0.5312%` |
-| GT 收敛 | 部分完成 | 两场景各 100 cell x 128 点水平圆盘计划已生成，IFCBench 半径为 `2.5 m`；新 evaluator 已按计划/raw 三元组对齐，正式 Vulkan Color-ID 采样待执行 |
+| Streaming | 完成 | Visible-weight Bytes@99：HKUST Full/成本感知/面积字节/HZB 为 `18.031/10.819/12.881/17.498 MiB`；IFCBench 为 `8.078/7.119/13.426/13.404 MiB`。25 Mbps 下 Full/HZB 调度 median 为 HKUST `0.126/27.317 s`、IFCBench `4.723/7.341 s` |
+| Test 图像 | 完成 | HKUST Full/AABB/HZB aggregate PER 为 `0.3662/0.8613/0.3128%`；IFCBench 为 `0.5011/0.0583/0.5312%`，均按各自冻结 test 协议解释 |
+| GT 收敛 | 完成诊断 | 两场景各 100 cell x 128 点硬件采样完成。HKUST 源 GT 对 128 点实例/权重覆盖 `99.6411/99.9997%`；IFCBench 四点 box GT 对另一水平圆盘定义为 `80.1942/97.2252%`。该结果只界定连续区域声明，不否定四点协议结果，也不触发重训 |
 | 离线成本 / 结果包 | 完成当前可得项 | 六阶段成本、artifact registry、三种子 Table 2 汇总已生成；未记录时间保持 unavailable，不作推算 |
-| 标准图形场景 | 两场景流水线执行中 | Sponza `38,784` 个硬件 Color-ID subpose、`2,424` Pose CSR 和 train-only 稀疏关系已完成；Full/AABB 三种子运行中。Sponza lossless HZB 外壳为 `1,844,914 B / 227,327 triangles`。Big City `129,408` 个 subpose 与 `8,088` Pose CSR 已完成，平均 candidate/GT `767.34/201.33`、无 candidate 漏正，六层关系采样运行中；lossless HZB 外壳为 `106,166,442 B / 15,711,990 triangles`。两场景已接入统一 HZB runner 并生成 120-pose timing plan |
+| 标准图形场景 | 协议纠正后执行中 | 旧 `camera_aligned_box` 标签、`0.5 m` 运行半径和空间块 split 已退出主线。三个场景均使用水平圆盘、`r=0.75 m`、后退 `1.299038 m`、32 subpose 和中心组 split。Sponza 已启动 Full/AABB 三种子；Big City 与 Viking 的新硬件 Color-ID 和 Pose CSR 均已通过 `candidateMissVisible=0`，两场景 train-only 稀疏深度关系分片正在运行 |
 
-截至 2026-09-11，现有两个主场景只剩 GT 收敛和缺失的 IFCBench 移动端组合。标准场景按同一显式四分割、同一 V4 和同一 AABB/HZB 评价口径执行；任何中间指标都不替代三种子 validation 选择和一次 frozen test。
+截至 2026-09-11，HKUST 与 IFCBench 主结果均按各自预登记的 view-cell 采样协议冻结。标准场景按同一显式四分割、同一 V4 和同一 AABB/HZB 评价口径执行；任何中间指标都不替代三种子 validation 选择和一次 frozen test。
 
 本轮实现回归已通过 benchmark `167` 项、model `48` 项、完整前端 `npm test` 和 sampler `7` 项测试；测试过程禁用 CUDA，不作为任何正式性能结果。

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Measure nested view-cell GT convergence from a plan and raw JSONL pair.
 
-The formal input contract is the generated 100 x 128 plan and the matching
-Color-ID raw JSONL. A raw row is joined to a plan row by
+The formal input contract is the generated 100 x 128 plan, its matching
+Color-ID raw JSONL and the source Pose CSR dataset. A raw row is joined to a plan row by
 ``(viewcell_id, subpose_id, source_pose_index)``; ``pose_index`` is only an
 optional consistency check and is never used as the join key.
 """
@@ -218,6 +218,36 @@ def load_raw(
     return visibility
 
 
+def load_source_visibility(
+    dataset_dir: Path,
+    plan: dict[int, list[dict[str, Any]]],
+) -> dict[int, Visibility]:
+    """Load the existing Pose CSR GT for each selected source view-cell."""
+
+    dataset_dir = Path(dataset_dir).resolve()
+    meta = json.loads((dataset_dir / "dataset_meta.json").read_text(encoding="utf-8"))
+    pose_count = int(meta.get("poseCount", -1))
+    offsets = np.fromfile(dataset_dir / "visible_offsets.bin", dtype="<u8")
+    ids = np.fromfile(dataset_dir / "visible_ids.bin", dtype="<u4")
+    weights = np.fromfile(dataset_dir / "visible_weights.bin", dtype="<f4")
+    if offsets.size != pose_count + 1 or offsets[0] != 0 or np.any(offsets[1:] < offsets[:-1]):
+        raise ValueError("source dataset visible offsets do not match poseCount")
+    if int(offsets[-1]) != ids.size or weights.size != ids.size:
+        raise ValueError("source dataset visible IDs/weights do not match offsets")
+
+    result: dict[int, Visibility] = {}
+    for viewcell_id, entries in plan.items():
+        source_indices = {int(entry["key"][2]) for entry in entries}
+        if len(source_indices) != 1:
+            raise ValueError(f"viewcell_id={viewcell_id} maps to multiple source poses")
+        source_index = source_indices.pop()
+        if not 0 <= source_index < pose_count:
+            raise ValueError(f"source pose {source_index} is outside the Pose CSR dataset")
+        start, end = int(offsets[source_index]), int(offsets[source_index + 1])
+        result[viewcell_id] = (ids[start:end].copy(), weights[start:end].astype(np.float64))
+    return result
+
+
 def nested_union(
     ordered_pose_ids: Sequence[Any] | np.ndarray,
     visibility: dict[Any, Visibility],
@@ -258,6 +288,7 @@ def build_convergence_rows(
     scene: str,
     plan: dict[int, list[dict[str, Any]]],
     visibility: dict[AlignmentKey, Visibility],
+    source_visibility: dict[int, Visibility],
     sample_counts: Sequence[int],
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
@@ -285,6 +316,15 @@ def build_convergence_rows(
                 snapshots[count] = (set(prefix_ids), dict(prefix_weights))
         final_ids, final_weights = snapshots[final_count]
         final_mass = _mass(final_weights)
+        source_ids_array, source_weights_array = source_visibility[viewcell_id]
+        source_ids = set(int(value) for value in source_ids_array.tolist())
+        source_weights = {
+            int(component_id): float(weight)
+            for component_id, weight in zip(source_ids_array.tolist(), source_weights_array.tolist())
+        }
+        intersection = source_ids & final_ids
+        union = source_ids | final_ids
+        source_mass = _mass(source_weights)
 
         for count in sample_counts:
             current_ids, current_weights = snapshots[count]
@@ -300,7 +340,7 @@ def build_convergence_rows(
                 "availableSubposes": len(ordered_keys),
                 "sampleCount": count,
                 "visibleCount": len(current_ids),
-                "final128VisibleCount": final_visible_count,
+                "finalReferenceVisibleCount": final_visible_count,
                 "visibleCoverage": (
                     len(current_ids) / final_visible_count if final_visible_count else 1.0
                 ),
@@ -318,7 +358,23 @@ def build_convergence_rows(
                 "weightedCoverage": (
                     current_mass / final_mass if final_mass else 1.0
                 ),
-                "final128WeightMass": final_mass,
+                "finalReferenceWeightMass": final_mass,
+                "sourceVisibleCount": len(source_ids),
+                "sourceCoverageOfReference": (
+                    len(intersection) / final_visible_count if final_visible_count else 1.0
+                ),
+                "sourceCoverageOfReferenceWeight": (
+                    sum(final_weights[component_id] for component_id in intersection) / final_mass
+                    if final_mass else 1.0
+                ),
+                "referenceCoverageOfSource": (
+                    len(intersection) / len(source_ids) if source_ids else 1.0
+                ),
+                "referenceCoverageOfSourceWeight": (
+                    sum(source_weights[component_id] for component_id in intersection) / source_mass
+                    if source_mass else 1.0
+                ),
+                "sourceReferenceJaccard": len(intersection) / len(union) if union else 1.0,
             })
     return rows
 
@@ -347,8 +403,8 @@ def summarize_rows(
             "viewcellCount": len(subset),
             "visibleCountMean": float(np.mean(values("visibleCount"))),
             "visibleCountP05": _quantile(values("visibleCount"), 0.05),
-            "final128VisibleCountMean": float(np.mean(values("final128VisibleCount"))),
-            "final128VisibleCountP05": _quantile(values("final128VisibleCount"), 0.05),
+            "finalReferenceVisibleCountMean": float(np.mean(values("finalReferenceVisibleCount"))),
+            "finalReferenceVisibleCountP05": _quantile(values("finalReferenceVisibleCount"), 0.05),
             "visibleCoverageMean": float(np.mean(values("visibleCoverage"))),
             "visibleCoverageP05": _quantile(values("visibleCoverage"), 0.05),
             "newInstanceCountMean": float(np.mean(values("newInstanceCount"))),
@@ -360,6 +416,13 @@ def summarize_rows(
             "weightedConvergenceP05": _quantile(values("weightedConvergence"), 0.05),
             "weightedCoverageMean": float(np.mean(values("weightedCoverage"))),
             "weightedCoverageP05": _quantile(values("weightedCoverage"), 0.05),
+            "sourceCoverageOfReferenceMean": float(np.mean(values("sourceCoverageOfReference"))),
+            "sourceCoverageOfReferenceP05": _quantile(values("sourceCoverageOfReference"), 0.05),
+            "sourceCoverageOfReferenceWeightMean": float(np.mean(values("sourceCoverageOfReferenceWeight"))),
+            "sourceCoverageOfReferenceWeightP05": _quantile(values("sourceCoverageOfReferenceWeight"), 0.05),
+            "referenceCoverageOfSourceMean": float(np.mean(values("referenceCoverageOfSource"))),
+            "referenceCoverageOfSourceWeightMean": float(np.mean(values("referenceCoverageOfSourceWeight"))),
+            "sourceReferenceJaccardMean": float(np.mean(values("sourceReferenceJaccard"))),
         })
     return summary_rows
 
@@ -378,6 +441,7 @@ def evaluate(
     scene: str,
     plan_path: Path,
     raw_path: Path,
+    dataset_dir: Path,
     output_dir: Path,
     sample_counts: Sequence[int] = DEFAULT_SAMPLE_COUNTS,
     viewcell_count: int = EXPECTED_VIEWCELL_COUNT,
@@ -399,7 +463,10 @@ def evaluate(
         subpose_count=subpose_count,
     )
     visibility = load_raw(Path(raw_path), plan)
-    rows = build_convergence_rows(scene, plan, visibility, requested_counts)
+    source_visibility = load_source_visibility(Path(dataset_dir), plan)
+    rows = build_convergence_rows(
+        scene, plan, visibility, source_visibility, requested_counts
+    )
     summary_rows = summarize_rows(scene, rows, requested_counts)
 
     output = Path(output_dir).resolve()
@@ -413,15 +480,17 @@ def evaluate(
         "formalEntry": "plan-jsonl-plus-raw-jsonl",
         "plan": str(Path(plan_path).resolve()),
         "raw": str(Path(raw_path).resolve()),
+        "sourceDataset": str(Path(dataset_dir).resolve()),
         "viewcellCount": viewcell_count,
         "subposesPerViewcell": subpose_count,
         "requestedSampleCounts": requested_counts,
         "alignment": "exact (viewcell_id, subpose_id, source_pose_index) key; pose_index is only checked when present",
         "nestedOrder": "ascending subpose_id from the supplied plan",
-        "reference": "union of subpose_id 0..127 in each view-cell",
-        "newInstanceRateDefinition": "new IDs in G_N minus G_(N/2), divided by |G_128|; N=1 uses an empty prefix",
-        "remainingInstanceRateDefinition": "IDs in G_128 not present in G_N, divided by |G_128|",
-        "weightedConvergenceDefinition": "sum of per-instance maximum component_weights in G_N divided by the corresponding G_128 sum",
+        "reference": f"union of subpose_id 0..{subpose_count - 1} in each view-cell",
+        "newInstanceRateDefinition": f"new IDs in G_N minus G_(N/2), divided by |G_{subpose_count}|; N=1 uses an empty prefix",
+        "remainingInstanceRateDefinition": f"IDs in G_{subpose_count} not present in G_N, divided by |G_{subpose_count}|",
+        "weightedConvergenceDefinition": f"sum of per-instance maximum component_weights in G_N divided by the corresponding G_{subpose_count} sum",
+        "sourceCoverageDefinition": f"fraction of G_{subpose_count} IDs or G_{subpose_count} weight mass already present in the source Pose CSR GT",
         "summary": summary_rows,
         "testRead": False,
     }
@@ -442,6 +511,7 @@ def main() -> None:
         "--plan", "--plan-jsonl", dest="plan", type=Path, required=True,
         help="100x128 nested plan JSONL",
     )
+    parser.add_argument("--dataset-dir", type=Path, required=True)
     parser.add_argument(
         "--raw", "--raw-jsonl", "--raw-dir", dest="raw", type=Path, required=True,
         help="matching raw JSONL file or shard directory",
@@ -456,6 +526,7 @@ def main() -> None:
         scene=args.scene,
         plan_path=args.plan,
         raw_path=args.raw,
+        dataset_dir=args.dataset_dir,
         output_dir=args.output_dir,
         sample_counts=parse_counts(args.sample_counts),
     )

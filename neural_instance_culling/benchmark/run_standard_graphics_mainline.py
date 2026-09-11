@@ -30,7 +30,7 @@ SCENES: dict[str, dict[str, Any]] = {
         "geometry": "neural_instance_culling/dataset/out/standard_graphics_scenes/sponza_128k/instance_geo_features_fp16.bin",
         "glb_index": "neural_instance_culling/dataset/out/standard_graphics_scenes/sponza_128k/assets/glbIndex.json",
         "glb_root": "neural_instance_culling/dataset/out/standard_graphics_scenes/sponza_128k/assets",
-        "splits": {"train": 1728, "validation": 276, "calibration": 132, "test": 288, "guard": 0},
+        "splits": {"train": 1752, "validation": 240, "calibration": 192, "test": 240, "guard": 0},
     },
     "bigcity_128k": {
         "dataset": "neural_instance_culling/dataset/out/pose_csr_bigcity_standard_graphics_128k_fov66_v1",
@@ -39,7 +39,16 @@ SCENES: dict[str, dict[str, Any]] = {
         "geometry": "neural_instance_culling/dataset/out/standard_graphics_scenes/bigcity_128k/instance_geo_features_fp16.bin",
         "glb_index": "neural_instance_culling/dataset/out/standard_graphics_scenes/bigcity_128k/assets/glbIndex.json",
         "glb_root": "neural_instance_culling/dataset/out/standard_graphics_scenes/bigcity_128k/assets",
-        "splits": {"train": 5916, "validation": 984, "calibration": 480, "test": 708, "guard": 0},
+        "splits": {"train": 5832, "validation": 804, "calibration": 648, "test": 804, "guard": 0},
+    },
+    "viking_village_128k": {
+        "dataset": "neural_instance_culling/dataset/out/pose_csr_viking_village_standard_graphics_128k_fov66_v1",
+        "relation": "neural_instance_culling/dataset/out/viking_village_standard_graphics_v4_bounded_relation_csr_v1",
+        "runtime_meta": "neural_instance_culling/dataset/out/standard_graphics_scenes/viking_village_128k/assets/runtimeVisibilityMeta.json",
+        "geometry": "neural_instance_culling/dataset/out/standard_graphics_scenes/viking_village_128k/instance_geo_features_fp16.bin",
+        "glb_index": "neural_instance_culling/dataset/out/standard_graphics_scenes/viking_village_128k/assets/glbIndex.json",
+        "glb_root": "neural_instance_culling/dataset/out/standard_graphics_scenes/viking_village_128k/assets",
+        "splits": {"train": 1104, "validation": 156, "calibration": 120, "test": 156, "guard": 0},
     },
 }
 

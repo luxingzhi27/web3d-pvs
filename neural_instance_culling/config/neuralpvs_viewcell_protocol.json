@@ -1,6 +1,7 @@
 {
-  "schema": "neuralpvs-viewcell-fov-protocol-v2",
+  "schema": "pvs-horizontal-disk-viewcell-protocol-v3",
   "reference": "NeuralPVS arXiv:2509.24677v1 Sections 3.2 and 4.3",
+  "viewcellShape": "horizontal_disk",
   "renderFovYDeg": 60.0,
   "modelFovYDeg": 66.0,
   "modelFovScale": 1.1,
@@ -9,11 +10,53 @@
   "renderResolution": [1024, 1024],
   "nearM": 0.3,
   "farM": 1000.0,
-  "groundTruthPositionsPerViewcell": 1000,
+  "defaultSubposesPerViewcell": 32,
+  "relatedWorkReference": {
+    "method": "NeuralPVS",
+    "groundTruthPositionsPerViewcell": 1000,
+    "note": "Reference configuration only; the SLM main protocol uses each scene profile's subposes value."
+  },
   "backOffsetFormula": "r / tan(renderFovYDeg / 2)",
+  "splitProtocol": {
+    "groupingUnit": "all oriented view-cells sharing one physical center",
+    "assignment": "deterministic seeded random center-group assignment",
+    "seed": 20260911,
+    "ratios": {
+      "train": 0.72,
+      "calibration": 0.08,
+      "validation": 0.10,
+      "test": 0.10
+    }
+  },
+  "sceneProfiles": {
+    "hkust_v3": {
+      "radiusM": 2.0,
+      "subposes": 32,
+      "skyFarSubposes": 48
+    },
+    "sponza_128k": {
+      "radiusM": 0.75,
+      "subposes": 32
+    },
+    "bigcity_128k": {
+      "radiusM": 0.75,
+      "subposes": 32
+    },
+    "viking_village_128k": {
+      "radiusM": 0.75,
+      "subposes": 32,
+      "representativePosePlacement": "ground_surface_grid",
+      "groundNodeToken": "terrain_near",
+      "excludedDomainNodeToken": "terrain_far",
+      "groundGridDivisionsXZ": [24, 24],
+      "cameraHeightAboveGroundM": 1.7,
+      "cameraSurfaceClearanceM": 0.8
+    }
+  },
   "semantics": {
     "renderFov": "前端真实画面使用的垂直视场角",
     "modelFov": "模型训练、后退候选相机和运行时推理使用的垂直视场角；等于真实相机视场角乘以 1.1",
-    "backOffset": "代表查询相机沿主视线反向后退的距离；r 使用 view-cell 的保守横向半径"
+    "viewcell": "固定相机朝向和高度的世界 XZ 水平圆盘；高空视点由不同高度的圆盘中心表达",
+    "backOffset": "代表查询相机沿主视线反向后退的距离；r 是水平圆盘半径"
   }
 }

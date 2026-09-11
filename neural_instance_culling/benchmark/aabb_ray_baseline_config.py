@@ -60,6 +60,12 @@ SCENES: dict[str, dict[str, str]] = {
         "glbIndex": "neural_instance_culling/dataset/out/standard_graphics_scenes/bigcity_128k/assets/glbIndex.json",
         "glbRoot": "neural_instance_culling/dataset/out/standard_graphics_scenes/bigcity_128k/assets",
     },
+    "viking_village_128k": {
+        "dataset": "neural_instance_culling/dataset/out/pose_csr_viking_village_standard_graphics_128k_fov66_v1",
+        "runtimeMeta": "neural_instance_culling/dataset/out/standard_graphics_scenes/viking_village_128k/assets/runtimeVisibilityMeta.json",
+        "glbIndex": "neural_instance_culling/dataset/out/standard_graphics_scenes/viking_village_128k/assets/glbIndex.json",
+        "glbRoot": "neural_instance_culling/dataset/out/standard_graphics_scenes/viking_village_128k/assets",
+    },
 }
 
 

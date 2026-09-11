@@ -34,7 +34,8 @@ function parseArgs(argv) {
     output: '',
     summary: '',
     scene: '',
-    subposesPerViewcell: 16,
+    subposesPerViewcell: 32,
+    viewcellShape: '',
     radius: null,
     halfRight: null,
     halfForward: null,
@@ -59,6 +60,7 @@ function parseArgs(argv) {
     else if (name === 'summary') args.summary = path.resolve(value);
     else if (name === 'scene') args.scene = String(value);
     else if (name === 'subposes-per-viewcell') args.subposesPerViewcell = Number(value);
+    else if (name === 'viewcell-shape') args.viewcellShape = String(value);
     else if (name === 'radius') args.radius = Number(value);
     else if (name === 'viewcell-half-right') args.halfRight = Number(value);
     else if (name === 'viewcell-half-forward') args.halfForward = Number(value);
@@ -97,34 +99,27 @@ function parseArgs(argv) {
   if (Math.abs(args.baseFovY - RENDER_FOV_Y_DEG) > 1e-6) {
     throw new Error(`The current view-cell sampler requires a 60 degree frontend render FOV.`);
   }
-  applySceneDefaults(args);
-  if (!Number.isFinite(args.halfRight) || args.halfRight < 0) throw new Error('--viewcell-half-right must be non-negative');
-  if (!Number.isFinite(args.halfForward) || args.halfForward < 0) throw new Error('--viewcell-half-forward must be non-negative');
-  if (!Number.isFinite(args.halfUp) || args.halfUp < 0) throw new Error('--viewcell-half-up must be non-negative');
   return args;
 }
 
-function applySceneDefaults(args) {
-  if (Number.isFinite(args.radius)) {
-    args.halfRight ??= args.radius;
-    args.halfForward ??= args.radius;
-    args.halfUp ??= args.radius * 0.35;
-    return;
+function viewcellGeometry(rep, args) {
+  const shape = args.viewcellShape || rep.viewcell_shape || NEURALPVS_FOV_PROTOCOL.viewcellShape;
+  if (shape === 'horizontal_disk') {
+    const radius = Number.isFinite(args.radius) ? args.radius : Number(rep.viewcell_radius);
+    if (!(radius > 0)) throw new Error('horizontal_disk requires a positive viewcell radius');
+    return { shape, radius, halfExtent: [radius, radius, 0] };
   }
-  const key = String(args.scene || '').toLowerCase().replace(/\\/g, '/');
-  if (key.includes('hkust')) {
-    args.halfRight ??= 4.0;
-    args.halfForward ??= 4.0;
-    args.halfUp ??= 1.5;
-  } else if (key.includes('metropolis') || key.includes('ifcbench')) {
-    args.halfRight ??= 2.5;
-    args.halfForward ??= 2.5;
-    args.halfUp ??= 1.0;
-  } else {
-    args.halfRight ??= 1.0;
-    args.halfForward ??= 1.0;
-    args.halfUp ??= 0.35;
+  if (shape !== 'camera_aligned_box') throw new Error(`Unsupported viewcell shape: ${shape}`);
+  const source = Array.isArray(rep.viewcell_half_extent) ? rep.viewcell_half_extent.map(Number) : [];
+  const halfExtent = [
+    Number.isFinite(args.halfRight) ? args.halfRight : source[0],
+    Number.isFinite(args.halfForward) ? args.halfForward : source[1],
+    Number.isFinite(args.halfUp) ? args.halfUp : source[2],
+  ];
+  if (halfExtent.some((value) => !Number.isFinite(value) || value < 0)) {
+    throw new Error('camera_aligned_box requires three non-negative half extents');
   }
+  return { shape, radius: Math.hypot(...halfExtent), halfExtent };
 }
 
 function readJsonl(file) {
@@ -191,13 +186,19 @@ function yawPitchFromForward(forward) {
 function stableSplit(viewcellId, seed) {
   const r = random01(seed, viewcellId + 101);
   if (r < 0.8) return 'train';
-  if (r < 0.9) return 'val';
+  if (r < 0.9) return 'validation';
   return 'test';
 }
 
-function sampleViewcellOffset(viewcellId, subposeId, halfRight, halfForward, halfUp, basis, seed) {
+function sampleViewcellOffset(viewcellId, subposeId, geometry, basis, seed) {
   if (subposeId === 0) return [0, 0, 0];
   const localSeed = (seed + Math.imul(viewcellId + 1, 73856093) + Math.imul(subposeId + 1, 19349663)) >>> 0;
+  if (geometry.shape === 'horizontal_disk') {
+    const radius = Math.sqrt(random01(localSeed, 1)) * geometry.radius;
+    const angle = random01(localSeed, 2) * Math.PI * 2;
+    return [Math.cos(angle) * radius, 0, Math.sin(angle) * radius];
+  }
+  const [halfRight, halfForward, halfUp] = geometry.halfExtent;
   const rightScale = (random01(localSeed, 1) * 2.0 - 1.0) * halfRight;
   const forwardScale = (random01(localSeed, 2) * 2.0 - 1.0) * halfForward;
   const vertical = (random01(localSeed, 3) * 2.0 - 1.0) * halfUp;
@@ -216,6 +217,9 @@ function main() {
   const out = fs.createWriteStream(args.output, { encoding: 'utf8' });
   let poseIndex = 0;
   const categoryCounts = {};
+  const shapes = new Set();
+  const radii = new Set();
+  const backOffsets = new Set();
   for (let viewcellId = 0; viewcellId < selected.length; viewcellId += 1) {
     const rep = selected[viewcellId];
     const center = (rep.camera_pos || [0, 0, 0]).map(Number);
@@ -233,7 +237,8 @@ function main() {
       : (CATEGORY_IDS[category] ?? CATEGORY_IDS.unknown);
     categoryCounts[category] = (categoryCounts[category] || 0) + 1;
     const split = rep.split || stableSplit(viewcellId, args.seed);
-    const viewcellRadius = Math.max(args.halfRight, args.halfForward, args.halfUp);
+    const geometry = viewcellGeometry(rep, args);
+    const viewcellRadius = geometry.radius;
     const explicitBackOffset = Number(rep.pvs_back_offset);
     const pvsBackOffset = Number.isFinite(explicitBackOffset) && explicitBackOffset > 0
       ? explicitBackOffset
@@ -243,9 +248,7 @@ function main() {
       const offset = sampleViewcellOffset(
         viewcellId,
         subposeId,
-        args.halfRight,
-        args.halfForward,
-        args.halfUp,
+        geometry,
         basis,
         args.seed,
       );
@@ -260,8 +263,8 @@ function main() {
         subpose_id: subposeId,
         viewcell_category: category,
         viewcell_center: center,
-        viewcell_shape: 'camera_aligned_box',
-        viewcell_half_extent: [args.halfRight, args.halfForward, args.halfUp],
+        viewcell_shape: geometry.shape,
+        viewcell_half_extent: geometry.halfExtent,
         viewcell_radius: viewcellRadius,
         viewcell_forward: forward,
         viewcell_yaw_deg: yawDeg,
@@ -285,6 +288,9 @@ function main() {
       out.write(`${JSON.stringify(row)}\n`);
       poseIndex += 1;
     }
+    shapes.add(geometry.shape);
+    radii.add(viewcellRadius);
+    backOffsets.add(pvsBackOffset);
   }
   out.end();
   const summary = {
@@ -295,18 +301,19 @@ function main() {
     viewcellCount: selected.length,
     subposesPerViewcell: args.subposesPerViewcell,
     poseCount: poseIndex,
-    viewcellShape: 'camera_aligned_box',
-    viewcellHalfExtent: [args.halfRight, args.halfForward, args.halfUp],
+    viewcellShapes: [...shapes],
+    viewcellRadiiM: [...radii],
+    pvsBackOffsetsM: [...backOffsets],
     protocol: NEURALPVS_FOV_PROTOCOL.schema,
     renderFovY: args.renderFovY,
     baseFovY: args.baseFovY,
     modelFovY: args.modelFovY,
     relatedWorkReferenceGroundTruthPositionsPerViewcell: Number(
-      NEURALPVS_FOV_PROTOCOL.groundTruthPositionsPerViewcell,
+      NEURALPVS_FOV_PROTOCOL.relatedWorkReference.groundTruthPositionsPerViewcell,
     ),
     backOffsetFormula: NEURALPVS_FOV_PROTOCOL.backOffsetFormula,
     categoryCounts,
-    semantics: 'Each viewcell emits K same-direction deterministic pseudo-random camera positions inside the viewcell; model sampling and candidate inference use 66 degrees, while the frontend display camera uses 60 degrees.',
+    semantics: 'Each viewcell emits K same-direction deterministic camera positions. The V4 mainline uses a fixed-height world-XZ horizontal disk; model sampling and candidate inference use 66 degrees, while the frontend display camera uses 60 degrees.',
   };
   const summaryPath = args.summary || args.output.replace(/\.jsonl$/i, '_summary.json');
   fs.writeFileSync(summaryPath, JSON.stringify(summary, null, 2), 'utf8');

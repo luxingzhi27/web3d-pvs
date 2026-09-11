@@ -1019,7 +1019,11 @@ async function buildExport(args) {
   for (let entryIndex = 0; entryIndex < selectedEntries.length; entryIndex += 1) {
     const entry = selectedEntries[entryIndex];
     const globalRecord = globalRecords[Number(entry.globalId)];
-    const expectedInstanceCount = globalRecord?.componentGlobalIds?.length ?? 0;
+    const componentGlobalIds = globalRecord?.componentGlobalIds || [];
+    const expectedInstanceCount = componentGlobalIds.length;
+    const runtimeOccluder = componentGlobalIds.every((componentId) => (
+      runtime.recordById[Number(componentId)]?.occluder !== false
+    ));
     const inspected = await inspectSourceEntry(entry, assetsDir, expectedInstanceCount);
     counters.sourceGlbBytes += inspected.sourceBytes;
     if (inspected.emptyPlaceholder) {
@@ -1054,14 +1058,21 @@ async function buildExport(args) {
         triangleCount: primitive.triangleCount,
         instanceCount: primitiveInstanceCount,
         materialDecision: primitive.material,
-        occluder: primitive.material.occluder,
-        reason: primitive.material.reason,
+        runtimeOccluder,
+        occluder: primitive.material.occluder && runtimeOccluder,
+        reason: primitive.material.reason || (runtimeOccluder ? null : 'runtime-meta-non-occluder'),
         selected: false,
       };
       primitiveAudits.push(primitiveAudit);
       if (!primitive.material.occluder) {
         counters.excludedPrimitiveCount += 1;
         counters.excludedByReason[primitive.material.reason] = (counters.excludedByReason[primitive.material.reason] || 0) + 1;
+        continue;
+      }
+      if (!runtimeOccluder) {
+        counters.excludedPrimitiveCount += 1;
+        counters.excludedByReason['runtime-meta-non-occluder'] =
+          (counters.excludedByReason['runtime-meta-non-occluder'] || 0) + 1;
         continue;
       }
       counters.opaquePrimitiveCount += 1;

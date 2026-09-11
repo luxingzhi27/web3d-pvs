@@ -50,6 +50,17 @@ def make_plan_and_raw(viewcell_count: int = 2, subpose_count: int = 4) -> tuple[
     return plan, raw
 
 
+def write_source_dataset(path: Path, source_pose_count: int) -> None:
+    path.mkdir()
+    ids = np.arange(source_pose_count, dtype="<u4")
+    np.arange(source_pose_count + 1, dtype="<u8").tofile(path / "visible_offsets.bin")
+    ids.tofile(path / "visible_ids.bin")
+    np.ones(source_pose_count, dtype="<f4").tofile(path / "visible_weights.bin")
+    (path / "dataset_meta.json").write_text(
+        json.dumps({"poseCount": source_pose_count}) + "\n", encoding="utf-8"
+    )
+
+
 class GtConvergenceTest(unittest.TestCase):
     def test_nested_union_uses_max_component_weight(self) -> None:
         visibility = {
@@ -107,14 +118,18 @@ class GtConvergenceTest(unittest.TestCase):
             )
             for row in raw
         }
-        rows = MODULE.build_convergence_rows("test", loaded_plan, visibility, [1, 2, 4])
+        source_visibility = {0: (np.asarray([1, 2]), np.asarray([1.0, 1.0]))}
+        rows = MODULE.build_convergence_rows(
+            "test", loaded_plan, visibility, source_visibility, [1, 2, 4]
+        )
         by_count = {row["sampleCount"]: row for row in rows}
-        self.assertEqual(by_count[4]["final128VisibleCount"], 3)
+        self.assertEqual(by_count[4]["finalReferenceVisibleCount"], 3)
         self.assertAlmostEqual(by_count[1]["newInstanceRate"], 1 / 3)
         self.assertAlmostEqual(by_count[2]["newInstanceRate"], 1 / 3)
         self.assertAlmostEqual(by_count[4]["newInstanceRate"], 1 / 3)
         self.assertAlmostEqual(by_count[2]["weightedConvergence"], 1 / 2)
         self.assertEqual(by_count[4]["remainingInstanceRate"], 0.0)
+        self.assertAlmostEqual(by_count[4]["sourceCoverageOfReference"], 2 / 3)
 
     def test_evaluate_writes_all_formal_prefixes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -124,10 +139,13 @@ class GtConvergenceTest(unittest.TestCase):
             raw_path = root / "raw.jsonl"
             write_jsonl(plan_path, plan)
             write_jsonl(raw_path, raw)
+            dataset_dir = root / "dataset"
+            write_source_dataset(dataset_dir, 200)
             manifest = MODULE.evaluate(
                 scene="synthetic",
                 plan_path=plan_path,
                 raw_path=raw_path,
+                dataset_dir=dataset_dir,
                 output_dir=root / "evaluation",
             )
             self.assertEqual(manifest["viewcellCount"], 100)

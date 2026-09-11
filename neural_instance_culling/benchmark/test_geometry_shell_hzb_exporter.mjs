@@ -63,33 +63,37 @@ const outputDir = path.join(root, 'output');
 fs.mkdirSync(path.join(assetsDir, 'task-0', 'glb', 'LOD0'), { recursive: true });
 writeTinyGlb(path.join(assetsDir, 'task-0/glb/LOD0/sub_0.glb'));
 writeTinyGlb(path.join(assetsDir, 'task-0/glb/LOD0/sub_1.glb'), { alphaMode: 'BLEND' });
+writeTinyGlb(path.join(assetsDir, 'task-0/glb/LOD0/sub_2.glb'));
 fs.writeFileSync(path.join(assetsDir, 'sceneWeb.json'), JSON.stringify({
   config: { sceneName: 'geometry-shell-test' },
-  groups: [{ idRange: [0, 1], instances: {} }],
+  groups: [{ idRange: [0, 2], instances: {} }],
 }));
 fs.writeFileSync(path.join(assetsDir, 'glbIndex.json'), JSON.stringify({
   version: 1,
   ordering: 'task-asc,baseId-asc',
   lod: 'LOD0',
-  total: 2,
+  total: 3,
   entries: [
   { globalId: 0, taskId: 0, baseId: 0, path: 'task-0/glb/LOD0/sub_0.glb' },
   { globalId: 1, taskId: 0, baseId: 1, path: 'task-0/glb/LOD0/sub_1.glb' },
+  { globalId: 2, taskId: 0, baseId: 2, path: 'task-0/glb/LOD0/sub_2.glb' },
   ],
 }));
 const emptyStats = { visiblePoses: 0, visibleRatio: 0, weightMean: 0, weightP90: 0, weightMax: 0, priorityPrior: 0 };
 fs.writeFileSync(path.join(assetsDir, 'runtimeVisibilityMeta.json'), JSON.stringify({
   schemaVersion: 1,
-  componentCount: 2,
-  instanceCount: 2,
-  globalGlbCount: 2,
+  componentCount: 3,
+  instanceCount: 3,
+  globalGlbCount: 3,
   componentRecords: [
     { componentGlobalId: 0, instanceId: 0, globalGlbId: 0, bounds: { center: [0.5, 0.5, -5], size: [1, 1, 0] }, rvcStats: emptyStats },
     { componentGlobalId: 1, instanceId: 1, globalGlbId: 1, bounds: { center: [0.5, 0.5, -5], size: [1, 1, 0] }, rvcStats: emptyStats },
+    { componentGlobalId: 2, instanceId: 2, globalGlbId: 2, occluder: false, bounds: { center: [0.5, 0.5, -5], size: [1, 1, 0] }, rvcStats: emptyStats },
   ],
   globalGlbRecords: [
     { globalGlbId: 0, componentGlobalIds: [0], aabb: { min: [0, 0, -5], max: [1, 1, -5] }, rvcStats: emptyStats },
     { globalGlbId: 1, componentGlobalIds: [1], aabb: { min: [0, 0, -5], max: [1, 1, -5] }, rvcStats: emptyStats },
+    { globalGlbId: 2, componentGlobalIds: [2], aabb: { min: [0, 0, -5], max: [1, 1, -5] }, rvcStats: emptyStats },
   ],
 }));
 
@@ -111,9 +115,10 @@ const result = await buildExport({
 await MeshoptDecoder.ready;
 assert.equal(result.meta.schema, 'geometry-shell-hzb-v2');
 assert.equal(result.meta.prototypeCount, 1);
-assert.equal(result.meta.stats.sourcePrimitiveCount, 2);
+assert.equal(result.meta.stats.sourcePrimitiveCount, 3);
 assert.equal(result.meta.stats.opaquePrimitiveCount, 1);
 assert.equal(result.meta.stats.excludedByReason['alpha-mode-blend'], 1);
+assert.equal(result.meta.stats.excludedByReason['runtime-meta-non-occluder'], 1);
 assert.equal(result.meta.queryContract.sampleCount, 1);
 assert.match(result.meta.queryContract.mipDimensions, /explicit/);
 assert.equal(result.meta.queryContract.candidateTest, 'all-candidate-conservative-aabb-hzb');
@@ -203,7 +208,7 @@ assert.equal(
 );
 const equalOfflineReport = JSON.parse(fs.readFileSync(equalResult.offlineReportPath, 'utf8'));
 assert.equal(equalOfflineReport.runtimeAsset, false);
-assert.equal(equalOfflineReport.primitiveAudits.length, 2);
+assert.equal(equalOfflineReport.primitiveAudits.length, 3);
 
 fs.rmSync(root, { recursive: true, force: true });
 console.log('Geometry-shell HZB exporter tests passed.');

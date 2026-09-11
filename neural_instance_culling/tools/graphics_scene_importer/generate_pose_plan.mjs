@@ -14,16 +14,19 @@ const WIDTH = 512;
 const HEIGHT = 288;
 const ASPECT = WIDTH / HEIGHT;
 const GRID_DIVISIONS = Object.freeze([16, 4, 16]);
-const BLOCK_DIVISIONS = Object.freeze([4, 2, 4]);
+const GROUND_GRID_DIVISIONS = Object.freeze([24, 24]);
 const YAW_DEGREES = Object.freeze([0, 90, 180, 270]);
 const PITCH_DEGREES = Object.freeze([-15, 0, 15]);
-const VIEWCELL_HALF_EXTENTS = Object.freeze([0.5, 0.5, 0.25]);
-const VIEWCELL_OUTER_RADIUS = Math.hypot(...VIEWCELL_HALF_EXTENTS);
+const VIEWCELL_RADIUS = 0.75;
 const SURFACE_EPSILON = 0.05;
-const CAMERA_CLEARANCE = VIEWCELL_OUTER_RADIUS + SURFACE_EPSILON;
+const CAMERA_CLEARANCE = VIEWCELL_RADIUS + SURFACE_EPSILON;
+const PVS_BACK_OFFSET = VIEWCELL_RADIUS / Math.tan(RENDER_FOV_Y * 0.5 * RAD);
+const SPLIT_SEED = 20260911;
 const SPLIT_NAMES = Object.freeze(['train', 'calibration', 'validation', 'test']);
-const SPLIT_RATIOS = Object.freeze([0.72, 0.08, 0.10, 0.10]);
 const BVH_LEAF_SIZE = 16;
+const GROUND_CAMERA_HEIGHT = 1.7;
+const TERRAIN_NEAR_TOKEN = 'terrain_near';
+const TERRAIN_FAR_TOKEN = 'terrain_far';
 
 export class PosePlanBlockedError extends Error {
   constructor(message) {
@@ -115,6 +118,7 @@ function auditRecords(runtimeMeta) {
     return {
       id,
       bounds: recordBounds(record, index, source.source),
+      sourceNodePath: String(record.sourceNodePath || ''),
       staticPvsEligible: record.staticPvsEligible !== false,
       alwaysResident: record.alwaysResident === true,
       alphaMode: record.alphaMode || null,
@@ -129,6 +133,10 @@ function auditRecords(runtimeMeta) {
     );
   }
   return { ...source, records };
+}
+
+function pathContains(record, token) {
+  return String(record?.sourceNodePath || '').toLowerCase().includes(token);
 }
 
 function clearanceForScene(sceneBounds) {
@@ -370,7 +378,10 @@ function triangleCenterCompare(centers, left, right, axis) {
 }
 
 function buildTriangleCollisionIndex(sourceScene) {
-  const renderables = Array.isArray(sourceScene?.renderables) ? sourceScene.renderables : [];
+  return buildTriangleIndex(Array.isArray(sourceScene?.renderables) ? sourceScene.renderables : []);
+}
+
+function buildTriangleIndex(renderables) {
   const triangleCount = renderables.reduce((sum, renderable) => (
     sum + Math.floor((renderable?.indices?.length || 0) / 3)
   ), 0);
@@ -449,6 +460,39 @@ function buildTriangleCollisionIndex(sourceScene) {
   };
 }
 
+function groundHeightAt(x, z, index) {
+  let highest = -Infinity;
+  const stack = [index.root];
+  while (stack.length > 0) {
+    const node = index.nodes[stack.pop()];
+    if (x < node.min[0] || x > node.max[0] || z < node.min[2] || z > node.max[2]) continue;
+    if (node.indices) {
+      for (const triangle of node.indices) {
+        const offset = triangle * 9;
+        const ax = index.vertices[offset];
+        const ay = index.vertices[offset + 1];
+        const az = index.vertices[offset + 2];
+        const bx = index.vertices[offset + 3];
+        const by = index.vertices[offset + 4];
+        const bz = index.vertices[offset + 5];
+        const cx = index.vertices[offset + 6];
+        const cy = index.vertices[offset + 7];
+        const cz = index.vertices[offset + 8];
+        const denominator = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
+        if (Math.abs(denominator) <= 1e-12) continue;
+        const u = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / denominator;
+        const v = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) / denominator;
+        const w = 1 - u - v;
+        if (u < -1e-8 || v < -1e-8 || w < -1e-8) continue;
+        highest = Math.max(highest, u * ay + v * by + w * cy);
+      }
+      continue;
+    }
+    stack.push(node.left, node.right);
+  }
+  return highest;
+}
+
 function nearestTriangleDistanceSquared(point, index, maximumDistanceSquared) {
   let nearest = Infinity;
   const stack = [index.root];
@@ -479,54 +523,14 @@ function collisionAtPoint(point, index, clearance) {
     : collides(point, index);
 }
 
-function morton3(x, y, z) {
-  let result = 0;
-  for (let bit = 0; bit < 8; bit += 1) {
-    result |= ((x >> bit) & 1) << (bit * 3);
-    result |= ((y >> bit) & 1) << (bit * 3 + 1);
-    result |= ((z >> bit) & 1) << (bit * 3 + 2);
-  }
-  return result >>> 0;
-}
-
-function splitBlockCounts(blockCount) {
-  if (blockCount < SPLIT_NAMES.length) {
-    throw new PosePlanBlockedError(
-      `only ${blockCount} occupied spatial blocks are available; four disjoint splits need at least four`,
-    );
-  }
-  const ideal = SPLIT_RATIOS.map((ratio) => ratio * blockCount);
-  const counts = ideal.map((value) => Math.max(1, Math.floor(value)));
-  while (counts.reduce((sum, value) => sum + value, 0) > blockCount) {
-    let selected = -1;
-    let excess = -Infinity;
-    for (let index = 0; index < counts.length; index += 1) {
-      if (counts[index] <= 1) continue;
-      const value = counts[index] - ideal[index];
-      if (value > excess) {
-        excess = value;
-        selected = index;
-      }
-    }
-    counts[selected] -= 1;
-  }
-  while (counts.reduce((sum, value) => sum + value, 0) < blockCount) {
-    let selected = 0;
-    let deficit = -Infinity;
-    for (let index = 0; index < counts.length; index += 1) {
-      const value = ideal[index] - counts[index];
-      if (value > deficit) {
-        deficit = value;
-        selected = index;
-      }
-    }
-    counts[selected] += 1;
-  }
-  return counts;
-}
-
-function blockCoordinate(gridIndex) {
-  return gridIndex.map((value, axis) => Math.floor(value * BLOCK_DIVISIONS[axis] / GRID_DIVISIONS[axis]));
+function hash32(value) {
+  let x = value >>> 0;
+  x ^= x >>> 16;
+  x = Math.imul(x, 0x7feb352d) >>> 0;
+  x ^= x >>> 15;
+  x = Math.imul(x, 0x846ca68b) >>> 0;
+  x ^= x >>> 16;
+  return x >>> 0;
 }
 
 function gridPosition(sceneBounds, gridIndex) {
@@ -562,13 +566,10 @@ function collectLegalPositions(sceneBounds, collisionIndex, clearance) {
         if (collisionAtPoint(position, collisionIndex, clearance)) {
           collisionRejected += 1;
         } else {
-          const block = blockCoordinate(gridIndex);
           positions.push({
             candidateIndex,
             gridIndex,
             position,
-            block,
-            blockMorton: morton3(block[0], block[1], block[2]),
           });
         }
         candidateIndex += 1;
@@ -582,64 +583,132 @@ function collectLegalPositions(sceneBounds, collisionIndex, clearance) {
   };
 }
 
-function groupPositionsByBlock(positions) {
-  const groups = new Map();
-  for (const position of positions) {
-    const key = position.block.join(',');
-    let group = groups.get(key);
-    if (!group) {
-      group = {
-        block: position.block,
-        blockMorton: position.blockMorton,
-        positions: [],
-      };
-      groups.set(key, group);
-    }
-    group.positions.push(position);
+function collectGroundSurfacePositions(runtimeRecords, sourceScene, clearance) {
+  const renderables = Array.isArray(sourceScene?.renderables) ? sourceScene.renderables : [];
+  const groundRenderables = renderables.filter((record) => pathContains(record, TERRAIN_NEAR_TOKEN));
+  if (groundRenderables.length === 0) {
+    throw new PosePlanBlockedError(`ground_surface_grid needs source nodes containing ${TERRAIN_NEAR_TOKEN}`);
   }
-  return [...groups.values()].sort((left, right) => (
-    compareNumbers(left.blockMorton, right.blockMorton)
-    || compareNumbers(left.block[0], right.block[0])
-    || compareNumbers(left.block[1], right.block[1])
-    || compareNumbers(left.block[2], right.block[2])
+  const domainRenderables = renderables.filter((record) => !pathContains(record, TERRAIN_FAR_TOKEN));
+  const domain = aggregateBounds(
+    domainRenderables.map((renderable, originalIndex) => ({
+      min: renderable.bounds.min,
+      max: renderable.bounds.max,
+      originalIndex,
+    })),
+    domainRenderables.map((_renderable, index) => index),
+  );
+  const groundIndex = buildTriangleIndex(groundRenderables);
+  const obstacleRecords = runtimeRecords.filter((record) => (
+    !pathContains(record, TERRAIN_NEAR_TOKEN) && !pathContains(record, TERRAIN_FAR_TOKEN)
   ));
-}
-
-function assignSplits(groups) {
-  const counts = splitBlockCounts(groups.length);
-  const splitByBlock = new Map();
-  let offset = 0;
-  for (let splitIndex = 0; splitIndex < SPLIT_NAMES.length; splitIndex += 1) {
-    for (let index = 0; index < counts[splitIndex]; index += 1) {
-      const group = groups[offset + index];
-      splitByBlock.set(group.block.join(','), SPLIT_NAMES[splitIndex]);
+  const obstacleIndex = obstacleRecords.length > 0 ? buildCollisionIndex(obstacleRecords, clearance) : null;
+  const positions = [];
+  let noGroundRejected = 0;
+  let collisionRejected = 0;
+  let candidateIndex = 0;
+  for (let xIndex = 0; xIndex < GROUND_GRID_DIVISIONS[0]; xIndex += 1) {
+    for (let zIndex = 0; zIndex < GROUND_GRID_DIVISIONS[1]; zIndex += 1) {
+      const x = domain.min[0] + ((xIndex + 0.5) / GROUND_GRID_DIVISIONS[0]) * (domain.max[0] - domain.min[0]);
+      const z = domain.min[2] + ((zIndex + 0.5) / GROUND_GRID_DIVISIONS[1]) * (domain.max[2] - domain.min[2]);
+      const groundY = groundHeightAt(x, z, groundIndex);
+      if (!Number.isFinite(groundY)) {
+        noGroundRejected += 1;
+      } else {
+        const position = [x, groundY + GROUND_CAMERA_HEIGHT, z];
+        const hitsGroundSurface = collidesWithGeometry(position, groundIndex, clearance);
+        const hitsObstacle = obstacleIndex ? collides(position, obstacleIndex) : false;
+        if (hitsGroundSurface || hitsObstacle) {
+          collisionRejected += 1;
+        } else {
+          positions.push({
+            candidateIndex,
+            gridIndex: [xIndex, 0, zIndex],
+            position,
+            sampleCategory: 'ground_surface_grid',
+          });
+        }
+      }
+      candidateIndex += 1;
     }
-    offset += counts[splitIndex];
   }
-  return { counts, splitByBlock };
+  return {
+    positions,
+    gridCandidateCount: candidateIndex,
+    collisionRejected,
+    noGroundRejected,
+    groundTriangleCount: groundIndex.triangleCount,
+    groundRenderableCount: groundRenderables.length,
+    obstacleRecordCount: obstacleRecords.length,
+    domainBounds: boundsFromValue(domain, 'ground surface domain'),
+  };
 }
 
-function createRows(groups, splitByBlock) {
+function assignCenterGroupSplits(positions) {
+  if (positions.length < 10) {
+    throw new PosePlanBlockedError('at least ten legal camera centers are required for four splits');
+  }
+  const order = positions.slice().sort((left, right) => (
+    compareNumbers(
+      hash32(SPLIT_SEED ^ Math.imul(left.candidateIndex + 1, 0x9e3779b1)),
+      hash32(SPLIT_SEED ^ Math.imul(right.candidateIndex + 1, 0x9e3779b1)),
+    ) || compareNumbers(left.candidateIndex, right.candidateIndex)
+  ));
+  const validationCount = Math.round(positions.length * 0.10);
+  const testCount = Math.round(positions.length * 0.10);
+  const historicalTrainCount = positions.length - validationCount - testCount;
+  const calibrationCount = Math.round(historicalTrainCount * 0.10);
+  const trainPool = order.slice(0, historicalTrainCount).sort((left, right) => (
+    compareNumbers(
+      hash32((SPLIT_SEED + 1) ^ Math.imul(left.candidateIndex + 1, 0x85ebca6b)),
+      hash32((SPLIT_SEED + 1) ^ Math.imul(right.candidateIndex + 1, 0x85ebca6b)),
+    ) || compareNumbers(left.candidateIndex, right.candidateIndex)
+  ));
+  const splitByCenter = new Map();
+  for (const position of trainPool.slice(0, calibrationCount)) {
+    splitByCenter.set(position.candidateIndex, 'calibration');
+  }
+  for (const position of trainPool.slice(calibrationCount)) {
+    splitByCenter.set(position.candidateIndex, 'train');
+  }
+  for (const position of order.slice(historicalTrainCount, historicalTrainCount + validationCount)) {
+    splitByCenter.set(position.candidateIndex, 'validation');
+  }
+  for (const position of order.slice(historicalTrainCount + validationCount)) {
+    splitByCenter.set(position.candidateIndex, 'test');
+  }
+  return {
+    splitByCenter,
+    centerCounts: {
+      train: historicalTrainCount - calibrationCount,
+      calibration: calibrationCount,
+      validation: validationCount,
+      test: testCount,
+    },
+  };
+}
+
+function createRows(positions, splitByCenter) {
   const rows = [];
-  for (const group of groups) {
-    const split = splitByBlock.get(group.block.join(','));
-    for (const position of group.positions.sort((left, right) => (
-      compareNumbers(left.gridIndex[0], right.gridIndex[0])
-      || compareNumbers(left.gridIndex[1], right.gridIndex[1])
-      || compareNumbers(left.gridIndex[2], right.gridIndex[2])
-    ))) {
+  for (const position of positions.slice().sort((left, right) => (
+    compareNumbers(left.gridIndex[0], right.gridIndex[0])
+    || compareNumbers(left.gridIndex[1], right.gridIndex[1])
+    || compareNumbers(left.gridIndex[2], right.gridIndex[2])
+  ))) {
+    const split = splitByCenter.get(position.candidateIndex);
       for (const yawDeg of YAW_DEGREES) {
         for (const pitchDeg of PITCH_DEGREES) {
           rows.push({
             pose_index: rows.length,
             split,
-            sample_category: 'free_space_grid',
+            sample_category: position.sampleCategory || 'free_space_grid',
             sample_category_id: 0,
             camera_pos: position.position.slice(),
             camera_forward: directionFor(yawDeg, pitchDeg),
-            viewcell_shape: 'camera_aligned_box',
-            viewcell_half_extent: VIEWCELL_HALF_EXTENTS.slice(),
-            viewcell_radius: VIEWCELL_OUTER_RADIUS,
+            viewcell_shape: 'horizontal_disk',
+            viewcell_half_extent: [VIEWCELL_RADIUS, VIEWCELL_RADIUS, 0],
+            viewcell_radius: VIEWCELL_RADIUS,
+            pvs_back_offset: PVS_BACK_OFFSET,
             yaw_deg: yawDeg,
             pitch_deg: pitchDeg,
             fov_y: MODEL_FOV_Y,
@@ -650,12 +719,9 @@ function createRows(groups, splitByBlock) {
             height: HEIGHT,
             position_index: position.candidateIndex,
             grid_index: position.gridIndex.slice(),
-            spatial_block: position.block.slice(),
-            spatial_block_morton: position.blockMorton,
           });
         }
       }
-    }
   }
   return rows;
 }
@@ -674,22 +740,36 @@ export function generatePosePlan(runtimeMeta, options = {}) {
   const sceneBounds = boundsFromValue(runtimeMeta?.sceneBounds, 'sceneBounds');
   const audited = auditRecords(runtimeMeta);
   const clearance = clearanceForScene(sceneBounds);
-  const legalityMode = options.sourceScene ? 'geometry' : 'aabb';
-  const collisionIndex = legalityMode === 'geometry'
-    ? buildTriangleCollisionIndex(options.sourceScene)
-    : buildCollisionIndex(audited.records, clearance);
-  const legal = collectLegalPositions(sceneBounds, collisionIndex, clearance);
+  const placementMode = options.placementMode || 'volume_grid';
+  if (!['volume_grid', 'ground_surface_grid'].includes(placementMode)) {
+    throw new PosePlanBlockedError(`unsupported placement mode ${placementMode}`);
+  }
+  if (placementMode === 'ground_surface_grid' && !options.sourceScene) {
+    throw new PosePlanBlockedError('ground_surface_grid requires --source-scene');
+  }
+  const legalityMode = placementMode === 'ground_surface_grid'
+    ? 'ground_surface_grid'
+    : options.sourceScene ? 'geometry' : 'aabb';
+  let collisionIndex = null;
+  let legal;
+  if (placementMode === 'ground_surface_grid') {
+    legal = collectGroundSurfacePositions(audited.records, options.sourceScene, clearance);
+  } else {
+    collisionIndex = legalityMode === 'geometry'
+      ? buildTriangleCollisionIndex(options.sourceScene)
+      : buildCollisionIndex(audited.records, clearance);
+    legal = collectLegalPositions(sceneBounds, collisionIndex, clearance);
+  }
   if (legal.positions.length === 0) {
     throw new PosePlanBlockedError(
       `no collision-free grid positions remain after rejecting ${legal.collisionRejected} positions`,
     );
   }
-  const groups = groupPositionsByBlock(legal.positions);
-  const { counts: splitBlockCount, splitByBlock } = assignSplits(groups);
-  const rows = createRows(groups, splitByBlock);
+  const { centerCounts: splitCenterCount, splitByCenter } = assignCenterGroupSplits(legal.positions);
+  const rows = createRows(legal.positions, splitByCenter);
   const splitPoseCount = countBySplit(rows);
   if (SPLIT_NAMES.some((name) => splitPoseCount[name] === 0)) {
-    throw new PosePlanBlockedError('one or more spatial splits has no pose');
+    throw new PosePlanBlockedError('one or more center-group splits has no pose');
   }
   const staticPvsEligibleCount = audited.records.filter((record) => record.staticPvsEligible).length;
   const alwaysResidentCount = audited.records.filter((record) => record.alwaysResident).length;
@@ -702,20 +782,30 @@ export function generatePosePlan(runtimeMeta, options = {}) {
     sourceSchema: runtimeMeta.schemaVersion ?? null,
     sceneBounds,
     legalRegion: {
-      semantics: legalityMode === 'geometry'
-        ? 'sceneBounds interior grid points whose nearest source-scene triangle surface is farther than the fixed clearance; no volume or navigability is claimed'
-        : 'sceneBounds interior grid points outside expanded runtime resource AABBs; navigability is not claimed',
+      semantics: legalityMode === 'ground_surface_grid'
+        ? 'fixed XZ grid over the non-far scene domain, projected downward onto terrain_near; camera centers are offset upward and clearance-tested'
+        : legalityMode === 'geometry'
+          ? 'sceneBounds interior grid points whose nearest source-scene triangle surface is farther than the fixed clearance; no volume or navigability is claimed'
+          : 'sceneBounds interior grid points outside expanded runtime resource AABBs; navigability is not claimed',
       mode: legalityMode,
-      collisionInput: legalityMode === 'geometry' ? 'source-scene-triangles' : audited.source,
+      collisionInput: legalityMode === 'geometry'
+        ? 'source-scene-triangles'
+        : legalityMode === 'ground_surface_grid' ? 'terrain_near triangles plus non-terrain runtime AABBs' : audited.source,
       sourceScene: options.sourceScenePath || null,
       sourceSceneTriangleCount: legalityMode === 'geometry' ? collisionIndex.triangleCount : null,
+      groundRenderableCount: legal.groundRenderableCount ?? null,
+      groundTriangleCount: legal.groundTriangleCount ?? null,
+      groundCameraHeight: legalityMode === 'ground_surface_grid' ? GROUND_CAMERA_HEIGHT : null,
+      groundNodeToken: legalityMode === 'ground_surface_grid' ? TERRAIN_NEAR_TOKEN : null,
+      excludedDomainNodeToken: legalityMode === 'ground_surface_grid' ? TERRAIN_FAR_TOKEN : null,
+      cameraDomainBounds: legal.domainBounds ?? sceneBounds,
+      obstacleRecordCount: legal.obstacleRecordCount ?? null,
       closedVolumeClassification: 'not performed; non-watertight shells are surface-only',
-      viewcellShape: 'camera_aligned_box',
-      viewcellHalfExtent: VIEWCELL_HALF_EXTENTS.slice(),
-      viewcellOuterRadius: VIEWCELL_OUTER_RADIUS,
+      viewcellShape: 'horizontal_disk',
+      viewcellRadius: VIEWCELL_RADIUS,
       surfaceEpsilon: SURFACE_EPSILON,
       safetyRadius: CAMERA_CLEARANCE,
-      safetyRadiusSemantics: 'center-to-surface distance must cover the view-cell box outer radius plus surface epsilon',
+      safetyRadiusSemantics: 'center-to-surface distance must cover the horizontal-disk radius plus surface epsilon',
       resourceRecordCount: audited.records.length,
       staticPvsEligibleResourceCount: staticPvsEligibleCount,
       staticPvsIneligibleResourceCount: audited.records.length - staticPvsEligibleCount,
@@ -726,14 +816,14 @@ export function generatePosePlan(runtimeMeta, options = {}) {
         return counts;
       }, {}),
       cameraClearance: clearance,
-      expandedAabbCollision: legalityMode === 'aabb',
-      nearestTriangleSurfaceDistance: legalityMode === 'geometry',
-      gridDivisions: GRID_DIVISIONS.slice(),
+      expandedAabbCollision: legalityMode === 'aabb' || legalityMode === 'ground_surface_grid',
+      nearestTriangleSurfaceDistance: legalityMode === 'geometry' || legalityMode === 'ground_surface_grid',
+      gridDivisions: legalityMode === 'ground_surface_grid'
+        ? [GROUND_GRID_DIVISIONS[0], 1, GROUND_GRID_DIVISIONS[1]] : GRID_DIVISIONS.slice(),
       gridCandidateCount: legal.gridCandidateCount,
+      noGroundIntersectionPositionCount: legal.noGroundRejected ?? 0,
       collisionRejectedPositionCount: legal.collisionRejected,
       legalPositionCount: legal.positions.length,
-      occupiedSpatialBlockCount: groups.length,
-      totalSpatialBlockCount: BLOCK_DIVISIONS.reduce((product, value) => product * value, 1),
     },
     protocol: {
       modelFovY: MODEL_FOV_Y,
@@ -744,19 +834,22 @@ export function generatePosePlan(runtimeMeta, options = {}) {
       yaws: YAW_DEGREES.slice(),
       pitches: PITCH_DEGREES.slice(),
       poseCountPerPosition: YAW_DEGREES.length * PITCH_DEGREES.length,
-      viewcellShape: 'camera_aligned_box',
-      viewcellHalfExtent: VIEWCELL_HALF_EXTENTS.slice(),
-      viewcellOuterRadius: VIEWCELL_OUTER_RADIUS,
+      viewcellShape: 'horizontal_disk',
+      viewcellRadius: VIEWCELL_RADIUS,
+      verticalDisplacement: 0,
+      pvsBackOffset: PVS_BACK_OFFSET,
+      backOffsetFormula: 'viewcellRadius / tan(renderFovY / 2)',
       surfaceEpsilon: SURFACE_EPSILON,
       cameraSafetyRadius: CAMERA_CLEARANCE,
     },
-    spatialSplit: {
-      blockDivisions: BLOCK_DIVISIONS.slice(),
-      ordering: '3D Morton block order, occupied blocks only',
-      ratios: Object.fromEntries(SPLIT_NAMES.map((name, index) => [name, SPLIT_RATIOS[index]])),
-      splitBlockCount: Object.fromEntries(SPLIT_NAMES.map((name, index) => [name, splitBlockCount[index]])),
+    centerGroupSplit: {
+      seed: SPLIT_SEED,
+      assignment: 'deterministic seeded random assignment of physical camera centers',
+      procedure: '80/10/10 train/validation/test, then 10% of the initial train centers become calibration',
+      ratios: { train: 0.72, calibration: 0.08, validation: 0.10, test: 0.10 },
+      splitCenterCount,
       splitPoseCount,
-      noBlockAppearsInMultipleSplits: true,
+      allOrientationsAtOneCenterStayInOneSplit: true,
     },
     poseCount: rows.length,
     sourceAudit: sourceAuditFrom(runtimeMeta, options.conversionManifest),
@@ -779,7 +872,7 @@ function writePlan(filePath, rows) {
 }
 
 function parseArgs(argv) {
-  const args = { runtimeMeta: '', output: '', summary: '', conversionManifest: '' };
+  const args = { runtimeMeta: '', output: '', summary: '', conversionManifest: '', placementMode: 'volume_grid' };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--runtime-meta') args.runtimeMeta = path.resolve(argv[++index] || '');
@@ -787,13 +880,14 @@ function parseArgs(argv) {
     else if (argument === '--output') args.output = path.resolve(argv[++index] || '');
     else if (argument === '--summary') args.summary = path.resolve(argv[++index] || '');
     else if (argument === '--conversion-manifest') args.conversionManifest = path.resolve(argv[++index] || '');
+    else if (argument === '--placement-mode') args.placementMode = String(argv[++index] || '');
     else if (argument === '--help') args.help = true;
     else throw new Error(`unknown argument: ${argument}`);
   }
   if (args.help) return args;
   if (!args.runtimeMeta || !args.output) {
     throw new Error(
-      'Usage: generate_pose_plan.mjs --runtime-meta runtimeVisibilityMeta.json --output pose_plan.jsonl [--source-scene scene.gltf|scene.glb] [--summary audit.json]',
+      'Usage: generate_pose_plan.mjs --runtime-meta runtimeVisibilityMeta.json --output pose_plan.jsonl [--source-scene scene.gltf|scene.glb] [--placement-mode volume_grid|ground_surface_grid] [--summary audit.json]',
     );
   }
   if (!args.summary) args.summary = args.output.replace(/\.jsonl$/i, '_summary.json');
@@ -807,7 +901,7 @@ function parseArgs(argv) {
 export async function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   if (args.help) {
-    console.log('generate_pose_plan.mjs --runtime-meta runtimeVisibilityMeta.json --output pose_plan.jsonl [--source-scene scene.gltf|scene.glb] [--summary audit.json]');
+    console.log('generate_pose_plan.mjs --runtime-meta runtimeVisibilityMeta.json --output pose_plan.jsonl [--source-scene scene.gltf|scene.glb] [--placement-mode volume_grid|ground_surface_grid] [--summary audit.json]');
     return null;
   }
   const runtimeMeta = readJson(args.runtimeMeta);
@@ -828,6 +922,7 @@ export async function main(argv = process.argv.slice(2)) {
     sourceScenePath: args.sourceScene || null,
     conversionManifest,
     sourceScene,
+    placementMode: args.placementMode,
   });
   writePlan(args.output, result.rows);
   fs.mkdirSync(path.dirname(args.summary), { recursive: true });

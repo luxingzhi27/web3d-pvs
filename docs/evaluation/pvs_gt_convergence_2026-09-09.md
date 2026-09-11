@@ -67,6 +67,7 @@ conda run -n slm_pvs python \
   --scene <scene> \
   --plan neural_instance_culling/benchmark/out/paper_results/gt_convergence/<scene>_128_plan.jsonl \
   --raw neural_instance_culling/benchmark/out/paper_results/gt_convergence/<scene>_128_raw \
+  --dataset-dir <source-pose-csr-dataset> \
   --output-dir neural_instance_culling/benchmark/out/paper_results/gt_convergence/<scene>_128_eval
 ```
 
@@ -75,12 +76,27 @@ conda run -n slm_pvs python \
 不满足 100×128 计划、三元组对齐和 `G_128` 参考定义的旧有限 subpose
 CSV/JSON 已删除，不再作为历史结果保留或被任何论文表格读取。
 
-新的 128 点 raw 硬件采样尚未在本次修复中执行，因此本文件不登记新的场景数值、硬件延迟或收敛结论。代码验证只使用合成 JSONL、CPU Python 单元测试和 Node wrapper 测试。
+正式 128 点硬件采样已经完成，两场景均为 `16/16` 分片、每场景
+`12,800/12,800` raw 行，GPU evidence 的页面后端均为 NVIDIA RTX A6000
+Vulkan/ANGLE，且 before/during/after host GPU 字段完整。
+
+| 场景 | 64点实例覆盖 | 64点权重收敛 | 64点权重5%分位 | 源GT对128点实例覆盖 | 源GT对128点权重覆盖 | 源GT权重5%分位 |
+|---|---:|---:|---:|---:|---:|---:|
+| HKUST | 99.9422% | 99.9191% | 99.5792% | 99.6411% | 99.9997% | 100.0000% |
+| IFCBench | 98.0276% | 98.8434% | 97.8533% | 80.1942% | 97.2252% | 92.2413% |
+
+`源GT对128点覆盖` 直接读取所选 source pose 在当前 Pose CSR 中的 GT，测量它覆盖
+另一种、更密集的水平圆盘参考定义的比例。HKUST 当前源数据使用 32/48 点，和该参考
+基本一致。IFCBench 当前源数据使用 `camera_aligned_box [2.5,2.5,1]` 内四点并集；它
+对 128 点水平圆盘新增实例的普通覆盖较低，但加权覆盖仍为 `97.2252%`，说明新增项
+主要是低屏幕权重构件。这是区域采样密度与形状变化的诊断，不表示原四点 GT、模型
+训练或同协议 test 错误。IFCBench 正式结果继续按四点 box 协议报告；全场 128 点
+重采样和重训已撤销。
 
 ## 修改与验证记录
 
 - 修改文件：`neural_instance_culling/benchmark/evaluate_gt_convergence.py`、对应 Python 测试、`neural_instance_culling/sampler/run_scene_viewcell_colorid_sampling.mjs`、wrapper Node 测试及本报告。
 - 依赖资源：新的 100×128 plan JSONL 与其完整 raw JSONL；正式采样另需每 shard 的三阶段 GPU evidence。
-- 主要修复：直接按三元组对齐；按最终 `G_128` 计算新增实例率与加权收敛；汇总保留每 shard 的 before/during/after host GPU 证据并拒绝缺失。
+- 主要修复：Color-ID raw 现在保留 `source_pose_index`；evaluator 直接按三元组对齐，按最终 `G_128` 计算新增实例率与加权收敛，并额外比较源 Pose CSR GT 对 `G_128` 的实例和权重覆盖；汇总保留每 shard 的 before/during/after host GPU 证据并拒绝缺失。
 - 主线状态：保留为新的 GT convergence 正式入口；旧结果仅作历史读取。
-- 未决风险：正式结论仍取决于后续独占硬件采样是否完整，以及 64 到 128 点的新增实例率和 weighted 收敛是否达到协议要求。
+- 未决风险：四点 GT 不能被表述为连续水平圆盘的严格 PVS；论文必须报告实际采样数和形状。若未来改变正式区域定义，才需要重建数据和模型。

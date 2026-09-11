@@ -56,8 +56,9 @@ from common.runtime_meta import load_runtime_meta  # noqa: E402
 EXPECTED_SPLITS = {
     "hkust_v3": {"train": 5926, "validation": 730, "calibration": 659, "test": 684, "guard": 0},
     "ifcbench_fantasy_metropolis": {"train": 19647, "validation": 2712, "calibration": 2183, "test": 2710, "guard": 0},
-    "sponza_128k": {"train": 1728, "validation": 276, "calibration": 132, "test": 288, "guard": 0},
-    "bigcity_128k": {"train": 5916, "validation": 984, "calibration": 480, "test": 708, "guard": 0},
+    "sponza_128k": {"train": 1752, "validation": 240, "calibration": 192, "test": 240, "guard": 0},
+    "bigcity_128k": {"train": 5832, "validation": 804, "calibration": 648, "test": 804, "guard": 0},
+    "viking_village_128k": {"train": 1104, "validation": 156, "calibration": 120, "test": 156, "guard": 0},
 }
 TRAIN_SCRIPT = BENCHMARK_DIR / "train_aabb_ray_baseline.py"
 EVALUATION_SCHEMA = "pvs-aabb-ray-mlp-evaluation-v1"

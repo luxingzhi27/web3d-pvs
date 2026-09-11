@@ -1,8 +1,8 @@
 # NeuralStreamWeb3D 数据集与采样协议
 
-更新时间：2026-09-09
+更新时间：2026-09-11
 
-本文定义当前训练数据如何从场景资产生成，以及每个二进制文件的语义。核心目标是让采样语义和 NeuralPVS 的 view-cell 思路一致：一个 view-cell 固定相机朝向和视场，在局部空间盒内随机生成多个位置不同但方向相同的子相机，最终可见集合取这些子相机结果的并集。参考论文：[NeuralPVS](https://arxiv.org/abs/2509.24677)。
+本文定义当前训练数据如何从场景资产生成，以及每个二进制文件的语义。正式 V4 主线的 view-cell 统一为固定相机朝向和高度的世界 XZ 水平圆盘，在圆盘内采样多个位置不同、方向相同的子相机，最终可见集合取这些子相机结果的并集。参考论文：[NeuralPVS](https://arxiv.org/abs/2509.24677)。
 
 ## 1. 相机口径
 
@@ -14,6 +14,14 @@
 
 后退相机可以沿当前视线反向移动指定距离，并使用 66° 模型视场角覆盖位置扰动带来的潜在可见实例。模型学习的是后退相机候选上的保守可见性；真实 60° 视锥负责最终实例级安全过滤。候选相机的视场角由当前协议统一给出。
 
+后退距离采用 NeuralPVS 第 3.2 节的构造。设真实显示垂直 FOV 为 $\theta=60^\circ$，水平圆盘半径为 $r$，则
+
+$$
+d_{back}=\frac{r}{\tan(\theta/2)}.
+$$
+
+候选相机为 $c'=c-d_{back}f$，其中 $c$ 是圆盘中心，$f$ 是单位前向。候选和模型 FOV 固定为 `66°`，比显示 FOV 每侧多 `3°`。HKUST 的 `r=2 m` 对应 `d=3.464102 m`；Sponza、Big City 和 Viking Village 的 `r=0.75 m` 对应 `d=1.299038 m`。半径可以按场景尺度登记，但公式、FOV 和候选语义不得按结果调整。
+
 采样宽高默认 512×288，宽高比会写入每条 pose。代码不应只根据垂直视场角推导横向视场角而忽略 aspect；数据构建同时保存 `tan_x` 和 `tan_y`，候选 AABB 计算也使用这两个量。
 
 ## 2. View-cell 与 subpose
@@ -21,14 +29,28 @@
 一个代表性相机行描述一个 view-cell 中心、前向方向、FOV、aspect、类别和数据集划分。`build_neuralpvs_viewcell_pose_plan.mjs` 为每个 view-cell 生成 K 个 subpose：
 
 1. 保持中心相机的前向方向、yaw、pitch、FOV 和 aspect 不变；
-2. 根据前向、右向和上向构成相机局部基；
-3. 在相机对齐盒中独立随机采样右向、前向和上向偏移；
+2. 在世界 XZ 平面内对面积均匀采样水平圆盘，Y 保持中心高度；
+3. 高空、楼层和远景通过不同高度的 view-cell 中心表达，不在单个 cell 内增加垂直扰动；
 4. 第一个 subpose 保留 view-cell 中心，便于保留代表点；
 5. 每个 subpose 写出独立世界坐标，但共用 `viewcell_id` 和方向信息。
 
-不同场景可以使用不同 view-cell 尺寸，但必须以实际 pose plan 和数据集 meta 为准。当前 HKUST view-cell 采样计划 `hkust_v3_viewcell_fov66` 使用水平圆盘，半径为 `2 m`、垂直扰动为 `0 m`，每个 cell 平均约 `34.88` 个成功 subpose。前端 `CameraPredictionGate` 已按同一契约判断：使用世界 XZ 平面位移、拒绝 Y 方向扰动、要求四元数朝向固定；越过边界时不受最小间隔抑制。显示相机保持 `60°`，Worker 的模型查询相机保持 `66°`，浏览器不展开 subpose。其他场景的尺寸必须单独登记，不能把一个场景的 cell 尺寸直接套到另一个场景。
+不同场景可以使用不同半径，但 shape 固定为 `horizontal_disk`，并必须以实际 pose plan 和数据集 meta 为准。HKUST 使用 `r=2 m`，普通 cell 使用 `32` 个 subpose，sky/far 使用 `48` 个；其中 sky `800` 个、far `640` 个中心说明 HKUST 包含高空/远景采样，只是每个 cell 内没有垂直扰动。Sponza、Big City 和 Viking Village 使用 `r=0.75 m`、每 cell `32` 个 subpose。前端 `CameraPredictionGate` 使用同一世界 XZ 位移契约，浏览器不展开 subpose。
+
+Viking Village 的场景完整包围盒被远山扩大到约 `1.1 km`，因此中心放置使用固定的
+`ground_surface_grid`，而不是全包围盒多层 Y 网格：相机域排除 `terrain_far`，固定
+`24×24` XZ 网格向 `terrain_near` 三角形求交，相机高度为交点上方 `1.7 m`，并继续
+执行 `0.8 m` 表面 clearance。该规则只决定圆盘中心放在哪里；圆盘半径、subpose、
+FOV、后退候选和 split 规则与其余标准场景一致。
+
+相机中心到几何表面的安全距离只用于保证整个圆盘不穿过几何，定义为 `radius + 0.05 m`。因此标准场景为 `0.80 m`。该 clearance 不是后退距离；后退距离始终由上式独立计算。
 
 采样计划中的类别用于保证空间分布覆盖，包括街道缝隙、建筑近旁、广场、外围、天空俯视和远景等。采样点需要在场景空隙或可行走区域，避免大面积落在实体模型内部；如果需要建筑内部采样，必须在实验说明中单独声明。
+
+### 2.1 统一 split 约定
+
+主实验按物理相机中心分组划分，同一中心的全部 yaw、pitch 和全部 subpose 必须进入同一 split。分组以固定 seed `20260911` 做确定性随机交错分配：先按中心组形成约 `80/10/10` 的历史 train/validation/test，再从初始 train 中取约 `10%` 为 calibration，最终约为 `72/8/10/10`。这与 HKUST 的有效语义一致：HKUST 的 `737` 个重复中心中没有任何中心跨 split；其历史 validation/test 保持冻结，calibration 从历史 train 抽取，因此实际计数仍为 `5926/659/730/684`。
+
+标准场景不得再使用连续 Morton 空间块作为主 split。空间块 holdout 回答的是未见区域外推问题，会显著改变正样本比例；它与本文的场景专属可见性压缩主问题不同。所有方法在一个场景内共享完全相同的中心组 split；test 只在模型、阈值和方法选择冻结后读取一次。
 
 ## 3. Color-ID 光栅化
 
@@ -54,13 +76,13 @@ Color-ID 的权重可以用于视觉重要性监督，但它不是深度缓冲�
 2. 要求成功 subpose 数达到 `min_success_subposes`；
 3. 对所有成功 subpose 的可见实例编号取并集；
 4. 对同一实例的权重取最大值，命中次数单独保存；
-5. 以成功 subpose 位置集合生成候选 AABB 并集；
+5. 使用单个后退 `66°` 相机生成 AABB 候选，与浏览器运行时一致；
 6. 正式模式不补入可见正样本；如果可见并集不属于候选并集，直接使数据构建失败，并保存漏正样本诊断。只有显式的探索性开关才允许补入；
 7. 保存 view-cell 中心作为模型查询相机。
 
 构建器要求每条正式 raw row 显式携带 `train/validation/calibration/test/guard` 之一；不再随机补 split，也不接受旧 `val` 名称。它同时写出 `query_center_world` 和 `candidate_camera_world = query_center_world - forward * pvs_back_offset`，其中前者进入区域查询，后者与 `poses.camera_world`、MVP 和候选相机语义一致。
 
-因此，候选集合不是“中心相机一次视锥的候选”，而是所有位置扰动 subpose 的候选并集；可见集合也不是某个 subpose 的可见集合，而是整个 view-cell 内潜在可见集合的并集。正式数据必须直接证明 `visible_ids ⊆ candidate_ids`，不能用标签补入制造这个关系；这样训练标签与 NeuralPVS 的 from-region PVS 语义一致，也能把候选生成错误暴露出来。
+候选集合来自单个后退 `66°` 相机；可见集合来自整个圆盘的 subpose 可见并集。正式数据必须直接证明 `visible_ids ⊆ candidate_ids`，不能用标签补入制造这个关系。该检查同时验证后退距离、FOV、AABB 和实例编号是否足以支持浏览器的一次查询。
 
 这些 subpose 不进入浏览器运行时。前端以当前相机建立一个 view-cell 预测锚点，通过一次后退扩展候选和一次模型批查询输出整个区域的保守潜在可见集；相机仍在该 cell 的空间与方向门限内时复用结果，越界后才建立新锚点并重新查询。真实 `60` 度视锥随后只对保守集合做当前帧实例级过滤。因而，只在某个边缘 subpose 可见的实例是合法正例，不是中心点的误报。
 
@@ -68,13 +90,13 @@ Color-ID 的权重可以用于视觉重要性监督，但它不是深度缓冲�
 
 ## 5. 候选集合的计算
 
-对每个 subpose，候选计算使用实例 AABB 与相机视锥的保守相交测试。对 AABB 中心和半尺寸投影到相机前向、右向、上向后，检查：
+候选计算使用实例 AABB 与后退 `66°` 相机视锥的保守相交测试。对 AABB 中心和半尺寸投影到相机前向、右向、上向后，检查：
 
 - 前向深度加包围半径是否超过 near；
 - 水平中心距离减水平半径是否落在水平视锥范围内；
 - 垂直中心距离减垂直半径是否落在垂直视锥范围内。
 
-多个 subpose 的候选 ID 合并去重。正式候选文件由 AABB 算法独立产生，数据契约要求：
+正式候选文件由该单相机 AABB 算法独立产生，数据契约要求：
 
 ```text
 visible_ids ⊆ candidate_ids
@@ -98,7 +120,7 @@ CSR（压缩稀疏行）用一个 offsets 数组描述每个 pose 的连续 ID �
 | `visible_weights.bin` | float32 | 与 `visible_ids` 对齐的权重 |
 | `visible_hit_counts.bin` | uint16 | 一个实例在多少个成功 subpose 中命中 |
 | `candidate_offsets.bin` | uint64 | 每个 pose 的候选 ID 起止位置 |
-| `candidate_ids.bin` | uint32 | 后退/子 pose AABB 候选实例编号 |
+| `candidate_ids.bin` | uint32 | 单个后退 66° 相机的 AABB 候选实例编号 |
 | `dataset_meta.json` | JSON | schema、相机口径、统计、原始候选语义、文件语义和 split |
 
 `visible_weights` 必须在报告中说明来源：Color-ID 数据是屏幕覆盖率 parts-per-million；历史 rvcServer 数据是 `component_weights`，只能按可见重要性权重解释，不能宣称为严格像素覆盖率。
@@ -124,7 +146,9 @@ CSR（压缩稀疏行）用一个 offsets 数组描述每个 pose 的连续 ID �
 |---|---|---|---|---|
 | `pose_csr_hkust_v3_main_stratified_calibration_fov66_v1` | HKUST Color-ID view-cell + 显式 split | 66° Y | 60° Y | 屏幕覆盖率 parts-per-million |
 | `pose_csr_ifcbench_fantasy_metropolis_main_stratified_calibration_fov66_v1` | IFCBench Metropolis Color-ID view-cell + 显式 split | 66° Y | 60° Y | 屏幕覆盖率 parts-per-million |
-| `pose_csr_sponza_standard_graphics_128k_fov66_v1` | Sponza 128 KiB renderable units + 显式空间 split | 66° Y | 60° Y | 屏幕覆盖率 parts-per-million |
+| `pose_csr_sponza_standard_graphics_128k_fov66_v1` | Sponza 128 KiB renderable units + 中心组随机 split | 66° Y | 60° Y | 屏幕覆盖率 parts-per-million |
+| `pose_csr_bigcity_standard_graphics_128k_fov66_v1` | Big City 128 KiB renderable units + 中心组随机 split | 66° Y | 60° Y | 屏幕覆盖率 parts-per-million |
+| `pose_csr_viking_village_standard_graphics_128k_fov66_v1` | Viking Village 128 KiB renderable units + 地表中心组随机 split | 66° Y | 60° Y | 屏幕覆盖率 parts-per-million |
 
 正式训练数据使用上表中带显式 split 的目录。`build_color_id_pose_csr.py` 只把每条 JSONL 记录作为一个 pose 打包，不会聚合 subpose；需要 NeuralPVS view-cell 并集时使用 `build_rvc_viewcell_pose_csr.py`，实际数据来源以 `sourceSampler` 和 `dataset_meta.json` 为准。
 
@@ -136,7 +160,8 @@ CSR（压缩稀疏行）用一个 offsets 数组描述每个 pose 的连续 ID �
 conda run -n slm_pvs node neural_instance_culling/sampler/build_neuralpvs_viewcell_pose_plan.mjs \
   --input neural_instance_culling/sampler/out/<scene>/representative_pose_plan.jsonl \
   --output neural_instance_culling/sampler/out/<scene>/viewcell_pose_plan.jsonl \
-  --scene <scene> --subposes-per-viewcell 16 --fov-y 66
+  --scene <scene> --viewcell-shape horizontal_disk --radius <scene-radius> \
+  --subposes-per-viewcell 32 --fov-y 66
 
 conda run -n slm_pvs node neural_instance_culling/sampler/run_scene_viewcell_colorid_sampling.mjs \
   --scene <scene> --assets-dir <scene>/assets \

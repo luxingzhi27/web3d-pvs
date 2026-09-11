@@ -206,6 +206,7 @@ def build_plan(
     viewcell_count: int,
     subpose_count: int,
     seed: int,
+    source_split: str = "validation",
 ) -> dict[str, Any]:
     dataset_dir = dataset_dir.resolve()
     meta = _read_json(dataset_dir / "dataset_meta.json")
@@ -224,18 +225,24 @@ def build_plan(
     weight_prefix[0] = 0.0
     np.cumsum(visible_weights, dtype=np.float64, out=weight_prefix[1:])
     weight_sums = weight_prefix[visible_offsets[1:]] - weight_prefix[visible_offsets[:-1]]
-    validation_id = int((meta.get("splitIds") or {}).get("validation", 1))
-    validation = np.flatnonzero(poses["split"] == validation_id)
-    selected = select_stratified_poses(
-        validation,
-        poses["category"],
-        poses["camera_forward"],
-        candidate_counts,
-        gt_counts,
-        weight_sums,
-        count=viewcell_count,
-        seed=seed,
-    )
+    split_ids = {str(name): int(value) for name, value in (meta.get("splitIds") or {}).items()}
+    split_names = {value: name for name, value in split_ids.items()}
+    if source_split == "all":
+        selected = np.arange(poses.size, dtype=np.int64)
+    else:
+        if source_split not in split_ids:
+            raise ValueError(f"dataset has no source split {source_split!r}")
+        eligible = np.flatnonzero(poses["split"] == split_ids[source_split])
+        selected = select_stratified_poses(
+            eligible,
+            poses["category"],
+            poses["camera_forward"],
+            candidate_counts,
+            gt_counts,
+            weight_sums,
+            count=viewcell_count,
+            seed=seed,
+        )
     output = output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     pose_index = 0
@@ -262,7 +269,7 @@ def build_plan(
                         "viewcell_id": output_viewcell_id,
                         "source_pose_index": source_pose_index,
                         "subpose_id": subpose_id,
-                        "split": "validation",
+                        "split": split_names[int(poses["split"][source_pose_index])],
                         "viewcell_center": center.tolist(),
                         "viewcell_forward": forward.tolist(),
                         "viewcell_shape": viewcell_shape,
@@ -280,8 +287,12 @@ def build_plan(
         "schema": "pvs-gt-convergence-nested-subpose-plan-v1",
         "scene": scene,
         "datasetDir": str(dataset_dir),
-        "sourceSplit": "validation",
-        "selection": "category, yaw, candidate count, GT count and visible-weight stratified round-robin",
+        "sourceSplit": source_split,
+        "selection": (
+            "all Pose CSR rows in original order"
+            if source_split == "all"
+            else "category, yaw, candidate count, GT count and visible-weight stratified round-robin"
+        ),
         "selectionSeed": seed,
         "sourcePoseIndices": selected.tolist(),
         "viewcellCount": int(selected.size),
@@ -316,6 +327,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--viewcell-count", type=int, default=100)
     parser.add_argument("--subpose-count", type=int, default=128)
     parser.add_argument("--seed", type=int, default=20260909)
+    parser.add_argument("--source-split", default="validation")
     return parser.parse_args(argv)
 
 
@@ -332,6 +344,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         viewcell_count=args.viewcell_count,
         subpose_count=args.subpose_count,
         seed=args.seed,
+        source_split=args.source_split,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 

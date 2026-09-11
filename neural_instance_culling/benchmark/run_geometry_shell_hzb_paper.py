@@ -56,13 +56,15 @@ REGION_COUNTS = {
     "ifcbench": (1, 0),
     "sponza_128k": (1, 0),
     "bigcity_128k": (1, 0),
+    "viking_village_128k": (1, 0),
 }
 VARIANTS = ("lossless", "equal_asset")
 EXPECTED_SPLITS = {
     "hkust": {"train": 5926, "validation": 730, "calibration": 659, "test": 684, "guard": 0},
     "ifcbench": {"train": 19647, "validation": 2712, "calibration": 2183, "test": 2710, "guard": 0},
-    "sponza_128k": {"train": 1728, "validation": 276, "calibration": 132, "test": 288, "guard": 0},
-    "bigcity_128k": {"train": 5916, "validation": 984, "calibration": 480, "test": 708, "guard": 0},
+    "sponza_128k": {"train": 1752, "validation": 240, "calibration": 192, "test": 240, "guard": 0},
+    "bigcity_128k": {"train": 5832, "validation": 804, "calibration": 648, "test": 804, "guard": 0},
+    "viking_village_128k": {"train": 1104, "validation": 156, "calibration": 120, "test": 156, "guard": 0},
 }
 
 RUNNER_FILES = (
@@ -585,6 +587,23 @@ def _scene_specs(data_root: Path, hzb_root: Path) -> dict[str, SceneSpec]:
             point60_plan_dir=hzb_root / "point60_gt_plans" / "bigcity_128k",
             representative_plan=dataset_root / "standard_graphics_scenes" / "bigcity_128k" / "pose_plan.jsonl",
             expected_splits=EXPECTED_SPLITS["bigcity_128k"],
+        ),
+        "viking_village_128k": SceneSpec(
+            key="viking_village_128k",
+            scene_name="viking_village_128k",
+            dataset_dir=dataset_root / "pose_csr_viking_village_standard_graphics_128k_fov66_v1",
+            region_dataset_dir=dataset_root / "pose_csr_viking_village_standard_graphics_128k_fov66_v1",
+            runtime_meta=dataset_root / "standard_graphics_scenes" / "viking_village_128k" / "assets" / "runtimeVisibilityMeta.json",
+            glb_index=dataset_root / "standard_graphics_scenes" / "viking_village_128k" / "assets" / "glbIndex.json",
+            glb_root=dataset_root / "standard_graphics_scenes" / "viking_village_128k" / "assets",
+            shell_dirs={
+                "lossless": hzb_root / "geometry_shell_hzb_lossless_viking_village_128k",
+                "equal_asset": hzb_root / "geometry_shell_hzb_equal_asset_viking_village_128k",
+            },
+            timing_plan=hzb_root / "viking_village_128k_test_timing_120_pose_plan.json",
+            point60_plan_dir=hzb_root / "point60_gt_plans" / "viking_village_128k",
+            representative_plan=dataset_root / "standard_graphics_scenes" / "viking_village_128k" / "pose_plan.jsonl",
+            expected_splits=EXPECTED_SPLITS["viking_village_128k"],
         ),
     }
 
@@ -1354,6 +1373,9 @@ def _parse_scene_keys(value: str) -> list[str]:
         "sponza_128k": "sponza_128k",
         "bigcity": "bigcity_128k",
         "bigcity_128k": "bigcity_128k",
+        "viking": "viking_village_128k",
+        "viking_village": "viking_village_128k",
+        "viking_village_128k": "viking_village_128k",
     }
     keys = []
     for token in str(value).split(","):
@@ -1362,7 +1384,7 @@ def _parse_scene_keys(value: str) -> list[str]:
             continue
         if token not in aliases:
             raise ValueError(
-                f"unknown scene {token!r}; choose hkust, ifcbench, sponza_128k or bigcity_128k"
+                f"unknown scene {token!r}; choose hkust, ifcbench, sponza_128k, bigcity_128k or viking_village_128k"
             )
         key = aliases[token]
         if key not in keys:
