@@ -173,7 +173,7 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 
 验收覆盖同分AP、零GT统计、阈值边界、checkpoint和固定表一致性、HZB深度/近裁剪面、区域并集、GLB原子到达、覆盖不可达、像素直方图与重渲染一致性，以及硬件计时边界。禁止新增兼容层、前端历史模型路径或手工哈希步骤。
 
-## 执行进度（2026-09-10）
+## 执行进度（2026-09-11）
 
 | 项目 | 状态 | 已有产物 / 下一动作 |
 |---|---|---|
@@ -189,7 +189,7 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 | Test 图像 | 完成 | HKUST Full/AABB/HZB aggregate PER 为 `0.3662/0.8613/0.3128%`；IFCBench 为 `0.5011/0.0583/0.5312%`，均按各自冻结 test 协议解释 |
 | GT 收敛 | 完成诊断 | 两场景各 100 cell x 128 点硬件采样完成。HKUST 源 GT 对 128 点实例/权重覆盖 `99.6411/99.9997%`；IFCBench 四点 box GT 对另一水平圆盘定义为 `80.1942/97.2252%`。该结果只界定连续区域声明，不否定四点协议结果，也不触发重训 |
 | 离线成本 / 结果包 | 完成当前可得项 | 六阶段成本、artifact registry、三种子 Table 2 汇总已生成；未记录时间保持 unavailable，不作推算 |
-| 标准图形场景 | 协议纠正后执行中 | 旧 `camera_aligned_box` 标签、`0.5 m` 运行半径和空间块 split 已退出主线。三个场景均使用水平圆盘、`r=0.75 m`、后退 `1.299038 m`、32 subpose 和中心组 split。Sponza 已启动 Full/AABB 三种子；Big City 与 Viking 的新硬件 Color-ID 和 Pose CSR 均已通过 `candidateMissVisible=0`，两场景 train-only 稀疏深度关系分片正在运行 |
+| 标准图形场景 | 正式矩阵执行中 | 三个场景均使用水平圆盘、`r=0.75 m`、后退 `1.299038 m`、32 subpose 和中心组 split。Sponza、Viking 的 Full/AABB 正式矩阵正在训练。Big City 的 16 个 train-only 深度分片均通过硬件门，关系 CSR 覆盖全部 `5832` 个 train view-cell，native candidate audit 通过；Full/AABB 预检完成并排在 Sponza 对应 runner 后自动启动。三个场景 test 均未用于模型选择。 |
 
 截至 2026-09-11，HKUST 与 IFCBench 主结果均按各自预登记的 view-cell 采样协议冻结。标准场景按同一显式四分割、同一 V4 和同一 AABB/HZB 评价口径执行；任何中间指标都不替代三种子 validation 选择和一次 frozen test。
 

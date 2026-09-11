@@ -203,11 +203,18 @@ source scene
 
 - 按物理相机中心分组，以 seed `20260911` 做确定性随机交错划分；同一中心的 12 个 yaw/pitch 方向和全部 subpose 不得跨 split；
 - 先形成约 `80/10/10` 的 train/validation/test，再从初始 train 中取约 `10%` 为 calibration，最终约 `72/8/10/10`，与 HKUST 的有效分组语义一致；
-- Sponza 固定为 `146/16/20/20` 个中心，即 `1752/192/240/240` 个 oriented view-cell；Big City 固定为 `486/54/67/67` 个中心，即 `5832/648/804/804`；
+- Sponza 固定为 `146/16/20/20` 个中心，即 `1752/192/240/240` 个 oriented view-cell；Big City 固定为 `486/54/67/67` 个中心，即 `5832/648/804/804`；Viking Village 固定为 `92/10/13/13` 个中心，即 `1104/120/156/156` 个 oriented view-cell；
 - Full V4 使用现有 96D 几何、28D 结构化生存场和相同综合损失，不增加标准场景专用头；
 - AABB + Ray MLP 使用与 Full 相同的训练步数、三 seed、安全校准规则和候选集合；
 - 每个 checkpoint 只在 calibration 冻结阈值，validation 选模型，test 只读取一次；
 - 先用 Sponza 完成单 seed 管线 smoke，确认语义后仍需执行登记的三 seed 正式训练，smoke 不能进入论文表格。
+
+### 6.3 当前正式执行状态（2026-09-11）
+
+- Sponza 的 Full V4 与 AABB + Ray MLP 已进入三种子 `40 x 900` 正式训练；中间 validation 只用于健康检查，不提前终止登记训练。
+- Viking Village 的 `49152/49152` 次 Color-ID subpose 已完成，16 个关系分片均为硬件 WebGL/ANGLE Vulkan，页面 `gpuGate.hardware=true`，train-only 关系 CSR 覆盖全部 `1104` 个 train view-cell，且 native `66 degrees` candidate audit 通过；Full V4 与 AABB + Ray MLP 已启动。
+- Big City 的 `258816/258816` 次 Color-ID subpose、Pose CSR 和 train-only 关系均已完成，`candidateMissVisible=0`，16 个关系分片通过同一硬件门；Full V4 与 AABB + Ray MLP 已完成预检并排入正式训练队列。
+- 三个场景的正式 test 均保持关闭；只有各自三种子训练完成、calibration 冻结阈值并由 validation 选定成员后，runner 才执行一次 frozen test。
 
 ## 7. 正式比较与指标
 
@@ -370,18 +377,18 @@ neural_instance_culling/benchmark/out/paper_results/standard_graphics/
 
 | 阶段 | 当前事实 | 后续行动 |
 |---|---|---|
-| G0 来源与资产审计 | Big City 与 Sponza 已完成 source audit；Viking 官方 Unity 场景与完整 FBX/prefab/材质资源已取得，三个场景的许可边界均已登记 | 完成 Viking Unity glTF 导出后的 source audit；本地派生场景资产不进入公开结果包 |
-| G1 单位转换 | Big City 已生成 `2734` 个、Sponza 已生成 `132` 个一单位一资源 GLB，并写出 conversion/runtime/audit manifests；Sponza MASK 硬件语义核验通过；Viking GLB source audit 已完成 | 完成 Viking `128 KiB` 转换及单位化 reference render 核验 |
-| G2 数据、训练、评价 | Sponza 新圆盘 Color-ID、Pose CSR 和 train-only 关系已完成，Full V4 与 AABB 正在训练；Big City 等待同协议重采样；旧 box 数据及训练不进入论文 | 完成 Sponza 三种子 validation 和一次 frozen test；随后串行执行 Big City/Viking 硬件采样、训练、Hi-Z、图像和 runtime |
+| G0 来源与资产审计 | Big City、Sponza 和 Viking Village 的固定源文件、许可边界及 source audit 均已登记；Viking 以本地 `VikingVillage.glb` 为唯一转换输入 | 保持三份源审计随最终结果包引用；受许可限制的源资产和派生 GLB 不公开分发 |
+| G1 单位转换 | Big City、Sponza、Viking 分别生成 `2734/132/1890` 个一单位一资源 GLB，并完成固定几何表、runtime metadata、reference binding 和 lossless shell | 等各场景 Full V4 运行资产冻结后导出 equal-asset shell |
+| G2 数据、训练、评价 | 三场景圆盘 Color-ID、Pose CSR 和 train-only 关系均完成且通过硬件/候选审计；Sponza、Viking 的 Full V4 与 AABB 正式训练运行中，Big City 两条 runner 已排在 Sponza 对应任务后自动启动 | 完成三场景三种子 validation 选择和一次 frozen test，再执行 Hi-Z、图像和独占 runtime |
 | G3 表图与敏感性 | 没有标准场景正式指标、图像或性能数字 | 仅在代表场景完成 `64/128/256 KiB` 敏感性，再生成 G1-G3 表、Pareto、延迟和定性图 |
 
 三个标准场景使用统一入口 `run_standard_graphics_mainline.py`：calibration 冻结每个 checkpoint 的阈值，validation 安全池按 useful cull、balanced accuracy、Occlusion Recall 和 precision 选择成员，只对该成员读取一次 test。Viking 已按实际 split 数加入该入口。AABB 复用 `run_aabb_ray_baseline.py` 的学习率扫描和三种子协议，不新建场景专用模型。
 
 标准场景接入检查还修正了 Color-ID sampler 的两项 GT 语义。资源绑定现在只按 `globalGlbId -> componentGlobalIds` 的显式关系完成，并交叉检查 runtime meta 与 GLB index；旧 `glbHash` 关联已删除。HKUST、Big City 和 Sponza 的静态映射核验分别得到 `3273 -> 18831`、`2734 -> 2734` 和 `132 -> 132`，缺失或冲突映射会在渲染前失败，避免生成 component 0 污染的 GT。MASK 的 Color-ID 材质保留原 base-color 纹理 alpha 与 cutoff，但不让纹理 RGB 乘到编码颜色；正式采样前仍需用真实 Sponza MASK primitive 完成硬件像素 smoke。
 
-2026-09-11 补充：`run_geometry_shell_hzb_paper.py` 已把 `sponza_128k` 和
-`bigcity_128k` 加入与 HKUST/IFCBench 相同的校准、冻结 test 和五轮 timing
-编排，两个标准场景均使用 `Region66 1/all`，没有标准场景专用 HZB 算法。
+2026-09-11 补充：`run_geometry_shell_hzb_paper.py` 已把 `sponza_128k`、
+`bigcity_128k` 和 `viking_village_128k` 加入与 HKUST/IFCBench 相同的校准、冻结
+test 和五轮 timing 编排，三个标准场景均使用 `Region66 1/all`，没有场景专用 HZB 算法。
 Sponza lossless 外壳已导出，实际启动资产 `1,844,914 B`，包含 `110` 个确定
 不透明 primitive、`227,327` 个三角形；`22` 个 MASK primitive 不作为保守不透明
 遮挡物。Big City lossless 外壳实际启动资产 `106,166,442 B`，包含 `2,734`
@@ -403,14 +410,20 @@ subpose，共 `258,816` 次 Color-ID 渲染，16 个分片全部为 NVIDIA Vulka
 `formalReady=true`。新 Pose CSR split 为 `5832/648/804/804`，平均候选
 `781.8077`、平均 GT 可见 `211.1635`，全部 subpose 成功且
 `candidateMissVisible=0`。其中 `988` 个空候选、`1,855` 个零 GT view-cell 按冻结
-协议保留。train-only 关系 manifest 使用 `5,832×5=29,160` 个深度视角，当前按 16
-分片执行稀疏光栅化。
+协议保留。train-only 关系使用 `5,832×5=29,160` 个深度视角；16 个分片均已完成，
+页面 `gpuGate.hardware=true` 且首层参考检查零不一致。关系 CSR 覆盖全部 `5,832` 个
+train view-cell，native candidate audit 通过，保留 `449,179` 条关系边和
+`20,100,507` 条生存观测。Full V4 与 AABB + Ray MLP 已通过不读 test 的预检并排入
+正式训练队列。
 
 Viking 新圆盘正式采样已完成：`1,536` 个 oriented view-cell、每 cell `32` 个
 subpose，共 `49,152` 次 Color-ID 渲染，16 个分片全部通过 NVIDIA Vulkan/ANGLE
 硬件门。新 Pose CSR split 为 `1104/120/156/156`，平均候选 `585.7337`、平均 GT
 可见 `134.6706`，全部 subpose 成功且 `candidateMissVisible=0`，没有空候选或空 GT。
-train-only 关系 manifest 使用 `1,104×5=5,520` 个深度视角，当前按 16 分片执行。
+train-only 关系使用 `1,104×5=5,520` 个深度视角；16 个分片均已完成且
+`formalReady=true`，关系 CSR 覆盖全部 `1,104` 个 train view-cell，native candidate
+audit 通过，保留 `110,189` 条关系边和 `1,553,537` 条生存观测。Full V4 与 AABB +
+Ray MLP 已通过不读取 test 的预检并启动正式矩阵。
 
 协议修正前 Sponza/Big City 的绑定 summary、Point60 和重复外壳结果已删除。Sponza
 绑定清单已从当前 Pose CSR 原地重建并核对后退距离为 `1.299038 m`；Big City 绑定清单
