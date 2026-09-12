@@ -606,6 +606,10 @@ def main() -> None:
         "splitCounts": split_counts,
         "stats": {
             **stats,
+            "pvsBackOffsetRange": [
+                float(min(vc["pvs_back_offset"] for vc in viewcells)),
+                float(max(vc["pvs_back_offset"] for vc in viewcells)),
+            ],
             "avgCandidate": float(candidate_offsets[-1] / max(1, len(viewcells))),
             "avgVisible": float(len(visible_ids_all) / max(1, len(viewcells))),
             "avgSubposesPerViewcell": float(stats["subposeCount"] / max(1, len(viewcells))),

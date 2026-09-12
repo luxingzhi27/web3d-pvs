@@ -672,3 +672,30 @@ conda run --no-capture-output -n slm_pvs python -u \
 validation 选择与唯一一次 frozen test，不再用训练 PID 存活状态代表任务是否完成。
 后续运行资产导出同时等待 `viking_finalize.done` 和 `bigcity_finalize.done`，确保三个
 标准场景的模型与阈值均已冻结后才进入 runtime、HZB 和图像评价。
+
+### 17.2 恢复结果与三个标准场景 frozen test
+
+Big City 两个查询头恢复成员均完整执行 `8 x 600`，没有读取 test。两者每个 epoch 的
+安全工作点仍为阈值 `0`、WR/LCB=`1/1`、Occlusion Recall=`0`、Useful Cull=`0`。
+这说明只重置共享主干与输出头、提高困难负例覆盖和分离权重，无法修复 seed02 已经形成的
+上游视角条件查询塌缩。两个恢复成员均保留为失败实验，不替换原始三种子，也不进入运行
+资产。Big City 最终按 validation 选择原始 seed01。
+
+Viking 保守微调 seed01 未通过 LCB 安全门；seed02 和 seed03 的最佳安全 validation
+分别为 `WR/LCB/Occlusion Recall/Useful Cull =
+0.995464/0.991894/0.508259/0.380651` 和
+`0.997193/0.994016/0.590526/0.442263`。原始 seed03 在相同安全池中的 Useful Cull 略高，
+因此最终仍选择原始 seed03。
+
+三个标准场景只在 calibration 阈值和 validation 模型选择冻结后各读取一次 test：
+
+| 场景 | 所选成员 | Pose PR-AUC | Pose prevalence | AP lift | WR | WR 95% LCB | Occlusion Recall | Useful Cull | GLB byte reduction |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Sponza | seed01 | 0.956493 | 0.327044 | 2.9247 | 0.999650 | 0.999399 | 0.794785 | 0.656913 | 0.517846 |
+| Viking Village | seed03 | 0.835365 | 0.540671 | 1.5451 | 0.998148 | 0.997138 | 0.611175 | 0.458815 | 0.239310 |
+| Big City | seed01 | 0.660315 | 0.407475 | 1.6205 | 0.999878 | 0.999842 | 0.469288 | 0.345195 | 0.266731 |
+
+标准场景数据构建器同时补齐 `dataset_meta.stats.pvsBackOffsetRange`。三场景固定后退距离均为
+`1.299038105676658 m`；该修正只补充已有查询几何的导出元数据，不改变 pose、候选、GT、
+split、checkpoint 或上述 test 结果。所选运行资产和等资产 HZB 外壳已完成导出，下一阶段
+为 A6000 WebGPU/WASM runtime、正式 HZB 和硬件 Color-ID 图像评价。
