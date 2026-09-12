@@ -1,6 +1,6 @@
 # NeuralStreamWeb3D 数据集与采样协议
 
-更新时间：2026-09-11
+更新时间：2026-09-13
 
 本文定义当前训练数据如何从场景资产生成，以及每个二进制文件的语义。正式 V4 主线的 view-cell 统一为固定相机朝向和高度的世界 XZ 水平圆盘，在圆盘内采样多个位置不同、方向相同的子相机，最终可见集合取这些子相机结果的并集。参考论文：[NeuralPVS](https://arxiv.org/abs/2509.24677)。
 
@@ -37,10 +37,11 @@ $$
 不同场景可以使用不同半径，但 shape 固定为 `horizontal_disk`，并必须以实际 pose plan 和数据集 meta 为准。HKUST 使用 `r=2 m`，普通 cell 使用 `32` 个 subpose，sky/far 使用 `48` 个；其中 sky `800` 个、far `640` 个中心说明 HKUST 包含高空/远景采样，只是每个 cell 内没有垂直扰动。Sponza、Big City 和 Viking Village 使用 `r=0.75 m`、每 cell `32` 个 subpose。前端 `CameraPredictionGate` 使用同一世界 XZ 位移契约，浏览器不展开 subpose。
 
 Viking Village 的场景完整包围盒被远山扩大到约 `1.1 km`，因此中心放置使用固定的
-`ground_surface_grid`，而不是全包围盒多层 Y 网格：相机域排除 `terrain_far`，固定
-`24×24` XZ 网格向 `terrain_near` 三角形求交，相机高度为交点上方 `1.7 m`，并继续
-执行 `0.8 m` 表面 clearance。该规则只决定圆盘中心放在哪里；圆盘半径、subpose、
-FOV、后退候选和 split 规则与其余标准场景一致。
+`ground_surface_grid`，而不是全包围盒多层 Y 网格：相机域排除 `terrain_far`，XZ 网格
+向 `terrain_near` 三角形求交，相机高度为交点上方 `1.7 m`，并继续执行 `0.8 m` 表面
+clearance。冻结的 V1 数据使用 `24×24` 网格；与旧中心不重合的 sampling V2 使用
+`32×32` 网格。该规则只决定圆盘中心放在哪里；圆盘半径、subpose、FOV、后退候选和
+split 规则与其余标准场景一致。
 
 相机中心到几何表面的安全距离只用于保证整个圆盘不穿过几何，定义为 `radius + 0.05 m`。因此标准场景为 `0.80 m`。该 clearance 不是后退距离；后退距离始终由上式独立计算。
 
@@ -48,7 +49,7 @@ FOV、后退候选和 split 规则与其余标准场景一致。
 
 ### 2.1 统一 split 约定
 
-主实验按物理相机中心分组划分，同一中心的全部 yaw、pitch 和全部 subpose 必须进入同一 split。分组以固定 seed `20260911` 做确定性随机交错分配：先按中心组形成约 `80/10/10` 的历史 train/validation/test，再从初始 train 中取约 `10%` 为 calibration，最终约为 `72/8/10/10`。这与 HKUST 的有效语义一致：HKUST 的 `737` 个重复中心中没有任何中心跨 split；其历史 validation/test 保持冻结，calibration 从历史 train 抽取，因此实际计数仍为 `5926/659/730/684`。
+主实验按物理相机中心分组划分，同一中心的全部 yaw、pitch 和全部 subpose 必须进入同一 split。冻结 V1 使用 seed `20260911`，sampling V2 使用 seed `20260913`；二者都做确定性随机交错分配：先按中心组形成约 `80/10/10` 的 train/validation/test，再从初始 train 中取约 `10%` 为 calibration，最终约为 `72/8/10/10`。这与 HKUST 的有效语义一致：HKUST 的 `737` 个重复中心中没有任何中心跨 split；其历史 validation/test 保持冻结，calibration 从历史 train 抽取，因此实际计数仍为 `5926/659/730/684`。
 
 标准场景不得再使用连续 Morton 空间块作为主 split。空间块 holdout 回答的是未见区域外推问题，会显著改变正样本比例；它与本文的场景专属可见性压缩主问题不同。所有方法在一个场景内共享完全相同的中心组 split；test 只在模型、阈值和方法选择冻结后读取一次。
 

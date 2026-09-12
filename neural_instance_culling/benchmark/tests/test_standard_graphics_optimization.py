@@ -57,7 +57,7 @@ class StandardGraphicsOptimizationTest(unittest.TestCase):
 
         self.assertGreater(selection_key(row(0.6)), selection_key(row(0.5)))
 
-    def test_formal_k_uses_minimum_train_only_quality_member(self) -> None:
+    def test_train_only_quality_is_available_as_a_diagnostic(self) -> None:
         payloads = [
             {"evidenceTopK": {"diagnostics": {"retainedQualityQuantiles": {"q01": 0.5}}}},
             {"evidenceTopK": {"diagnostics": {"retainedQualityQuantiles": {"q01": 0.81}}}},

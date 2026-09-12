@@ -739,12 +739,12 @@ subpose 的标签误当成 view-cell PVS 标签。
 因此 K 只增加离线关系构建与训练成本，不增加导出的前端逐实例特征维度。
 
 快速扫描对三场景完整执行 K=8/16/32 的一个种子短训，不能因某一成员未过安全门而取消
-其余成员。正式容量不按 test 或 validation 单独调参，而采用统一的 train-only 规则：选择
-保留关系质量 q01 不低于 `0.8` 的最小 K。当前证据据此固定 Sponza `K=16`、Viking
-Village `K=16`、Big City `K=32`。短扫仍报告 checkpoint 自身 calibration 安全性、
-validation WR/LCB、Useful Cull、balanced accuracy、Occlusion Recall、precision 和平均
-保留数量，用于确认 train-only 容量规则没有造成明显退化。三个固定 K 随后各执行三种子
-`40 x 900` 从头长训；旧 test 在这一阶段保持关闭。
+其余成员。关系保留质量 q01 只作为关系资产诊断，不直接决定正式容量。正式 K 在完整
+pilot 都结束后，只从 calibration/validation 安全成员中选择，并依次比较 Useful Cull、
+balanced accuracy、Occlusion Recall、precision、WR LCB 和平均保留数量。原因是更高的
+关系覆盖率不等价于更好的可见性分类；强行按 q01 选择会把训练容量代理当成最终效果。
+所选 K 随后执行三种子 `40 x 900` 从头长训；旧 test 在这一阶段保持关闭。sampling V2
+延用这里冻结的 K，不再次用新 test 或新关系 q01 调参。
 
 ### 18.3 第二阶段：新中心采样与未见 holdout
 
@@ -754,15 +754,25 @@ subpose 和 `1.299038 m` 后退距离生成更密的物理中心网格。位置�
 Big City `20 x 5 x 20`、Viking Village 地表 `32 x 32`；正式生成前先审计合法中心数和
 空间覆盖，若碰撞过滤造成严重空洞，只能统一调整网格密度，不能按结果手挑中心。
 
-新网格与旧网格坐标不重合。新数据仍按物理中心成组划分，所有同中心方向必须属于同一
+新网格与旧网格坐标不重合。实际得到 Sponza `556`、Viking Village `226`、Big City
+`1340` 个合法物理中心；对应 oriented view-cell split 分别为
+`4800/528/672/672`、`1944/216/276/276` 和
+`11580/1284/1608/1608`。新数据仍按物理中心成组划分，所有同中心方向必须属于同一
 split。优化配置不得查看新 test 标签；新 calibration/validation 用于阈值和成员选择，
-新 test 只在模型、关系容量、困难采样比例及阈值全部冻结后读取一次。正式 Color-ID 和
-三角形关系采样继续执行硬件 WebGL/ANGLE Vulkan 门，并保存规定的 GPU evidence。
+新 test 只在模型、关系容量、困难采样比例及阈值全部冻结后读取一次。三套 Color-ID 共
+完成 `213504/86784/514560` 次硬件 WebGL/ANGLE Vulkan 光栅化，全部 32/32 subpose
+成功，三个 Pose CSR 均为 `candidateMissVisible=0`。
 
 新 GT 仍由每个 view-cell 的全部 32 个 subpose 可见并集构造。train-only 三角形关系与
 生存监督从当前每 cell 5 个代表 subpose 提高到固定 9 个，选择规则为中心点加确定性最远点
 空间覆盖，不使用可见性标签。K 值采用第一阶段在旧 validation 上选出的结果。增加的关系
 采样只影响离线预处理和训练，不增加浏览器每 pose 的一次批量查询次数。
+
+三角形深度缓存仍采用 `320x180`、最多 6 层。新清单需要按稳定的单分片规模执行：Sponza
+使用 32 分片（每片 1350 pose），Viking Village 使用 16 分片（每片约 1094 pose），
+Big City 使用 64 分片（每片约 1629 pose）。最初将 Sponza 划为 16 分片时，每片 2700
+pose，四个浏览器进程都在本地序号约 2032 处停止推进；未完成 `.partial` 已删除，没有
+进入关系构建。重新切块只改变离线任务边界，不改变 pose、几何、GT 或关系定义。
 
 ### 18.4 后续单位划分消融
 

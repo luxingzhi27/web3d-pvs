@@ -276,14 +276,11 @@ def summarize_pilots(model_root: Path, result_root: Path, scenes: list[str]) -> 
         safe_rows = [row for row in rows if row["safe"]]
         pool = safe_rows or rows
         selected = max(pool, key=selection_key)
-        formal_k, relation_quality = train_only_relation_k(scene)
+        _quality_k, relation_quality = train_only_relation_k(scene)
         selections[scene] = {
             "validationBestSourceTopK": int(selected["sourceTopK"]),
+            "selectedSourceTopK": int(selected["sourceTopK"]),
             "validationSelectionPool": "safe" if safe_rows else "diagnostic",
-            "trainOnlySelectedSourceTopK": formal_k,
-            "trainOnlySelectionRule": (
-                f"minimum sourceTopK with retained relation quality q01 >= {RELATION_QUALITY_Q01_FLOOR}"
-            ),
             "relationQualityRows": relation_quality,
             "rows": rows,
             "testRead": False,
@@ -293,9 +290,7 @@ def summarize_pilots(model_root: Path, result_root: Path, scenes: list[str]) -> 
         "experiment": EXPERIMENT,
         "selectionSplit": "validation",
         "validationDiagnosticRule": "safety, useful cull, balanced accuracy, occlusion recall, precision, WR LCB, fewer predictions",
-        "formalCapacityRule": (
-            f"minimum train-only relation sourceTopK with retained quality q01 >= {RELATION_QUALITY_Q01_FLOOR}"
-        ),
+        "formalCapacityRule": "best member in the validation-safe pool; relation quality is diagnostic only",
         "selections": selections,
         "testRead": False,
     }
@@ -351,8 +346,13 @@ def run_v2_relation_builds(scenes: list[str], result_root: Path) -> None:
                 raise RuntimeError(f"sampling-v2 relation build failed for {scene} top-k {source_k}")
 
 
-def select_v2_member(scene: str, model_root: Path, result_root: Path) -> dict[str, Any]:
-    source_k, relation_quality = train_only_v2_relation_k(scene)
+def select_v2_member(
+    scene: str,
+    source_k: int,
+    model_root: Path,
+    result_root: Path,
+) -> dict[str, Any]:
+    _quality_k, relation_quality = train_only_v2_relation_k(scene)
     rows = []
     for seed in SEEDS:
         member = v2_member_dir(model_root, scene, source_k, seed)
@@ -442,7 +442,7 @@ def main() -> None:
     if args.mode == "v2-full":
         jobs = []
         for scene in scenes:
-            source_k, _relation_quality = train_only_v2_relation_k(scene)
+            source_k = int(selection["selections"][scene]["selectedSourceTopK"])
             dataset_meta = read_json(
                 ROOT / "neural_instance_culling/dataset/out" / V2_DATASETS[scene] / "dataset_meta.json"
             )
@@ -461,7 +461,8 @@ def main() -> None:
 
     if args.mode == "v2-finalize":
         for scene in scenes:
-            selected = select_v2_member(scene, model_root, result_root)
+            source_k = int(selection["selections"][scene]["selectedSourceTopK"])
+            selected = select_v2_member(scene, source_k, model_root, result_root)
             source_k = int(selected["sourceTopK"])
             seed = int(selected["selectedSeed"])
             member = Path(str(selected["selectedMember"]))
@@ -501,7 +502,7 @@ def main() -> None:
 
     jobs = []
     for scene in scenes:
-        source_k = int(selection["selections"][scene]["trainOnlySelectedSourceTopK"])
+        source_k = int(selection["selections"][scene]["selectedSourceTopK"])
         for seed in SEEDS:
             output = model_root / scene / f"topk{source_k}_ambiguity_balanced_full_seed{seed}_e40"
             jobs.append((

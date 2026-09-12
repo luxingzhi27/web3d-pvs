@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
 from pathlib import Path
+from queue import Queue
 import subprocess
 import sys
 import time
@@ -248,18 +249,30 @@ def _run_jobs(jobs: Sequence[tuple[str, Sequence[str]]], gpu_ids: Sequence[int],
     if not gpu_ids:
         raise ValueError("at least one GPU ID is required")
 
-    def run(index: int, name: str, command: Sequence[str]) -> dict[str, Any]:
-        gpu = int(gpu_ids[index % len(gpu_ids)])
-        result = _run_logged(command, gpu, log_dir / f"{name}.stdout.log", log_dir / f"{name}.stderr.log")
-        result["name"] = name
-        return result
+    available_gpus: Queue[int] = Queue()
+    for gpu in gpu_ids:
+        available_gpus.put(int(gpu))
+
+    def run(name: str, command: Sequence[str]) -> dict[str, Any]:
+        gpu = available_gpus.get()
+        try:
+            result = _run_logged(
+                command,
+                gpu,
+                log_dir / f"{name}.stdout.log",
+                log_dir / f"{name}.stderr.log",
+            )
+            result["name"] = name
+            return result
+        finally:
+            available_gpus.put(gpu)
 
     results: list[dict[str, Any]] = []
     log_dir.mkdir(parents=True, exist_ok=True)
     with ThreadPoolExecutor(max_workers=min(len(gpu_ids), len(jobs))) as executor:
         futures = {
-            executor.submit(run, index, name, command): name
-            for index, (name, command) in enumerate(jobs)
+            executor.submit(run, name, command): name
+            for name, command in jobs
         }
         for future in as_completed(futures):
             result = future.result()
