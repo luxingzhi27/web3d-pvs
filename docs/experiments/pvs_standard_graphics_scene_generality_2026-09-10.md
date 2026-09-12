@@ -580,3 +580,70 @@ validation WR/LCB/Occlusion Recall/Useful Cull 分别为
 `0.995464/0.991894/0.508259/0.380651`。epoch 2--4 的 Occlusion Recall 一度达到
 `0.516998`，但 LCB 仅约 `0.9791`，因此不会被选择。seed01/03 复现和后续六成员
 validation 选择已经进入自动队列；在这一步完成前 Viking test 继续关闭。
+
+## 17. 2026-09-12 Big City seed02 查询头塌缩与恢复实验
+
+Big City Full V4 seed02 从 epoch 4 到 epoch 36 的 calibration 冻结阈值始终为 `0`，
+validation 的 WR/LCB 虽为 `1/1`，但 Occlusion Recall 和 Useful Cull 均为 `0`。
+这不是安全且有效的模型，而是所有候选均保留。阈值扫描显示 `0.56` 时仍保留约
+`772.04` 个候选，增至 `0.58` 后只剩约 `0.8` 个且 calibration WR 降至 `0.389852`。
+
+进一步在固定的 32 个 validation view-cell、`44,329` 个候选上检查 epoch-24 输出：
+seed02 概率标准差仅 `0.011482`，q01/q50/q99 为
+`0.568400/0.568671/0.568808`；seed01/03 的标准差分别为 `0.240049/0.209911`。
+seed02 查询隐藏特征逐维标准差均值为 `0.042599`，也低于 seed01/03 的
+`0.147935/0.088890`。因此判定为轻量运行时查询头陷入近常数局部最优，而不是 GT、
+候选或阈值实现错误。
+
+登记恢复实验 `pvs_v4_bigcity_runtime_head_recovery_v1`。恢复成员从 seed02 完整
+`40 x 900` 的 test-free `last.pt` 初始化，保留已经学习的 96D 几何、分层遮挡关系、
+生存场和实例校准残差，仅重新初始化 `shared_trunk`、实例可见性头及未参与本阶段损失的
+两个任务头。训练入口新增 `--reset-runtime-heads`，运行时网络结构、导出 schema 和前端
+算子不变。
+
+两个成员均完整执行 `8 epoch x 600 step`，每 epoch 用自己的 calibration 阈值评价
+validation，不读取 test：
+
+- `head_reset_balanced`：学习率 `1e-4`，召回保护 `0.30`，困难边界分离 `0.35`，
+  困难负例比例 `0.05`、上限 `512`。
+- `head_reset_strong_separation`：学习率 `1e-4`，召回保护 `0.30`，困难边界分离
+  `0.60`，困难负例比例 `0.10`、上限 `1024`。
+
+公共运行命令为：
+
+```bash
+CUDA_VISIBLE_DEVICES=2 conda run --no-capture-output -n slm_pvs python -u \
+  neural_instance_culling/model/train_pvs.py \
+  --dataset-dir neural_instance_culling/dataset/out/pose_csr_bigcity_standard_graphics_128k_fov66_v1 \
+  --relation-dir neural_instance_culling/dataset/out/bigcity_standard_graphics_v4_bounded_relation_csr_v1 \
+  --runtime-meta neural_instance_culling/dataset/out/standard_graphics_scenes/bigcity_128k/assets/runtimeVisibilityMeta.json \
+  --initial-geo-features neural_instance_culling/dataset/out/standard_graphics_scenes/bigcity_128k/instance_geo_features_fp16.bin \
+  --glb-index neural_instance_culling/dataset/out/standard_graphics_scenes/bigcity_128k/assets/glbIndex.json \
+  --glb-root neural_instance_culling/dataset/out/standard_graphics_scenes/bigcity_128k/assets \
+  --init-checkpoint neural_instance_culling/model/out/pvs_mainline_v4_standard_graphics_v1/bigcity_128k/full_seed20260802_e40/last.pt \
+  --reset-runtime-heads --variant full_integrated_visibility_mainline \
+  --occlusion-representation survival --survival-rank 4 \
+  --relation-source bounded_hierarchical --spectral-mode moment_envelope \
+  --instance-calibration-mode residual --loss-variant pose_balanced_rvl_contrastive \
+  --epochs 8 --steps-per-epoch 600 --poses-per-batch 4 --observation-batch-size 8192 \
+  --eval-every 1 --snapshot-every 1 --max-eval-poses 0 \
+  --calibration-bootstrap-replicates 10000 --seed 20260802 --device cuda \
+  --learning-rate 0.0001 --weight-decay 0.00001 --survival-loss-weight 0.25 \
+  --relation-consistency-weight 0.10 --instance-calibration-regularization-weight 0.02 \
+  --instance-calibration-max-abs 4.0 --sparse-instance-penalty 3.0 \
+  --instance-calibration-warmup-fraction 0 --instance-calibration-ramp-fraction 0 \
+  --relation-gradient-cap 0.25 --integrated-rvl-recall-guard-weight 0.30 \
+  --integrated-rvl-recall-target 0.99 --integrated-rvl-recall-temperature 0.05 \
+  --integrated-rvl-pose-cvar-fraction 0.25 --integrated-rvl-pose-cvar-weight 0.25 \
+  --integrated-tail-ramp-fraction 0 --frontier-positive-mass-fraction 0.005 \
+  --frontier-positive-count-cap 64 --frontier-margin 0.50 --frontier-temperature 0.25 \
+  --frontier-positive-importance-floor 0.5 --frontier-positive-importance-power 0.5
+```
+
+每个成员分别补充自己的 `--output-dir`、`--experiment-name`、
+`--integrated-separation-weight`、`--frontier-negative-fraction` 和
+`--frontier-negative-count-cap`。两个成员都必须跑完；安全资格仍要求 checkpoint 自身
+calibration 及 validation 的 aggregate WR 和单侧 95% LCB 均严格大于 `0.99`。
+合格成员与三个原始 Full 成员进入同一 validation 池，按 Useful Cull、balanced
+accuracy、Occlusion Recall、precision、WR LCB 和更少预测选择，之后 Big City test
+只读取一次。

@@ -31,6 +31,31 @@ def runtime_batch(model: BoundedRelationSurvivalMomentModel, count: int = 3):
 
 
 class PvsModelTests(unittest.TestCase):
+    def test_reset_runtime_heads_preserves_offline_encoder(self) -> None:
+        torch.manual_seed(7)
+        model = BoundedRelationSurvivalMomentModel(5, 2)
+        offline_before = {
+            name: value.detach().clone()
+            for name, value in model.state_dict().items()
+            if name.startswith("offline_survival_encoder.")
+        }
+        runtime_before = {
+            name: value.detach().clone()
+            for name, value in model.state_dict().items()
+            if name.startswith(("shared_trunk.", "visibility_head."))
+        }
+
+        model.reset_runtime_heads()
+
+        for name, value in offline_before.items():
+            self.assertTrue(torch.equal(value, model.state_dict()[name]))
+        self.assertTrue(
+            any(
+                not torch.equal(value, model.state_dict()[name])
+                for name, value in runtime_before.items()
+            )
+        )
+
     def test_default_runtime_contract(self) -> None:
         model = BoundedRelationSurvivalMomentModel(5, 2)
         self.assertEqual(model.config["runtimeSchema"], MODEL_SCHEMA)

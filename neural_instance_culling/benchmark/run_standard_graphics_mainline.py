@@ -28,6 +28,11 @@ VIKING_FINETUNE_MEMBERS = {
     20260802: "conservative_seed20260802_from_e032_lr5e-6_e4x450",
     20260803: "conservative_seed20260803_from_best_safe_lr5e-6_e4x450",
 }
+BIGCITY_RECOVERY_ROOT = ROOT / "neural_instance_culling/model/out/pvs_v4_bigcity_runtime_head_recovery_v1"
+BIGCITY_RECOVERY_MEMBERS = {
+    "balanced": "seed20260802_head_reset_balanced_e8x600",
+    "strong_separation": "seed20260802_head_reset_strong_separation_e8x600",
+}
 
 SCENES: dict[str, dict[str, Any]] = {
     "sponza_128k": {
@@ -134,6 +139,7 @@ def selection_members(
     scene: str,
     model_root: Path,
     finetune_root: Path = VIKING_FINETUNE_ROOT,
+    bigcity_recovery_root: Path = BIGCITY_RECOVERY_ROOT,
 ) -> list[dict[str, Any]]:
     rows = [
         {
@@ -144,20 +150,39 @@ def selection_members(
         }
         for seed in SEEDS
     ]
-    if scene != "viking_village_128k":
-        return rows
-    finetunes = [
-        {
-            "label": f"region_stability_seed{seed}",
-            "memberType": "region_stability_finetune",
-            "seed": seed,
-            "member": finetune_root / VIKING_FINETUNE_MEMBERS[seed],
-        }
-        for seed in SEEDS
-    ]
-    if all((row["member"] / "calibration_ready_summary.json").is_file() for row in finetunes):
-        rows.extend(finetunes)
+    if scene == "viking_village_128k":
+        finetunes = [
+            {
+                "label": f"region_stability_seed{seed}",
+                "memberType": "region_stability_finetune",
+                "seed": seed,
+                "member": finetune_root / VIKING_FINETUNE_MEMBERS[seed],
+            }
+            for seed in SEEDS
+        ]
+        if all((row["member"] / "calibration_ready_summary.json").is_file() for row in finetunes):
+            rows.extend(finetunes)
+    if scene == "bigcity_128k":
+        recoveries = [
+            {
+                "label": f"runtime_head_recovery_{label}",
+                "memberType": "runtime_head_recovery",
+                "seed": 20260802,
+                "member": bigcity_recovery_root / member,
+            }
+            for label, member in BIGCITY_RECOVERY_MEMBERS.items()
+        ]
+        if all((row["member"] / "calibration_ready_summary.json").is_file() for row in recoveries):
+            rows.extend(recoveries)
     return rows
+
+
+def evaluation_method_name(member_type: str) -> str:
+    return {
+        "full_from_scratch": "full_v4",
+        "region_stability_finetune": "full_v4_region_stability_finetune",
+        "runtime_head_recovery": "full_v4_runtime_head_recovery",
+    }[member_type]
 
 
 def validation_output(benchmark_root: Path, scene: str, row: dict[str, Any]) -> Path:
@@ -464,7 +489,7 @@ def run_scene(scene: str, mode: str, model_root: Path, benchmark_root: Path, gpu
                         output,
                         seed,
                         "validation",
-                        method_name="full_v4" if candidate["memberType"] == "full_from_scratch" else "full_v4_region_stability_finetune",
+                        method_name=evaluation_method_name(candidate["memberType"]),
                     ),
                 )
             )
@@ -485,7 +510,7 @@ def run_scene(scene: str, mode: str, model_root: Path, benchmark_root: Path, gpu
                     selected["seed"],
                     "test",
                     sidecar,
-                    method_name="full_v4" if selected["memberType"] == "full_from_scratch" else "full_v4_region_stability_finetune",
+                    method_name=evaluation_method_name(selected["memberType"]),
                 ),
             )],
             gpu_ids[:1],

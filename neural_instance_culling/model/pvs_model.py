@@ -313,6 +313,18 @@ class BoundedRelationSurvivalMomentModel(nn.Module):
             "instance_to_glb", torch.zeros(self.num_instances, dtype=torch.long), persistent=False
         )
 
+    def reset_runtime_heads(self) -> None:
+        """Reinitialize the lightweight runtime query trunk and task heads."""
+        for root in (
+            self.shared_trunk,
+            self.visibility_head,
+            self.utility_head,
+            self.download_head,
+        ):
+            for module in root.modules():
+                if isinstance(module, nn.Linear):
+                    module.reset_parameters()
+
     @property
     def config(self) -> dict[str, Any]:
         has_occlusion = self.occlusion_representation != "none"

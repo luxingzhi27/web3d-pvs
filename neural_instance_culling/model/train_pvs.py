@@ -591,6 +591,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="initialize model parameters from one V4 checkpoint and create a fresh AdamW",
     )
+    parser.add_argument(
+        "--reset-runtime-heads",
+        action="store_true",
+        help="reinitialize the runtime query trunk and task heads after loading a checkpoint",
+    )
     parser.add_argument("--experiment-name", required=True)
     parser.add_argument("--variant", required=True)
     parser.add_argument("--occlusion-representation", choices=OCCLUSION_REPRESENTATION_MODES, default="survival")
@@ -684,6 +689,8 @@ def _validate_args(args: argparse.Namespace) -> None:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     _validate_args(args)
+    if args.reset_runtime_heads and args.init_checkpoint is None:
+        raise ValueError("--reset-runtime-heads requires --init-checkpoint")
     _prepare_output(args.output_dir)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -744,6 +751,9 @@ def main(argv: list[str] | None = None) -> None:
     }
     if args.init_checkpoint is not None:
         initialization = _initialize_model_from_checkpoint(model, args.init_checkpoint)
+    if args.reset_runtime_heads:
+        model.reset_runtime_heads()
+        initialization["runtimeHeadsReset"] = True
     # Reliability is derived from the current train split.  It is not an
     # optimizer state and is refreshed after loading a source checkpoint.
     model.set_instance_calibration_reliability(torch.from_numpy(reliability).to(device))

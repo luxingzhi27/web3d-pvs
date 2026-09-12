@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 
 from neural_instance_culling.benchmark.run_standard_graphics_mainline import (
+    BIGCITY_RECOVERY_MEMBERS,
     SCENES,
     VIKING_FINETUNE_MEMBERS,
     selection_members,
@@ -68,6 +69,20 @@ class StandardGraphicsMainlineTest(unittest.TestCase):
                 (member / "calibration_ready_summary.json").write_text("{}", encoding="utf-8")
             rows = selection_members("viking_village_128k", root, finetunes)
             self.assertEqual(len(rows), 6)
+
+    def test_bigcity_recovery_family_requires_both_members(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recoveries = root / "recoveries"
+            rows = selection_members("bigcity_128k", root, bigcity_recovery_root=recoveries)
+            self.assertEqual(len(rows), 3)
+
+            for name in BIGCITY_RECOVERY_MEMBERS.values():
+                member = recoveries / name
+                member.mkdir(parents=True)
+                (member / "calibration_ready_summary.json").write_text("{}", encoding="utf-8")
+            rows = selection_members("bigcity_128k", root, bigcity_recovery_root=recoveries)
+            self.assertEqual(len(rows), 5)
 
 
 if __name__ == "__main__":
