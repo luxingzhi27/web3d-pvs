@@ -8,9 +8,11 @@ from neural_instance_culling.benchmark.run_standard_graphics_mainline import (
     BIGCITY_RECOVERY_MEMBERS,
     SCENES,
     VIKING_FINETUNE_MEMBERS,
+    bigcity_recovery_command,
     selection_members,
     validation_key,
     validation_safe,
+    viking_finetune_command,
 )
 
 
@@ -83,6 +85,14 @@ class StandardGraphicsMainlineTest(unittest.TestCase):
                 (member / "calibration_ready_summary.json").write_text("{}", encoding="utf-8")
             rows = selection_members("bigcity_128k", root, bigcity_recovery_root=recoveries)
             self.assertEqual(len(rows), 5)
+
+    def test_registered_recovery_commands_keep_test_closed(self) -> None:
+        bigcity = bigcity_recovery_command("balanced")
+        self.assertIn("--reset-runtime-heads", bigcity)
+        self.assertNotIn("test", bigcity)
+        viking = viking_finetune_command(20260801)
+        self.assertIn("--init-checkpoint", viking)
+        self.assertNotIn("test", viking)
 
 
 if __name__ == "__main__":

@@ -647,3 +647,28 @@ calibration 及 validation 的 aggregate WR 和单侧 95% LCB 均严格大于 `0
 合格成员与三个原始 Full 成员进入同一 validation 池，按 Useful Cull、balanced
 accuracy、Occlusion Recall、precision、WR LCB 和更少预测选择，之后 Big City test
 只读取一次。
+
+### 17.1 正式恢复 runner 与完成状态
+
+三个标准场景的原始 Full V4 三种子均已完成。Big City seed02 原始最佳安全成员仍是
+epoch 4 的全保留工作点；seed01/03 最佳安全 validation 的
+WR/LCB/Occlusion Recall/Useful Cull 分别为
+`0.999864/0.999839/0.503400/0.394889` 和
+`0.999417/0.999055/0.499145/0.391552`。
+
+`run_standard_graphics_mainline.py` 新增两个正式执行模式：
+
+```bash
+conda run --no-capture-output -n slm_pvs python -u \
+  neural_instance_culling/benchmark/run_standard_graphics_mainline.py \
+  recover-bigcity --scenes bigcity_128k --gpu-ids 1 2
+
+conda run --no-capture-output -n slm_pvs python -u \
+  neural_instance_culling/benchmark/run_standard_graphics_mainline.py \
+  finetune-viking --scenes viking_village_128k --gpu-ids 0 3
+```
+
+两种模式直接以训练子进程返回码和 `calibration_ready_summary.json` 推进完整训练、
+validation 选择与唯一一次 frozen test，不再用训练 PID 存活状态代表任务是否完成。
+后续运行资产导出同时等待 `viking_finalize.done` 和 `bigcity_finalize.done`，确保三个
+标准场景的模型与阈值均已冻结后才进入 runtime、HZB 和图像评价。

@@ -33,6 +33,10 @@ BIGCITY_RECOVERY_MEMBERS = {
     "balanced": "seed20260802_head_reset_balanced_e8x600",
     "strong_separation": "seed20260802_head_reset_strong_separation_e8x600",
 }
+BIGCITY_RECOVERY_CONFIGS = {
+    "balanced": {"separation": "0.35", "negative_fraction": "0.05", "negative_cap": "512"},
+    "strong_separation": {"separation": "0.60", "negative_fraction": "0.10", "negative_cap": "1024"},
+}
 
 SCENES: dict[str, dict[str, Any]] = {
     "sponza_128k": {
@@ -246,6 +250,72 @@ def train_command(scene: str, output: Path, seed: int, *, smoke: bool) -> list[s
         "--frontier-positive-importance-floor", "0.5",
         "--frontier-positive-importance-power", "0.5",
     ]
+
+
+def _replace_command_value(command: list[str], flag: str, value: str) -> None:
+    index = command.index(flag)
+    command[index + 1] = value
+
+
+def bigcity_recovery_command(label: str) -> list[str]:
+    config = BIGCITY_RECOVERY_CONFIGS[label]
+    output = BIGCITY_RECOVERY_ROOT / BIGCITY_RECOVERY_MEMBERS[label]
+    command = train_command("bigcity_128k", output, 20260802, smoke=False)
+    command.extend([
+        "--init-checkpoint",
+        str(member_dir(
+            ROOT / "neural_instance_culling/model/out/pvs_mainline_v4_standard_graphics_v1",
+            "bigcity_128k",
+            20260802,
+        ) / "last.pt"),
+        "--reset-runtime-heads",
+    ])
+    for flag, value in {
+        "--experiment-name": f"pvs_v4_bigcity_runtime_head_recovery_v1_{label}",
+        "--epochs": "8",
+        "--steps-per-epoch": "600",
+        "--eval-every": "1",
+        "--snapshot-every": "1",
+        "--learning-rate": "0.0001",
+        "--instance-calibration-warmup-fraction": "0",
+        "--instance-calibration-ramp-fraction": "0",
+        "--integrated-separation-weight": config["separation"],
+        "--integrated-tail-ramp-fraction": "0",
+        "--frontier-negative-fraction": config["negative_fraction"],
+        "--frontier-negative-count-cap": config["negative_cap"],
+    }.items():
+        _replace_command_value(command, flag, value)
+    return command
+
+
+def viking_finetune_command(seed: int) -> list[str]:
+    output = VIKING_FINETUNE_ROOT / VIKING_FINETUNE_MEMBERS[seed]
+    command = train_command("viking_village_128k", output, seed, smoke=False)
+    command.extend([
+        "--init-checkpoint",
+        str(member_dir(
+            ROOT / "neural_instance_culling/model/out/pvs_mainline_v4_standard_graphics_v1",
+            "viking_village_128k",
+            seed,
+        ) / "best_safe.pt"),
+    ])
+    for flag, value in {
+        "--experiment-name": f"pvs_v4_viking_region_stability_finetune_v1_conservative_seed{seed}",
+        "--epochs": "4",
+        "--steps-per-epoch": "450",
+        "--poses-per-batch": "8",
+        "--eval-every": "1",
+        "--snapshot-every": "1",
+        "--learning-rate": "0.000005",
+        "--instance-calibration-warmup-fraction": "0",
+        "--instance-calibration-ramp-fraction": "0",
+        "--integrated-rvl-recall-guard-weight": "0.75",
+        "--integrated-rvl-recall-target": "0.997",
+        "--integrated-rvl-pose-cvar-weight": "0.75",
+        "--integrated-tail-ramp-fraction": "0",
+    }.items():
+        _replace_command_value(command, flag, value)
+    return command
 
 
 def selected_checkpoint(member: Path) -> Path:
@@ -468,13 +538,38 @@ def run_scene(scene: str, mode: str, model_root: Path, benchmark_root: Path, gpu
             benchmark_root / scene / "logs/smoke",
         )
         return
+    if mode == "recover-bigcity":
+        if scene != "bigcity_128k":
+            raise ValueError("recover-bigcity only supports bigcity_128k")
+        run_jobs(
+            [
+                (f"runtime_head_recovery_{label}", bigcity_recovery_command(label))
+                for label in BIGCITY_RECOVERY_CONFIGS
+            ],
+            gpu_ids,
+            BIGCITY_RECOVERY_ROOT / "run_logs",
+        )
+    if mode == "finetune-viking":
+        if scene != "viking_village_128k":
+            raise ValueError("finetune-viking only supports viking_village_128k")
+        pending = [seed for seed in SEEDS if not (
+            VIKING_FINETUNE_ROOT / VIKING_FINETUNE_MEMBERS[seed] / "calibration_ready_summary.json"
+        ).is_file()]
+        run_jobs(
+            [
+                (f"region_stability_seed{seed}", viking_finetune_command(seed))
+                for seed in pending
+            ],
+            gpu_ids,
+            VIKING_FINETUNE_ROOT / "run_logs",
+        )
     if mode in {"train", "all"}:
         jobs = [
             (f"train_seed{seed}", train_command(scene, member_dir(model_root, scene, seed), seed, smoke=False))
             for seed in SEEDS
         ]
         run_jobs(jobs, gpu_ids[:3], benchmark_root / scene / "logs/train")
-    if mode in {"evaluate", "all"}:
+    if mode in {"evaluate", "all", "recover-bigcity", "finetune-viking"}:
         jobs = []
         for candidate in selection_members(scene, model_root):
             seed = int(candidate["seed"])
@@ -495,7 +590,7 @@ def run_scene(scene: str, mode: str, model_root: Path, benchmark_root: Path, gpu
             )
         run_jobs(jobs, gpu_ids[:3], benchmark_root / scene / "logs/validation")
     selected: dict[str, Any] | None = None
-    if mode in {"finalize", "all"}:
+    if mode in {"finalize", "all", "recover-bigcity", "finetune-viking"}:
         selected = select_validation_member(scene, model_root, benchmark_root)
         output = benchmark_root / scene / "test" / "full_v4.json"
         sidecar = benchmark_root / scene / "test" / "full_v4.sidecar"
@@ -543,7 +638,13 @@ def run_scene(scene: str, mode: str, model_root: Path, benchmark_root: Path, gpu
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("preflight", "smoke", "train", "evaluate", "finalize", "export", "all"))
+    parser.add_argument(
+        "mode",
+        choices=(
+            "preflight", "smoke", "train", "evaluate", "finalize", "export", "all",
+            "recover-bigcity", "finetune-viking",
+        ),
+    )
     parser.add_argument("--scenes", default="sponza_128k")
     parser.add_argument(
         "--model-root",
