@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+import numpy as np
+
 BENCHMARK_DIR = Path(__file__).resolve().parents[2] / "benchmark"
 MODEL_DIR = Path(__file__).resolve().parents[1]
 for path in (str(BENCHMARK_DIR), str(MODEL_DIR)):
@@ -16,6 +18,7 @@ for path in (str(BENCHMARK_DIR), str(MODEL_DIR)):
 from run_pvs import MAINLINE_CONFIG, build_train_command  # noqa: E402
 from fixed_geometry_encoder import InstancePointNetPPGeoEncoder  # noqa: E402
 from train_pvs import (  # noqa: E402
+    _ambiguity_balanced_pose_sampling,
     _calibration_blend,
     _initialize_model_from_checkpoint,
     _load_relation_bundle,
@@ -30,6 +33,52 @@ DATA_ROOT = Path(os.environ.get("SLM_DATA_ROOT", "/mnt/sda/rhyang/slm")).resolve
 
 
 class TrainPvsTests(unittest.TestCase):
+    def test_ambiguity_sampling_uses_train_pose_visibility_and_boundaries(self) -> None:
+        class Dataset:
+            candidates = [
+                np.asarray([0, 1], dtype=np.uint32),
+                np.asarray([0, 1], dtype=np.uint32),
+                np.asarray([0, 1], dtype=np.uint32),
+                np.asarray([0, 1], dtype=np.uint32),
+            ]
+            visible = [
+                np.asarray([0], dtype=np.uint32),
+                np.asarray([1], dtype=np.uint32),
+                np.asarray([0, 1], dtype=np.uint32),
+                np.asarray([0], dtype=np.uint32),
+            ]
+            hits = [
+                np.asarray([4], dtype=np.uint16),
+                np.asarray([2], dtype=np.uint16),
+                np.asarray([4, 4], dtype=np.uint16),
+                np.asarray([4], dtype=np.uint16),
+            ]
+
+            def candidate_slice(self, pose_index: int) -> np.ndarray:
+                return self.candidates[pose_index]
+
+            def visible_slice(self, pose_index: int) -> tuple[np.ndarray, np.ndarray]:
+                ids = self.visible[pose_index]
+                return ids, np.ones(ids.size, dtype=np.float32)
+
+            def visible_hit_count_slice(self, pose_index: int) -> np.ndarray:
+                return self.hits[pose_index]
+
+            def subpose_count(self, _pose_index: int) -> int:
+                return 4
+
+        split = mock.Mock(
+            pose_indices=np.arange(4, dtype=np.int64),
+            pose_indices_with_visible=np.arange(4, dtype=np.int64),
+        )
+        hard, metadata = _ambiguity_balanced_pose_sampling(
+            Dataset(), split, 2, hard_quantile=0.75
+        )
+        self.assertEqual(hard.tolist(), [1])
+        self.assertEqual(metadata["sourceSplit"], "train")
+        self.assertEqual(metadata["hardPoseCount"], 1)
+        self.assertFalse(metadata["testRead"])
+
     def test_offline_geometry_encoder_output_shape(self) -> None:
         import torch
 

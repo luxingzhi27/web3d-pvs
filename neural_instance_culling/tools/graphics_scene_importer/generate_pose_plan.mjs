@@ -49,6 +49,19 @@ function vector3(value, label) {
   return value.map((item, axis) => finiteNumber(item, `${label}[${axis}]`));
 }
 
+function integerVector(value, length, label) {
+  if (!Array.isArray(value) || value.length !== length) {
+    throw new PosePlanBlockedError(`${label} must contain ${length} integers`);
+  }
+  return value.map((item, axis) => {
+    const number = Number(item);
+    if (!Number.isInteger(number) || number <= 0) {
+      throw new PosePlanBlockedError(`${label}[${axis}] must be a positive integer`);
+    }
+    return number;
+  });
+}
+
 function boundsFromValue(value, label) {
   if (!value || typeof value !== 'object') {
     throw new PosePlanBlockedError(`${label} is missing`);
@@ -533,9 +546,9 @@ function hash32(value) {
   return x >>> 0;
 }
 
-function gridPosition(sceneBounds, gridIndex) {
+function gridPosition(sceneBounds, gridIndex, gridDivisions) {
   return gridIndex.map((value, axis) => (
-    sceneBounds.min[axis] + ((value + 0.5) / GRID_DIVISIONS[axis]) * sceneBounds.size[axis]
+    sceneBounds.min[axis] + ((value + 0.5) / gridDivisions[axis]) * sceneBounds.size[axis]
   ));
 }
 
@@ -554,15 +567,15 @@ function directionFor(yawDeg, pitchDeg) {
   });
 }
 
-function collectLegalPositions(sceneBounds, collisionIndex, clearance) {
+function collectLegalPositions(sceneBounds, collisionIndex, clearance, gridDivisions) {
   const positions = [];
   let collisionRejected = 0;
   let candidateIndex = 0;
-  for (let x = 0; x < GRID_DIVISIONS[0]; x += 1) {
-    for (let y = 0; y < GRID_DIVISIONS[1]; y += 1) {
-      for (let z = 0; z < GRID_DIVISIONS[2]; z += 1) {
+  for (let x = 0; x < gridDivisions[0]; x += 1) {
+    for (let y = 0; y < gridDivisions[1]; y += 1) {
+      for (let z = 0; z < gridDivisions[2]; z += 1) {
         const gridIndex = [x, y, z];
-        const position = gridPosition(sceneBounds, gridIndex);
+        const position = gridPosition(sceneBounds, gridIndex, gridDivisions);
         if (collisionAtPoint(position, collisionIndex, clearance)) {
           collisionRejected += 1;
         } else {
@@ -583,7 +596,7 @@ function collectLegalPositions(sceneBounds, collisionIndex, clearance) {
   };
 }
 
-function collectGroundSurfacePositions(runtimeRecords, sourceScene, clearance) {
+function collectGroundSurfacePositions(runtimeRecords, sourceScene, clearance, groundGridDivisions) {
   const renderables = Array.isArray(sourceScene?.renderables) ? sourceScene.renderables : [];
   const groundRenderables = renderables.filter((record) => pathContains(record, TERRAIN_NEAR_TOKEN));
   if (groundRenderables.length === 0) {
@@ -607,10 +620,10 @@ function collectGroundSurfacePositions(runtimeRecords, sourceScene, clearance) {
   let noGroundRejected = 0;
   let collisionRejected = 0;
   let candidateIndex = 0;
-  for (let xIndex = 0; xIndex < GROUND_GRID_DIVISIONS[0]; xIndex += 1) {
-    for (let zIndex = 0; zIndex < GROUND_GRID_DIVISIONS[1]; zIndex += 1) {
-      const x = domain.min[0] + ((xIndex + 0.5) / GROUND_GRID_DIVISIONS[0]) * (domain.max[0] - domain.min[0]);
-      const z = domain.min[2] + ((zIndex + 0.5) / GROUND_GRID_DIVISIONS[1]) * (domain.max[2] - domain.min[2]);
+  for (let xIndex = 0; xIndex < groundGridDivisions[0]; xIndex += 1) {
+    for (let zIndex = 0; zIndex < groundGridDivisions[1]; zIndex += 1) {
+      const x = domain.min[0] + ((xIndex + 0.5) / groundGridDivisions[0]) * (domain.max[0] - domain.min[0]);
+      const z = domain.min[2] + ((zIndex + 0.5) / groundGridDivisions[1]) * (domain.max[2] - domain.min[2]);
       const groundY = groundHeightAt(x, z, groundIndex);
       if (!Number.isFinite(groundY)) {
         noGroundRejected += 1;
@@ -644,14 +657,14 @@ function collectGroundSurfacePositions(runtimeRecords, sourceScene, clearance) {
   };
 }
 
-function assignCenterGroupSplits(positions) {
+function assignCenterGroupSplits(positions, splitSeed) {
   if (positions.length < 10) {
     throw new PosePlanBlockedError('at least ten legal camera centers are required for four splits');
   }
   const order = positions.slice().sort((left, right) => (
     compareNumbers(
-      hash32(SPLIT_SEED ^ Math.imul(left.candidateIndex + 1, 0x9e3779b1)),
-      hash32(SPLIT_SEED ^ Math.imul(right.candidateIndex + 1, 0x9e3779b1)),
+      hash32(splitSeed ^ Math.imul(left.candidateIndex + 1, 0x9e3779b1)),
+      hash32(splitSeed ^ Math.imul(right.candidateIndex + 1, 0x9e3779b1)),
     ) || compareNumbers(left.candidateIndex, right.candidateIndex)
   ));
   const validationCount = Math.round(positions.length * 0.10);
@@ -660,8 +673,8 @@ function assignCenterGroupSplits(positions) {
   const calibrationCount = Math.round(historicalTrainCount * 0.10);
   const trainPool = order.slice(0, historicalTrainCount).sort((left, right) => (
     compareNumbers(
-      hash32((SPLIT_SEED + 1) ^ Math.imul(left.candidateIndex + 1, 0x85ebca6b)),
-      hash32((SPLIT_SEED + 1) ^ Math.imul(right.candidateIndex + 1, 0x85ebca6b)),
+      hash32((splitSeed + 1) ^ Math.imul(left.candidateIndex + 1, 0x85ebca6b)),
+      hash32((splitSeed + 1) ^ Math.imul(right.candidateIndex + 1, 0x85ebca6b)),
     ) || compareNumbers(left.candidateIndex, right.candidateIndex)
   ));
   const splitByCenter = new Map();
@@ -741,6 +754,20 @@ export function generatePosePlan(runtimeMeta, options = {}) {
   const audited = auditRecords(runtimeMeta);
   const clearance = clearanceForScene(sceneBounds);
   const placementMode = options.placementMode || 'volume_grid';
+  const gridDivisions = integerVector(
+    options.gridDivisions || GRID_DIVISIONS,
+    3,
+    'gridDivisions',
+  );
+  const groundGridDivisions = integerVector(
+    options.groundGridDivisions || GROUND_GRID_DIVISIONS,
+    2,
+    'groundGridDivisions',
+  );
+  const splitSeed = Number(options.splitSeed ?? SPLIT_SEED);
+  if (!Number.isInteger(splitSeed) || splitSeed < 0) {
+    throw new PosePlanBlockedError('splitSeed must be a non-negative integer');
+  }
   if (!['volume_grid', 'ground_surface_grid'].includes(placementMode)) {
     throw new PosePlanBlockedError(`unsupported placement mode ${placementMode}`);
   }
@@ -753,19 +780,23 @@ export function generatePosePlan(runtimeMeta, options = {}) {
   let collisionIndex = null;
   let legal;
   if (placementMode === 'ground_surface_grid') {
-    legal = collectGroundSurfacePositions(audited.records, options.sourceScene, clearance);
+    legal = collectGroundSurfacePositions(
+      audited.records, options.sourceScene, clearance, groundGridDivisions,
+    );
   } else {
     collisionIndex = legalityMode === 'geometry'
       ? buildTriangleCollisionIndex(options.sourceScene)
       : buildCollisionIndex(audited.records, clearance);
-    legal = collectLegalPositions(sceneBounds, collisionIndex, clearance);
+    legal = collectLegalPositions(sceneBounds, collisionIndex, clearance, gridDivisions);
   }
   if (legal.positions.length === 0) {
     throw new PosePlanBlockedError(
       `no collision-free grid positions remain after rejecting ${legal.collisionRejected} positions`,
     );
   }
-  const { centerCounts: splitCenterCount, splitByCenter } = assignCenterGroupSplits(legal.positions);
+  const { centerCounts: splitCenterCount, splitByCenter } = assignCenterGroupSplits(
+    legal.positions, splitSeed,
+  );
   const rows = createRows(legal.positions, splitByCenter);
   const splitPoseCount = countBySplit(rows);
   if (SPLIT_NAMES.some((name) => splitPoseCount[name] === 0)) {
@@ -819,7 +850,7 @@ export function generatePosePlan(runtimeMeta, options = {}) {
       expandedAabbCollision: legalityMode === 'aabb' || legalityMode === 'ground_surface_grid',
       nearestTriangleSurfaceDistance: legalityMode === 'geometry' || legalityMode === 'ground_surface_grid',
       gridDivisions: legalityMode === 'ground_surface_grid'
-        ? [GROUND_GRID_DIVISIONS[0], 1, GROUND_GRID_DIVISIONS[1]] : GRID_DIVISIONS.slice(),
+        ? [groundGridDivisions[0], 1, groundGridDivisions[1]] : gridDivisions.slice(),
       gridCandidateCount: legal.gridCandidateCount,
       noGroundIntersectionPositionCount: legal.noGroundRejected ?? 0,
       collisionRejectedPositionCount: legal.collisionRejected,
@@ -843,7 +874,7 @@ export function generatePosePlan(runtimeMeta, options = {}) {
       cameraSafetyRadius: CAMERA_CLEARANCE,
     },
     centerGroupSplit: {
-      seed: SPLIT_SEED,
+      seed: splitSeed,
       assignment: 'deterministic seeded random assignment of physical camera centers',
       procedure: '80/10/10 train/validation/test, then 10% of the initial train centers become calibration',
       ratios: { train: 0.72, calibration: 0.08, validation: 0.10, test: 0.10 },
@@ -871,8 +902,25 @@ function writePlan(filePath, rows) {
   fs.writeFileSync(filePath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8');
 }
 
+function parseIntegerList(value, length, label) {
+  const values = String(value || '').split(',').map((item) => Number(item.trim()));
+  if (values.length !== length || values.some((item) => !Number.isInteger(item) || item <= 0)) {
+    throw new Error(`${label} must contain ${length} comma-separated positive integers`);
+  }
+  return values;
+}
+
 function parseArgs(argv) {
-  const args = { runtimeMeta: '', output: '', summary: '', conversionManifest: '', placementMode: 'volume_grid' };
+  const args = {
+    runtimeMeta: '',
+    output: '',
+    summary: '',
+    conversionManifest: '',
+    placementMode: 'volume_grid',
+    gridDivisions: GRID_DIVISIONS.slice(),
+    groundGridDivisions: GROUND_GRID_DIVISIONS.slice(),
+    splitSeed: SPLIT_SEED,
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--runtime-meta') args.runtimeMeta = path.resolve(argv[++index] || '');
@@ -881,13 +929,16 @@ function parseArgs(argv) {
     else if (argument === '--summary') args.summary = path.resolve(argv[++index] || '');
     else if (argument === '--conversion-manifest') args.conversionManifest = path.resolve(argv[++index] || '');
     else if (argument === '--placement-mode') args.placementMode = String(argv[++index] || '');
+    else if (argument === '--grid-divisions') args.gridDivisions = parseIntegerList(argv[++index], 3, '--grid-divisions');
+    else if (argument === '--ground-grid-divisions') args.groundGridDivisions = parseIntegerList(argv[++index], 2, '--ground-grid-divisions');
+    else if (argument === '--split-seed') args.splitSeed = Number(argv[++index]);
     else if (argument === '--help') args.help = true;
     else throw new Error(`unknown argument: ${argument}`);
   }
   if (args.help) return args;
   if (!args.runtimeMeta || !args.output) {
     throw new Error(
-      'Usage: generate_pose_plan.mjs --runtime-meta runtimeVisibilityMeta.json --output pose_plan.jsonl [--source-scene scene.gltf|scene.glb] [--placement-mode volume_grid|ground_surface_grid] [--summary audit.json]',
+      'Usage: generate_pose_plan.mjs --runtime-meta runtimeVisibilityMeta.json --output pose_plan.jsonl [--source-scene scene.gltf|scene.glb] [--placement-mode volume_grid|ground_surface_grid] [--grid-divisions 16,4,16] [--ground-grid-divisions 24,24] [--split-seed N] [--summary audit.json]',
     );
   }
   if (!args.summary) args.summary = args.output.replace(/\.jsonl$/i, '_summary.json');
@@ -901,7 +952,7 @@ function parseArgs(argv) {
 export async function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   if (args.help) {
-    console.log('generate_pose_plan.mjs --runtime-meta runtimeVisibilityMeta.json --output pose_plan.jsonl [--source-scene scene.gltf|scene.glb] [--placement-mode volume_grid|ground_surface_grid] [--summary audit.json]');
+    console.log('generate_pose_plan.mjs --runtime-meta runtimeVisibilityMeta.json --output pose_plan.jsonl [--source-scene scene.gltf|scene.glb] [--placement-mode volume_grid|ground_surface_grid] [--grid-divisions 16,4,16] [--ground-grid-divisions 24,24] [--split-seed N] [--summary audit.json]');
     return null;
   }
   const runtimeMeta = readJson(args.runtimeMeta);
@@ -923,6 +974,9 @@ export async function main(argv = process.argv.slice(2)) {
     conversionManifest,
     sourceScene,
     placementMode: args.placementMode,
+    gridDivisions: args.gridDivisions,
+    groundGridDivisions: args.groundGridDivisions,
+    splitSeed: args.splitSeed,
   });
   writePlan(args.output, result.rows);
   fs.mkdirSync(path.dirname(args.summary), { recursive: true });

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from contextlib import redirect_stdout
 import io
+import json
 from pathlib import Path
+import struct
 import sys
 import tempfile
 import unittest
@@ -47,6 +49,27 @@ def _fixture_scene(root: Path, key: str = "hkust") -> orchestrator.SceneSpec:
 
 
 class GeometryShellHZBPaperOrchestratorTests(unittest.TestCase):
+    def test_region_preflight_accepts_current_pose_csr_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "dataset_meta.json").write_text(
+                json.dumps({
+                    "schema": "pose-csr-explicit-four-way-split-v1",
+                    "viewcellCount": 2,
+                    "poseCount": 2,
+                    "numInstances": 3,
+                }),
+                encoding="utf-8",
+            )
+            (root / "subpose_offsets.bin").write_bytes(struct.pack("<3Q", 0, 1, 2))
+            (root / "subpose_camera_forward.bin").write_bytes(struct.pack("<6f", *([0.0] * 6)))
+            (root / "subpose_camera_pos.bin").write_bytes(struct.pack("<6f", *([0.0] * 6)))
+            (root / "subpose_pose_indices.bin").write_bytes(struct.pack("<2I", 0, 1))
+            (root / "viewcell_centers.bin").write_bytes(struct.pack("<6f", *([0.0] * 6)))
+            result = orchestrator._check_region_assets(root, 2, 3)
+        self.assertEqual(result["schema"], "pose-csr-explicit-four-way-split-v1")
+        self.assertEqual(result["subposeCount"], 2)
+
     def test_registered_matrix_has_the_requested_shape(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

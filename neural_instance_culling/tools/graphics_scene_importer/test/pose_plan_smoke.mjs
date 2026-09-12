@@ -80,6 +80,14 @@ try {
   assert.equal(centerSplits.size >= 10, true);
   assert.equal(first.audit.centerGroupSplit.allOrientationsAtOneCenterStayInOneSplit, true);
 
+  const denser = generatePosePlan(source, {
+    gridDivisions: [20, 5, 20],
+    splitSeed: 20260913,
+  });
+  assert.deepEqual(denser.audit.legalRegion.gridDivisions, [20, 5, 20]);
+  assert.equal(denser.audit.centerGroupSplit.seed, 20260913);
+  assert.notEqual(denser.audit.legalRegion.legalPositionCount, centerSplits.size);
+
   const runtimePath = path.join(root, 'runtimeVisibilityMeta.json');
   const outputPath = path.join(root, 'pose_plan.jsonl');
   const summaryPath = path.join(root, 'pose_plan_summary.json');
@@ -171,6 +179,14 @@ try {
     row.camera_pos[0] < 7 - 0.8 || row.camera_pos[0] > 9 + 0.8
       || row.camera_pos[2] < 7 - 0.8 || row.camera_pos[2] > 9 + 0.8
   )));
+  const denserGround = generatePosePlan(groundRuntime, {
+    sourceScene: groundScene,
+    placementMode: 'ground_surface_grid',
+    groundGridDivisions: [32, 32],
+    splitSeed: 20260913,
+  });
+  assert.deepEqual(denserGround.audit.legalRegion.gridDivisions, [32, 1, 32]);
+  assert.equal(denserGround.audit.centerGroupSplit.seed, 20260913);
 
   assert.throws(
     () => generatePosePlan(groundRuntime, { placementMode: 'ground_surface_grid' }),

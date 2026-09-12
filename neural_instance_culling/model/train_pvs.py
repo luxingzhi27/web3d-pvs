@@ -258,6 +258,68 @@ def _instance_reliability(
     }
 
 
+def _ambiguity_balanced_pose_sampling(
+    dataset: PoseCSRDataset,
+    train_split: Any,
+    num_instances: int,
+    *,
+    hard_quantile: float,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Select train poses dominated by view-dependent or boundary instances."""
+    pose_indices = np.asarray(train_split.pose_indices_with_visible, dtype=np.int64)
+    candidate_counts = np.zeros(num_instances, dtype=np.int64)
+    visible_counts = np.zeros(num_instances, dtype=np.int64)
+    for pose_index in np.asarray(train_split.pose_indices, dtype=np.int64):
+        candidate_ids = np.asarray(dataset.candidate_slice(int(pose_index)), dtype=np.int64)
+        visible_ids = np.asarray(dataset.visible_slice(int(pose_index))[0], dtype=np.int64)
+        if candidate_ids.size:
+            candidate_counts += np.bincount(candidate_ids, minlength=num_instances)
+        if visible_ids.size:
+            visible_counts += np.bincount(visible_ids, minlength=num_instances)
+
+    rates = np.divide(
+        visible_counts,
+        candidate_counts,
+        out=np.zeros(num_instances, dtype=np.float64),
+        where=candidate_counts > 0,
+    )
+    instance_ambiguity = 4.0 * rates * (1.0 - rates)
+    instance_ambiguity[candidate_counts < 2] = 0.0
+    scores = np.zeros(pose_indices.size, dtype=np.float64)
+    candidate_terms = np.zeros_like(scores)
+    boundary_terms = np.zeros_like(scores)
+    for row, pose_index in enumerate(pose_indices.tolist()):
+        candidate_ids = np.asarray(dataset.candidate_slice(pose_index), dtype=np.int64)
+        if candidate_ids.size:
+            candidate_terms[row] = float(instance_ambiguity[candidate_ids].mean())
+        hits = np.asarray(dataset.visible_hit_count_slice(pose_index), dtype=np.float64)
+        subpose_count = int(dataset.subpose_count(pose_index))
+        if hits.size and subpose_count > 0:
+            hit_rates = np.clip(hits / subpose_count, 0.0, 1.0)
+            boundary_terms[row] = float((4.0 * hit_rates * (1.0 - hit_rates)).mean())
+        scores[row] = 0.7 * candidate_terms[row] + 0.3 * boundary_terms[row]
+
+    hard_count = max(1, int(math.ceil((1.0 - hard_quantile) * pose_indices.size)))
+    order = np.lexsort((pose_indices, -scores))
+    hard_pose_indices = np.sort(pose_indices[order[:hard_count]])
+    return hard_pose_indices, {
+        "schema": "pvs-train-only-ambiguity-balanced-pose-sampling-v1",
+        "sourceSplit": "train",
+        "score": "0.7 * mean(4 * instance_visible_rate * (1-rate)) + 0.3 * mean(4 * subpose_hit_rate * (1-hit_rate))",
+        "hardQuantile": float(hard_quantile),
+        "eligiblePoseCount": int(pose_indices.size),
+        "hardPoseCount": int(hard_pose_indices.size),
+        "hardScoreMin": float(scores[order[hard_count - 1]]),
+        "scoreQuantiles": {
+            str(quantile): float(np.quantile(scores, quantile))
+            for quantile in (0.0, 0.25, 0.5, 0.75, 0.9, 1.0)
+        },
+        "candidateAmbiguityMean": float(candidate_terms.mean()),
+        "subposeBoundaryAmbiguityMean": float(boundary_terms.mean()),
+        "testRead": False,
+    }
+
+
 def _load_glb_bytes(index_path: Path, root: Path, num_glbs: int) -> np.ndarray:
     payload = json.loads(index_path.read_text(encoding="utf-8"))
     result = np.zeros(num_glbs, dtype=np.float32)
@@ -614,6 +676,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=12)
     parser.add_argument("--steps-per-epoch", type=int, default=100)
     parser.add_argument("--poses-per-batch", type=int, default=4)
+    parser.add_argument(
+        "--pose-sampling",
+        choices=("uniform", "ambiguity_balanced"),
+        default="uniform",
+    )
+    parser.add_argument("--hard-pose-fraction", type=float, default=0.0)
+    parser.add_argument("--hard-pose-quantile", type=float, default=0.65)
     parser.add_argument("--observation-batch-size", type=int, default=8192)
     parser.add_argument("--eval-every", type=int, default=4)
     parser.add_argument("--snapshot-every", type=int, default=4)
@@ -674,6 +743,8 @@ def _validate_args(args: argparse.Namespace) -> None:
     for value in (
         args.instance_calibration_warmup_fraction,
         args.instance_calibration_ramp_fraction,
+        args.hard_pose_fraction,
+        args.hard_pose_quantile,
         args.integrated_rvl_pose_cvar_fraction,
         args.integrated_rvl_pose_cvar_weight,
         args.integrated_tail_ramp_fraction,
@@ -684,6 +755,12 @@ def _validate_args(args: argparse.Namespace) -> None:
     ):
         if not 0 <= value <= 1:
             raise ValueError("fraction arguments must lie in [0, 1]")
+    if args.pose_sampling == "uniform" and args.hard_pose_fraction != 0:
+        raise ValueError("uniform pose sampling requires --hard-pose-fraction 0")
+    if args.pose_sampling == "ambiguity_balanced" and not 0 < args.hard_pose_fraction <= 1:
+        raise ValueError("ambiguity-balanced pose sampling requires a positive hard-pose fraction")
+    if not 0 < args.hard_pose_quantile < 1:
+        raise ValueError("hard-pose quantile must lie strictly between 0 and 1")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -707,6 +784,22 @@ def main(argv: list[str] | None = None) -> None:
     validation_name, validation_split = _resolve_split(dataset, args.validation_split, "validation")
     geometry, geometry_meta = _load_geometry(args.initial_geo_features, num_instances)
     depth = _depth_normalization(args.relation_dir)
+
+    hard_pose_indices: np.ndarray | None = None
+    pose_sampling_meta: dict[str, Any] = {
+        "schema": "pvs-uniform-train-pose-sampling-v1",
+        "sourceSplit": "train",
+        "hardPoseFraction": 0.0,
+        "testRead": False,
+    }
+    if args.pose_sampling == "ambiguity_balanced":
+        hard_pose_indices, pose_sampling_meta = _ambiguity_balanced_pose_sampling(
+            dataset,
+            train_split,
+            num_instances,
+            hard_quantile=args.hard_pose_quantile,
+        )
+        pose_sampling_meta["hardPoseFraction"] = float(args.hard_pose_fraction)
 
     if args.occlusion_representation == "survival":
         relation, relation_tensors, local_ids, structural_ids, observations, relation_meta = _load_relation_bundle(
@@ -798,6 +891,7 @@ def main(argv: list[str] | None = None) -> None:
             "calibration": int(calibration_split.pose_indices.size),
             "validation": int(validation_split.pose_indices.size),
         },
+        "poseSampling": pose_sampling_meta,
         "dataset": {"path": str(args.dataset_dir.resolve())},
         "runtimeMeta": {"path": str(args.runtime_meta.resolve())},
         "viewcell": viewcell_contract,
@@ -842,7 +936,11 @@ def main(argv: list[str] | None = None) -> None:
         epoch_values: dict[str, list[float]] = {}
         rng = np.random.default_rng(args.seed + epoch * 1009)
         batches = train_split.pose_set_batches(
-            args.poses_per_batch, rng, args.steps_per_epoch
+            args.poses_per_batch,
+            rng,
+            args.steps_per_epoch,
+            hard_pose_indices=hard_pose_indices,
+            hard_pose_fraction=args.hard_pose_fraction,
         )
         for step, poses in enumerate(batches):
             step_started = time.perf_counter()

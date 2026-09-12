@@ -699,3 +699,74 @@ Viking 保守微调 seed01 未通过 LCB 安全门；seed02 和 seed03 的最佳
 `1.299038105676658 m`；该修正只补充已有查询几何的导出元数据，不改变 pose、候选、GT、
 split、checkpoint 或上述 test 结果。所选运行资产和等资产 HZB 外壳已完成导出，下一阶段
 为 A6000 WebGPU/WASM runtime、正式 HZB 和硬件 Color-ID 图像评价。
+
+## 18. 2026-09-13 标准场景采样与关系容量优化登记
+
+### 18.1 动机与已定位问题
+
+三场景旧 test 已在模型和阈值冻结后各读取一次。旧结果继续作为原始 `128 KiB + K=8`
+主线结果保留，后续优化不得再次读取该 test 做选择，也不得覆盖原 checkpoint、关系资产或
+结果目录。优化配置只使用 train、calibration 和 validation 选择；若要形成新的正式 test
+结论，必须在配置冻结后采样从未读取过的新物理中心作为 holdout。
+
+当前 train-only 审计得到：Sponza、Viking Village、Big City 的平均候选数分别约为
+`47.74/583.68/781.18`；GT/candidate 比例分别为
+`0.1957/0.2252/0.2750`。正例只在不足一半 subpose 中出现的比例分别约为
+`15.85%/28.21%/24.33%`。Viking 和 Big City 因此比 Sponza 有更多区域边界正例。
+按实例在 train 中的条件可见率计算，处于 `[0.1,0.9]` 中间区间的实例比例约为
+`78.03%/47.78%/82.59%`，更严格的 `[0.25,0.75]` 中间区间分别为
+`7.58%/23.28%/45.54%`；Big City 的可见性尤其依赖视角。
+
+三场景关系资产当前均固定 `sourceTopK=8`，但保留关系质量的最小值分别为
+`0.54316/0.27461/0.02920`。Big City 从约 `2.09M` 聚合关系边截断为约 `0.45M`，
+说明统一 K=8 对密集室外遮挡过紧。Big City 的源场景只有 29 个 primitive，128 KiB
+转换单元还会合并较多空间邻近但拓扑不连通的片段；本轮先固定单位划分，单独验证采样与
+关系容量，避免同时改变监督粒度。
+
+### 18.2 第一阶段：不改变 GT 的 train-only 重采样
+
+登记实验前缀：`pvs_v4_standard_graphics_ambiguity_sampling_relation_sweep_v1`。
+
+训练集先按实例统计 `candidate occurrence` 与 `visible occurrence`，得到条件可见率
+`r_i`。实例歧义定义为 `4 r_i (1-r_i)`；每个 pose 的困难度由候选实例平均歧义和
+正例 subpose 命中率的边界歧义共同决定。只使用 train 标签选出困难度最高的 35% pose，
+每个训练 batch 固定 50% 困难 pose、50% 全训练集均匀 pose。calibration、validation
+及其阈值协议保持不变。该操作是训练重采样，不生成伪标签，不移动相机，也不把单个
+subpose 的标签误当成 view-cell PVS 标签。
+
+关系容量扫描固定为 `K=8/16/32`。K=16/32 直接从同一批 train-only 三角形深度稀疏证据
+重建；方向数、深度壳层、层级分组、生存场维度、运行时 28D 遮挡表和查询头全部不变。
+因此 K 只增加离线关系构建与训练成本，不增加导出的前端逐实例特征维度。
+
+快速扫描对三场景完整执行 K=8/16/32 的一个种子短训，不能因某一成员未过安全门而取消
+其余成员。正式容量不按 test 或 validation 单独调参，而采用统一的 train-only 规则：选择
+保留关系质量 q01 不低于 `0.8` 的最小 K。当前证据据此固定 Sponza `K=16`、Viking
+Village `K=16`、Big City `K=32`。短扫仍报告 checkpoint 自身 calibration 安全性、
+validation WR/LCB、Useful Cull、balanced accuracy、Occlusion Recall、precision 和平均
+保留数量，用于确认 train-only 容量规则没有造成明显退化。三个固定 K 随后各执行三种子
+`40 x 900` 从头长训；旧 test 在这一阶段保持关闭。
+
+### 18.3 第二阶段：新中心采样与未见 holdout
+
+训练配置冻结后，三场景使用同一圆盘 view-cell、12 个方向、60/66 度 FOV、32 个
+subpose 和 `1.299038 m` 后退距离生成更密的物理中心网格。位置由场景几何和固定网格
+产生，不能根据 validation 错误位置手工放点。建议网格为：Sponza `20 x 5 x 20`、
+Big City `20 x 5 x 20`、Viking Village 地表 `32 x 32`；正式生成前先审计合法中心数和
+空间覆盖，若碰撞过滤造成严重空洞，只能统一调整网格密度，不能按结果手挑中心。
+
+新网格与旧网格坐标不重合。新数据仍按物理中心成组划分，所有同中心方向必须属于同一
+split。优化配置不得查看新 test 标签；新 calibration/validation 用于阈值和成员选择，
+新 test 只在模型、关系容量、困难采样比例及阈值全部冻结后读取一次。正式 Color-ID 和
+三角形关系采样继续执行硬件 WebGL/ANGLE Vulkan 门，并保存规定的 GPU evidence。
+
+新 GT 仍由每个 view-cell 的全部 32 个 subpose 可见并集构造。train-only 三角形关系与
+生存监督从当前每 cell 5 个代表 subpose 提高到固定 9 个，选择规则为中心点加确定性最远点
+空间覆盖，不使用可见性标签。K 值采用第一阶段在旧 validation 上选出的结果。增加的关系
+采样只影响离线预处理和训练，不增加浏览器每 pose 的一次批量查询次数。
+
+### 18.4 后续单位划分消融
+
+若第一、二阶段后 Big City 仍明显落后，再单独登记空间连贯单位消融，比较当前
+128 KiB Morton 合并与限制单元空间跨度/连通分量数量的转换。该消融必须同时报告单位数、
+候选数、模型资产、运行时和 HZB 外壳成本，不能只用更细单位带来的高剔除率作为改进。
+在前两阶段结果出来前不重建 Big City 单元资产。

@@ -218,9 +218,14 @@ def _check_csr(directory: Path, offsets_name: str, ids_name: str, row_count: int
 
 def _check_region_assets(directory: Path, row_count: int, num_instances: int) -> dict[str, Any]:
     meta = _read_json(_require_file(directory / "dataset_meta.json", "Region66 dataset metadata"))
-    if meta.get("schema") != "proxy-viewcell-pvs-dataset-v1":
+    supported_schemas = {
+        "proxy-viewcell-pvs-dataset-v1",
+        "pose-csr-explicit-four-way-split-v1",
+    }
+    if meta.get("schema") not in supported_schemas:
         raise ValueError(f"unsupported Region66 dataset schema: {directory}")
-    if _int(meta.get("viewcellCount", -1), "Region66 viewcellCount") != row_count:
+    region_row_count = meta.get("viewcellCount", meta.get("poseCount", -1))
+    if _int(region_row_count, "Region66 viewcellCount") != row_count:
         raise ValueError("Region66 viewcellCount does not match Pose CSR poseCount")
     if _int(meta.get("numInstances", -1), "Region66 numInstances") != num_instances:
         raise ValueError("Region66 numInstances does not match Pose CSR dataset")

@@ -121,3 +121,17 @@ conda run --no-capture-output -n slm_pvs \
 - `neural_instance_culling/benchmark/run_geometry_shell_hzb_paper.py`；
 - `neural_instance_culling/benchmark/tests/test_run_geometry_shell_hzb_paper.py`；
 - 本执行记录。
+
+## 2026-09-13 标准场景 Region66 预检修正
+
+Sponza、Viking Village 和 Big City 的 Region66 来源就是当前正式
+`pose-csr-explicit-four-way-split-v1` 数据集，其中已包含
+`subpose_offsets/subpose_camera_pos/subpose_camera_forward/subpose_pose_indices`
+和 `viewcell_centers`。浏览器 HZB runner 已按这些固定文件读取，但 Python orchestrator
+预检曾错误地只允许旧 `proxy-viewcell-pvs-dataset-v1`，导致三个标准场景在启动 GPU 前
+失败，未产生 HZB 指标。
+
+预检现明确支持这两种仍在正式矩阵中的数据来源，并继续逐项检查 view-cell 数、实例数、
+offset 单调性和全部数组长度。三个标准场景的真实 CPU preflight 已通过，单元测试共 8 项
+通过。此前失败没有结果可保留；后续从 calibration 重新开始，并在训练任务结束后的独占
+浏览器窗口执行 timing，避免并发训练污染 HZB 延迟。

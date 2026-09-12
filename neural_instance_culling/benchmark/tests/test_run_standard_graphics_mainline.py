@@ -3,12 +3,17 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 import tempfile
+import threading
+import time
+from types import SimpleNamespace
+from unittest import mock
 
 from neural_instance_culling.benchmark.run_standard_graphics_mainline import (
     BIGCITY_RECOVERY_MEMBERS,
     SCENES,
     VIKING_FINETUNE_MEMBERS,
     bigcity_recovery_command,
+    run_jobs,
     selection_members,
     validation_key,
     validation_safe,
@@ -17,6 +22,36 @@ from neural_instance_culling.benchmark.run_standard_graphics_mainline import (
 
 
 class StandardGraphicsMainlineTest(unittest.TestCase):
+    def test_job_runner_never_leases_one_gpu_to_two_active_jobs(self) -> None:
+        active: set[str] = set()
+        collisions: list[str] = []
+        seen: list[str] = []
+        lock = threading.Lock()
+
+        def fake_run(*_args, **kwargs):
+            gpu = kwargs["env"]["CUDA_VISIBLE_DEVICES"]
+            with lock:
+                if gpu in active:
+                    collisions.append(gpu)
+                active.add(gpu)
+                seen.append(gpu)
+            time.sleep(0.03)
+            with lock:
+                active.remove(gpu)
+            return SimpleNamespace(returncode=0)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "neural_instance_culling.benchmark.run_standard_graphics_mainline.subprocess.run",
+            side_effect=fake_run,
+        ):
+            run_jobs(
+                [(f"job{index}", ["noop"]) for index in range(6)],
+                [2, 3],
+                Path(temporary),
+            )
+        self.assertEqual(collisions, [])
+        self.assertEqual(set(seen), {"2", "3"})
+
     def test_registered_scenes_have_four_way_splits(self) -> None:
         for name in ("sponza_128k", "viking_village_128k", "bigcity_128k"):
             with self.subTest(scene=name):

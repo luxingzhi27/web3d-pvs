@@ -8,6 +8,7 @@ import json
 import math
 import os
 from pathlib import Path
+from queue import Queue
 import subprocess
 import sys
 import time
@@ -381,22 +382,32 @@ def export_command(scene: str, selected: dict[str, Any], output: Path) -> list[s
 def run_jobs(jobs: Sequence[tuple[str, list[str]]], gpu_ids: Sequence[int], log_dir: Path) -> None:
     if not jobs:
         return
+    if not gpu_ids:
+        raise ValueError("at least one GPU ID is required")
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    def run(index: int, name: str, command: list[str]) -> tuple[str, int, float]:
+    available_gpus: Queue[int] = Queue()
+    for gpu_id in gpu_ids:
+        available_gpus.put(int(gpu_id))
+
+    def run(name: str, command: list[str]) -> tuple[str, int, float]:
+        gpu_id = available_gpus.get()
         environment = dict(os.environ)
-        environment["CUDA_VISIBLE_DEVICES"] = str(gpu_ids[index % len(gpu_ids)])
-        started = time.time()
-        with (log_dir / f"{name}.stdout.log").open("w", encoding="utf-8") as stdout, (
-            log_dir / f"{name}.stderr.log"
-        ).open("w", encoding="utf-8") as stderr:
-            result = subprocess.run(command, cwd=ROOT, env=environment, stdout=stdout, stderr=stderr, check=False)
-        return name, int(result.returncode), float(time.time() - started)
+        environment["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        try:
+            started = time.time()
+            with (log_dir / f"{name}.stdout.log").open("w", encoding="utf-8") as stdout, (
+                log_dir / f"{name}.stderr.log"
+            ).open("w", encoding="utf-8") as stderr:
+                result = subprocess.run(command, cwd=ROOT, env=environment, stdout=stdout, stderr=stderr, check=False)
+            return name, int(result.returncode), float(time.time() - started)
+        finally:
+            available_gpus.put(gpu_id)
 
     with ThreadPoolExecutor(max_workers=min(len(jobs), len(gpu_ids))) as executor:
         futures = {
-            executor.submit(run, index, name, command): name
-            for index, (name, command) in enumerate(jobs)
+            executor.submit(run, name, command): name
+            for name, command in jobs
         }
         for future in as_completed(futures):
             name, return_code, elapsed = future.result()
