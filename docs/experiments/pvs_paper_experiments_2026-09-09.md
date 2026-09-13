@@ -184,7 +184,7 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 | 场景统计 | 完成 | 五场景规模、三角形、GLB 字节、split、候选/GT 分布已进入 Table 1 |
 | HKUST Full test | 完成 | 三种子均通过安全门；WR `0.997082 +/- 0.001634`，LCB `0.994334 +/- 0.003271`，useful cull `0.901758 +/- 0.007830` |
 | IFCBench 微调与 test | 完成 | 四点 camera-aligned-box 协议下，v2 边界减半三种子 validation LCB 为 `0.991106/0.990764/0.990215`；正式 `2710` test 的 pose PR-AUC `0.482290 +/- 0.021681`、WR `0.991179 +/- 0.000668`、LCB `0.990523 +/- 0.000552`、useful cull `0.602498 +/- 0.015504`。运行资产使用 validation useful cull 最高的 seed01 |
-| AABB + Ray MLP | 部分完成 | HKUST、IFCBench 和标准场景 V1 三种子结果已完成。标准场景正式主表已切换到 `sampling_v2` 同 split，V2 AABB 使用独立实验名和输出根从头训练，不复用 V1 checkpoint；IFCBench seed02/03 不重复读取 test |
+| AABB + Ray MLP | 部分完成 | HKUST、IFCBench 和标准场景 V1 三种子结果已完成。标准场景 V2 的两学习率扫描已完成，Big City 三种子长训已启动，Sponza/Viking 已排队；全部只到 validation，不复用 V1 checkpoint，不读取 test |
 | HZB 外壳与运行时 | 部分完成 | HKUST Region66 正式完成：lossless WR/LCB/useful cull 为 `0.997633/0.996552/0.328166`，总查询 p50 `989.55 ms`。IFCBench 和三个标准图形学场景已有外壳资产，正式 calibration/test/timing 待硬件独占窗口执行 |
 | 资产与容量 | 完成 | 神经资产为 lossless shell 的 `1.37%`（HKUST）和 `19.78%`（IFCBench）；rank Pareto 与 Table 4 已生成 |
 | 端侧模型前向 | 部分完成 | A6000 五场景 WebGPU/WASM 五 session raw 与统一汇总均已完成；HKUST M2 与 vivo 已完成，IFCBench 移动端仍缺失 |

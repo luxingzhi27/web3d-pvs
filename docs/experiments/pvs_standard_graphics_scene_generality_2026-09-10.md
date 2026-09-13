@@ -840,8 +840,11 @@ WR/LCB 为 `0.999216/0.998836`，Occlusion Recall `0.567280`，Useful Cull
 `0.445000`、Precision `0.380314`、Balanced Accuracy `0.766867`、Avg Pred
 `441.32`。Big City seed20260802 已完整执行，其最佳安全点在 epoch 40：WR/LCB
 `0.999204/0.997921`、Occlusion Recall `0.489783`、Useful Cull `0.384208`、
-Precision `0.346891`。seed20260803 仍按完整矩阵运行，不能用上述中间结论替代最终
-三种子选择。
+Precision `0.346891`。seed20260803 也已完整执行，其最佳安全点在 epoch 36：WR/LCB
+`0.999846/0.999816`、Occlusion Recall `0.521623`、Useful Cull `0.409185`、
+Precision `0.361212`、Balanced Accuracy `0.753020`、Avg Pred `473.30`。Big City V1
+三种子现已全部完成且 `testRead=false`；这些结果只作 V2 采样优化对照，不读取旧 test
+选择 V2 配置。
 
 Viking Village V1 三种子也已完整执行 `40 x 900`，全程 `testRead=false`。每个种子
 都至少存在一个通过 validation WR/LCB 安全门的 checkpoint，但安全池内的剔除能力差异
@@ -871,3 +874,8 @@ runner 释放 GPU，再由 GPU0-2 并行执行 Big City V2 三种子，避免单
 AABB 使用新实验名 `pvs_aabb_ray_mlp_formal_sampling_v2` 和独立输出根，必须从头完成扫描
 及三种子训练，不能复用 V1 checkpoint。HZB 的 V2 preflight、120-pose timing plan 和
 Point60 test 计划已完成；正式浏览器 calibration/test/timing 等全部训练退出后再执行。
+
+AABB V2 的 `2e-4/1e-3` 学习率扫描已在三个场景全部完成，只读取
+train/calibration/validation。GPU0 随后提前执行 Big City AABB 三种子长训；Sponza 与
+Viking AABB 在九个 V2 Full 成员全部完成后分别使用独立 GPU 队列补齐。三条 AABB runner
+均带 `--skip-test`，完成 validation 汇总前不打开 test。
