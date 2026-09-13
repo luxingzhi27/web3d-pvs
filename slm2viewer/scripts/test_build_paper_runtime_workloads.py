@@ -52,6 +52,16 @@ class PaperRuntimeWorkloadTest(unittest.TestCase):
                 copied = viewer / "public/assets/neural_instance_culling" / scene["asset"]
                 target._validate_runtime(copied, scene)
 
+    def test_standard_graphics_workloads_use_sampling_v2_outputs(self) -> None:
+        scenes = {scene["id"]: scene for scene in target.SCENES}
+        expected = {"sponza": 672, "viking_village": 276, "bigcity": 1608}
+        for scene_id, test_count in expected.items():
+            scene = scenes[scene_id]
+            self.assertTrue(scene["dataset"].endswith("_sampling_v2"))
+            self.assertIn("/sampling_v2/", scene["source"])
+            self.assertEqual(scene["expected"], test_count)
+            self.assertTrue(scene["experiment"].endswith("_sampling_v2"))
+
     def test_rejects_wrong_final_viewcell_radius(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
