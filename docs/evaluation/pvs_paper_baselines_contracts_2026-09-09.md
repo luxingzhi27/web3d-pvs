@@ -3,9 +3,9 @@
 日期：2026-09-09
 
 状态：评价接口、sidecar、场景统计和 AABB+Ray MLP 正式入口已完成。五个场景的
-AABB+Ray MLP 扫描与三种子 `40 x 900` 训练均已完成；HKUST、Sponza、Big City 和
-Viking Village 已生成三种子 frozen-test 结果，IFCBench 尚需补齐 seed02/03 的独立
-test JSON 与 score sidecar。
+AABB+Ray MLP 扫描、三种子 `40 x 900` 训练和 frozen-test 指标均已完成。IFCBench
+seed02/03 的 test 指标只保存在正式汇总中，对应 score sidecar 不再存在；test 不得为此
+重复读取，图像和 streaming 使用现存的 seed01 sidecar。
 
 ## 目的
 
@@ -65,9 +65,10 @@ HKUST Full V4 frozen test 已读取全部 `684` 个 test pose，产物为：
 正式实验 `pvs_aabb_ray_mlp_formal_v1` 已对五个场景执行两个学习率的 `6 x 300`
 扫描，并统一选择 `2e-4`，随后完成三种子 `40 x 900`。HKUST、Sponza、Big City 和
 Viking Village 均已有三个种子的独立 frozen-test JSON 与 score sidecar。IFCBench
-目前只有 seed20260801 的独立 frozen-test 产物；seed20260802/03 已有 checkpoint 和
-calibration/validation 选择，但仍须按各自冻结阈值补写完整 test JSON 与 sidecar，不能
-用汇总文件中的 inline row 代替。
+三个种子的 frozen-test 指标已经各读取一次，`formal/ifcbench_fantasy_metropolis/summary.json`
+中的每一行都登记 `testRead=true`、`testEvaluationCount=1` 和完整 `2710` pose；只有
+seed20260801 的独立 JSON 与 score sidecar 仍在磁盘。三种子集合指标使用该正式汇总，
+需要逐候选分数的图像和 streaming 使用 seed20260801 sidecar，不重读 seed02/03 test。
 
 ## 验证
 
