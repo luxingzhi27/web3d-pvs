@@ -184,7 +184,7 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 | 场景统计 | 完成 | 五场景规模、三角形、GLB 字节、split、候选/GT 分布已进入 Table 1 |
 | HKUST Full test | 完成 | 三种子均通过安全门；WR `0.997082 +/- 0.001634`，LCB `0.994334 +/- 0.003271`，useful cull `0.901758 +/- 0.007830` |
 | IFCBench 微调与 test | 完成 | 四点 camera-aligned-box 协议下，v2 边界减半三种子 validation LCB 为 `0.991106/0.990764/0.990215`；正式 `2710` test 的 pose PR-AUC `0.482290 +/- 0.021681`、WR `0.991179 +/- 0.000668`、LCB `0.990523 +/- 0.000552`、useful cull `0.602498 +/- 0.015504`。运行资产使用 validation useful cull 最高的 seed01 |
-| AABB + Ray MLP | 完成 | 五场景三种子 `40 x 900` 与 frozen-test 指标均已完成；IFCBench seed02/03 指标保存在正式 summary，逐候选图像/streaming 使用现存 seed01 sidecar，不重复读取 test |
+| AABB + Ray MLP | 部分完成 | HKUST、IFCBench 和标准场景 V1 三种子结果已完成。标准场景正式主表已切换到 `sampling_v2` 同 split，V2 AABB 使用独立实验名和输出根从头训练，不复用 V1 checkpoint；IFCBench seed02/03 不重复读取 test |
 | HZB 外壳与运行时 | 部分完成 | HKUST Region66 正式完成：lossless WR/LCB/useful cull 为 `0.997633/0.996552/0.328166`，总查询 p50 `989.55 ms`。IFCBench 和三个标准图形学场景已有外壳资产，正式 calibration/test/timing 待硬件独占窗口执行 |
 | 资产与容量 | 完成 | 神经资产为 lossless shell 的 `1.37%`（HKUST）和 `19.78%`（IFCBench）；rank Pareto 与 Table 4 已生成 |
 | 端侧模型前向 | 部分完成 | A6000 五场景 WebGPU/WASM 五 session raw 与统一汇总均已完成；HKUST M2 与 vivo 已完成，IFCBench 移动端仍缺失 |
@@ -193,7 +193,7 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 | Test 图像 | 部分完成 | HKUST Full/AABB/HZB aggregate PER 为 `0.3662/0.8613/0.3128%`；IFCBench 当前只有 validation 图像，三个标准图形学场景的 Full/HZB 正式 test 图像待执行 |
 | GT 收敛 | 完成诊断 | 两场景各 100 cell x 128 点硬件采样完成。HKUST 源 GT 对 128 点实例/权重覆盖 `99.6411/99.9997%`；IFCBench 四点 box GT 对另一水平圆盘定义为 `80.1942/97.2252%`。该结果只界定连续区域声明，不否定四点协议结果，也不触发重训 |
 | 离线成本 / 结果包 | 完成当前可得项 | 六阶段成本、artifact registry、三种子 Table 2 汇总已生成；未记录时间保持 unavailable，不作推算 |
-| 标准图形场景 | 正式矩阵执行中 | 三个场景均使用水平圆盘、`r=0.75 m`、后退 `1.299038 m`、32 subpose 和中心组 split。AABB 三种子已训练；V1 困难 pose 均衡采样的 Sponza/Big City 正在长训，随后接续 Viking。V2 三场景采样、Pose CSR、train-only 深度缓存及 K8/16/32 关系均完成，正式长训固定 K8 并等待 GPU。三个场景 test 均未用于本轮选择。 |
+| 标准图形场景 | 正式矩阵执行中 | 三个场景均使用水平圆盘、`r=0.75 m`、后退 `1.299038 m`、32 subpose 和中心组 split。V2 采样、Pose CSR、train-only 深度缓存及 K8/16/32 关系已完成；正式 K8 长训已启动，Sponza 三种子在 GPU1-3 并行，随后接续 Viking，Big City 在 V1 seed03 与前述 runner 完成后由三卡并行。V2 AABB/HZB 配置已对齐同一 split，test 仍关闭。 |
 
 截至 2026-09-13，HKUST 与 IFCBench 主结果均按各自预登记的 view-cell 采样协议冻结。标准场景按同一显式四分割、同一 V4 和同一 AABB/HZB 评价口径执行；任何中间指标都不替代三种子 validation 选择和一次 frozen test。
 

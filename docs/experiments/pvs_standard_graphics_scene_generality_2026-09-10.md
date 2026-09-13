@@ -838,8 +838,10 @@ WR/LCB 安全门的 checkpoint 中按 Useful Cull 选择的最佳点：
 Big City V1 seed20260801 也已完整执行 `40 x 900`，其最佳安全点在 epoch 24：
 WR/LCB 为 `0.999216/0.998836`，Occlusion Recall `0.567280`，Useful Cull
 `0.445000`、Precision `0.380314`、Balanced Accuracy `0.766867`、Avg Pred
-`441.32`。Big City seed20260802/03 与 Viking Village 三种子仍按完整矩阵运行，不能用
-上述单种子中间结论替代最终三种子选择。
+`441.32`。Big City seed20260802 已完整执行，其最佳安全点在 epoch 40：WR/LCB
+`0.999204/0.997921`、Occlusion Recall `0.489783`、Useful Cull `0.384208`、
+Precision `0.346891`。seed20260803 仍按完整矩阵运行，不能用上述中间结论替代最终
+三种子选择。
 
 Viking Village V1 三种子也已完整执行 `40 x 900`，全程 `testRead=false`。每个种子
 都至少存在一个通过 validation WR/LCB 安全门的 checkpoint，但安全池内的剔除能力差异
@@ -854,3 +856,13 @@ Viking Village V1 三种子也已完整执行 `40 x 900`，全程 `testRead=fals
 Viking V1 的安全池结果整体弱于同一旧 validation 上的 8-epoch pilot，不能据此替换正式
 结论，也不能重新读取旧 test 选择 checkpoint。后续以预登记的 V2 更密采样三种子结果
 判断是否形成更稳定的安全与剔除折中；V1 结果作为采样优化对照保留。
+
+2026-09-14 已启动 V2 随机初始化长训。GPU1-3 当前并行执行 Sponza 三种子，完成后同一
+runner 自动接续 Viking Village 三种子；Big City V1 seed20260803 完成后先等待上述
+runner 释放 GPU，再由 GPU0-2 并行执行 Big City V2 三种子，避免单卡串行延长总工期。
+所有 V2 成员固定 K=8、`40 x 900`、三种子，不加载 V1/pilot checkpoint，test 保持关闭。
+
+与 V2 Full 配套的 AABB + Ray MLP 和 Geometry-shell HZB 已改为相同 V2 CSR 与 split。
+AABB 使用新实验名 `pvs_aabb_ray_mlp_formal_sampling_v2` 和独立输出根，必须从头完成扫描
+及三种子训练，不能复用 V1 checkpoint。HZB 的 V2 preflight、120-pose timing plan 和
+Point60 test 计划已完成；正式浏览器 calibration/test/timing 等全部训练退出后再执行。

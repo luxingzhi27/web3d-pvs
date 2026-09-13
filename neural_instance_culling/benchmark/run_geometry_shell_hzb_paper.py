@@ -62,9 +62,9 @@ VARIANTS = ("lossless", "equal_asset")
 EXPECTED_SPLITS = {
     "hkust": {"train": 5926, "validation": 730, "calibration": 659, "test": 684, "guard": 0},
     "ifcbench": {"train": 19647, "validation": 2712, "calibration": 2183, "test": 2710, "guard": 0},
-    "sponza_128k": {"train": 1752, "validation": 240, "calibration": 192, "test": 240, "guard": 0},
-    "bigcity_128k": {"train": 5832, "validation": 804, "calibration": 648, "test": 804, "guard": 0},
-    "viking_village_128k": {"train": 1104, "validation": 156, "calibration": 120, "test": 156, "guard": 0},
+    "sponza_128k": {"train": 4800, "validation": 672, "calibration": 528, "test": 672, "guard": 0},
+    "bigcity_128k": {"train": 11580, "validation": 1608, "calibration": 1284, "test": 1608, "guard": 0},
+    "viking_village_128k": {"train": 1944, "validation": 276, "calibration": 216, "test": 276, "guard": 0},
 }
 
 RUNNER_FILES = (
@@ -562,8 +562,8 @@ def _scene_specs(data_root: Path, hzb_root: Path) -> dict[str, SceneSpec]:
         "sponza_128k": SceneSpec(
             key="sponza_128k",
             scene_name="sponza",
-            dataset_dir=dataset_root / "pose_csr_sponza_standard_graphics_128k_fov66_v1",
-            region_dataset_dir=dataset_root / "pose_csr_sponza_standard_graphics_128k_fov66_v1",
+            dataset_dir=dataset_root / "pose_csr_sponza_standard_graphics_128k_fov66_sampling_v2",
+            region_dataset_dir=dataset_root / "pose_csr_sponza_standard_graphics_128k_fov66_sampling_v2",
             runtime_meta=dataset_root / "standard_graphics_scenes" / "sponza_128k" / "assets" / "runtimeVisibilityMeta.json",
             glb_index=dataset_root / "standard_graphics_scenes" / "sponza_128k" / "assets" / "glbIndex.json",
             glb_root=dataset_root / "standard_graphics_scenes" / "sponza_128k" / "assets",
@@ -573,14 +573,14 @@ def _scene_specs(data_root: Path, hzb_root: Path) -> dict[str, SceneSpec]:
             },
             timing_plan=hzb_root / "sponza_128k_test_timing_120_pose_plan.json",
             point60_plan_dir=hzb_root / "point60_gt_plans" / "sponza_128k",
-            representative_plan=dataset_root / "standard_graphics_scenes" / "sponza_128k" / "pose_plan.jsonl",
+            representative_plan=dataset_root / "standard_graphics_scene_sampling_v2" / "sponza_128k" / "pose_plan.jsonl",
             expected_splits=EXPECTED_SPLITS["sponza_128k"],
         ),
         "bigcity_128k": SceneSpec(
             key="bigcity_128k",
             scene_name="neuralpvs_bigcity",
-            dataset_dir=dataset_root / "pose_csr_bigcity_standard_graphics_128k_fov66_v1",
-            region_dataset_dir=dataset_root / "pose_csr_bigcity_standard_graphics_128k_fov66_v1",
+            dataset_dir=dataset_root / "pose_csr_bigcity_standard_graphics_128k_fov66_sampling_v2",
+            region_dataset_dir=dataset_root / "pose_csr_bigcity_standard_graphics_128k_fov66_sampling_v2",
             runtime_meta=dataset_root / "standard_graphics_scenes" / "bigcity_128k" / "assets" / "runtimeVisibilityMeta.json",
             glb_index=dataset_root / "standard_graphics_scenes" / "bigcity_128k" / "assets" / "glbIndex.json",
             glb_root=dataset_root / "standard_graphics_scenes" / "bigcity_128k" / "assets",
@@ -590,14 +590,14 @@ def _scene_specs(data_root: Path, hzb_root: Path) -> dict[str, SceneSpec]:
             },
             timing_plan=hzb_root / "bigcity_128k_test_timing_120_pose_plan.json",
             point60_plan_dir=hzb_root / "point60_gt_plans" / "bigcity_128k",
-            representative_plan=dataset_root / "standard_graphics_scenes" / "bigcity_128k" / "pose_plan.jsonl",
+            representative_plan=dataset_root / "standard_graphics_scene_sampling_v2" / "bigcity_128k" / "pose_plan.jsonl",
             expected_splits=EXPECTED_SPLITS["bigcity_128k"],
         ),
         "viking_village_128k": SceneSpec(
             key="viking_village_128k",
             scene_name="viking_village_128k",
-            dataset_dir=dataset_root / "pose_csr_viking_village_standard_graphics_128k_fov66_v1",
-            region_dataset_dir=dataset_root / "pose_csr_viking_village_standard_graphics_128k_fov66_v1",
+            dataset_dir=dataset_root / "pose_csr_viking_village_standard_graphics_128k_fov66_sampling_v2",
+            region_dataset_dir=dataset_root / "pose_csr_viking_village_standard_graphics_128k_fov66_sampling_v2",
             runtime_meta=dataset_root / "standard_graphics_scenes" / "viking_village_128k" / "assets" / "runtimeVisibilityMeta.json",
             glb_index=dataset_root / "standard_graphics_scenes" / "viking_village_128k" / "assets" / "glbIndex.json",
             glb_root=dataset_root / "standard_graphics_scenes" / "viking_village_128k" / "assets",
@@ -607,7 +607,7 @@ def _scene_specs(data_root: Path, hzb_root: Path) -> dict[str, SceneSpec]:
             },
             timing_plan=hzb_root / "viking_village_128k_test_timing_120_pose_plan.json",
             point60_plan_dir=hzb_root / "point60_gt_plans" / "viking_village_128k",
-            representative_plan=dataset_root / "standard_graphics_scenes" / "viking_village_128k" / "pose_plan.jsonl",
+            representative_plan=dataset_root / "standard_graphics_scene_sampling_v2" / "viking_village_128k" / "pose_plan.jsonl",
             expected_splits=EXPECTED_SPLITS["viking_village_128k"],
         ),
     }

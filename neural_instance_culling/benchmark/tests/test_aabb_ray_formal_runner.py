@@ -9,10 +9,12 @@ if str(BENCHMARK) not in sys.path:
     sys.path.insert(0, str(BENCHMARK))
 
 from aabb_ray_baseline_config import (  # noqa: E402
+    EXPERIMENT,
     FORMAL_EPOCHS,
     FORMAL_SEEDS,
     FORMAL_STEPS_PER_EPOCH,
     LOSS_CONFIG,
+    SCENES,
     SCAN_EPOCHS,
     SCAN_LEARNING_RATES,
     SCAN_STEPS_PER_EPOCH,
@@ -84,6 +86,7 @@ class AabbRayFormalRunnerTests(unittest.TestCase):
         self.assertGreater(_validation_key(unsafe_higher_lcb), _validation_key(unsafe_more_cull))
 
     def test_registered_scan_and_confirmation_matrix_is_fixed(self) -> None:
+        self.assertEqual(EXPERIMENT, "pvs_aabb_ray_mlp_formal_sampling_v2")
         self.assertEqual(SCAN_LEARNING_RATES, (2e-4, 1e-3))
         self.assertEqual((SCAN_EPOCHS, SCAN_STEPS_PER_EPOCH), (6, 300))
         self.assertEqual((FORMAL_EPOCHS, FORMAL_STEPS_PER_EPOCH), (40, 900))
@@ -91,6 +94,10 @@ class AabbRayFormalRunnerTests(unittest.TestCase):
         self.assertEqual(LOSS_CONFIG["lossVariant"], "pose_balanced_rvl_contrastive")
         self.assertEqual(LOSS_CONFIG["rvlRecallGuardWeight"], 0.30)
         self.assertEqual(LOSS_CONFIG["sharedTailSeparationWeight"], 0.20)
+
+    def test_standard_graphics_scenes_use_sampling_v2_pose_csr(self) -> None:
+        for scene in ("sponza_128k", "bigcity_128k", "viking_village_128k"):
+            self.assertTrue(SCENES[scene]["dataset"].endswith("_sampling_v2"))
 
     def test_training_command_contains_mainline_objective_and_no_test_split(self) -> None:
         command = build_train_command(

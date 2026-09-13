@@ -6,7 +6,7 @@ from typing import Any
 
 
 DATA_ROOT = Path("/mnt/sda/rhyang/slm")
-EXPERIMENT = "pvs_aabb_ray_mlp_formal_v1"
+EXPERIMENT = "pvs_aabb_ray_mlp_formal_sampling_v2"
 FORMAL_SEEDS = (20260801, 20260802, 20260803)
 FORMAL_EPOCHS = 40
 FORMAL_STEPS_PER_EPOCH = 900
@@ -49,19 +49,19 @@ SCENES: dict[str, dict[str, str]] = {
         "glbRoot": "ifcbench_fantasy_metropolis_instanced_v2/assets",
     },
     "sponza_128k": {
-        "dataset": "neural_instance_culling/dataset/out/pose_csr_sponza_standard_graphics_128k_fov66_v1",
+        "dataset": "neural_instance_culling/dataset/out/pose_csr_sponza_standard_graphics_128k_fov66_sampling_v2",
         "runtimeMeta": "neural_instance_culling/dataset/out/standard_graphics_scenes/sponza_128k/assets/runtimeVisibilityMeta.json",
         "glbIndex": "neural_instance_culling/dataset/out/standard_graphics_scenes/sponza_128k/assets/glbIndex.json",
         "glbRoot": "neural_instance_culling/dataset/out/standard_graphics_scenes/sponza_128k/assets",
     },
     "bigcity_128k": {
-        "dataset": "neural_instance_culling/dataset/out/pose_csr_bigcity_standard_graphics_128k_fov66_v1",
+        "dataset": "neural_instance_culling/dataset/out/pose_csr_bigcity_standard_graphics_128k_fov66_sampling_v2",
         "runtimeMeta": "neural_instance_culling/dataset/out/standard_graphics_scenes/bigcity_128k/assets/runtimeVisibilityMeta.json",
         "glbIndex": "neural_instance_culling/dataset/out/standard_graphics_scenes/bigcity_128k/assets/glbIndex.json",
         "glbRoot": "neural_instance_culling/dataset/out/standard_graphics_scenes/bigcity_128k/assets",
     },
     "viking_village_128k": {
-        "dataset": "neural_instance_culling/dataset/out/pose_csr_viking_village_standard_graphics_128k_fov66_v1",
+        "dataset": "neural_instance_culling/dataset/out/pose_csr_viking_village_standard_graphics_128k_fov66_sampling_v2",
         "runtimeMeta": "neural_instance_culling/dataset/out/standard_graphics_scenes/viking_village_128k/assets/runtimeVisibilityMeta.json",
         "glbIndex": "neural_instance_culling/dataset/out/standard_graphics_scenes/viking_village_128k/assets/glbIndex.json",
         "glbRoot": "neural_instance_culling/dataset/out/standard_graphics_scenes/viking_village_128k/assets",

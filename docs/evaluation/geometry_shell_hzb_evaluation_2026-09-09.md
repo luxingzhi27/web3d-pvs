@@ -154,3 +154,16 @@ HKUST 正式结果已进入 `benchmark/out/paper_results/hzb/`、`image_metrics/
 该修正使 Viking Village 的 `8` 个源材质不确定单位与 `235` 个 MASK 单位一起退出
 遮挡外壳；对应测试覆盖了“GLB 为 OPAQUE、运行时资格为 false”的情况。旧错误外壳已
 原地替换，不保留兼容结果。
+
+2026-09-14 将三个标准图形学场景的正式 HZB 输入统一切换到未读取过的
+`sampling_v2` Pose CSR。Sponza、Big City、Viking Village 的四分割分别为
+`4800/528/672/672`、`11580/1284/1608/1608` 和
+`1944/216/276/276`（train/calibration/validation/test）。三个场景的 Region66
+数据源均为对应 V2 CSR；120-pose timing plan 重新按各自 V2 test 候选规模分层生成，
+Point60 计划也改由 V2 逐 pose 代表相机生成，分别覆盖 `672/1608/276` 个 test pose。
+旧 V1 Point60 行号计划已删除，不保留兼容入口。
+
+新正式输出根固定为
+`benchmark/out/paper_results/standard_graphics/hzb/geometry_shell_hzb_sampling_v2_paper`。
+V2 preflight 已通过，相关 HZB/AABB 配置测试通过；calibration、frozen test、timing 和
+Point60 硬件 Color-ID 尚未执行，必须等待全部 CUDA 训练退出后，在独占 A6000 窗口运行。

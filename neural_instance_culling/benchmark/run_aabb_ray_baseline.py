@@ -57,9 +57,9 @@ from common.runtime_meta import load_runtime_meta  # noqa: E402
 EXPECTED_SPLITS = {
     "hkust_v3": {"train": 5926, "validation": 730, "calibration": 659, "test": 684, "guard": 0},
     "ifcbench_fantasy_metropolis": {"train": 19647, "validation": 2712, "calibration": 2183, "test": 2710, "guard": 0},
-    "sponza_128k": {"train": 1752, "validation": 240, "calibration": 192, "test": 240, "guard": 0},
-    "bigcity_128k": {"train": 5832, "validation": 804, "calibration": 648, "test": 804, "guard": 0},
-    "viking_village_128k": {"train": 1104, "validation": 156, "calibration": 120, "test": 156, "guard": 0},
+    "sponza_128k": {"train": 4800, "validation": 672, "calibration": 528, "test": 672, "guard": 0},
+    "bigcity_128k": {"train": 11580, "validation": 1608, "calibration": 1284, "test": 1608, "guard": 0},
+    "viking_village_128k": {"train": 1944, "validation": 276, "calibration": 216, "test": 276, "guard": 0},
 }
 TRAIN_SCRIPT = BENCHMARK_DIR / "train_aabb_ray_baseline.py"
 EVALUATION_SCHEMA = "pvs-aabb-ray-mlp-evaluation-v1"
@@ -769,7 +769,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--data-root", type=Path, default=DATA_ROOT)
     parser.add_argument("--scenes", default=",".join(SCENES))
     parser.add_argument("--model-root", type=Path, default=ROOT / "neural_instance_culling/model/out" / EXPERIMENT)
-    parser.add_argument("--benchmark-root", type=Path, default=ROOT / "neural_instance_culling/benchmark/out/paper_results")
+    parser.add_argument(
+        "--benchmark-root",
+        type=Path,
+        default=ROOT / "neural_instance_culling/benchmark/out/paper_results/standard_graphics/aabb_sampling_v2",
+    )
     parser.add_argument("--gpu-ids", type=int, nargs="+", default=[0, 1, 2])
     parser.add_argument("--skip-test", action="store_true")
     parser.add_argument("--dry-run", action="store_true")

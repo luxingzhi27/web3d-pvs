@@ -149,6 +149,17 @@ class GeometryShellHZBPaperOrchestratorTests(unittest.TestCase):
             ["sponza_128k", "bigcity_128k"],
         )
 
+    def test_standard_graphics_scenes_use_sampling_v2_pose_csr(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            scenes = orchestrator._scene_specs(Path(temporary), Path(temporary) / "hzb")
+        for key in ("sponza_128k", "bigcity_128k", "viking_village_128k"):
+            scene = scenes[key]
+            self.assertTrue(scene.dataset_dir.name.endswith("_sampling_v2"))
+            self.assertEqual(scene.region_dataset_dir, scene.dataset_dir)
+            self.assertEqual(scene.representative_plan.parent.name, key)
+            self.assertEqual(scene.representative_plan.parent.parent.name, "standard_graphics_scene_sampling_v2")
+            self.assertEqual(scene.expected_splits, orchestrator.EXPECTED_SPLITS[key])
+
     def test_existing_complete_task_is_skipped_and_partial_task_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary) / "task"
