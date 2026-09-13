@@ -2,7 +2,9 @@
 
 日期：2026-09-09
 
-状态：HKUST/IFCBench 的 Full、AABB MLP 和 lossless HZB 共六组正式 test 图像渲染已完成，入口和硬件证据继续作为唯一执行协议。
+状态：HKUST 的 Full、AABB MLP 和 lossless HZB 三组正式 test 图像渲染已完成。
+IFCBench 与三个标准图形学场景的正式 test 图像仍待执行；入口和硬件证据继续作为唯一
+执行协议。
 
 ## 输入契约
 
@@ -51,7 +53,13 @@ summary 报告 `formalImageEvaluationReady=true` 时才成功。HKUST 与 IFCBen
 
 神经与 AABB manifest 由 `evaluate_viewcell_image_per.py --score-sidecar` 直接复用正式 test sidecar 的 `predictedIds`，不再次执行模型。入口要求 sidecar 覆盖完整 test split，并逐 pose 核对其 candidate 顺序与 Pose CSR 完全一致；阈值仍从 sidecar 登记的 calibration 文件解析并与 sidecar threshold 相等。AABB calibration 使用唯一的 `pvs-aabb-ray-mlp-calibration-v1.bestSafe.selection`，不再从通用 threshold rows 二次选择。`--render-schema-only` 只构造渲染 manifest，因此不计算 froxel 诊断，也不报告推理耗时。
 
-截至 2026-09-11，四份神经/AABB 和两份 HZB formal-v2 manifest 均已完成硬件渲染。HKUST Full/AABB/HZB aggregate PER 为 `0.3662/0.8613/0.3128%`，IFCBench 为 `0.5011/0.0583/0.5312%`；六组均使用 NVIDIA RTX A6000 Vulkan/ANGLE WebGL 2，失败 subpose 和缺失 GLB 都为零。完整 miss、wrong-ID、mean 和 p95 见[HZB 评价报告](geometry_shell_hzb_evaluation_2026-09-09.md)。
+截至 2026-09-13，HKUST 的 Full/AABB/HZB 三份 formal-v2 manifest 已完成硬件渲染，
+aggregate PER 为 `0.3662/0.8613/0.3128%`。三组均覆盖全部 `684` 个 test view-cell 和
+`23,856` 个 dense subpose，使用 NVIDIA RTX A6000 Vulkan/ANGLE WebGL 2，失败
+subpose 和缺失 GLB 都为零。完整 miss、wrong-ID、mean 和 p95 见
+[HZB 评价报告](geometry_shell_hzb_evaluation_2026-09-09.md)。IFCBench 现有图像结果属于
+validation，不作为 frozen test 结论；标准图形学场景现有 schema-only summary 也不作为
+正式渲染结果。
 
 不启动浏览器的 schema 检查：
 

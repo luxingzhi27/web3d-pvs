@@ -1,8 +1,12 @@
 # PVS 论文核心实验与一周执行计划
 
-日期：2026-09-09；2026-09-10、2026-09-11 更新正式执行状态
+日期：2026-09-09；2026-09-10、2026-09-11、2026-09-13 更新正式执行状态
 
-状态：执行中。截至 2026-09-11，HKUST/IFCBench 的神经、AABB、正式 HZB、test 图像、A6000 runtime 和全 test streaming 模拟均已完成；真实 scheduler replay、GT 收敛和标准图形场景扩展仍在执行。本文是论文实验、图表、结果目录和执行顺序的唯一计划。
+状态：执行中。截至 2026-09-13，HKUST 的神经、AABB、正式 HZB、test 图像、A6000
+runtime 和全 test streaming 已形成完整证据链；IFCBench 已完成神经、主要 AABB、A6000
+runtime 和非 HZB streaming，正式 HZB、test 图像及 scheduler replay 待执行。三个标准
+图形学场景的 AABB 与 A6000 runtime 已完成，Full 优化训练、HZB 和图像评价继续执行。
+本文是论文实验、图表、结果目录和执行顺序的唯一计划。
 
 ## 论文需要证明的内容
 
@@ -173,25 +177,25 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 
 验收覆盖同分AP、零GT统计、阈值边界、checkpoint和固定表一致性、HZB深度/近裁剪面、区域并集、GLB原子到达、覆盖不可达、像素直方图与重渲染一致性，以及硬件计时边界。禁止新增兼容层、前端历史模型路径或手工哈希步骤。
 
-## 执行进度（2026-09-11）
+## 执行进度（2026-09-13）
 
 | 项目 | 状态 | 已有产物 / 下一动作 |
 |---|---|---|
-| 场景统计 | 完成 | 两场景规模、三角形、GLB 字节、split、候选/GT 分布已进入 Table 1 |
+| 场景统计 | 完成 | 五场景规模、三角形、GLB 字节、split、候选/GT 分布已进入 Table 1 |
 | HKUST Full test | 完成 | 三种子均通过安全门；WR `0.997082 +/- 0.001634`，LCB `0.994334 +/- 0.003271`，useful cull `0.901758 +/- 0.007830` |
 | IFCBench 微调与 test | 完成 | 四点 camera-aligned-box 协议下，v2 边界减半三种子 validation LCB 为 `0.991106/0.990764/0.990215`；正式 `2710` test 的 pose PR-AUC `0.482290 +/- 0.021681`、WR `0.991179 +/- 0.000668`、LCB `0.990523 +/- 0.000552`、useful cull `0.602498 +/- 0.015504`。运行资产使用 validation useful cull 最高的 seed01 |
-| AABB + Ray MLP | 完成 | 两场景三种子 `40 x 900` 与 frozen test 已完成。IFCBench pose PR-AUC `0.28504 +/- 0.00047`、prevalence `0.12232`、useful cull `0.03942`；HKUST 与 Full 的正式对照产物也已登记 |
-| HZB 外壳与运行时 | 完成 | 两场景冻结 `512x288 / 100 m`。Lossless Region66 test 的 WR/LCB/useful cull 为 HKUST `0.997633/0.996552/0.328166`、IFCBench `0.995325/0.994716/0.237997`；总查询 p50 分别为 `989.55/120.15 ms` |
+| AABB + Ray MLP | 部分完成 | 五场景三种子 `40 x 900` 均已训练；HKUST、Sponza、Big City、Viking Village 已生成三种子 frozen-test JSON/sidecar，IFCBench 仅 seed01 有独立 test 产物，seed02/03 待补 |
+| HZB 外壳与运行时 | 部分完成 | HKUST Region66 正式完成：lossless WR/LCB/useful cull 为 `0.997633/0.996552/0.328166`，总查询 p50 `989.55 ms`。IFCBench 和三个标准图形学场景已有外壳资产，正式 calibration/test/timing 待硬件独占窗口执行 |
 | 资产与容量 | 完成 | 神经资产为 lossless shell 的 `1.37%`（HKUST）和 `19.78%`（IFCBench）；rank Pareto 与 Table 4 已生成 |
-| 端侧模型前向 | 部分完成 | A6000 两场景五 session 已完成：HKUST/IFCBench WebGPU kernel p50 `1.568/1.385 ms`、p95 `3.555/3.590 ms`；WASM p50 `3.7/46.8 ms`、p95 `100.5/143.2 ms`。HKUST M2 与 vivo 已完成，IFCBench 移动端仍缺失 |
+| 端侧模型前向 | 部分完成 | A6000 五场景 WebGPU/WASM 五 session raw 与统一汇总均已完成；HKUST M2 与 vivo 已完成，IFCBench 移动端仍缺失 |
 | Safety-efficiency | 完成 | 六个核心变体的 calibration-safe validation 曲线及论文图已生成 |
-| Streaming | 完成 | Visible-weight Bytes@99：HKUST Full/成本感知/面积字节/HZB 为 `18.031/10.819/12.881/17.498 MiB`；IFCBench 为 `8.078/7.119/13.426/13.404 MiB`。25 Mbps 下 Full/HZB 调度 median 为 HKUST `0.126/27.317 s`、IFCBench `4.723/7.341 s` |
-| Test 图像 | 完成 | HKUST Full/AABB/HZB aggregate PER 为 `0.3662/0.8613/0.3128%`；IFCBench 为 `0.5011/0.0583/0.5312%`，均按各自冻结 test 协议解释 |
+| Streaming | 部分完成 | HKUST/IFCBench 的 Full、成本感知、AABB 和启发式完整 test visible-weight 模拟已完成；HKUST HZB 与 216 次真实 scheduler replay 已完成。IFCBench HZB 模拟、scheduler replay 和两场景统一表图待其正式 HZB 结果 |
+| Test 图像 | 部分完成 | HKUST Full/AABB/HZB aggregate PER 为 `0.3662/0.8613/0.3128%`；IFCBench 当前只有 validation 图像，三个标准图形学场景的 Full/HZB 正式 test 图像待执行 |
 | GT 收敛 | 完成诊断 | 两场景各 100 cell x 128 点硬件采样完成。HKUST 源 GT 对 128 点实例/权重覆盖 `99.6411/99.9997%`；IFCBench 四点 box GT 对另一水平圆盘定义为 `80.1942/97.2252%`。该结果只界定连续区域声明，不否定四点协议结果，也不触发重训 |
 | 离线成本 / 结果包 | 完成当前可得项 | 六阶段成本、artifact registry、三种子 Table 2 汇总已生成；未记录时间保持 unavailable，不作推算 |
-| 标准图形场景 | 正式矩阵执行中 | 三个场景均使用水平圆盘、`r=0.75 m`、后退 `1.299038 m`、32 subpose 和中心组 split。Sponza、Viking 的 Full/AABB 正式矩阵正在训练。Big City 的 16 个 train-only 深度分片均通过硬件门，关系 CSR 覆盖全部 `5832` 个 train view-cell，native candidate audit 通过；Full/AABB 预检完成并排在 Sponza 对应 runner 后自动启动。三个场景 test 均未用于模型选择。 |
+| 标准图形场景 | 正式矩阵执行中 | 三个场景均使用水平圆盘、`r=0.75 m`、后退 `1.299038 m`、32 subpose 和中心组 split。AABB 三种子已训练；V1 困难 pose 均衡采样的 Sponza/Big City 正在长训，随后接续 Viking。V2 三场景采样、Pose CSR、train-only 深度缓存及 K8/16/32 关系均完成，正式长训固定 K8 并等待 GPU。三个场景 test 均未用于本轮选择。 |
 
-截至 2026-09-11，HKUST 与 IFCBench 主结果均按各自预登记的 view-cell 采样协议冻结。标准场景按同一显式四分割、同一 V4 和同一 AABB/HZB 评价口径执行；任何中间指标都不替代三种子 validation 选择和一次 frozen test。
+截至 2026-09-13，HKUST 与 IFCBench 主结果均按各自预登记的 view-cell 采样协议冻结。标准场景按同一显式四分割、同一 V4 和同一 AABB/HZB 评价口径执行；任何中间指标都不替代三种子 validation 选择和一次 frozen test。
 
 本轮实现回归已通过 benchmark `167` 项、model `48` 项、完整前端 `npm test` 和 sampler `7` 项测试；测试过程禁用 CUDA，不作为任何正式性能结果。
 

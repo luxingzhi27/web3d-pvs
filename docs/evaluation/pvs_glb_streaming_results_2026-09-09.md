@@ -1,6 +1,6 @@
 # Strict Cold-Cache GLB Streaming
 
-日期：2026-09-09；2026-09-11 完成正式 visible-weight test 模拟
+日期：2026-09-09；2026-09-13 更新
 
 ## 目的
 
@@ -62,10 +62,13 @@ conda run -n slm_pvs python neural_instance_culling/benchmark/generate_streaming
 | IFCBench | Neural `p_g/B^alpha` | 3.616 | 7.119 | 11.370 | 13.764 | 4.638 |
 | IFCBench | AABB MLP | 13.097 | 24.639 | 36.623 | 44.304 | 21.405 |
 | IFCBench | Projected area/byte | 5.875 | 13.426 | 25.326 | 37.264 | 10.580 |
-| IFCBench | HZB visible-first | 6.046 | 13.404 | 23.511 | 31.302 | 10.472 |
 | IFCBench | GT utility/byte oracle | 0.689 | 1.616 | 3.087 | 4.101 | 0 |
 
-完整方法行、20 个 fixed-random seeds、10/25/50/100 Mbps 换算、coverage ceiling 和不可达率在 `streaming_formal/figures/table5_streaming_ranking.csv`。所有 threshold-free 方法共享完整 candidate GLB 集合，因此 coverage ceiling 为 1。
+HKUST 和 IFCBench 各自的 `ranking_summary.json` 保存完整方法行、20 个 fixed-random
+seeds、10/25/50/100 Mbps 换算、coverage ceiling 和不可达率。当前论文 figures 目录只
+汇总了 HKUST，须在 IFCBench 正式 HZB 完成后重新生成两场景统一表图。所有可用的
+threshold-free 方法共享完整 candidate GLB 集合，因此 coverage ceiling 为 1；
+IFCBench 的 `hzb_visible_first` 当前明确为 unavailable，不能进入表格。
 
 冻结阈值过滤单独报告：HKUST Full 平均保留 `161.76` GLB、`36.84 MiB`，平均 coverage ceiling `0.996914`；IFCBench Full 平均保留 `561.25` GLB、`11.66 MiB`，coverage ceiling `0.997467`。过滤集合不参与上表的 threshold-free Bytes@x 排名。
 
@@ -86,7 +89,11 @@ conda run -n slm_pvs python neural_instance_culling/benchmark/generate_streaming
 
 ## 真实调度结果
 
-`slm2viewer/scripts/run_real_scheduler_streaming.mjs` 和 `build_real_scheduler_plan.py` 固定每场景 12 个 test pose，运行 25/50 Mbps、每项 3 次，调用现有 `classifyGlbSchedule` 和 `GlbResourceScheduler` 的 `urgent/warm/speculative` 状态机，且显式记录 `startup100Enabled=false`、不使用 startup tier。两场景共 `432` 次 replay 全部完成且无下载失败。
+`slm2viewer/scripts/run_real_scheduler_streaming.mjs` 和 `build_real_scheduler_plan.py` 固定
+12 个 HKUST test pose，运行 25/50 Mbps、每项 3 次，调用现有 `classifyGlbSchedule`
+和 `GlbResourceScheduler` 的 `urgent/warm/speculative` 状态机，且显式记录
+`startup100Enabled=false`、不使用 startup tier。HKUST 共 `216` 次 replay，均完成且
+无下载失败。IFCBench scheduler plan/replay 尚未执行。
 
 25 Mbps 结果如下；GLB 与 waste 是达到完整 GT GLB 集合时的逐 run 平均值：
 
@@ -95,11 +102,11 @@ conda run -n slm_pvs python neural_instance_culling/benchmark/generate_streaming
 | HKUST | Full | 0.126 s | 116.208 s | 49.703 | 28.062 | 5.225 | 1.879 s | 117.961 s |
 | HKUST | AABB MLP | 0.800 s | 136.141 s | 99.127 | 77.486 | unavailable | unavailable | unavailable |
 | HKUST | HZB visible-first | 27.317 s | 153.304 s | 151.488 | 129.847 | 380.814 | 155.097 s | 281.084 s |
-| IFCBench | Full | 4.723 s | 7.711 s | 12.098 | 8.493 | 11.334 | 8.526 s | 11.514 s |
-| IFCBench | AABB MLP | 12.287 s | 30.913 s | 43.497 | 39.892 | unavailable | unavailable | unavailable |
-| IFCBench | HZB visible-first | 7.341 s | 22.996 s | 28.985 | 25.381 | 57.148 | 26.517 s | 42.171 s |
 
-调度阶段使用真实 GLB 响应和空应用缓存，但 Node 阶段只校验 GLB container 并执行生产调度状态机，不构造 Three.js 场景，因此不冒充完整浏览器首帧渲染时间。`含启动传输下界` 在调度时间上加对应可见性资产按相同聚合带宽的传输时间，不包含资产解码、模型初始化、HZB 构建或最终绘制。AABB MLP 尚无正式部署 bundle，不能把 replay 中的空 asset list 解释成零字节，故该列保持 unavailable。完整 25/50 Mbps 数据在 `table5_scheduler_replay.csv`。IFCBench replay 与其模型测试统一使用四点 box GT 和原 test split。
+调度阶段使用真实 GLB 响应和空应用缓存，但 Node 阶段只校验 GLB container 并执行生产调度状态机，不构造 Three.js 场景，因此不冒充完整浏览器首帧渲染时间。`含启动传输下界` 在调度时间上加对应可见性资产按相同聚合带宽的传输时间，不包含资产解码、模型初始化、HZB 构建或最终绘制。AABB MLP 尚无正式部署 bundle，不能把 replay 中的空 asset list 解释成零字节，故该列保持 unavailable。完整 25/50 Mbps 数据在 `table5_scheduler_replay.csv`。
+
+IFCBench replay 必须使用同一 frozen test split 和现有四点 box GT，并在正式 Region66
+HZB 结果可用后一次性生成 Full、AABB MLP 和 HZB visible-first 三种方法的计划与 replay。
 
 ## 文件与测试
 

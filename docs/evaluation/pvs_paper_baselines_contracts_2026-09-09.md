@@ -2,7 +2,10 @@
 
 日期：2026-09-09
 
-状态：评价接口、sidecar、场景统计和 AABB+Ray MLP 正式入口已完成。两场景快速扫描正在执行，随后按计划完成三种子 `40 x 900`；未将未完成成员当作实验结果。
+状态：评价接口、sidecar、场景统计和 AABB+Ray MLP 正式入口已完成。五个场景的
+AABB+Ray MLP 扫描与三种子 `40 x 900` 训练均已完成；HKUST、Sponza、Big City 和
+Viking Village 已生成三种子 frozen-test 结果，IFCBench 尚需补齐 seed02/03 的独立
+test JSON 与 score sidecar。
 
 ## 目的
 
@@ -59,7 +62,12 @@ HKUST Full V4 frozen test 已读取全部 `684` 个 test pose，产物为：
 
 两场景 preflight 的 split 数量均符合计划：HKUST 为 `5926/659/730/684`，IFCBench 为 `19647/2183/2712/2710`。IFCBench test 中有 `26` 个零 GT pose。
 
-本 worktree 的 AABB scan 曾在 GPU 调度更新前短暂启动，随后按主线程 GPU 统一安排立即停止；两个不完整 HKUST scan member 和 smoke checkpoint 已清理，未形成 calibration、validation 或 test 论文结果。当前没有 AABB runner 或训练子进程运行，IFCBench 现有 GPU 任务未被触碰。后续正式任务仍必须执行完整的两个 LR 扫描，并无论扫描结果选择一个 LR 完成三个 seed 的 `40 x 900`。
+正式实验 `pvs_aabb_ray_mlp_formal_v1` 已对五个场景执行两个学习率的 `6 x 300`
+扫描，并统一选择 `2e-4`，随后完成三种子 `40 x 900`。HKUST、Sponza、Big City 和
+Viking Village 均已有三个种子的独立 frozen-test JSON 与 score sidecar。IFCBench
+目前只有 seed20260801 的独立 frozen-test 产物；seed20260802/03 已有 checkpoint 和
+calibration/validation 选择，但仍须按各自冻结阈值补写完整 test JSON 与 sidecar，不能
+用汇总文件中的 inline row 代替。
 
 ## 验证
 
