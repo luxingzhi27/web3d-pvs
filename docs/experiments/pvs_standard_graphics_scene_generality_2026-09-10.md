@@ -840,3 +840,17 @@ WR/LCB 为 `0.999216/0.998836`，Occlusion Recall `0.567280`，Useful Cull
 `0.445000`、Precision `0.380314`、Balanced Accuracy `0.766867`、Avg Pred
 `441.32`。Big City seed20260802/03 与 Viking Village 三种子仍按完整矩阵运行，不能用
 上述单种子中间结论替代最终三种子选择。
+
+Viking Village V1 三种子也已完整执行 `40 x 900`，全程 `testRead=false`。每个种子
+都至少存在一个通过 validation WR/LCB 安全门的 checkpoint，但安全池内的剔除能力差异
+较大：
+
+| 场景 | Seed | Epoch | WR | WR 95% LCB | Occlusion Recall | Useful Cull | Precision | Balanced Accuracy | Avg Pred |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Viking Village | 20260801 | 8 | 0.995920 | 0.992083 | 0.384911 | 0.288271 | 0.348724 | 0.683671 | 410.12 |
+| Viking Village | 20260802 | 20 | 0.995191 | 0.991013 | 0.002140 | 0.001603 | 0.251207 | 0.500366 | 578.69 |
+| Viking Village | 20260803 | 4 | 0.997162 | 0.994405 | 0.206147 | 0.154390 | 0.292720 | 0.593100 | 487.40 |
+
+Viking V1 的安全池结果整体弱于同一旧 validation 上的 8-epoch pilot，不能据此替换正式
+结论，也不能重新读取旧 test 选择 checkpoint。后续以预登记的 V2 更密采样三种子结果
+判断是否形成更稳定的安全与剔除折中；V1 结果作为采样优化对照保留。
