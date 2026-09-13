@@ -20,6 +20,7 @@ from run_standard_graphics_mainline import (  # noqa: E402
     SEEDS,
     _replace_command_value,
     evaluate_command,
+    export_command,
     read_json,
     run_jobs,
     selected_checkpoint,
@@ -382,6 +383,37 @@ def select_v2_member(
     return payload
 
 
+def export_v2_runtime(
+    scene: str,
+    selection: dict[str, Any],
+    result_root: Path,
+    gpu_ids: list[int],
+) -> Path:
+    member = Path(str(selection["selectedMember"]))
+    output = result_root / "sampling_v2" / scene / "runtime_selected"
+    run_jobs(
+        [("export_runtime", export_command(scene, {"checkpoint": selected_checkpoint(member)}, output))],
+        gpu_ids[:1],
+        result_root / "logs/sampling_v2_export" / scene,
+    )
+    meta = read_json(output / "model_meta.json")
+    write_json(
+        result_root / "sampling_v2" / scene / "runtime_export.json",
+        {
+            "schema": "pvs-standard-graphics-sampling-v2-runtime-export-v1",
+            "scene": scene,
+            "selectedSeed": int(selection["selectedSeed"]),
+            "selectionSplit": "validation",
+            "runtimeDir": str(output.resolve()),
+            "runtimeSchema": meta.get("schema"),
+            "threshold": meta.get("threshold"),
+            "numInstances": meta.get("numInstances"),
+            "testRead": False,
+        },
+    )
+    return output
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -466,6 +498,7 @@ def main() -> None:
             source_k = int(selected["sourceTopK"])
             seed = int(selected["selectedSeed"])
             member = Path(str(selected["selectedMember"]))
+            runtime_dir = export_v2_runtime(scene, selected, result_root, args.gpu_ids)
             output_root = result_root / "sampling_v2" / scene / "test"
             output = output_root / "full_v4.json"
             sidecar = output_root / "full_v4.sidecar"
@@ -491,6 +524,7 @@ def main() -> None:
                     "sourceTopK": source_k,
                     "selectedSeed": seed,
                     "selectedMember": str(member.resolve()),
+                    "runtimeDir": str(runtime_dir.resolve()),
                     "test": str(output.resolve()),
                     "scoreSidecar": str(sidecar.resolve()),
                     "aggregate": result.get("aggregate"),

@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 from neural_instance_culling.benchmark.run_standard_graphics_optimization import (
+    export_v2_runtime,
     optimized_train_command,
     relation_build_command,
     selection_key,
@@ -90,6 +91,33 @@ class StandardGraphicsOptimizationTest(unittest.TestCase):
         self.assertIn("pose_csr_bigcity_standard_graphics_128k_fov66_sampling_v2", " ".join(command))
         self.assertIn("/results/sampling_v2/bigcity_triangle_depth_train/cache", " ".join(command))
         self.assertEqual(command[command.index("--splits") + 1], "train")
+
+    def test_v2_runtime_export_uses_selected_validation_member(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            member = root / "member"
+            member.mkdir()
+            (member / "calibration_ready_summary.json").write_text(
+                '{"status":"safe","bestSafe":{}}', encoding="utf-8"
+            )
+            (member / "best_safe.pt").write_bytes(b"checkpoint")
+            selection = {"selectedMember": str(member), "selectedSeed": 20260801}
+
+            def fake_run_jobs(jobs, gpu_ids, log_dir):
+                command = jobs[0][1]
+                output = Path(command[command.index("--output-dir") + 1])
+                output.mkdir(parents=True)
+                (output / "model_meta.json").write_text(
+                    '{"schema":"runtime","threshold":0.5,"numInstances":132}',
+                    encoding="utf-8",
+                )
+
+            with mock.patch(
+                "neural_instance_culling.benchmark.run_standard_graphics_optimization.run_jobs",
+                side_effect=fake_run_jobs,
+            ):
+                output = export_v2_runtime("sponza_128k", selection, root / "results", [0])
+        self.assertEqual(output.name, "runtime_selected")
 
 
 if __name__ == "__main__":

@@ -861,6 +861,9 @@ Viking V1 的安全池结果整体弱于同一旧 validation 上的 8-epoch pilo
 runner 自动接续 Viking Village 三种子；Big City V1 seed20260803 完成后先等待上述
 runner 释放 GPU，再由 GPU0-2 并行执行 Big City V2 三种子，避免单卡串行延长总工期。
 所有 V2 成员固定 K=8、`40 x 900`、三种子，不加载 V1/pilot checkpoint，test 保持关闭。
+`v2-finalize` 先按 calibration/validation 安全池选定成员并导出唯一 `runtime_selected`
+运行资产，导出成功后才读取一次 frozen test；最终 summary 同时登记 checkpoint、运行资产
+和 score sidecar，供后续图像、runtime 与汇总入口使用。
 
 与 V2 Full 配套的 AABB + Ray MLP 和 Geometry-shell HZB 已改为相同 V2 CSR 与 split。
 AABB 使用新实验名 `pvs_aabb_ray_mlp_formal_sampling_v2` 和独立输出根，必须从头完成扫描
