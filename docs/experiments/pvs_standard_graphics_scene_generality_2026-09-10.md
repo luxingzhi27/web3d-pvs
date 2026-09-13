@@ -824,3 +824,19 @@ Big City V2 的 K=8/16/32 关系 CSR 均已构建，分别保留
 `66 degrees` AABB 候选与数据集候选一致，未使用 GT 正例并集修补。按旧 validation
 冻结的选择规则，V2 正式长训仍使用 K=8，并从随机初始化执行三种子 `40 x 900`；该训练
 须等待当前 V1 完整矩阵释放对应 GPU，不能与 V1 成员混用 checkpoint 或 split。
+
+V1 困难 pose 均衡采样的 Sponza 三种子已完整执行 `40 x 900`，全程
+`testRead=false`。下表为每个种子在自身 calibration 冻结阈值下，从通过 validation
+WR/LCB 安全门的 checkpoint 中按 Useful Cull 选择的最佳点：
+
+| 场景 | Seed | Epoch | WR | WR 95% LCB | Occlusion Recall | Useful Cull | Precision | Balanced Accuracy | Avg Pred |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Sponza | 20260801 | 36 | 0.997298 | 0.994802 | 0.747543 | 0.609029 | 0.466495 | 0.859072 | 19.46 |
+| Sponza | 20260802 | 24 | 0.995031 | 0.991600 | 0.792017 | 0.645262 | 0.516600 | 0.884650 | 17.70 |
+| Sponza | 20260803 | 32 | 0.997165 | 0.994274 | 0.754331 | 0.614559 | 0.476355 | 0.868479 | 19.30 |
+
+Big City V1 seed20260801 也已完整执行 `40 x 900`，其最佳安全点在 epoch 24：
+WR/LCB 为 `0.999216/0.998836`，Occlusion Recall `0.567280`，Useful Cull
+`0.445000`、Precision `0.380314`、Balanced Accuracy `0.766867`、Avg Pred
+`441.32`。Big City seed20260802/03 与 Viking Village 三种子仍按完整矩阵运行，不能用
+上述单种子中间结论替代最终三种子选择。
