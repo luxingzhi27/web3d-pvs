@@ -808,4 +808,19 @@ V2 的 train-only 分布审计表明，Sponza、Viking Village、Big City 的平
 `132/1890/2734` 个单位均至少进入一个 train 候选。相比 V1，训练 pose 数分别增加约
 `2.74x/1.76x/1.99x`，但正样本比例没有被人为抬高。Sponza 和 Viking Village 的 V2
 train-only 三角形深度缓存已分别完成 `32/32`、`16/16` 分片，均
-`formalReady=true`，对应 K=8/16/32 关系 CSR 已构建；Big City 的 64 分片正在执行。
+`formalReady=true`，对应 K=8/16/32 关系 CSR 已构建。Big City 的深度缓存也已完成
+`64/64` 分片，`failedCount=0`、`formalReady=true`，每个分片均保留硬件 GPU evidence；
+缓存覆盖全部 `11,580` 个 train view-cell 和 `104,220` 个关系代表视点，没有未覆盖的
+train pose。随后执行：
+
+```bash
+conda run --no-capture-output -n slm_pvs python -u \
+  neural_instance_culling/benchmark/run_standard_graphics_optimization.py \
+  build-v2-relations --scenes bigcity_128k
+```
+
+Big City V2 的 K=8/16/32 关系 CSR 均已构建，分别保留
+`467,614/866,447/1,448,782` 条关系边；三者都只读取 train split，重新计算的后退
+`66 degrees` AABB 候选与数据集候选一致，未使用 GT 正例并集修补。按旧 validation
+冻结的选择规则，V2 正式长训仍使用 K=8，并从随机初始化执行三种子 `40 x 900`；该训练
+须等待当前 V1 完整矩阵释放对应 GPU，不能与 V1 成员混用 checkpoint 或 split。
