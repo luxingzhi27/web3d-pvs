@@ -442,6 +442,7 @@ def _metric_payload(raw: Mapping[str, Any], *, threshold: float) -> dict[str, An
         "specificity": raw.get("agg_specificity"),
         "usefulCull": useful_cull,
         "badCull": bad_cull,
+        "candidateNormalizedOcclusionRecall": raw.get("candidate_normalized_occlusion_recall"),
         "avgCandidateCount": raw.get("avg_candidate_count"),
         "avgGtCount": raw.get("avg_gt_count"),
         "avgPredCount": raw.get("avg_pred_count"),

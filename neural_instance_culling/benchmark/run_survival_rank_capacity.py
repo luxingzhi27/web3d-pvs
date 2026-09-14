@@ -9,11 +9,16 @@ import statistics
 import sys
 from typing import Any, Mapping, Sequence
 
+import numpy as np
 import torch
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from neural_instance_culling.model.common.culling_metrics import (  # noqa: E402
+    candidate_normalized_occlusion_recall,
+)
 
 from neural_instance_culling.benchmark.run_pvs import (
     MAINLINE_CONFIG,
@@ -279,6 +284,14 @@ def summarize(model_root: Path, benchmark_root: Path, ranks: Sequence[int]) -> d
             calibration = _load_json(member / "calibration_ready_summary.json")
             aggregate = evaluation["aggregate"]
             pose_macro = evaluation["poseMacro"]
+            per_pose = evaluation.get("perPose") or []
+            if not per_pose:
+                raise ValueError(f"capacity evaluation lacks per-pose counts: {output}")
+            cnor = candidate_normalized_occlusion_recall(
+                np.asarray([float(row["metrics"]["tn"]) for row in per_pose]),
+                np.asarray([float(row["metrics"]["fp"]) for row in per_pose]),
+                np.asarray([float(row["metrics"]["candidateCount"]) for row in per_pose]),
+            )
             lcb = float(aggregate["weightedRecallLowerConfidenceBound"])
             weighted_recall = float(aggregate["weightedRecall"])
             rows.append(
@@ -298,7 +311,10 @@ def summarize(model_root: Path, benchmark_root: Path, ranks: Sequence[int]) -> d
                         and lcb > WEIGHTED_RECALL_FLOOR
                     ),
                     "weightedRecallLowerConfidenceBound": lcb,
-                    "aggregate": {key: float(aggregate[key]) for key in metric_keys},
+                    "aggregate": {
+                        **{key: float(aggregate[key]) for key in metric_keys},
+                        "candidateNormalizedOcclusionRecall": cnor,
+                    },
                     "poseMacro": {key: float(pose_macro[key]) for key in metric_keys},
                     "runtimeFeatureDim": int(evaluation["runtime"]["runtimeFeatureDim"]),
                     "runtimeFeatureBytes": int(evaluation["runtime"]["runtimeFeatureBytes"]),
@@ -321,7 +337,7 @@ def summarize(model_root: Path, benchmark_root: Path, ranks: Sequence[int]) -> d
             "modelStateParameterCount": int(statistics.fmean(row["modelStateParameterCount"] for row in members)),
             "aggregateMean": {
                 key: float(statistics.fmean(row["aggregate"][key] for row in members))
-                for key in metric_keys
+                for key in (*metric_keys, "candidateNormalizedOcclusionRecall")
             },
             "poseMacroMean": {
                 key: float(statistics.fmean(row["poseMacro"][key] for row in members))

@@ -12,6 +12,7 @@ from neural_instance_culling.benchmark.run_standard_graphics_optimization import
     selection_key,
     train_only_relation_k,
     v2_relation_build_command,
+    v2_sponza_refinement_command,
     v2_train_command,
 )
 from neural_instance_culling.model.train_pvs import parse_args
@@ -91,6 +92,24 @@ class StandardGraphicsOptimizationTest(unittest.TestCase):
         self.assertIn("pose_csr_bigcity_standard_graphics_128k_fov66_sampling_v2", " ".join(command))
         self.assertIn("/results/sampling_v2/bigcity_triangle_depth_train/cache", " ".join(command))
         self.assertEqual(command[command.index("--splits") + 1], "train")
+
+    def test_sponza_refinement_is_small_and_uses_one_fixed_protocol(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            command = v2_sponza_refinement_command(
+                Path(temporary) / "member",
+                20260801,
+                8,
+                Path(temporary) / "source.pt",
+            )
+            args = parse_args(command[2:])
+        self.assertEqual(args.epochs, 4)
+        self.assertEqual(args.steps_per_epoch, 900)
+        self.assertEqual(args.poses_per_batch, 8)
+        self.assertEqual(args.learning_rate, 2e-5)
+        self.assertEqual(args.integrated_rvl_recall_target, 0.995)
+        self.assertEqual(args.integrated_separation_weight, 0.10)
+        self.assertEqual(args.init_checkpoint, Path(temporary) / "source.pt")
+        self.assertNotIn("test", command)
 
     def test_v2_runtime_export_uses_selected_validation_member(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -185,6 +185,14 @@ class GeometryShellHZBEvaluatorTests(unittest.TestCase):
         self.assertEqual(aggregate["tp"], 2)
         self.assertEqual(aggregate["tn"], 2)
 
+    def test_candidate_normalized_occlusion_recall_balances_pose_scale(self) -> None:
+        value = evaluator.candidate_normalized_occlusion_recall(
+            np.asarray([10.0, 80.0]),
+            np.asarray([0.0, 20.0]),
+            np.asarray([100.0, 1000.0]),
+        )
+        self.assertAlmostEqual(value, 0.9)
+
     def test_glb_metrics_are_per_pose_and_can_report_source_bytes(self) -> None:
         first = evaluator.glb_metrics({1, 2}, {2, 3}, {1: 10, 2: 20, 3: 30})
         second = evaluator.glb_metrics({2}, {2}, {1: 10, 2: 20, 3: 30})

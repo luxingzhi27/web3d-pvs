@@ -27,6 +27,7 @@ if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
 
 from common.runtime_meta import load_runtime_meta  # noqa: E402
+from common.culling_metrics import candidate_normalized_occlusion_recall  # noqa: E402
 from common.threshold_selection import (  # noqa: E402
     aggregate_weighted_cull_selection_rule,
     select_aggregate_weighted_cull_workpoint,
@@ -566,6 +567,14 @@ def _summarize_pose_rows(rows: list[dict[str, Any]], lcb_replicates: int = 0, se
         "specificity": specificity,
         "usefulCull": _safe_div(tn, candidate),
         "badCull": _safe_div(fn, candidate),
+        "candidateNormalizedOcclusionRecall": candidate_normalized_occlusion_recall(
+            np.asarray([float(row["metrics"].get("tn", 0.0)) for row in rows]),
+            np.asarray([float(row["metrics"].get("fp", 0.0)) for row in rows]),
+            np.asarray([
+                sum(float(row["metrics"].get(key, 0.0)) for key in ("tp", "fp", "fn", "tn"))
+                for row in rows
+            ]),
+        ),
         "avgPredCount": _safe_div(pred, len(rows)),
         "avgCandidateCount": _safe_div(candidate, len(rows)),
         "avgGtCount": _safe_div(gt, len(rows)),

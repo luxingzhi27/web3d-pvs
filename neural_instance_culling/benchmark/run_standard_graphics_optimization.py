@@ -50,6 +50,7 @@ RELATION_K = (8, 16, 32)
 RELATION_QUALITY_Q01_FLOOR = 0.8
 PILOT_EPOCHS = 8
 PILOT_STEPS = 450
+SPONZA_REFINEMENT_EXPERIMENT = "pvs_v4_sponza_sampling_v2_safety_refinement_v1"
 V2_DATASETS = {
     "sponza_128k": "pose_csr_sponza_standard_graphics_128k_fov66_sampling_v2",
     "viking_village_128k": "pose_csr_viking_village_standard_graphics_128k_fov66_sampling_v2",
@@ -181,6 +182,39 @@ def v2_train_command(
         f"{EXPERIMENT}_sampling_v2_{scene}_topk{source_k}_seed{seed}",
     )
     return command
+
+
+def v2_sponza_refinement_command(
+    output: Path,
+    seed: int,
+    source_k: int,
+    init_checkpoint: Path,
+) -> list[str]:
+    command = v2_train_command("sponza_128k", output, seed, source_k)
+    command.extend(["--init-checkpoint", str(init_checkpoint)])
+    replacements = {
+        "--experiment-name": f"{SPONZA_REFINEMENT_EXPERIMENT}_seed{seed}",
+        "--epochs": "4",
+        "--steps-per-epoch": "900",
+        "--poses-per-batch": "8",
+        "--eval-every": "1",
+        "--snapshot-every": "1",
+        "--learning-rate": "0.00002",
+        "--instance-calibration-warmup-fraction": "0",
+        "--instance-calibration-ramp-fraction": "0",
+        "--integrated-rvl-recall-guard-weight": "0.40",
+        "--integrated-rvl-recall-target": "0.995",
+        "--integrated-rvl-pose-cvar-weight": "0.35",
+        "--integrated-separation-weight": "0.10",
+        "--integrated-tail-ramp-fraction": "0",
+    }
+    for flag, value in replacements.items():
+        _replace_command_value(command, flag, value)
+    return command
+
+
+def v2_sponza_refinement_member_dir(model_root: Path, seed: int) -> Path:
+    return model_root / "sampling_v2_refinement" / "sponza_128k" / f"seed{seed}_e4"
 
 
 def v2_evaluate_command(
@@ -420,7 +454,7 @@ def main() -> None:
         "mode",
         choices=(
             "build-relations", "pilot", "summarize-pilot", "full",
-            "build-v2-relations", "v2-full", "v2-finalize",
+            "build-v2-relations", "v2-full", "v2-refine-sponza", "v2-finalize",
         ),
     )
     parser.add_argument(
@@ -489,6 +523,24 @@ def main() -> None:
                     v2_train_command(scene, output, seed, source_k),
                 ))
         run_jobs(jobs, args.gpu_ids, result_root / "logs/sampling_v2_full")
+        return
+
+    if args.mode == "v2-refine-sponza":
+        source_k = int(selection["selections"]["sponza_128k"]["selectedSourceTopK"])
+        jobs = []
+        for seed in SEEDS:
+            source_member = v2_member_dir(model_root, "sponza_128k", source_k, seed)
+            output = v2_sponza_refinement_member_dir(model_root, seed)
+            jobs.append((
+                f"sampling_v2_sponza_refinement_seed{seed}",
+                v2_sponza_refinement_command(
+                    output,
+                    seed,
+                    source_k,
+                    selected_checkpoint(source_member),
+                ),
+            ))
+        run_jobs(jobs, args.gpu_ids, result_root / "logs/sampling_v2_sponza_refinement")
         return
 
     if args.mode == "v2-finalize":

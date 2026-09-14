@@ -53,6 +53,7 @@ METRICS = (
     "glbCountReduction",
     "glbByteReduction",
     "glbBytesAtAchievedVisualUtility",
+    "candidateNormalizedOcclusionRecall",
 )
 COUNT_FIELDS = (
     "tp",
@@ -177,6 +178,12 @@ def _metrics_from_values(
     )
     candidate = np.maximum(1.0, tp + fp + fn + tn)
     gt = np.maximum(1.0, tp + fn)
+    pose_candidate = np.maximum(
+        1.0,
+        values["tp"] + values["fp"] + values["fn"] + values["tn"],
+    )
+    normalized_tn = values["tn"] / pose_candidate
+    normalized_negative = (values["tn"] + values["fp"]) / pose_candidate
     efficiency = {
         "avgCandidateCount": candidate / max(1, pose_count),
         "avgGtCount": (tp + fn) / max(1, pose_count),
@@ -199,6 +206,12 @@ def _metrics_from_values(
             "glbBytesAtAchievedVisualUtility"
         ]
         / max(1, pose_count),
+        "candidateNormalizedOcclusionRecall": np.divide(
+            np.sum(normalized_tn, axis=-1),
+            np.sum(normalized_negative, axis=-1),
+            out=np.ones_like(np.sum(normalized_tn, axis=-1), dtype=np.float64),
+            where=np.sum(normalized_negative, axis=-1) > 0.0,
+        ),
     }
     return {**pose, **aggregate, **efficiency}
 

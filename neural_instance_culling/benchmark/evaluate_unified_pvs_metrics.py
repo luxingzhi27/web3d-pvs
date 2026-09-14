@@ -395,6 +395,8 @@ def evaluate_runner(
     pose_useful_cull = np.zeros((n_th,), dtype=np.float64)
     pose_bad_cull = np.zeros((n_th,), dtype=np.float64)
     pose_negative_fpr = np.zeros((n_th,), dtype=np.float64)
+    cnor_tn = np.zeros((n_th,), dtype=np.float64)
+    cnor_negative = np.zeros((n_th,), dtype=np.float64)
     pose_candidate_byte_reduction = np.zeros((n_th,), dtype=np.float64)
     aggregate_weighted_tp = np.zeros((n_th,), dtype=np.float64)
     aggregate_weighted_gt = 0.0
@@ -627,6 +629,8 @@ def evaluate_runner(
             pose_useful_cull += useful_cull
             pose_bad_cull += bad_cull
             pose_negative_fpr += negative_fpr
+            cnor_tn += local_tn / candidate_count
+            cnor_negative += (local_tn + local_fp) / candidate_count
             gt_count_sum += gt_count
             candidate_count_sum += candidate_count
             candidate_glb_count_sum += float(candidate_glbs.size)
@@ -716,6 +720,9 @@ def evaluate_runner(
                 "pose_raw_candidate_reduction_ratio": float(raw_candidate_reduction),
                 "pose_useful_cull_candidate_ratio": float(useful_cull_ratio),
                 "pose_bad_cull_candidate_ratio": float(bad_cull_ratio),
+                "candidate_normalized_occlusion_recall": float(
+                    cnor_tn[i] / cnor_negative[i] if cnor_negative[i] > 0.0 else 1.0
+                ),
                 "safety_adjusted_cull_score": float(useful_cull_ratio * safety_multiplier),
                 "agg_accuracy": float(agg_accuracy),
                 "agg_balanced_accuracy": float(0.5 * (agg_recall + agg_specificity)),
@@ -826,14 +833,15 @@ def write_markdown(path: Path, payload: dict[str, Any]) -> None:
         "",
         "## Weighted-Safe Primary Workpoint",
         "",
-        "| Model | Threshold | Acc | Bal Acc | Recall | Weighted Recall | Utility Recall | Useful Cull | Bad Cull | Raw Reduction | Avg Candidate | Avg GT | Avg Pred | Overfetch | Byte Reduction |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Model | Threshold | Acc | Bal Acc | Recall | Weighted Recall | Utility Recall | CNOR | Useful Cull | Bad Cull | Raw Reduction | Avg Candidate | Avg GT | Avg Pred | Overfetch | Byte Reduction |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for summary in payload["summaries"]:
         row = (summary.get("workpoints") or {}).get("primaryWeightedPrecision")
         lines.append(
             f"| {summary['name']} | {fmt(row, 'threshold')} | {fmt(row, 'pose_accuracy')} | {fmt(row, 'pose_balanced_accuracy')} | "
             f"{fmt(row, 'pose_recall')} | {fmt(row, 'pose_weighted_recall')} | {fmt(row, 'pose_visual_utility_recall')} | "
+            f"{fmt(row, 'candidate_normalized_occlusion_recall')} | "
             f"{fmt(row, 'pose_useful_cull_candidate_ratio')} | {fmt(row, 'pose_bad_cull_candidate_ratio', 5)} | "
             f"{fmt(row, 'pose_raw_candidate_reduction_ratio')} | {fmt(row, 'avg_candidate_count', 2)} | "
             f"{fmt(row, 'avg_gt_count', 2)} | {fmt(row, 'avg_pred_count', 2)} | {fmt(row, 'overfetch_factor', 2)} | "
@@ -845,8 +853,8 @@ def write_markdown(path: Path, payload: dict[str, Any]) -> None:
             "",
             "## Diagnostic Workpoints",
             "",
-            "| Model | Workpoint | Threshold | Acc | Bal Acc | Precision | Recall | Specificity | Useful Cull | Bad Cull | Avg Pred | Avg FP | Avg FN |",
-            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| Model | Workpoint | Threshold | Acc | Bal Acc | Precision | Recall | Specificity | CNOR | Useful Cull | Bad Cull | Avg Pred | Avg FP | Avg FN |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for summary in payload["summaries"]:
@@ -865,7 +873,8 @@ def write_markdown(path: Path, payload: dict[str, Any]) -> None:
             lines.append(
                 f"| {summary['name']} | {label} | {fmt(row, 'threshold')} | {fmt(row, 'pose_accuracy')} | "
                 f"{fmt(row, 'pose_balanced_accuracy')} | {fmt(row, 'pose_precision')} | {fmt(row, 'pose_recall')} | "
-                f"{fmt(row, 'pose_specificity')} | {fmt(row, 'pose_useful_cull_candidate_ratio')} | "
+                f"{fmt(row, 'pose_specificity')} | {fmt(row, 'candidate_normalized_occlusion_recall')} | "
+                f"{fmt(row, 'pose_useful_cull_candidate_ratio')} | "
                 f"{fmt(row, 'pose_bad_cull_candidate_ratio', 5)} | {fmt(row, 'avg_pred_count', 2)} | "
                 f"{fmt(row, 'avg_fp_count', 2)} | {fmt(row, 'avg_fn_count', 2)} |"
             )

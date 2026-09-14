@@ -293,6 +293,8 @@ def evaluate_thresholds(
     pose_balanced_accuracies = np.zeros((n_th,), dtype=np.float64)
     pose_useful_culls = np.zeros((n_th,), dtype=np.float64)
     pose_bad_culls = np.zeros((n_th,), dtype=np.float64)
+    cnor_tn = np.zeros((n_th,), dtype=np.float64)
+    cnor_negative = np.zeros((n_th,), dtype=np.float64)
     pred_counts = np.zeros((n_th,), dtype=np.float64)
     predicted_glb_counts = np.zeros((n_th,), dtype=np.float64)
     predicted_glb_bytes = np.zeros((n_th,), dtype=np.float64)
@@ -471,6 +473,8 @@ def evaluate_thresholds(
             pose_balanced_accuracies += 0.5 * (recall + specificity)
             pose_useful_culls += local_tn / max(1.0, float(end - start))
             pose_bad_culls += local_fn / max(1.0, float(end - start))
+            cnor_tn += local_tn / float(end - start)
+            cnor_negative += (local_tn + local_fp) / float(end - start)
             local_predicted_glb_counts = np.zeros((n_th,), dtype=np.float64)
             local_predicted_glb_bytes = np.zeros((n_th,), dtype=np.float64)
             local_candidate_glb_count = 0.0
@@ -582,6 +586,9 @@ def evaluate_thresholds(
             "pose_balanced_accuracy": float(pose_balanced_accuracies[i] / max(1, pose_count)),
             "pose_useful_cull": float(pose_useful_culls[i] / max(1, pose_count)),
             "pose_bad_cull": float(pose_bad_culls[i] / max(1, pose_count)),
+            "candidate_normalized_occlusion_recall": float(
+                cnor_tn[i] / cnor_negative[i] if cnor_negative[i] > 0.0 else 1.0
+            ),
             "agg_precision": float(agg_precision),
             "agg_recall": float(agg_recall),
             "agg_weighted_recall": float(agg_weighted_tp[i] / max(1e-12, agg_weighted_gt)),

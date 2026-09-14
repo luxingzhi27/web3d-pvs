@@ -1149,6 +1149,10 @@ def _validate_metrics(task: TaskSpec) -> None:
         raise ValueError("HZB metrics do not cover the complete split")
     if not isinstance(metrics.get("aggregate"), Mapping) or not isinstance(metrics.get("poseMacro"), Mapping):
         raise ValueError("HZB metrics lack aggregate/poseMacro metrics")
+    _number(
+        metrics["aggregate"].get("candidateNormalizedOcclusionRecall"),
+        "aggregate.candidateNormalizedOcclusionRecall",
+    )
     for field in ("weightedRecall", "weightedRecallLower95"):
         _number(metrics.get(field), field)
     ground_truth = metrics.get("groundTruth")

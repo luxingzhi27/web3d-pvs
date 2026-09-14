@@ -89,6 +89,10 @@ def _candidate(path: Path) -> dict[str, Any]:
             aggregate.get("balancedAccuracy"), "aggregate.balancedAccuracy"
         ),
         "specificity": _number(aggregate.get("specificity"), "aggregate.specificity"),
+        "candidateNormalizedOcclusionRecall": _number(
+            aggregate.get("candidateNormalizedOcclusionRecall"),
+            "aggregate.candidateNormalizedOcclusionRecall",
+        ),
         "precision": _number(aggregate.get("precision"), "aggregate.precision"),
         "totalP50Ms": _number(timing.get("totalP50Ms"), "timing.totalP50Ms"),
         "safe": weighted_recall > 0.99 and lower_bound > 0.99,

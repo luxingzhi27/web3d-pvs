@@ -21,6 +21,7 @@ TABLE2_METRICS = (
     "aggregate_positive_rate", "aggregate_ap_lift", "aggregate_precision",
     "aggregate_recall", "aggregate_false_occlusion_rate",
     "aggregate_specificity", "aggregate_balanced_accuracy",
+    "candidate_normalized_occlusion_recall",
     "aggregate_weighted_recall", "aggregate_weighted_recall_lcb",
     "useful_cull", "bad_cull", "avg_pred_count", "glb_byte_reduction",
 )
@@ -28,7 +29,8 @@ TABLE2_DISPLAY_METRICS = (
     "pose_average_precision", "pose_positive_rate", "pose_ap_lift",
     "pose_precision", "pose_recall", "pose_false_occlusion_rate",
     "pose_specificity", "pose_balanced_accuracy", "aggregate_weighted_recall",
-    "aggregate_weighted_recall_lcb", "useful_cull", "bad_cull",
+    "aggregate_weighted_recall_lcb", "candidate_normalized_occlusion_recall",
+    "useful_cull", "bad_cull",
     "avg_pred_count", "glb_byte_reduction",
 )
 ARTIFACT_FIELDS = ("section", "artifactId", "path", "status", "reason")
@@ -111,6 +113,10 @@ def _metric_row(
         "aggregate_accuracy": metric("accuracy", "agg_accuracy"),
         "aggregate_balanced_accuracy": metric("balancedAccuracy", "agg_balanced_accuracy"),
         "aggregate_specificity": metric("specificity", "agg_specificity"),
+        "candidate_normalized_occlusion_recall": metric(
+            "candidateNormalizedOcclusionRecall",
+            "candidate_normalized_occlusion_recall",
+        ),
         "aggregate_average_precision": metric("averagePrecision", "aggregateAveragePrecision"),
         "aggregate_positive_rate": metric("positiveRate", "aggregatePositiveRate"),
         "aggregate_ap_lift": metric("apLift", "aggregateApLift"),

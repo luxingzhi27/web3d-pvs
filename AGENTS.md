@@ -9,7 +9,7 @@
 - 不允许用旧实验名称复用新含义。例如同一个目录名不能先表示 PointNet++ 原始版，后又表示高召回版。
 - 不允许把失败实验伪装成当前主线；失败实验可以记录，但不能污染默认 runner、README 或前端默认资产。
 - 不允许用 sample-level 二分类指标替代 pose-level 集合指标作为主结论。
-- 当前主要验收目标是：以 `weighted recall` 及其置信下界作为画面安全主门，在安全约束下最大化有效剔除和资源节省。普通 pose recall 必须报告，用于诊断均匀实例覆盖，但不能单独否决或证明画面安全；除非实验协议另有登记，不得把 pose recall `0.95` 当作 weighted recall 的替代门。满足 weighted recall 安全约束后，优先比较 `useful cull = TN / candidate`、`bad cull = FN / candidate`、平均预测数量、GLB 字节削减和前端延迟。普通 precision、F1、逐实例 accuracy 和 balanced accuracy 必须报告，但不能单独作为主结论。
+- 当前主要验收目标是：以 `weighted recall` 及其置信下界作为画面安全主门，在安全约束下最大化有效剔除和资源节省。普通 pose recall 必须报告，用于诊断均匀实例覆盖，但不能单独否决或证明画面安全；除非实验协议另有登记，不得把 pose recall `0.95` 当作 weighted recall 的替代门。满足 weighted recall 安全约束后，优先比较 `useful cull = TN / candidate`、候选归一化遮挡召回率 `CNOR`、`bad cull = FN / candidate`、平均预测数量、GLB 字节削减和前端延迟。普通 precision、F1、逐实例 accuracy 和 balanced accuracy 必须报告，但不能单独作为主结论。
 - `precision` 受候选集合中的正负样本比例影响：在真正率和假正率相同的情况下，加入更多不可见候选仍会增加 FP 并降低 precision。因此跨候选规模、跨场景或跨候选生成策略比较时，必须同时报告平均候选数、GT/候选比例、specificity、instance accuracy 和 balanced accuracy。普通 accuracy 可能被大量 TN 抬高；`balanced accuracy = (recall + specificity) / 2` 对正负样本比例更稳健，是安全门之后的重要分类参考，不能只在附录中出现。
 - 新优化模型必须区分“安全工作点”和“分布健康诊断”。安全工作点只由 checkpoint 自己的 calibration 阈值是否满足 weighted recall 及其置信下界决定；固定概率边界 `0.5` 或 `[0.4, 0.6]` 不能作为额外硬门。低阈值必须结合正负尾部、阈值扰动和校准误差解释；禁止用 bias、temperature 或其他后处理把阈值移动到中间后伪装成模型效果提升。
 - 不允许把 `recall_high` 当作额外变体后缀来逃避主目标；每个正式 PVS 实验默认就必须按高召回目标训练和选 checkpoint。若一个模型需要降低召回才能得到好看的 F1，它不能作为合格主线版本。历史路径或旧 benchmark 中出现的 PointNet / Triplane / dynamic-pool 命名只作为已删除旧实验理解，不能作为当前默认路径。
@@ -148,6 +148,7 @@ conda run -n slm_pvs python slm2viewer/scripts/verify_v4_frontend_parity.py \
 - 当前主指标优先级：
   - 画面安全约束：pose-level / live-level `recall`、`weighted recall`、`image PER`、`miss pixel rate`。
   - 有效剔除：`useful cull = TN / candidate`，只在满足安全约束的阈值或工作点之间比较。
+  - 跨视点遮挡效率：`CNOR = sum_p(TN_p/C_p) / sum_p((TN_p+FP_p)/C_p)`；它按每个 pose 的候选规模归一化剔除机会，正文主表必须报告。
   - 错误剔除：`bad cull = FN / candidate` 和 `FN / GT`，必须同时报告，防止用少预测掩盖漏预测。
   - 资源效率：`avg pred`、`avg pred / avg GT`、`avg pred / avg candidate`、`GLB count reduction`、`GLB byte reduction`、预算内 GLB utility recall。
   - 运行成本：模型 forward latency、总调度 latency、runtime feature size、前端 Worker/WebGPU smoke latency。
@@ -164,6 +165,7 @@ conda run -n slm_pvs python slm2viewer/scripts/verify_v4_frontend_parity.py \
   - `agg precision/recall/accuracy`：跨所有 pose 合并 TP/FP/FN/TN 后再算。
   - `weighted recall`：按 `visible_weights` 统计 GT 被找回比例。
   - `specificity / negative recall`：不可见候选被正确剔除的比例，即 `TN / (TN + FP)`。
+  - `candidate normalized occlusion recall / CNOR`：候选归一化遮挡召回率；不同于 pose-macro specificity 和 aggregate specificity，机器字段固定为 `candidateNormalizedOcclusionRecall`，平坦训练结果使用 `candidate_normalized_occlusion_recall`。
 
 ## 5. 文件与目录卫生
 

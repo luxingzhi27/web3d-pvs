@@ -227,7 +227,44 @@ Validation 使用同一冻结阈值报告 weighted recall，并用于比较 chec
 
 `useful cull` 必须和 bad cull、普通 recall、weighted recall 同表展示。预测集合过小可能同时得到较高 useful cull 和较高漏检，不能解释为模型更好。
 
-### 5.5 面向图形学读者的遮挡术语
+### 5.5 候选归一化遮挡召回率（CNOR）
+
+普通 pose-macro 遮挡召回对每个含负样本的 pose 等权，负样本很少的 pose 中少量 FP
+会引起较大的比例波动。Aggregate 遮挡召回则按负样本数量加权，容易由候选规模很大的
+pose 主导。本文增加候选归一化遮挡召回率：
+
+\[
+\mathrm{CNOR}=
+\frac{\sum_p TN_p/C_p}
+{\sum_p (TN_p+FP_p)/C_p}.
+\]
+
+令 $N_p=TN_p+FP_p$ 为 pose $p$ 的理论可剔除负样本数，则 CNOR 也可以写成：
+
+\[
+\mathrm{CNOR}=
+\frac{\sum_p (N_p/C_p)\,\mathrm{Specificity}_p}
+{\sum_p N_p/C_p}.
+\]
+
+因此 CNOR 是以 `负样本数/候选数` 为权重的 pose 遮挡召回，衡量模型实现的候选归一化
+正确剔除量占理论候选归一化可剔除机会的比例。它没有额外超参数，取值范围为 `[0,1]`；
+空候选 pose 和没有负样本的 pose 对分子、分母均不贡献。若整个评价集合没有任何负样本，
+实现约定返回 `1`，并必须同时报告负样本机会为零。
+
+三种遮挡召回口径回答不同问题：
+
+| 指标 | pose 权重 | 主要解释 |
+|---|---|---|
+| Pose-macro Occlusion Recall | 每个含负样本 pose 等权 | 平均视点的负类识别能力 |
+| Aggregate Occlusion Recall | `N_p` | 全部负候选的总体识别能力 |
+| CNOR | `N_p/C_p` | 候选规模归一化后的实际剔除机会利用率 |
+
+论文正文以 CNOR 作为跨 pose 的主要遮挡效率指标，同时保留 pose-macro 和 aggregate
+Occlusion Recall 作为诊断。CNOR 不参与画面安全门，也不替代 `Useful Cull = TN/C`：
+前者比较机会利用率，后者直接表示全部候选中正确剔除的绝对比例。
+
+### 5.6 面向图形学读者的遮挡术语
 
 本项目以“可见”为正类：`target=True` 表示 GT 可见，`pred=True` 表示预测可见并保留。因此同一个混淆矩阵可以从可见性预测和遮挡剔除两个方向解释：
 
@@ -244,6 +281,7 @@ GT occluded + Pred occluded = TN
 |---|---|---|---|
 | Visible Recall | `recall` | `TP / (TP + FN)` | 真正可见实例中被保留的比例 |
 | Occlusion Recall | `specificity` | `TN / (TN + FP)` | 真正遮挡实例中被正确剔除的比例 |
+| Candidate-Normalized Occlusion Recall (CNOR) | `candidateNormalizedOcclusionRecall` | `sum(TN_p/C_p) / sum((TN_p+FP_p)/C_p)` | 候选规模归一化后的遮挡机会利用率 |
 | False Occlusion Rate | `1 - recall`，等价于 `FN / GT` | `FN / (TP + FN)` | 真正可见实例中被错误剔除的比例 |
 | Useful Cull Ratio | `usefulCull` | `TN / |C|` | 所有候选中被正确剔除的比例 |
 | Bad Cull Ratio | `badCull` | `FN / |C|` | 所有候选中属于错误剔除的比例 |
@@ -260,7 +298,7 @@ GT occluded + Pred occluded = TN
 \mathrm{FOR}_{agg}=\frac{\sum_p FN_p}{\sum_p(TP_p+FN_p)}=1-\mathrm{Recall}_{agg}.
 \]
 
-正文安全与剔除表推荐使用 `Visible Recall`、`Occlusion Recall`、`False Occlusion Rate`、`Weighted Recall`、`Useful Cull Ratio` 和 `Bad Cull Ratio`；表注给出与机器字段的映射。Precision、balanced accuracy 和正样本比例仍需保留，避免遮挡术语掩盖过量保留问题。
+正文安全与剔除表推荐使用 `Visible Recall`、`CNOR`、`False Occlusion Rate`、`Weighted Recall`、`Useful Cull Ratio` 和 `Bad Cull Ratio`；pose-macro 与 aggregate Occlusion Recall 放在完整表中，表注给出与机器字段的映射。Precision、balanced accuracy 和正样本比例仍需保留，避免遮挡术语掩盖过量保留问题。
 
 ## 6. 图像、资源与运行指标
 
@@ -395,7 +433,7 @@ mean difference
 
 | 表 | 必须包含 |
 |---|---|
-| 安全与剔除 | 阈值、weighted recall、单侧 LCB、普通 recall、useful cull、bad cull、平均预测数 |
+| 安全与剔除 | 阈值、weighted recall、单侧 LCB、普通 recall、CNOR、useful cull、bad cull、平均预测数 |
 | 分类与排序 | pose/aggregate precision、balanced accuracy、PR-AUC、正样本比例；ROC-AUC 作为辅助 |
 | 图像与资源 | PER、mean/p95 miss-pixel、预测 GLB 数/字节、同视觉效用字节和首屏时间 |
 | 部署成本 | 运行资产大小、输入维度、WebGPU/WASM p50/p95、内存、frame-time 和 draw calls |
@@ -410,6 +448,7 @@ Pose-macro 是论文叙述“平均视点”的主口径；aggregate 必须同�
 - pose-macro 和 aggregate PR-AUC；
 - pose-macro 和 aggregate precision、recall、balanced accuracy；
 - useful cull、bad cull、平均预测数和 GLB 字节；
+- CNOR，以及 pose-macro/aggregate Occlusion Recall；
 - 图像 miss-pixel 与运行资产/延迟；
 - 相对完整模型的 paired-bootstrap 差值和 95% CI。
 
@@ -436,6 +475,7 @@ Pose-macro 是论文叙述“平均视点”的主口径；aggregate 必须同�
 - [ ] 同时报 precision、specificity、accuracy 和 balanced accuracy；
 - [ ] PR-AUC 标明 pose-macro 或 aggregate，并给出同口径正样本比例；
 - [ ] 同时报 useful cull、bad cull 和平均预测数；
+- [ ] 同时报 CNOR，并说明它不替代 weighted-recall 安全门或 Useful Cull；
 - [ ] 同时报图像漏检、GLB 数/字节和运行资产/延迟，缺失项写 `not_available`；
 - [ ] Streaming 明确 utility 来源、完整 candidate GLB 集合、冷缓存、GLB 完整到达语义和排序公式；
 - [ ] 成本指数及其他调度参数只由 calibration/validation 确定，test 不参与规则选择；

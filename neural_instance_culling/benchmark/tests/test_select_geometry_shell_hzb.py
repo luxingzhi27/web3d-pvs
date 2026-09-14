@@ -62,6 +62,7 @@ class GeometryShellHZBSelectionTests(unittest.TestCase):
                         "badCull": 0.0001,
                         "balancedAccuracy": 0.8,
                         "specificity": 0.7,
+                        "candidateNormalizedOcclusionRecall": 0.75,
                         "precision": 0.3,
                     },
                     "timing": {"totalP50Ms": 4.0},

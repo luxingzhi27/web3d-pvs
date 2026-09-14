@@ -22,6 +22,7 @@ def _test_payload(seed: int, precision: float) -> dict[str, object]:
             "precision": precision, "recall": 0.9, "weightedRecall": 0.95,
             "weightedRecallLowerConfidenceBound": 0.9, "averagePrecision": 0.5,
             "balancedAccuracy": 0.8, "specificity": 0.7,
+            "candidateNormalizedOcclusionRecall": 0.75,
             "usefulCull": 0.3, "badCull": 0.1,
             "avgPredCount": 2.0, "glbByteReduction": 0.2,
         },
@@ -51,6 +52,9 @@ class PaperTableGeneratorTests(unittest.TestCase):
             self.assertAlmostEqual(summary[0]["aggregate_precision_std"], 1.0)
             self.assertEqual(summary[0]["pose_average_precision_mean"], 0.4)
             self.assertAlmostEqual(summary[0]["pose_false_occlusion_rate_mean"], 0.2)
+            self.assertAlmostEqual(
+                summary[0]["candidate_normalized_occlusion_recall_mean"], 0.75
+            )
             result = generate_tables(stats, metrics, root / "tables")
             self.assertEqual(result["table2RowCount"], 1)
             with (root / "tables/table2_test_visibility.csv").open(newline="") as handle:

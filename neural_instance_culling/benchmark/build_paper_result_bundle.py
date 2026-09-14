@@ -42,7 +42,8 @@ ABLATION_METRICS = (
     "poseBalancedAccuracy", "poseSpecificity", "aggregatePrecision",
     "aggregateRecall", "aggregateWeightedRecall", "aggregateAccuracy",
     "aggregateBalancedAccuracy", "aggregateSpecificity", "aggregateUsefulCull",
-    "aggregateBadCull", "avgCandidateCount", "avgGtCount", "avgPredCount",
+    "candidateNormalizedOcclusionRecall", "aggregateBadCull",
+    "avgCandidateCount", "avgGtCount", "avgPredCount",
     "predictedGlbCount", "predictedGlbBytes", "glbByteReduction",
 )
 
@@ -112,6 +113,9 @@ def build_rank(source: Path, output: Path) -> dict[str, Any]:
             "posePrecision": float(pose["precision"]), "poseWeightedRecall": float(pose["weightedRecall"]),
             "aggregatePrecision": float(aggregate["precision"]), "aggregateWeightedRecall": float(aggregate["weightedRecall"]),
             "aggregateBalancedAccuracy": float(aggregate["balancedAccuracy"]),
+            "candidateNormalizedOcclusionRecall": float(
+                aggregate["candidateNormalizedOcclusionRecall"]
+            ),
             "aggregateUsefulCull": float(aggregate["usefulCull"]), "aggregateBadCull": float(aggregate["badCull"]),
             "avgPredCount": float(aggregate["avgPredCount"]),
         })

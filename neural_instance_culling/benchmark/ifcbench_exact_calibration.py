@@ -35,6 +35,7 @@ from pvs_model import (  # noqa: E402
     SURVIVAL_RANK,
 )
 from pvs_threshold_metrics import score_distribution_summary  # noqa: E402
+from common.culling_metrics import candidate_normalized_occlusion_recall  # noqa: E402
 from pose_csr_dataset import PoseCSRDataset  # noqa: E402
 
 
@@ -744,6 +745,11 @@ def _metrics_at_threshold(
     pose_balanced = 0.5 * (pose_recall + pose_specificity)
     pose_useful = pose_tn / np.maximum(1.0, pose_candidates)
     pose_bad = pose_fn / np.maximum(1.0, pose_candidates)
+    cnor = candidate_normalized_occlusion_recall(
+        pose_tn,
+        pose_fp,
+        pose_candidates,
+    )
     aggregate_recall = tp / max(1.0, gt_count)
     aggregate_precision = tp / max(1.0, tp + fp)
     aggregate_specificity = tn / max(1.0, tn + fp)
@@ -760,6 +766,7 @@ def _metrics_at_threshold(
         "pose_specificity": float(pose_specificity.mean()),
         "pose_useful_cull": float(pose_useful.mean()),
         "pose_bad_cull": float(pose_bad.mean()),
+        "candidate_normalized_occlusion_recall": cnor,
         "agg_precision": float(aggregate_precision),
         "agg_recall": float(aggregate_recall),
         "agg_weighted_recall": float(aggregate_weighted_recall),

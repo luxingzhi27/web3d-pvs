@@ -32,7 +32,7 @@ runtime 和非 HZB streaming，正式 HZB、test 图像及 scheduler replay 待�
 - 实例任务使用 `66` 度区域候选和区域可见并集；图像与即时显示使用真实 `60` 度相机及每个 pose 的实际 aspect。
 - 每个 checkpoint 只在 calibration 冻结阈值。安全条件为 aggregate weighted recall 及其单侧 95% bootstrap 下界均严格大于 `0.99`。
 - Validation 选择配置；模型、阈值和评价结构冻结后，每个 test 样本只读取一次。零 GT pose 保留并单独统计。
-- 同时报告 pose-macro 和 aggregate precision、recall、F1、Jaccard、accuracy、balanced accuracy、specificity、PR-AUC、正样本比例、AP lift、useful cull、bad cull、预测数量和 GLB 字节。论文主表的 PR-AUC 固定为 pose-macro AP，并紧邻 pose 正样本比例与 AP lift；aggregate AP 只作为完整汇总的辅助口径。
+- 同时报告 pose-macro 和 aggregate precision、recall、F1、Jaccard、accuracy、balanced accuracy、specificity、PR-AUC、正样本比例、AP lift，以及候选归一化遮挡召回率 CNOR、useful cull、bad cull、预测数量和 GLB 字节。论文主表的 PR-AUC 固定为 pose-macro AP，并紧邻 pose 正样本比例与 AP lift；aggregate AP 只作为完整汇总的辅助口径。CNOR 是跨 pose 的主要遮挡效率指标，但不替代 weighted-recall 安全门或 Useful Cull。
 - AP 使用合并同分值的 Average Precision。Pose-macro AP 只对有 GT 的 pose 计算并报告有效 pose 数；零 GT pose 的 FP 仍进入集合和资源指标。
 - 三种子报告 mean 和 sample standard deviation。核心差值使用按 seed 聚类、seed 内配对 pose 重采样的 10,000 次 bootstrap。
 - 图像统计以 view-cell 为重采样单位，报告 PER、miss 和 wrong-ID 的 aggregate、mean、median、p95；extra 使用全图像素分母。
@@ -194,6 +194,92 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 | GT 收敛 | 完成诊断 | 两场景各 100 cell x 128 点硬件采样完成。HKUST 源 GT 对 128 点实例/权重覆盖 `99.6411/99.9997%`；IFCBench 四点 box GT 对另一水平圆盘定义为 `80.1942/97.2252%`。该结果只界定连续区域声明，不否定四点协议结果，也不触发重训 |
 | 离线成本 / 结果包 | 完成当前可得项 | 六阶段成本、artifact registry、三种子 Table 2 汇总已生成；未记录时间保持 unavailable，不作推算 |
 | 标准图形场景 | 正式矩阵执行中 | 三个场景均使用水平圆盘、`r=0.75 m`、后退 `1.299038 m`、32 subpose 和中心组 split。Sponza V2 三种子已完成，安全池选择 seed02：WR/LCB `0.993122/0.991115`、Occlusion Recall `0.745124`、Useful Cull `0.598600`；Viking 三种子已启动，随后由 GPU1-3 执行 Big City V2。V2 AABB/HZB 已对齐同一 split，test 仍关闭。 |
+
+## 2026-09-14 CNOR 评价口径与已有结果
+
+新增候选归一化遮挡召回率：
+
+\[
+\mathrm{CNOR}=\frac{\sum_p TN_p/C_p}{\sum_p(TN_p+FP_p)/C_p}.
+\]
+
+该指标从正式 `perPose` 混淆计数或 pose-aligned score sidecar 直接重算，不由 aggregate
+specificity 近似。Full 与 AABB 的三种子结果报告 mean +/- sample std；只有一份逐 pose
+资产时明确标成单成员结果。
+
+| 场景与方法 | Split | CNOR | Aggregate Occlusion Recall | Useful Cull |
+|---|---|---:|---:|---:|
+| HKUST Full V4，3 seeds | frozen test | `0.909787 +/- 0.007364` | 见正式三种子表 | `0.901758 +/- 0.007830` |
+| IFCBench Full V4 微调，3 seeds | frozen test | `0.676840 +/- 0.007504` | 见正式三种子表 | `0.602498 +/- 0.015504` |
+| Sponza Full V1，所选成员 | frozen test | `0.756205` | `0.794785` | `0.656913` |
+| Viking Village Full V1，所选成员 | frozen test | `0.627725` | `0.611175` | `0.458815` |
+| Big City Full V1，所选成员 | frozen test | `0.277705` | `0.469288` | `0.345195` |
+| HKUST AABB MLP，3 seeds | frozen test | `0.686248 +/- 0.037469` | 见正式三种子表 | 见正式三种子表 |
+| IFCBench AABB MLP，保留 sidecar 的 seed01 | frozen test | `0.043845` | `0.093073` | `0.084048` |
+| Sponza AABB MLP V1，3 seeds | frozen test | `0.702111 +/- 0.008729` | 见正式三种子表 | 见正式三种子表 |
+| Viking Village AABB MLP V1，3 seeds | frozen test | `0.241273 +/- 0.152166` | 见正式三种子表 | 见正式三种子表 |
+| Big City AABB MLP V1，3 seeds | frozen test | `0.120282 +/- 0.055787` | 见正式三种子表 | 见正式三种子表 |
+| HKUST lossless HZB | frozen test | `0.358233` | `0.745166` | `0.728587` |
+| HKUST equal-asset HZB | frozen test | `0.027535` | `0.071726` | `0.070131` |
+
+Sponza sampling V2 当前只读取 validation：安全 seed02/03 的 CNOR 分别为
+`0.733841/0.612719`；seed01 的 calibration 诊断阈值在 validation 上 CNOR 为 `0.051621`，
+没有合格安全工作点。V2 test 继续关闭。IFCBench AABB seed02/03 的旧正式汇总没有保留
+逐 pose 混淆计数或 score sidecar，因此不能从 aggregate 计数恢复 CNOR，也不得重读 test。
+
+HKUST 核心消融已从 730 个 validation pose 的逐 pose 混淆计数重新汇总：Full 的三种子
+CNOR 为 `0.903764`；去除分层关系、去除生存场、通用 28 维、去除矩包络、去除召回保护、
+去除困难边界的 CNOR 依次为 `0.875568/0.838316/0.894385/0.895451/0.882723/0.897642`。
+生存场 rank `2/4/8/12` 的 CNOR 分别为
+`0.893121/0.906264/0.890525/0.905261`。这些结果仍是 validation 消融，不与 frozen test
+主表混用。
+
+实现修改覆盖 `pvs_threshold_metrics.py`、`evaluate_pvs.py`、
+`evaluate_unified_pvs_metrics.py`、`ifcbench_exact_calibration.py`、
+`evaluate_geometry_shell_hzb.py`、阈值曲线、消融/容量汇总和论文表生成器。机器字段固定为
+嵌套结果中的 `candidateNormalizedOcclusionRecall`，平坦阈值行中的
+`candidate_normalized_occlusion_recall`。已有 frozen prediction 只从保存的逐 pose 计数或
+score sidecar 派生 CNOR，不重新运行模型或 HZB，也不重新选择阈值。
+
+Sponza V2 validation 重放命令沿用 `evaluate_pvs.py --split validation --device cpu`，使用
+每个 checkpoint 自己的 `calibration_ready_summary.json`。核心消融和容量汇总命令为：
+
+```bash
+conda run -n slm_pvs python neural_instance_culling/benchmark/summarize_core_ablation.py \
+  --root neural_instance_culling/benchmark/out/pvs_v4_integrated_visibility_mainline_v1 \
+  --output neural_instance_culling/benchmark/out/pvs_v4_integrated_visibility_mainline_v1/paper_core_ablation_summary.json \
+  --bootstrap-replicates 10000 --seed 20260823
+
+conda run -n slm_pvs python \
+  neural_instance_culling/benchmark/run_survival_rank_capacity.py summarize
+```
+
+本次 CNOR 接入回归通过 benchmark `210` 项和 model `51` 项测试；HKUST 既有 HZB 的
+16 份 calibration/test metrics 已从保存的浏览器预测重新计算，冻结 calibration 选择仍为
+`512x288, depth bias 100 m`，没有重新执行硬件渲染或改变选择结果。
+
+## 2026-09-14 Sponza sampling V2 小幅安全微调
+
+V2 seed01 的最佳 validation WR/LCB 为 `0.991063/0.986920`，后续 epoch 的 LCB 继续下降；
+seed02/03 虽通过安全门，但 CNOR 和 Useful Cull 均低于 V1。该现象按困难可见正例的跨
+split 泛化不足处理，不通过 test 调阈值。
+
+固定微调族为 `pvs_v4_sponza_sampling_v2_safety_refinement_v1`。三个种子均从各自原始
+V2 成员启动：安全成员使用 `best_safe.pt`，seed01 使用 `best_diagnostic.pt`；fresh AdamW、
+`4 epoch x 900 step`、学习率 `2e-5`、每批 8 个 pose、RVL 目标 `0.995`、召回保护权重
+`0.40`、最差 pose 权重 `0.35`，困难边界权重由 `0.20` 减为 `0.10`。三种子使用完全相同
+的参数和更新预算，test 保持关闭。
+
+```bash
+conda run --no-capture-output -n slm_pvs python -u \
+  neural_instance_culling/benchmark/run_standard_graphics_optimization.py \
+  v2-refine-sponza --scenes sponza_128k --gpu-ids 0 1 2
+```
+
+保留条件仍为每个成员 calibration 冻结阈值后 validation WR 与单侧 95% LCB 均严格大于
+`0.99`；安全成员之间比较 Useful Cull、CNOR、balanced accuracy、aggregate/pose
+Occlusion Recall 和 precision。该微调族只有三种子确认完成后才能与原 V2 家族比较，
+不能只把修复后的 seed01 混入原 seed02/03 均值。
 
 截至 2026-09-13，HKUST 与 IFCBench 主结果均按各自预登记的 view-cell 采样协议冻结。标准场景按同一显式四分割、同一 V4 和同一 AABB/HZB 评价口径执行；任何中间指标都不替代三种子 validation 选择和一次 frozen test。
 

@@ -878,7 +878,8 @@ def confirmation_summary(
         "agg_precision", "agg_recall", "agg_weighted_recall",
         "aggregateWeightedRecallLowerConfidenceBound", "agg_accuracy",
         "agg_balanced_accuracy", "agg_specificity", "agg_useful_cull",
-        "agg_bad_cull", "avg_pred_count", "positiveFraction",
+        "candidate_normalized_occlusion_recall", "agg_bad_cull",
+        "avg_pred_count", "positiveFraction",
     )
     aggregate = {}
     for metric in metrics:

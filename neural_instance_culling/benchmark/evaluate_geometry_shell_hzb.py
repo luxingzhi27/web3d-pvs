@@ -11,9 +11,17 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 from typing import Any
 
 import numpy as np
+
+ROOT = Path(__file__).resolve().parents[2]
+MODEL_DIR = ROOT / "neural_instance_culling" / "model"
+if str(MODEL_DIR) not in sys.path:
+    sys.path.insert(0, str(MODEL_DIR))
+
+from common.culling_metrics import candidate_normalized_occlusion_recall  # noqa: E402
 
 
 RESULT_SCHEMA = "geometry-shell-hzb-browser-result-v2"
@@ -444,6 +452,11 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         totals["predictedCount"],
         totals["gtCount"],
         totals["tp"],
+    )
+    aggregate["candidateNormalizedOcclusionRecall"] = candidate_normalized_occlusion_recall(
+        np.asarray([float(item["tn"]) for item in per_pose]),
+        np.asarray([float(item["fp"]) for item in per_pose]),
+        np.asarray([float(item["candidateCount"]) for item in per_pose]),
     )
     weighted_hits_array = np.asarray(weighted_hits, dtype=np.float64)
     weighted_totals_array = np.asarray(weighted_totals, dtype=np.float64)

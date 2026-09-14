@@ -77,6 +77,7 @@ class IfcbenchExactCalibrationTest(unittest.TestCase):
         self.assertEqual(row["thresholdIsScoreChangePoint"], True)
         self.assertAlmostEqual(row["aggregateWeightedRecall"], 1.0)
         self.assertAlmostEqual(row["aggregateWeightedRecallLowerConfidenceBound"], 1.0)
+        self.assertAlmostEqual(row["candidate_normalized_occlusion_recall"], 1.0)
 
     def test_fixed_bootstrap_file_is_reused_without_regeneration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

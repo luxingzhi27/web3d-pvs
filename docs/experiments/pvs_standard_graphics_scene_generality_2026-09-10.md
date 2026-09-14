@@ -713,6 +713,14 @@ split、checkpoint 或上述 test 结果。所选运行资产和等资产 HZB �
 `47.74/583.68/781.18`；GT/candidate 比例分别为
 `0.1957/0.2252/0.2750`。正例只在不足一半 subpose 中出现的比例分别约为
 `15.85%/28.21%/24.33%`。Viking 和 Big City 因此比 Sponza 有更多区域边界正例。
+
+### 2026-09-14 Sponza V2 安全微调补充
+
+Sponza sampling V2 三种子长训完成后，seed01 没有 validation LCB 大于 `0.99` 的工作点，
+seed02/03 的 CNOR 为 `0.733841/0.612719`。新增固定三种子小幅微调族
+`pvs_v4_sponza_sampling_v2_safety_refinement_v1`，配置和保留规则见
+[论文实验总方案](pvs_paper_experiments_2026-09-09.md)。该阶段不改变圆盘 view-cell、中心组
+split、候选、GT、关系 K 或模型结构，也不读取 sampling V2 test。
 按实例在 train 中的条件可见率计算，处于 `[0.1,0.9]` 中间区间的实例比例约为
 `78.03%/47.78%/82.59%`，更严格的 `[0.25,0.75]` 中间区间分别为
 `7.58%/23.28%/45.54%`；Big City 的可见性尤其依赖视角。

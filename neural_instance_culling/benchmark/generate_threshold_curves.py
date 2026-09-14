@@ -18,6 +18,7 @@ if str(MODEL) not in sys.path:
     sys.path.insert(0, str(MODEL))
 
 from common.runtime_meta import load_runtime_meta  # noqa: E402
+from common.culling_metrics import candidate_normalized_occlusion_recall  # noqa: E402
 from pvs_threshold_metrics import weighted_recall_lower_confidence_bound  # noqa: E402
 
 try:
@@ -36,7 +37,8 @@ CSV_FIELDS = [
     "source", "split", "threshold", "threshold_source", "calibration_safe",
     "weighted_recall", "weighted_recall_lower_confidence_bound", "precision",
     "recall", "accuracy", "balanced_accuracy", "specificity", "avg_pred",
-    "useful_cull", "bad_cull", "avg_candidate_count", "avg_gt_count",
+    "candidate_normalized_occlusion_recall", "useful_cull", "bad_cull",
+    "avg_candidate_count", "avg_gt_count",
     "avg_pred_glb_bytes", "avg_candidate_glb_bytes", "glb_byte_reduction",
     "pose_weighted_recall", "pose_precision", "pose_recall", "pose_accuracy",
     "pose_balanced_accuracy", "pose_specificity", "pose_useful_cull",
@@ -280,6 +282,11 @@ def score_curve(
             "accuracy": _div(tp + tn, candidate_count, 1.0),
             "balanced_accuracy": 0.5 * (_div(tp, gt_count, 1.0) + _div(tn, tn + fp, 1.0)),
             "specificity": _div(tn, tn + fp, 1.0),
+            "candidate_normalized_occlusion_recall": candidate_normalized_occlusion_recall(
+                tn_pose,
+                fp_pose,
+                candidate_counts,
+            ),
             "avg_pred": _div(predicted_count, pose_count),
             "useful_cull": _div(tn, candidate_count, 1.0),
             "bad_cull": _div(fn, candidate_count),
