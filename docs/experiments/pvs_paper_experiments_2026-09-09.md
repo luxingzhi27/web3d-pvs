@@ -193,7 +193,7 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 | Test 图像 | 部分完成 | HKUST Full/AABB/HZB aggregate PER 为 `0.3662/0.8613/0.3128%`；IFCBench 当前只有 validation 图像，三个标准图形学场景的 Full/HZB 正式 test 图像待执行 |
 | GT 收敛 | 完成诊断 | 两场景各 100 cell x 128 点硬件采样完成。HKUST 源 GT 对 128 点实例/权重覆盖 `99.6411/99.9997%`；IFCBench 四点 box GT 对另一水平圆盘定义为 `80.1942/97.2252%`。该结果只界定连续区域声明，不否定四点协议结果，也不触发重训 |
 | 离线成本 / 结果包 | 完成当前可得项 | 六阶段成本、artifact registry、三种子 Table 2 汇总已生成；未记录时间保持 unavailable，不作推算 |
-| 标准图形场景 | 正式矩阵执行中 | 三个场景均使用水平圆盘、`r=0.75 m`、后退 `1.299038 m`、32 subpose 和中心组 split。Sponza V2 三种子已完成，安全池选择 seed02：WR/LCB `0.993122/0.991115`、Occlusion Recall `0.745124`、Useful Cull `0.598600`；Viking 三种子已启动，随后由 GPU1-3 执行 Big City V2。V2 AABB/HZB 已对齐同一 split，test 仍关闭。 |
+| 标准图形场景 | 正式矩阵执行中 | 三个场景均使用水平圆盘、`r=0.75 m`、后退 `1.299038 m`、32 subpose 和中心组 split。Sponza V2 安全池选择 seed02：WR/LCB/CNOR/Useful Cull 为 `0.993122/0.991106/0.733841/0.598631`。Viking V2 三种子均安全，当前选择 seed02：`0.996797/0.993179/0.545428/0.392464`。Big City V2 三种子已在 GPU1-3 启动；Viking AABB 正在 GPU0 串行训练。V2 test 仍关闭。 |
 
 ## 2026-09-14 CNOR 评价口径与已有结果
 
@@ -226,6 +226,12 @@ Sponza sampling V2 当前只读取 validation：安全 seed02/03 的 CNOR 分别
 `0.733841/0.612719`；seed01 的 calibration 诊断阈值在 validation 上 CNOR 为 `0.051621`，
 没有合格安全工作点。V2 test 继续关闭。IFCBench AABB seed02/03 的旧正式汇总没有保留
 逐 pose 混淆计数或 score sidecar，因此不能从 aggregate 计数恢复 CNOR，也不得重读 test。
+
+Viking Village sampling V2 三种子完成后使用各自 calibration 阈值重放完整 `276`
+validation pose。seed01/02/03 的 CNOR 为 `0.402506/0.545428/0.437581`；WR/LCB 为
+`0.997429/0.993681`、`0.996797/0.993179`、`0.997529/0.993846`，三者均通过安全门。
+按安全池内 Useful Cull 选择 seed02，其 Useful Cull 为 `0.392464`，aggregate Occlusion
+Recall 为 `0.512367`。该重放使用 CPU，只补充集合指标，不是运行性能实验。
 
 HKUST 核心消融已从 730 个 validation pose 的逐 pose 混淆计数重新汇总：Full 的三种子
 CNOR 为 `0.903764`；去除分层关系、去除生存场、通用 28 维、去除矩包络、去除召回保护、

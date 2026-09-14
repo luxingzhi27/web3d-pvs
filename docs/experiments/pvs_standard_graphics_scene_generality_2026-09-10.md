@@ -721,6 +721,13 @@ seed02/03 的 CNOR 为 `0.733841/0.612719`。新增固定三种子小幅微调�
 `pvs_v4_sponza_sampling_v2_safety_refinement_v1`，配置和保留规则见
 [论文实验总方案](pvs_paper_experiments_2026-09-09.md)。该阶段不改变圆盘 view-cell、中心组
 split、候选、GT、关系 K 或模型结构，也不读取 sampling V2 test。
+
+### 2026-09-14 Viking V2 三种子完成
+
+Viking Village sampling V2 三种子 `40 x 900` 已全部完成，且三个 validation 成员均通过
+WR/LCB 严格安全门。seed01/02/03 的 CNOR 为 `0.402506/0.545428/0.437581`，Useful Cull
+为 `0.272394/0.392464/0.316901`；当前按 validation 选择 seed02。Big City sampling V2
+三种子已自动接力启动，标准场景 sampling V2 test 继续关闭。
 按实例在 train 中的条件可见率计算，处于 `[0.1,0.9]` 中间区间的实例比例约为
 `78.03%/47.78%/82.59%`，更严格的 `[0.25,0.75]` 中间区间分别为
 `7.58%/23.28%/45.54%`；Big City 的可见性尤其依赖视角。
