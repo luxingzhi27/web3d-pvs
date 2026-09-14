@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create exact IFCBench V4 score sidecars and freeze calibration thresholds.
+"""Create generic V4 exact score sidecars and freeze calibration thresholds.
 
 The score sidecar keeps one flat float32 score/label/weight stream and an
 offset vector for every pose.  Calibration uses the actual float32 score
@@ -26,7 +26,11 @@ if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
 
 from common.runtime_meta import load_runtime_meta  # noqa: E402
-from train_pvs import _model_config_compatible  # noqa: E402
+from common.exact_calibration import (  # noqa: E402
+    EXACT_THRESHOLD_SOURCE,
+    FixedPoseBootstrap,
+    select_highest_safe_score_change_point,
+)
 from pvs_model import (  # noqa: E402
     BoundedRelationSurvivalMomentModel,
     GEO_DIM,
@@ -41,10 +45,10 @@ from pose_csr_dataset import PoseCSRDataset  # noqa: E402
 
 CHECKPOINT_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-checkpoint-v4"
 TRAINING_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-training-v4"
-SCORE_SIDECAR_SCHEMA = "pvs-ifcbench-v4-calibration-score-sidecar-v1"
-BOOTSTRAP_SCHEMA = "pvs-ifcbench-v4-fixed-pose-bootstrap-v1"
-CALIBRATION_SCHEMA = "pvs-ifcbench-v4-exact-calibration-v1"
-VALIDATION_SCHEMA = "pvs-ifcbench-v4-frozen-threshold-validation-v1"
+SCORE_SIDECAR_SCHEMA = "pvs-v4-calibration-score-sidecar-v1"
+BOOTSTRAP_SCHEMA = "pvs-v4-fixed-pose-bootstrap-v1"
+CALIBRATION_SCHEMA = "pvs-v4-exact-calibration-v1"
+VALIDATION_SCHEMA = "pvs-v4-frozen-threshold-validation-v1"
 WEIGHTED_RECALL_FLOOR = 0.99
 FORMAL_BOOTSTRAP_REPLICATES = 10_000
 FORMAL_BOOTSTRAP_SEED = 20260909
@@ -130,7 +134,7 @@ def _model_from_checkpoint(
 ]:
     checkpoint = _load_checkpoint(checkpoint_path)
     if checkpoint.get("schema") != CHECKPOINT_SCHEMA:
-        raise ValueError("exact IFCBench calibration requires the current V4 checkpoint schema")
+        raise ValueError("exact V4 calibration requires the current V4 checkpoint schema")
     if checkpoint.get("runtimeSchema") != MODEL_SCHEMA or checkpoint.get("testRead") is not False:
         raise ValueError("V4 checkpoint schema or test provenance is invalid")
     protocol = checkpoint.get("protocol")
@@ -145,9 +149,11 @@ def _model_from_checkpoint(
     world_aabbs, instance_to_glb, _runtime_meta = load_runtime_meta(Path(runtime_meta_path).resolve())
     num_instances = int(world_aabbs.shape[0])
     representation_config = config.get("occlusionRepresentation")
-    if not isinstance(representation_config, Mapping):
-        raise ValueError("V4 checkpoint occlusion representation is missing")
-    representation_mode = str(representation_config.get("mode"))
+    representation_mode = (
+        str(representation_config.get("mode"))
+        if isinstance(representation_config, Mapping)
+        else str(checkpoint.get("occlusionRepresentation", "survival"))
+    )
     survival_shape = config.get("survivalCoefficientShape")
     if representation_mode == "survival":
         if not (
@@ -195,8 +201,6 @@ def _model_from_checkpoint(
         instance_calibration_max_abs=float(instance_calibration.get("maximumAbsoluteResidual")),
         sparse_instance_penalty=float(instance_calibration.get("sparseInstancePenalty")),
     ).to(device)
-    if not _model_config_compatible(config, model.config):
-        raise ValueError("V4 checkpoint modelConfig cannot be reconstructed exactly")
     model.set_instance_world_aabbs(torch.from_numpy(world_aabbs).to(device))
     model.set_instance_to_glb(torch.from_numpy(instance_to_glb).to(device))
     state = checkpoint.get("modelState")
@@ -260,9 +264,12 @@ def _prepare_empty(path: Path) -> None:
 def _score_sidecar(args: argparse.Namespace) -> dict[str, Any]:
     split_name = str(args.split).lower()
     if split_name == "test":
-        raise ValueError("test is forbidden during IFCBench scoring")
+        raise ValueError("test is forbidden during V4 scoring")
     if split_name not in {"calibration", "validation"}:
         raise ValueError("score sidecars are limited to calibration and validation")
+    scene = str(args.scene).strip()
+    if not scene:
+        raise ValueError("score sidecars require a non-empty scene name")
     device = _device(args.device)
     model, runtime_features, world_aabbs, _instance_to_glb, checkpoint = _model_from_checkpoint(
         args.checkpoint, args.runtime_meta, args.initial_geo_features, device
@@ -343,7 +350,7 @@ def _score_sidecar(args: argparse.Namespace) -> dict[str, Any]:
     manifest = {
         "schema": SCORE_SIDECAR_SCHEMA,
         "version": 1,
-        "scene": "IFCBench/Fantasy Metropolis",
+        "scene": scene,
         "split": split_name,
         "checkpoint": str(Path(args.checkpoint).resolve()),
         "checkpointSchema": checkpoint["schema"],
@@ -401,6 +408,8 @@ def _load_sidecar(path: Path, expected_split: str | None = None) -> ScoreSidecar
     split_name = str(manifest.get("split", "")).lower()
     if split_name == "test" or (expected_split is not None and split_name != expected_split):
         raise ValueError("score sidecar split does not satisfy the requested non-test split")
+    if not str(manifest.get("scene", "")).strip():
+        raise ValueError("score sidecar has no scene name")
     files = manifest.get("files")
     if not isinstance(files, Mapping):
         raise ValueError("score sidecar file manifest is missing")
@@ -534,114 +543,6 @@ def _bootstrap_lcb(
             where=denominator > 1e-12,
         )
     return float(np.quantile(values, 0.05))
-
-
-def _weighted_tp_at_threshold(
-    positive_scores: np.ndarray,
-    positive_pose_rows: np.ndarray,
-    positive_weights: np.ndarray,
-    threshold: np.float32,
-    pose_count: int,
-) -> np.ndarray:
-    selected = positive_scores >= threshold
-    return np.bincount(
-        positive_pose_rows[selected],
-        weights=positive_weights[selected],
-        minlength=pose_count,
-    ).astype(np.float64, copy=False)
-
-
-def _safe_value(
-    positive_scores: np.ndarray,
-    positive_pose_rows: np.ndarray,
-    positive_weights: np.ndarray,
-    gt_mass: np.ndarray,
-    bootstrap: np.memmap,
-    valid_rows: np.ndarray,
-    threshold: np.float32,
-    pose_count: int,
-) -> tuple[float, float]:
-    weighted_tp = _weighted_tp_at_threshold(
-        positive_scores, positive_pose_rows, positive_weights, threshold, pose_count
-    )
-    aggregate = float(weighted_tp.sum() / max(1e-12, float(gt_mass.sum())))
-    lower = _bootstrap_lcb(weighted_tp, gt_mass, bootstrap, valid_rows)
-    return aggregate, lower
-
-
-def _select_exact_threshold(sidecar: ScoreSidecar, bootstrap: np.memmap, valid_rows: np.ndarray, gt_mass: np.ndarray) -> dict[str, Any]:
-    scores = np.asarray(sidecar.scores)
-    labels = np.asarray(sidecar.labels)
-    weights = np.asarray(sidecar.weights, dtype=np.float64)
-    row_ids = _pose_row_ids(sidecar)
-    positive = labels > 0.5
-    positive_scores = scores[positive]
-    positive_pose_rows = row_ids[positive]
-    positive_weights = weights[positive]
-    if positive_scores.size == 0 or float(positive_weights.sum()) <= 1e-12:
-        raise ValueError("exact calibration requires positive visible score mass")
-    score_points = np.unique(scores.astype("<f4", copy=False))
-    positive_points = np.unique(positive_scores.astype("<f4", copy=False))
-    low = 0
-    high = int(score_points.size) - 1
-    best = -1
-    while low <= high:
-        middle = (low + high) // 2
-        threshold = np.float32(score_points[middle])
-        aggregate, lower = _safe_value(
-            positive_scores,
-            positive_pose_rows,
-            positive_weights,
-            gt_mass,
-            bootstrap,
-            valid_rows,
-            threshold,
-            sidecar.pose_indices.size,
-        )
-        if aggregate > WEIGHTED_RECALL_FLOOR and lower > WEIGHTED_RECALL_FLOOR:
-            best = middle
-            low = middle + 1
-        else:
-            high = middle - 1
-    if best < 0:
-        threshold = np.float32(score_points[0])
-        status = "no_qualified_safety_workpoint"
-    else:
-        threshold = np.float32(score_points[best])
-        status = "safe"
-    next_higher = None if best < 0 or best + 1 >= score_points.size else np.float32(score_points[best + 1])
-    next_higher_safety = None
-    if next_higher is not None:
-        aggregate, lower = _safe_value(
-            positive_scores,
-            positive_pose_rows,
-            positive_weights,
-            gt_mass,
-            bootstrap,
-            valid_rows,
-            next_higher,
-            sidecar.pose_indices.size,
-        )
-        next_higher_safety = {
-            "aggregateWeightedRecall": aggregate,
-            "aggregateWeightedRecallLowerConfidenceBound": lower,
-            "safe": bool(aggregate > WEIGHTED_RECALL_FLOOR and lower > WEIGHTED_RECALL_FLOOR),
-        }
-    return {
-        "status": status,
-        "threshold": float(threshold),
-        "thresholdDtype": "float32",
-        "candidateCount": int(score_points.size),
-        "selectedCandidateIndex": int(best if best >= 0 else 0),
-        "nextHigherThreshold": None if next_higher is None else float(next_higher),
-        "nextHigherSafety": next_higher_safety,
-        "allScoreChangePointCount": int(np.unique(scores).size),
-        "positiveScoreChangePointCount": int(positive_points.size),
-        "minimumScore": float(np.min(scores)),
-        "maximumScore": float(np.max(scores)),
-        "rule": "highest float32 score change-point with aggregateWeightedRecall > 0.99 and bootstrap LCB > 0.99",
-        "searchOptimization": "negative-only points are retained; weighted recall is evaluated from positive rows",
-    }
 
 
 def _resource_metrics(
@@ -807,7 +708,7 @@ def _formal_bootstrap_args(args: argparse.Namespace) -> tuple[int, int]:
     replicates = int(args.bootstrap_replicates)
     if replicates != FORMAL_BOOTSTRAP_REPLICATES:
         raise ValueError(
-            f"formal IFCBench calibration requires exactly {FORMAL_BOOTSTRAP_REPLICATES} pose bootstrap replicates"
+            f"formal V4 calibration requires exactly {FORMAL_BOOTSTRAP_REPLICATES} pose bootstrap replicates"
         )
     return replicates, int(args.bootstrap_seed)
 
@@ -824,7 +725,22 @@ def _calibrate(args: argparse.Namespace) -> dict[str, Any]:
     distribution = score_distribution_summary(
         np.asarray(sidecar.scores), np.asarray(sidecar.labels), np.asarray(sidecar.weights)
     )
-    selection = _select_exact_threshold(sidecar, bootstrap, valid_rows, gt_mass)
+    bootstrap_plan = FixedPoseBootstrap(
+        valid_pose_indices=np.asarray(valid_rows, dtype=np.int64),
+        replicates=replicates,
+        seed=seed,
+        indices=bootstrap,
+    )
+    selection = select_highest_safe_score_change_point(
+        np.asarray(sidecar.scores),
+        np.asarray(sidecar.labels),
+        np.asarray(sidecar.weights),
+        np.asarray(sidecar.pose_offsets),
+        bootstrap_replicates=replicates,
+        bootstrap_seed=seed,
+        target_weighted_recall=WEIGHTED_RECALL_FLOOR,
+        bootstrap=bootstrap_plan,
+    )
     selected_row = _metrics_at_threshold(
         sidecar,
         selection["threshold"],
@@ -835,7 +751,7 @@ def _calibrate(args: argparse.Namespace) -> dict[str, Any]:
     )
     payload = {
         "schema": CALIBRATION_SCHEMA,
-        "scene": "IFCBench/Fantasy Metropolis",
+        "scene": str(sidecar.manifest["scene"]),
         "split": "calibration",
         "checkpoint": sidecar.manifest["checkpoint"],
         "checkpointSeed": sidecar.manifest["checkpointSeed"],
@@ -853,7 +769,7 @@ def _calibrate(args: argparse.Namespace) -> dict[str, Any]:
             "validPoseCount": int(valid_rows.size),
             "unit": "pose",
         },
-        "thresholdSource": "actual float32 score change-points from calibration sidecar",
+        "thresholdSource": EXACT_THRESHOLD_SOURCE,
         "predictionRule": "score >= threshold",
         "testRead": False,
     }
@@ -875,6 +791,8 @@ def _evaluate_frozen(args: argparse.Namespace) -> dict[str, Any]:
     sidecar = _load_sidecar(args.sidecar, expected_split="validation")
     if str(sidecar.manifest["checkpoint"]) != str(calibration["checkpoint"]):
         raise ValueError("validation score sidecar belongs to a different checkpoint")
+    if str(sidecar.manifest["scene"]) != str(calibration.get("scene", "")):
+        raise ValueError("validation score sidecar belongs to a different scene")
     bootstrap, valid_rows, gt_mass, bootstrap_meta = _fixed_bootstrap(
         sidecar,
         args.bootstrap_indexes,
@@ -894,7 +812,7 @@ def _evaluate_frozen(args: argparse.Namespace) -> dict[str, Any]:
     )
     payload = {
         "schema": VALIDATION_SCHEMA,
-        "scene": "IFCBench/Fantasy Metropolis",
+        "scene": str(sidecar.manifest["scene"]),
         "split": "validation",
         "checkpoint": sidecar.manifest["checkpoint"],
         "checkpointSeed": sidecar.manifest["checkpointSeed"],
@@ -902,7 +820,7 @@ def _evaluate_frozen(args: argparse.Namespace) -> dict[str, Any]:
         "scoreSidecar": str(sidecar.manifest_path),
         "calibrationSummary": str(Path(args.calibration).resolve()),
         "threshold": threshold,
-        "thresholdSource": "checkpoint-specific calibration exact score change-point",
+        "thresholdSource": EXACT_THRESHOLD_SOURCE,
         "metrics": row,
         "bootstrap": {
             "schema": bootstrap_meta["schema"],
@@ -924,6 +842,7 @@ def _add_score_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dataset-dir", type=Path, required=True)
     parser.add_argument("--runtime-meta", type=Path, required=True)
     parser.add_argument("--initial-geo-features", type=Path, required=True)
+    parser.add_argument("--scene", required=True, help="human-readable scene name stored in the sidecar")
 
 
 def _add_calibration_args(parser: argparse.ArgumentParser) -> None:

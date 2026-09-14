@@ -785,7 +785,7 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
             calibration_path.write_text(
                 json.dumps(
                     {
-                        "schema": "pvs-ifcbench-v4-exact-calibration-v1",
+                        "schema": "pvs-v4-exact-calibration-v1",
                         "split": "calibration",
                         "checkpoint": str(checkpoint_path),
                         "predictionRule": "score >= threshold",

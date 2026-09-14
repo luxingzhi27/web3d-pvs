@@ -52,7 +52,7 @@ CHECKPOINT_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-check
 REPLAY_SPLITS = ("train", "calibration", "validation", "test")
 TRAINING_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-training-v4"
 CALIBRATION_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-calibration-summary-v4"
-EXACT_CALIBRATION_SCHEMA = "pvs-ifcbench-v4-exact-calibration-v1"
+EXACT_CALIBRATION_SCHEMA = "pvs-v4-exact-calibration-v1"
 EVALUATION_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-v4-evaluation-v1"
 REGISTERED_MAX_NORM_CYCLES = 8.0
 # Keep the schema names discoverable under the v4-specific vocabulary used by

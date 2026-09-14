@@ -1,11 +1,11 @@
 # PVS 论文核心实验与一周执行计划
 
-日期：2026-09-09；2026-09-10、2026-09-11、2026-09-13 更新正式执行状态
+日期：2026-09-09；2026-09-10、2026-09-11、2026-09-13、2026-09-15 更新正式执行状态
 
-状态：执行中。截至 2026-09-13，HKUST 的神经、AABB、正式 HZB、test 图像、A6000
-runtime 和全 test streaming 已形成完整证据链；IFCBench 已完成神经、主要 AABB、A6000
-runtime 和非 HZB streaming，正式 HZB、test 图像及 scheduler replay 待执行。三个标准
-图形学场景的 AABB 与 A6000 runtime 已完成，Full 优化训练、HZB 和图像评价继续执行。
+状态：执行中。截至 2026-09-15，HKUST/IFCBench 的冻结 V4 checkpoint 保持不变，后续只
+用统一精确 calibration 阈值重放现有评价。三个标准图形学场景转入 Connected-SAH 128 KiB
+单位重建，先完成 Full，再执行同单位 AABB、HZB、图像和 runtime；旧 Morton 结果只作单位
+划分消融。
 本文是论文实验、图表、结果目录和执行顺序的唯一计划。
 
 ## 论文需要证明的内容
@@ -184,7 +184,7 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 | 场景统计 | 完成 | 五场景规模、三角形、GLB 字节、split、候选/GT 分布已进入 Table 1 |
 | HKUST Full test | 完成 | 三种子均通过安全门；WR `0.997082 +/- 0.001634`，LCB `0.994334 +/- 0.003271`，useful cull `0.901758 +/- 0.007830` |
 | IFCBench 微调与 test | 完成 | 四点 camera-aligned-box 协议下，v2 边界减半三种子 validation LCB 为 `0.991106/0.990764/0.990215`；正式 `2710` test 的 pose PR-AUC `0.482290 +/- 0.021681`、WR `0.991179 +/- 0.000668`、LCB `0.990523 +/- 0.000552`、useful cull `0.602498 +/- 0.015504`。运行资产使用 validation useful cull 最高的 seed01 |
-| AABB + Ray MLP | 部分完成 | HKUST、IFCBench 和标准场景 V1 三种子结果已完成。标准场景 V2 的学习率扫描及 Big City 三种子 validation 已完成；Big City 最佳安全 Useful Cull 仅 `0.000090`。Viking 正在 GPU0 长训，Sponza 已排队；全部不复用 V1 checkpoint、不读取 test |
+| AABB + Ray MLP | 部分完成 | HKUST、IFCBench 结果保留。标准场景必须等待 Connected-SAH Full 冻结后，使用相同新单位和 split 从头执行，不再沿用或续跑 Morton AABB 队列 |
 | HZB 外壳与运行时 | 部分完成 | HKUST Region66 正式完成：lossless WR/LCB/useful cull 为 `0.997633/0.996552/0.328166`，总查询 p50 `989.55 ms`。IFCBench 和三个标准图形学场景已有外壳资产，正式 calibration/test/timing 待硬件独占窗口执行 |
 | 资产与容量 | 完成 | 神经资产为 lossless shell 的 `1.37%`（HKUST）和 `19.78%`（IFCBench）；rank Pareto 与 Table 4 已生成 |
 | 端侧模型前向 | 部分完成 | A6000 五场景 WebGPU/WASM 五 session raw 与统一汇总均已完成；HKUST M2 与 vivo 已完成，IFCBench 移动端仍缺失 |
@@ -193,7 +193,7 @@ GPU 1-3用于训练和评分，GPU 0用于浏览器开发验证；正式计时�
 | Test 图像 | 部分完成 | HKUST Full/AABB/HZB aggregate PER 为 `0.3662/0.8613/0.3128%`；IFCBench 当前只有 validation 图像，三个标准图形学场景的 Full/HZB 正式 test 图像待执行 |
 | GT 收敛 | 完成诊断 | 两场景各 100 cell x 128 点硬件采样完成。HKUST 源 GT 对 128 点实例/权重覆盖 `99.6411/99.9997%`；IFCBench 四点 box GT 对另一水平圆盘定义为 `80.1942/97.2252%`。该结果只界定连续区域声明，不否定四点协议结果，也不触发重训 |
 | 离线成本 / 结果包 | 完成当前可得项 | 六阶段成本、artifact registry、三种子 Table 2 汇总已生成；未记录时间保持 unavailable，不作推算 |
-| 标准图形场景 | 正式矩阵执行中 | 三个场景均使用水平圆盘、`r=0.75 m`、后退 `1.299038 m`、32 subpose 和中心组 split。Sponza V2 安全池选择 seed02：WR/LCB/CNOR/Useful Cull 为 `0.993122/0.991106/0.733841/0.598631`。Viking V2 三种子均安全，当前选择 seed02：`0.996797/0.993179/0.545428/0.392464`。Big City V2 三种子已在 GPU1-3 启动；Viking AABB 正在 GPU0 串行训练。V2 test 仍关闭。 |
+| 标准图形场景 | Connected-SAH 重建 | 三场景转换和 1024 点/96D 几何表已完成，单位数为 Sponza `129`、Viking Village `1,763`、Big City `2,861`。Sponza/Viking 硬件 Color-ID 与新 Pose CSR 已完成，Big City Color-ID 执行中。训练仍按三个场景 seed01、三个场景 seed02、三个场景 seed03 展开；旧 V2 test 保持关闭。 |
 
 ## 2026-09-14 CNOR 评价口径与已有结果
 
@@ -241,7 +241,7 @@ CNOR 为 `0.903764`；去除分层关系、去除生存场、通用 28 维、去
 主表混用。
 
 实现修改覆盖 `pvs_threshold_metrics.py`、`evaluate_pvs.py`、
-`evaluate_unified_pvs_metrics.py`、`ifcbench_exact_calibration.py`、
+`evaluate_unified_pvs_metrics.py`、`v4_exact_calibration.py`、
 `evaluate_geometry_shell_hzb.py`、阈值曲线、消融/容量汇总和论文表生成器。机器字段固定为
 嵌套结果中的 `candidateNormalizedOcclusionRecall`，平坦阈值行中的
 `candidate_normalized_occlusion_recall`。已有 frozen prediction 只从保存的逐 pose 计数或
@@ -298,3 +298,26 @@ Occlusion Recall 和 precision。该微调族只有三种子确认完成后才�
 - Big City Full seed01/02 与 AABB seed01/02 正在训练。为使用空闲 GPU 3，Full 编排父进程已暂停，seed03 已提前并行启动；三者完成后由独立队列统一 validation 并只读取一次 test。AABB runner 仍会在前两成员结束后自动接续 seed03。
 - 五场景 `scene_statistics.csv` 已重建；六阶段离线成本汇总扩展为五场景 `30` 行，缺失时间继续标为 `unavailable`。
 - 标准场景 Full runner 已增加独立运行资产导出阶段；端侧前向 workload 清单已登记 Sponza、Viking Village 和 Big City。正式 WebGPU/HZB/图像硬件任务仍等待训练退出后在无并发计算窗口执行。
+
+## 2026-09-15 标准场景重启与统一精确阈值
+
+- 不修改当前 V4 的 96D 几何表、结构化生存场和运行时查询头；HKUST/IFCBench 不重训。
+- 标准场景统一改为连通分量感知的确定性 SAH 128 KiB 单位：小连通分量只在同一源
+  primitive/材质内按空间紧凑性聚合，超大连通分量再内部递归切分；新单位必须重采
+  Color-ID、重建 CSR 和 train-only K=8 关系。
+- Full 固定使用 `lr=5e-5`、`poses_per_batch=8`、`hard_pose_fraction=0.35`，尾部分离权重
+  升至 `0.30`，正/负尾部比例为 `0.01/0.02`，正样本重要性下限为 `0.25`；采用先分类与
+  生存场、再尾部分离、最后召回保护的课程。
+- 第一轮同时训练三个场景各一个 seed，确认跨场景趋势后再补第二、第三种子。GPU 是否同卡
+  并发由启动时显存、利用率和实测吞吐决定，不固定一卡一任务。
+- calibration 阈值统一改为实际 float32 分数变化点；HKUST/IFCBench 对现有 checkpoint
+  重做 calibration/validation 阈值冻结和派生结果，不用 test 选阈值、不重新训练。
+- 精确重校准已完成。HKUST 三种子均通过 validation 安全门，选择 seed02；其
+  WR/LCB/Useful Cull/CNOR 为 `0.996847/0.994558/0.904606/0.915014`。IFCBench 只有
+  seed03 通过 validation 安全门，对应 `0.991350/0.990509/0.559296/0.648690`；seed01/02
+  的 validation LCB 为 `0.989853/0.989395`，不进入精确阈值安全池。当前尚未用新阈值
+  重放 test、图像、streaming 或前端资产。
+- 标准场景执行顺序固定为 `Full -> AABB MLP -> HZB -> frozen test/image/runtime`，后两类
+  基线不得提前占用 Full 的采样、训练和浏览器 GPU 资源。
+- 完整单位契约、停止记录和重建步骤以
+  [标准图形学场景方案](pvs_standard_graphics_scene_generality_2026-09-10.md)第 19 节为准。

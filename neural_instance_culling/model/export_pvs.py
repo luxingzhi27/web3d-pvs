@@ -31,7 +31,7 @@ MODEL_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-envelope-v
 CHECKPOINT_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-checkpoint-v4"
 TRAINING_PROTOCOL_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-training-v4"
 CALIBRATION_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-calibration-v4"
-EXACT_CALIBRATION_SCHEMA = "pvs-ifcbench-v4-exact-calibration-v1"
+EXACT_CALIBRATION_SCHEMA = "pvs-v4-exact-calibration-v1"
 EXPORT_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-runtime-v4"
 QUERY_WEIGHTS_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-query-weights-v4"
 
@@ -1761,7 +1761,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--calibration",
         default=None,
-        help="Checkpoint-specific exact calibration summary used by the IFCBench final model.",
+        help="Checkpoint-specific exact calibration summary used by the V4 final model.",
     )
     parser.add_argument(
         "--threshold",

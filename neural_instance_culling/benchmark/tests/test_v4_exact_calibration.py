@@ -12,17 +12,20 @@ BENCHMARK_DIR = Path(__file__).resolve().parents[1]
 if str(BENCHMARK_DIR) not in sys.path:
     sys.path.insert(0, str(BENCHMARK_DIR))
 
-from ifcbench_exact_calibration import (  # noqa: E402
+from v4_exact_calibration import (  # noqa: E402
     BOOTSTRAP_SCHEMA,
     SCORE_SIDECAR_SCHEMA,
     _fixed_bootstrap,
     _load_sidecar,
     _metrics_at_threshold,
-    _select_exact_threshold,
+)
+from neural_instance_culling.model.common.exact_calibration import (  # noqa: E402
+    FixedPoseBootstrap,
+    select_highest_safe_score_change_point,
 )
 
 
-class IfcbenchExactCalibrationTest(unittest.TestCase):
+class V4ExactCalibrationTest(unittest.TestCase):
     def _sidecar(self, root: Path) -> Path:
         root.mkdir(parents=True, exist_ok=True)
         scores = np.asarray([0.9, 0.4, 0.8, 0.7, 0.1], dtype="<f4")
@@ -37,6 +40,7 @@ class IfcbenchExactCalibrationTest(unittest.TestCase):
             json.dumps(
                 {
                     "schema": SCORE_SIDECAR_SCHEMA,
+                    "scene": "Synthetic/Generic Scene",
                     "split": "calibration",
                     "checkpoint": "/source/checkpoint.pt",
                     "checkpointSeed": 20260802,
@@ -63,7 +67,20 @@ class IfcbenchExactCalibrationTest(unittest.TestCase):
             bootstrap, valid_rows, gt_mass, metadata = _fixed_bootstrap(
                 sidecar, Path(temporary) / "bootstrap.bin", replicates=8, seed=7
             )
-            selection = _select_exact_threshold(sidecar, bootstrap, valid_rows, gt_mass)
+            selection = select_highest_safe_score_change_point(
+                np.asarray(sidecar.scores),
+                np.asarray(sidecar.labels),
+                np.asarray(sidecar.weights),
+                np.asarray(sidecar.pose_offsets),
+                bootstrap_replicates=8,
+                bootstrap_seed=7,
+                bootstrap=FixedPoseBootstrap(
+                    valid_pose_indices=valid_rows,
+                    replicates=8,
+                    seed=7,
+                    indices=bootstrap,
+                ),
+            )
             row = _metrics_at_threshold(
                 sidecar, selection["threshold"], bootstrap, valid_rows, gt_mass
             )
@@ -78,6 +95,21 @@ class IfcbenchExactCalibrationTest(unittest.TestCase):
         self.assertAlmostEqual(row["aggregateWeightedRecall"], 1.0)
         self.assertAlmostEqual(row["aggregateWeightedRecallLowerConfidenceBound"], 1.0)
         self.assertAlmostEqual(row["candidate_normalized_occlusion_recall"], 1.0)
+
+    def test_generic_scene_name_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            sidecar = _load_sidecar(self._sidecar(Path(temporary)), expected_split="calibration")
+        self.assertEqual(sidecar.manifest["scene"], "Synthetic/Generic Scene")
+
+    def test_test_split_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self._sidecar(Path(temporary))
+            manifest_path = root / "sidecar_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["split"] = "test"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "non-test"):
+                _load_sidecar(root)
 
     def test_fixed_bootstrap_file_is_reused_without_regeneration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -148,7 +148,7 @@ class ViewcellSplitSourceTests(unittest.TestCase):
             self.assertEqual(predictions[2].tolist(), [2])
             self.assertEqual(source["threshold"], 0.7)
 
-    def test_ifcbench_exact_calibration_is_checkpoint_bound(self) -> None:
+    def test_v4_exact_calibration_is_checkpoint_bound(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             checkpoint = Path(temp_dir) / "member.pt"
             checkpoint.write_bytes(b"fixture")
@@ -156,7 +156,7 @@ class ViewcellSplitSourceTests(unittest.TestCase):
             summary.write_text(
                 json.dumps(
                     {
-                        "schema": "pvs-ifcbench-v4-exact-calibration-v1",
+                        "schema": "pvs-v4-exact-calibration-v1",
                         "split": "calibration",
                         "testRead": False,
                         "status": "safe",

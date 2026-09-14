@@ -975,7 +975,7 @@ def resolve_threshold(args: argparse.Namespace, spec: dict[str, str], runner) ->
             "testEvaluationCount": 0,
         }
 
-    if data.get("schema") == "pvs-ifcbench-v4-exact-calibration-v1":
+    if data.get("schema") == "pvs-v4-exact-calibration-v1":
         if data.get("split") != "calibration" or data.get("testRead") is not False:
             raise RuntimeError(f"{eval_summary} must be a test-free exact calibration summary.")
         checkpoint = spec.get("checkpoint")

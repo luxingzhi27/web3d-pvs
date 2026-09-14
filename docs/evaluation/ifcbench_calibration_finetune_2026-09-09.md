@@ -41,7 +41,7 @@ IFCBench 数据契约为 `41,298` 个实例、`3,669` 个 GLB、`19,647 / 2,183 
 提交 `27fbe56` 增加：
 
 - `train_pvs.py` 的显式 `--init-checkpoint`。它严格验证当前 V4 checkpoint/runtime schema 和架构配置，加载模型状态后重新创建 fresh AdamW，不读取来源优化器状态；记录来源 seed、epoch、global step、继承的实例校准 blend 和当前额外更新数。warm-start 从第一步保持完整困难边界项。
-- `ifcbench_exact_calibration.py`。`score` 子命令按 split 的固定 pose 顺序写入 `scores_f32.bin`、`labels_f32.bin`、`weights_f32.bin`，三者与 `pose_offsets_u64.bin` 一一对齐，并保存 `pose_indices_i64.bin`。标签是候选实例是否在 view-cell 可见实例并集中，权重是 `visible_weights`，不解释为真实像素覆盖率。
+- `v4_exact_calibration.py`。通用 V4 `score` 子命令按 split 的固定 pose 顺序写入 `scores_f32.bin`、`labels_f32.bin`、`weights_f32.bin`，三者与 `pose_offsets_u64.bin` 一一对齐，并保存 `pose_indices_i64.bin`。场景名由调用方传入；标签是候选实例是否在 view-cell 可见实例并集中，权重是 `visible_weights`，不解释为真实像素覆盖率。
 - 精确校准使用 score 的实际 float32 change-points，预测规则固定为 `score >= threshold`。安全工作点是最高 change-point，且 aggregate weighted recall 和固定 pose bootstrap 的单侧 95% 下界均严格大于 `0.99`。固定 bootstrap 索引写入公共文件并跨配置复用，正式数量为 `10,000` 组；零 GT/零权重 pose 不进入 aggregate bootstrap 分母，但仍保留在 offsets 和普通 pose 统计中。
 - `run_ifcbench_calibration_finetune.py`。它从源数据 root 组装五组扫描、公共 calibration/validation bootstrap、validation 冻结阈值和三 seed confirmation 命令；每个长任务独立保存 stdout/stderr。
 

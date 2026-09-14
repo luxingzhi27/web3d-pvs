@@ -23,7 +23,7 @@ from typing import Any, Sequence
 
 ROOT = Path(__file__).resolve().parents[2]
 TRAIN = ROOT / "neural_instance_culling" / "model" / "train_pvs.py"
-CALIBRATE = ROOT / "neural_instance_culling" / "benchmark" / "ifcbench_exact_calibration.py"
+CALIBRATE = ROOT / "neural_instance_culling" / "benchmark" / "v4_exact_calibration.py"
 DATA_ROOT_DEFAULT = Path("/mnt/sda/rhyang/slm")
 EXPERIMENT = "pvs_ifcbench_v4_calibration_finetune_v1"
 REFINE_EXPERIMENT = "pvs_ifcbench_v4_calibration_finetune_v2_refine"
@@ -241,6 +241,7 @@ def _build_train_command(
         "--relation-dir", str(p["relation"]),
         "--runtime-meta", str(p["runtime_meta"]),
         "--initial-geo-features", str(p["geometry"]),
+        "--scene", "IFCBench/Fantasy Metropolis",
         "--glb-index", str(p["glb_index"]),
         "--glb-root", str(p["glb_root"]),
         "--output-dir", str(Path(output).resolve()),
@@ -357,6 +358,7 @@ def score_command(data_root: Path, checkpoint: Path, dataset_split: str, output_
         "--dataset-dir", str(p["dataset"]),
         "--runtime-meta", str(p["runtime_meta"]),
         "--initial-geo-features", str(p["geometry"]),
+        "--scene", "IFCBench/Fantasy Metropolis",
         "--split", split_name,
         "--output-dir", str(Path(output_dir).resolve()),
         "--poses-per-batch", "2",

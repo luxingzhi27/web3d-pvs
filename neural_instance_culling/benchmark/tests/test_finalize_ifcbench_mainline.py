@@ -179,7 +179,7 @@ class FinalizeIfcbenchMainlineTests(unittest.TestCase):
                 (result_root / "exact_calibration.json").write_text(
                     json.dumps(
                         {
-                            "schema": "pvs-ifcbench-v4-exact-calibration-v1",
+                            "schema": "pvs-v4-exact-calibration-v1",
                             "split": "calibration",
                             "checkpoint": str(checkpoint),
                             "status": "safe",

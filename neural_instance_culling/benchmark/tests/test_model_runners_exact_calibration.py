@@ -23,7 +23,7 @@ class ExactCalibrationThresholdTests(unittest.TestCase):
             checkpoint.write_bytes(b"checkpoint")
             calibration = root / "exact_calibration.json"
             calibration.write_text(json.dumps({
-                "schema": "pvs-ifcbench-v4-exact-calibration-v1",
+                "schema": "pvs-v4-exact-calibration-v1",
                 "split": "calibration",
                 "testRead": False,
                 "checkpoint": str(checkpoint),
@@ -48,7 +48,7 @@ class ExactCalibrationThresholdTests(unittest.TestCase):
             checkpoint.write_bytes(b"checkpoint")
             calibration = root / "exact_calibration.json"
             payload = {
-                "schema": "pvs-ifcbench-v4-exact-calibration-v1",
+                "schema": "pvs-v4-exact-calibration-v1",
                 "split": "calibration",
                 "testRead": False,
                 "checkpoint": str(root / "other.pt"),

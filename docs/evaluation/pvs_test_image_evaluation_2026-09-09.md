@@ -24,7 +24,7 @@ Pose CSR 候选和基线配置见 [`pvs_hzb_test_image_manifest_2026-09-09.md`](
 validator 负责。
 
 IFCBench 最终成员若来自 warm-start 微调，manifest 生成入口接受当前唯一的
-`pvs-ifcbench-v4-exact-calibration-v1`。该文件必须是 `split=calibration`、
+`pvs-v4-exact-calibration-v1`。该文件必须是 `split=calibration`、
 `testRead=false`、`status=safe`，其记录的 checkpoint 必须与正在评价的 checkpoint
 路径完全一致，且 weighted recall 与单侧 95% 下界都严格大于 `0.99`。图像入口只读取
 其中冻结阈值，不在 test 上重新选阈值；其他未知 calibration schema 仍拒绝。

@@ -1,6 +1,10 @@
 import { MeshoptEncoder } from 'meshoptimizer/encoder';
 
 export const TARGET_UNIT_BYTES = 128 * 1024;
+export const PARTITION_SCHEMA = 'connected-sah-pack-v2';
+export const SAH_BIN_COUNT = 16;
+// Large nodes are split before exact meshopt probing to cap temporary geometry.
+export const MAX_GEOMETRY_PROBE_TRIANGLES = 32768;
 
 function positiveInteger(value, label) {
   const number = Number(value);
@@ -35,167 +39,435 @@ function boundsForPositions(values) {
   };
 }
 
-function includeBounds(target, source) {
-  for (let axis = 0; axis < 3; axis += 1) {
-    target.min[axis] = Math.min(target.min[axis], source.min[axis]);
-    target.max[axis] = Math.max(target.max[axis], source.max[axis]);
-  }
-}
+function unionFindComponents(renderable) {
+  const triangleCount = renderable.indices.length / 3;
+  const vertexCount = renderable.positions.length / 3;
+  const parent = new Int32Array(triangleCount);
+  const firstTriangleByVertex = new Int32Array(vertexCount);
+  parent.fill(-1);
+  firstTriangleByVertex.fill(-1);
 
-function unionFind(count) {
-  const parent = Uint32Array.from({ length: count }, (_value, index) => index);
-  const rank = new Uint8Array(count);
   function find(value) {
     let root = value;
-    while (parent[root] !== root) root = parent[root];
-    while (parent[value] !== value) {
+    while (parent[root] >= 0) root = parent[root];
+    while (value !== root) {
       const next = parent[value];
       parent[value] = root;
       value = next;
     }
     return root;
   }
+
   function join(left, right) {
     let leftRoot = find(left);
     let rightRoot = find(right);
     if (leftRoot === rightRoot) return;
-    if (rank[leftRoot] < rank[rightRoot]) [leftRoot, rightRoot] = [rightRoot, leftRoot];
+    if (parent[leftRoot] > parent[rightRoot]) [leftRoot, rightRoot] = [rightRoot, leftRoot];
+    parent[leftRoot] += parent[rightRoot];
     parent[rightRoot] = leftRoot;
-    if (rank[leftRoot] === rank[rightRoot]) rank[leftRoot] += 1;
   }
-  return { find, join };
-}
 
-function connectedTriangleGroups(renderable) {
-  const triangleCount = renderable.indices.length / 3;
-  const groups = new Map();
-  const { find, join } = unionFind(triangleCount);
-  const firstTriangleByVertex = new Map();
   for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+    const firstIndex = triangle * 3;
     for (let corner = 0; corner < 3; corner += 1) {
-      const vertex = renderable.indices[triangle * 3 + corner];
-      const previous = firstTriangleByVertex.get(vertex);
-      if (previous == null) firstTriangleByVertex.set(vertex, triangle);
+      const vertex = Number(renderable.indices[firstIndex + corner]);
+      if (!Number.isInteger(vertex) || vertex < 0 || vertex >= vertexCount) {
+        throw new Error(`triangle ${triangle} references invalid vertex ${vertex}`);
+      }
+      const previous = firstTriangleByVertex[vertex];
+      if (previous < 0) firstTriangleByVertex[vertex] = triangle;
       else join(previous, triangle);
     }
   }
+
   for (let triangle = 0; triangle < triangleCount; triangle += 1) {
     const root = find(triangle);
-    if (!groups.has(root)) groups.set(root, []);
-    groups.get(root).push(triangle);
+    if (root !== triangle) parent[triangle] = root;
   }
-  return [...groups.values()];
-}
-
-function triangleCentroid(renderable, triangle) {
-  const first = triangle * 3;
-  const points = [0, 1, 2].map((corner) => {
-    const vertex = renderable.indices[first + corner] * 3;
-    return [
-      renderable.positions[vertex],
-      renderable.positions[vertex + 1],
-      renderable.positions[vertex + 2],
-    ];
-  });
-  return [
-    (points[0][0] + points[1][0] + points[2][0]) / 3,
-    (points[0][1] + points[1][1] + points[2][1]) / 3,
-    (points[0][2] + points[1][2] + points[2][2]) / 3,
-  ];
-}
-
-function morton3(x, y, z) {
-  let result = 0;
-  for (let bit = 0; bit < 10; bit += 1) {
-    result |= ((x >> bit) & 1) << (bit * 3);
-    result |= ((y >> bit) & 1) << (bit * 3 + 1);
-    result |= ((z >> bit) & 1) << (bit * 3 + 2);
+  for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+    if (parent[triangle] < 0) parent[triangle] = -1;
   }
-  return result >>> 0;
+
+  let componentCount = 0;
+  for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+    const root = parent[triangle] >= 0 ? parent[triangle] : triangle;
+    if (parent[root] === -1) {
+      parent[root] = -(componentCount + 2);
+      componentCount += 1;
+    }
+  }
+  // Convert non-roots first so root markers remain available to every link.
+  for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+    if (parent[triangle] >= 0) {
+      const root = parent[triangle];
+      parent[triangle] = -parent[root] - 2;
+    }
+  }
+  for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+    if (parent[triangle] < 0) parent[triangle] = -parent[triangle] - 2;
+  }
+
+  const componentCounts = new Uint32Array(componentCount);
+  for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+    componentCounts[parent[triangle]] += 1;
+  }
+  const componentOffsets = new Uint32Array(componentCount + 1);
+  for (let component = 0; component < componentCount; component += 1) {
+    componentOffsets[component + 1] = componentOffsets[component] + componentCounts[component];
+  }
+  const writeOffsets = componentOffsets.slice(0, componentCount);
+  const componentTriangles = new Uint32Array(triangleCount);
+  for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+    const component = parent[triangle];
+    componentTriangles[writeOffsets[component]] = triangle;
+    writeOffsets[component] += 1;
+  }
+  return { componentCount, componentOffsets, componentTriangles };
 }
 
-function mortonForPoint(point, bounds) {
-  const quantize = (value, axis) => {
-    const extent = bounds.max[axis] - bounds.min[axis];
-    const normalized = extent > 0 ? (value - bounds.min[axis]) / extent : 0;
-    return Math.max(0, Math.min(1023, Math.floor(normalized * 1023)));
-  };
-  return morton3(quantize(point[0], 0), quantize(point[1], 1), quantize(point[2], 2));
+// Layout per item: centroid xyz, bounds min xyz, bounds max xyz.
+function buildItemData(renderable, items, itemOffsets, itemTriangles) {
+  const itemCount = items;
+  const data = new Float32Array(itemCount * 9);
+  const weights = new Uint32Array(itemCount);
+  const firstSourceTriangles = new Uint32Array(itemCount);
+  for (let item = 0; item < itemCount; item += 1) {
+    const start = itemOffsets[item];
+    const end = itemOffsets[item + 1];
+    const dataIndex = item * 9;
+    data[dataIndex + 3] = Infinity;
+    data[dataIndex + 4] = Infinity;
+    data[dataIndex + 5] = Infinity;
+    data[dataIndex + 6] = -Infinity;
+    data[dataIndex + 7] = -Infinity;
+    data[dataIndex + 8] = -Infinity;
+    weights[item] = end - start;
+    firstSourceTriangles[item] = itemTriangles[start];
+    for (let offset = start; offset < end; offset += 1) {
+      const sourceTriangle = itemTriangles[offset];
+      const sourceIndex = sourceTriangle * 3;
+      for (let corner = 0; corner < 3; corner += 1) {
+        const vertex = Number(renderable.indices[sourceIndex + corner]) * 3;
+        for (let axis = 0; axis < 3; axis += 1) {
+          const value = renderable.positions[vertex + axis];
+          data[dataIndex + axis] += value / 3;
+          data[dataIndex + 3 + axis] = Math.min(data[dataIndex + 3 + axis], value);
+          data[dataIndex + 6 + axis] = Math.max(data[dataIndex + 6 + axis], value);
+        }
+      }
+    }
+    for (let axis = 0; axis < 3; axis += 1) data[dataIndex + axis] /= Math.max(1, weights[item]);
+  }
+  return { data, weights, firstSourceTriangles };
 }
 
-function componentDescriptor(renderable, triangles, bounds) {
-  const componentBounds = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
-  const centroid = [0, 0, 0];
-  for (const triangle of triangles) {
-    const point = triangleCentroid(renderable, triangle);
-    for (let axis = 0; axis < 3; axis += 1) centroid[axis] += point[axis];
-    for (const corner of [0, 1, 2]) {
-      const vertex = renderable.indices[triangle * 3 + corner] * 3;
-      for (let axis = 0; axis < 3; axis += 1) {
-        componentBounds.min[axis] = Math.min(componentBounds.min[axis], renderable.positions[vertex + axis]);
-        componentBounds.max[axis] = Math.max(componentBounds.max[axis], renderable.positions[vertex + axis]);
+function centroidBoundsForItems(items, data) {
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    const dataIndex = item * 9;
+    for (let axis = 0; axis < 3; axis += 1) {
+      min[axis] = Math.min(min[axis], data[dataIndex + axis]);
+      max[axis] = Math.max(max[axis], data[dataIndex + axis]);
+    }
+  }
+  return { min, max };
+}
+
+function itemBin(item, axis, centroidBounds, data) {
+  const extent = centroidBounds.max[axis] - centroidBounds.min[axis];
+  if (extent <= 0) return 0;
+  const dataIndex = item * 9;
+  const normalized = (data[dataIndex + axis] - centroidBounds.min[axis]) / extent;
+  return Math.max(0, Math.min(SAH_BIN_COUNT - 1, Math.floor(normalized * SAH_BIN_COUNT)));
+}
+
+function initializeBinBounds(bounds) {
+  for (let bin = 0; bin < SAH_BIN_COUNT; bin += 1) {
+    const offset = bin * 6;
+    bounds[offset] = Infinity;
+    bounds[offset + 1] = Infinity;
+    bounds[offset + 2] = Infinity;
+    bounds[offset + 3] = -Infinity;
+    bounds[offset + 4] = -Infinity;
+    bounds[offset + 5] = -Infinity;
+  }
+}
+
+function includeItemBounds(target, targetOffset, data, dataOffset) {
+  for (let axis = 0; axis < 3; axis += 1) {
+    target[targetOffset + axis] = Math.min(target[targetOffset + axis], data[dataOffset + 3 + axis]);
+    target[targetOffset + 3 + axis] = Math.max(target[targetOffset + 3 + axis], data[dataOffset + 6 + axis]);
+  }
+}
+
+function includeBoundsArray(target, targetOffset, source, sourceOffset) {
+  for (let axis = 0; axis < 3; axis += 1) {
+    target[targetOffset + axis] = Math.min(target[targetOffset + axis], source[sourceOffset + axis]);
+    target[targetOffset + 3 + axis] = Math.max(target[targetOffset + 3 + axis], source[sourceOffset + 3 + axis]);
+  }
+}
+
+function surfaceAreaArray(bounds, offset) {
+  const x = Math.max(0, bounds[offset + 3] - bounds[offset]);
+  const y = Math.max(0, bounds[offset + 4] - bounds[offset + 1]);
+  const z = Math.max(0, bounds[offset + 5] - bounds[offset + 2]);
+  return 2 * (x * y + x * z + y * z);
+}
+
+function compareSahCandidate(cost, axis, bin, sourceTriangle, best) {
+  if (best.axis < 0) return true;
+  const tolerance = 1e-12 * Math.max(1, Math.abs(cost), Math.abs(best.cost));
+  if (cost < best.cost - tolerance) return true;
+  if (cost > best.cost + tolerance) return false;
+  return axis < best.axis
+    || (axis === best.axis && bin < best.bin)
+    || (axis === best.axis && bin === best.bin && sourceTriangle < best.sourceTriangle);
+}
+
+function partitionByBin(items, data, axis, bin, centroidBounds) {
+  let leftCount = 0;
+  for (let index = 0; index < items.length; index += 1) {
+    if (itemBin(items[index], axis, centroidBounds, data) <= bin) leftCount += 1;
+  }
+  let left = 0;
+  let right = items.length - 1;
+  while (left < leftCount && right >= leftCount) {
+    while (left < leftCount && itemBin(items[left], axis, centroidBounds, data) <= bin) left += 1;
+    while (right >= leftCount && itemBin(items[right], axis, centroidBounds, data) > bin) right -= 1;
+    if (left < leftCount && right >= leftCount) {
+      const value = items[left];
+      items[left] = items[right];
+      items[right] = value;
+      left += 1;
+      right -= 1;
+    }
+  }
+  if (leftCount === 0 || leftCount === items.length) return null;
+  return { left: items.subarray(0, leftCount), right: items.subarray(leftCount), axis, bin };
+}
+
+function binnedSahSplit(items, stableKeys, data, weights = null) {
+  const centroidBounds = centroidBoundsForItems(items, data);
+  let best = { axis: -1, bin: -1, cost: Infinity, sourceTriangle: Infinity };
+  for (let axis = 0; axis < 3; axis += 1) {
+    if (centroidBounds.max[axis] <= centroidBounds.min[axis]) continue;
+    const binCounts = new Uint32Array(SAH_BIN_COUNT);
+    const binWeights = new Float64Array(SAH_BIN_COUNT);
+    const binFirst = new Uint32Array(SAH_BIN_COUNT);
+    binFirst.fill(0xffffffff);
+    const binBounds = new Float64Array(SAH_BIN_COUNT * 6);
+    initializeBinBounds(binBounds);
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index];
+      const bin = itemBin(item, axis, centroidBounds, data);
+      const dataIndex = item * 9;
+      const binOffset = bin * 6;
+      binCounts[bin] += 1;
+      binWeights[bin] += weights ? weights[item] : 1;
+      binFirst[bin] = Math.min(binFirst[bin], stableKeys[item]);
+      includeItemBounds(binBounds, binOffset, data, dataIndex);
+    }
+
+    const prefixCounts = new Uint32Array(SAH_BIN_COUNT);
+    const suffixCounts = new Uint32Array(SAH_BIN_COUNT);
+    const prefixWeights = new Float64Array(SAH_BIN_COUNT);
+    const suffixWeights = new Float64Array(SAH_BIN_COUNT);
+    const prefixFirst = new Uint32Array(SAH_BIN_COUNT);
+    const suffixFirst = new Uint32Array(SAH_BIN_COUNT);
+    prefixFirst.fill(0xffffffff);
+    suffixFirst.fill(0xffffffff);
+    const prefixBounds = new Float64Array(SAH_BIN_COUNT * 6);
+    const suffixBounds = new Float64Array(SAH_BIN_COUNT * 6);
+    initializeBinBounds(prefixBounds);
+    initializeBinBounds(suffixBounds);
+    let count = 0;
+    let weight = 0;
+    let first = 0xffffffff;
+    for (let bin = 0; bin < SAH_BIN_COUNT; bin += 1) {
+      count += binCounts[bin];
+      weight += binWeights[bin];
+      first = Math.min(first, binFirst[bin]);
+      prefixCounts[bin] = count;
+      prefixWeights[bin] = weight;
+      prefixFirst[bin] = first;
+      const offset = bin * 6;
+      if (bin > 0) {
+        for (let axisIndex = 0; axisIndex < 6; axisIndex += 1) {
+          prefixBounds[offset + axisIndex] = prefixBounds[offset - 6 + axisIndex];
+        }
+      }
+      includeBoundsArray(prefixBounds, offset, binBounds, offset);
+    }
+    count = 0;
+    weight = 0;
+    first = 0xffffffff;
+    for (let bin = SAH_BIN_COUNT - 1; bin >= 0; bin -= 1) {
+      count += binCounts[bin];
+      weight += binWeights[bin];
+      first = Math.min(first, binFirst[bin]);
+      suffixCounts[bin] = count;
+      suffixWeights[bin] = weight;
+      suffixFirst[bin] = first;
+      const offset = bin * 6;
+      if (bin < SAH_BIN_COUNT - 1) {
+        for (let axisIndex = 0; axisIndex < 6; axisIndex += 1) {
+          suffixBounds[offset + axisIndex] = suffixBounds[offset + 6 + axisIndex];
+        }
+      }
+      includeBoundsArray(suffixBounds, offset, binBounds, offset);
+    }
+    for (let bin = 0; bin < SAH_BIN_COUNT - 1; bin += 1) {
+      if (prefixCounts[bin] === 0 || suffixCounts[bin + 1] === 0) continue;
+      const cost = surfaceAreaArray(prefixBounds, bin * 6) * prefixWeights[bin]
+        + surfaceAreaArray(suffixBounds, (bin + 1) * 6) * suffixWeights[bin + 1];
+      if (compareSahCandidate(cost, axis, bin, suffixFirst[bin + 1], best)) {
+        best = { axis, bin, cost, sourceTriangle: suffixFirst[bin + 1] };
       }
     }
   }
-  for (let axis = 0; axis < 3; axis += 1) centroid[axis] /= Math.max(1, triangles.length);
-  return {
-    triangles,
-    bounds: {
-      ...componentBounds,
-      center: componentBounds.min.map((value, axis) => (value + componentBounds.max[axis]) * 0.5),
-      size: componentBounds.min.map((value, axis) => Math.max(0, componentBounds.max[axis] - value)),
-    },
-    centroid,
-    morton: mortonForPoint(centroid, bounds),
-    firstTriangle: triangles.reduce((minimum, triangle) => Math.min(minimum, triangle), Infinity),
-  };
+  if (best.axis < 0) return null;
+  return partitionByBin(items, data, best.axis, best.bin, centroidBounds);
 }
 
-function sortedTriangles(renderable, triangles, bounds) {
-  return triangles.slice().sort((left, right) => {
-    const leftCode = mortonForPoint(triangleCentroid(renderable, left), bounds);
-    const rightCode = mortonForPoint(triangleCentroid(renderable, right), bounds);
-    return leftCode - rightCode || left - right;
-  });
+function stableMedianSplit(items, stableKeys) {
+  items.sort((left, right) => stableKeys[left] - stableKeys[right]);
+  const middle = Math.floor(items.length * 0.5);
+  return { left: items.subarray(0, middle), right: items.subarray(middle), axis: null, bin: null };
 }
 
-function geometryForTriangles(renderable, triangles) {
-  const vertexMap = new Map();
-  const originalVertices = [];
-  const outputIndices = [];
-  for (const triangle of triangles) {
+function splitItemsDeterministically(items, stableKeys, data, weights = null) {
+  return binnedSahSplit(items, stableKeys, data, weights)
+    || stableMedianSplit(items, stableKeys);
+}
+
+function buildTriangleCache(renderable, sourceTriangles) {
+  const triangleCount = sourceTriangles.length;
+  const data = new Float32Array(triangleCount * 9);
+  const positions = renderable.positions;
+  const indices = renderable.indices;
+  for (let localTriangle = 0; localTriangle < triangleCount; localTriangle += 1) {
+    const sourceTriangle = sourceTriangles[localTriangle];
+    const sourceIndex = sourceTriangle * 3;
+    const dataIndex = localTriangle * 9;
+    data[dataIndex + 3] = Infinity;
+    data[dataIndex + 4] = Infinity;
+    data[dataIndex + 5] = Infinity;
+    data[dataIndex + 6] = -Infinity;
+    data[dataIndex + 7] = -Infinity;
+    data[dataIndex + 8] = -Infinity;
     for (let corner = 0; corner < 3; corner += 1) {
-      const original = Number(renderable.indices[triangle * 3 + corner]);
-      let mapped = vertexMap.get(original);
-      if (mapped == null) {
-        mapped = originalVertices.length;
-        vertexMap.set(original, mapped);
-        originalVertices.push(original);
+      const vertex = Number(indices[sourceIndex + corner]) * 3;
+      for (let axis = 0; axis < 3; axis += 1) {
+        const value = positions[vertex + axis];
+        data[dataIndex + axis] += value / 3;
+        data[dataIndex + 3 + axis] = Math.min(data[dataIndex + 3 + axis], value);
+        data[dataIndex + 6 + axis] = Math.max(data[dataIndex + 6 + axis], value);
       }
-      outputIndices.push(mapped);
     }
   }
-  const positions = new Float32Array(originalVertices.length * 3);
-  for (let index = 0; index < originalVertices.length; index += 1) {
-    positions.set(renderable.positions.slice(originalVertices[index] * 3, originalVertices[index] * 3 + 3), index * 3);
+  const order = new Uint32Array(triangleCount);
+  for (let triangle = 0; triangle < triangleCount; triangle += 1) order[triangle] = triangle;
+  return { data, order };
+}
+
+function createVertexRemapper(vertexCount) {
+  return {
+    marks: new Int32Array(vertexCount),
+    localIndices: new Uint32Array(vertexCount),
+    epoch: 0,
+  };
+}
+
+function nextRemapEpoch(remapper) {
+  remapper.epoch += 1;
+  if (remapper.epoch >= 0x7fffffff) {
+    remapper.marks.fill(0);
+    remapper.epoch = 1;
+  }
+  return remapper.epoch;
+}
+
+function geometryForSourceTriangles(renderable, sourceTriangleIds, remapper) {
+  const maxVertexCount = sourceTriangleIds.length * 3;
+  const originalVertices = new Uint32Array(maxVertexCount);
+  const outputIndices = new Uint32Array(maxVertexCount);
+  const epoch = nextRemapEpoch(remapper);
+  let vertexCount = 0;
+  let outputIndex = 0;
+  for (let index = 0; index < sourceTriangleIds.length; index += 1) {
+    const sourceTriangle = sourceTriangleIds[index];
+    const sourceIndex = sourceTriangle * 3;
+    for (let corner = 0; corner < 3; corner += 1) {
+      const originalVertex = Number(renderable.indices[sourceIndex + corner]);
+      if (remapper.marks[originalVertex] !== epoch) {
+        remapper.marks[originalVertex] = epoch;
+        remapper.localIndices[originalVertex] = vertexCount;
+        originalVertices[vertexCount] = originalVertex;
+        vertexCount += 1;
+      }
+      outputIndices[outputIndex] = remapper.localIndices[originalVertex];
+      outputIndex += 1;
+    }
+  }
+  const positions = new Float32Array(vertexCount * 3);
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    const sourceVertex = originalVertices[vertex] * 3;
+    positions.set(renderable.positions.subarray(sourceVertex, sourceVertex + 3), vertex * 3);
   }
   const attributes = {};
   for (const [name, attribute] of Object.entries(renderable.attributes || {})) {
-    const values = new Float32Array(originalVertices.length * attribute.components);
-    for (let index = 0; index < originalVertices.length; index += 1) {
-      const start = originalVertices[index] * attribute.components;
-      values.set(attribute.values.slice(start, start + attribute.components), index * attribute.components);
+    const values = new Float32Array(vertexCount * attribute.components);
+    for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+      const sourceVertex = originalVertices[vertex] * attribute.components;
+      values.set(
+        attribute.values.subarray(sourceVertex, sourceVertex + attribute.components),
+        vertex * attribute.components,
+      );
     }
     attributes[name] = { values, components: attribute.components, type: attribute.type };
   }
   return {
     positions,
-    indices: Uint32Array.from(outputIndices),
+    indices: outputIndices,
     attributes,
-    vertexCount: positions.length / 3,
-    triangleCount: triangles.length,
+    vertexCount,
+    triangleCount: sourceTriangleIds.length,
     bounds: boundsForPositions(positions),
   };
+}
+
+function sourceTrianglesForLocalOrder(localTriangles, sourceTriangles) {
+  const result = new Uint32Array(localTriangles.length);
+  for (let index = 0; index < localTriangles.length; index += 1) {
+    result[index] = sourceTriangles[localTriangles[index]];
+  }
+  return result;
+}
+
+function sourceTrianglesForComponents(componentOrder, componentOffsets, componentTriangles) {
+  let triangleCount = 0;
+  for (let index = 0; index < componentOrder.length; index += 1) {
+    const component = componentOrder[index];
+    triangleCount += componentOffsets[component + 1] - componentOffsets[component];
+  }
+  const result = new Uint32Array(triangleCount);
+  let offset = 0;
+  for (let index = 0; index < componentOrder.length; index += 1) {
+    const component = componentOrder[index];
+    const start = componentOffsets[component];
+    const end = componentOffsets[component + 1];
+    result.set(componentTriangles.subarray(start, end), offset);
+    offset += end - start;
+  }
+  return result;
+}
+
+function componentOrdinals(componentOrder) {
+  const result = new Array(componentOrder.length);
+  for (let index = 0; index < componentOrder.length; index += 1) result[index] = componentOrder[index];
+  return result;
 }
 
 async function ensureEncoder() {
@@ -250,9 +522,17 @@ export async function estimateEncodedGeometryBytes(geometry) {
   };
 }
 
-async function makePart(renderable, triangles, componentOrdinals, partitionReason) {
-  const geometry = geometryForTriangles(renderable, triangles);
-  const compression = await estimateEncodedGeometryBytes(geometry);
+function makePartRecord(
+  renderable,
+  sourceTriangleIds,
+  sourceComponentOrdinals,
+  sourceComponentCount,
+  partitionReason,
+  geometry,
+  compression,
+  oversizeReason = null,
+  oversizedComponentSplit = false,
+) {
   return {
     sourceNodeIndex: renderable.sourceNodeIndex,
     sourceNodePath: renderable.sourceNodePath,
@@ -264,9 +544,15 @@ async function makePart(renderable, triangles, componentOrdinals, partitionReaso
     materialOutput: renderable.materialOutput,
     nodeName: renderable.nodeName,
     worldMatrix: renderable.worldMatrix,
-    sourceTriangleIndices: triangles.slice(),
-    sourceComponentOrdinals: componentOrdinals.slice(),
+    sourceTriangleIndices: sourceTriangleIds.slice(),
+    sourceComponentOrdinals,
+    partitionSchema: PARTITION_SCHEMA,
+    componentCount: sourceComponentOrdinals.length,
+    sourceComponentCount,
     partitionReason,
+    oversizedComponentSplit,
+    oversize: oversizeReason != null,
+    oversizeReason,
     geometry,
     bounds: geometry.bounds,
     compression,
@@ -275,86 +561,174 @@ async function makePart(renderable, triangles, componentOrdinals, partitionReaso
   };
 }
 
-async function splitComponent(renderable, descriptor, targetBytes, componentOrdinal) {
-  const triangles = sortedTriangles(renderable, descriptor.triangles, {
-    min: renderable.bounds.min,
-    max: renderable.bounds.max,
-  });
-  const parts = [];
-  let offset = 0;
-  while (offset < triangles.length) {
-    let low = 1;
-    let high = triangles.length - offset;
-    let best = 1;
-    while (low <= high) {
-      const middle = Math.floor((low + high) * 0.5);
-      const candidate = triangles.slice(offset, offset + middle);
-      const estimate = await estimateEncodedGeometryBytes(geometryForTriangles(renderable, candidate));
-      if (estimate.encodedGeometryBytes <= targetBytes) {
-        best = middle;
-        low = middle + 1;
-      } else {
-        high = middle - 1;
+async function evaluateLocalTriangles(renderable, localTriangles, sourceTriangles, remapper) {
+  const sourceTriangleIds = sourceTrianglesForLocalOrder(localTriangles, sourceTriangles);
+  const geometry = geometryForSourceTriangles(renderable, sourceTriangleIds, remapper);
+  return {
+    sourceTriangleIds,
+    geometry,
+    compression: await estimateEncodedGeometryBytes(geometry),
+  };
+}
+
+async function splitOversizedComponent(
+  renderable,
+  sourceTriangles,
+  cache,
+  targetBytes,
+  componentOrdinal,
+  componentCount,
+  remapper,
+  emit,
+) {
+  let rootNode = true;
+  async function visit(localTriangles) {
+    let evaluation = null;
+    if (localTriangles.length <= MAX_GEOMETRY_PROBE_TRIANGLES) {
+      evaluation = await evaluateLocalTriangles(renderable, localTriangles, sourceTriangles, remapper);
+      if (evaluation.compression.encodedGeometryBytes <= targetBytes) {
+        await emit(makePartRecord(
+          renderable,
+          evaluation.sourceTriangleIds,
+          [componentOrdinal],
+          componentCount,
+          rootNode ? 'connected-component' : 'oversized-connected-component-binned-sah',
+          evaluation.geometry,
+          evaluation.compression,
+          null,
+          !rootNode,
+        ));
+        return;
+      }
+      if (localTriangles.length === 1) {
+        await emit(makePartRecord(
+          renderable,
+          evaluation.sourceTriangleIds,
+          [componentOrdinal],
+          componentCount,
+          'single-triangle-oversize',
+          evaluation.geometry,
+          evaluation.compression,
+          'single-triangle',
+        ));
+        return;
       }
     }
-    const selected = triangles.slice(offset, offset + best);
-    parts.push(await makePart(renderable, selected, [componentOrdinal], 'connected-component-morton'));
-    offset += best;
+    rootNode = false;
+    evaluation = null;
+    const split = splitItemsDeterministically(localTriangles, sourceTriangles, cache.data);
+    if (!split || !split.left.length || !split.right.length) {
+      throw new Error('connected-SAH could not split a multi-triangle component');
+    }
+    await visit(split.left);
+    await visit(split.right);
   }
-  return parts;
+  await visit(cache.order);
+}
+
+async function partitionComponentGroups(
+  renderable,
+  connected,
+  componentData,
+  componentOrder,
+  targetBytes,
+  remapper,
+  emit,
+) {
+  const componentCount = connected.componentCount;
+  async function visit(order) {
+    if (order.length === 1) {
+      const component = order[0];
+      const start = connected.componentOffsets[component];
+      const end = connected.componentOffsets[component + 1];
+      const sourceTriangles = connected.componentTriangles.subarray(start, end);
+      const cache = buildTriangleCache(renderable, sourceTriangles);
+      await splitOversizedComponent(
+        renderable,
+        sourceTriangles,
+        cache,
+        targetBytes,
+        component,
+        componentCount,
+        remapper,
+        emit,
+      );
+      return;
+    }
+
+    let triangleCount = 0;
+    for (let index = 0; index < order.length; index += 1) {
+      const component = order[index];
+      triangleCount += connected.componentOffsets[component + 1] - connected.componentOffsets[component];
+    }
+    if (triangleCount <= MAX_GEOMETRY_PROBE_TRIANGLES) {
+      const sourceTriangleIds = sourceTrianglesForComponents(
+        order,
+        connected.componentOffsets,
+        connected.componentTriangles,
+      );
+      const geometry = geometryForSourceTriangles(renderable, sourceTriangleIds, remapper);
+      const compression = await estimateEncodedGeometryBytes(geometry);
+      if (compression.encodedGeometryBytes <= targetBytes) {
+        await emit(makePartRecord(
+          renderable,
+          sourceTriangleIds,
+          componentOrdinals(order),
+          componentCount,
+          'connected-component-binned-sah-pack',
+          geometry,
+          compression,
+        ));
+        return;
+      }
+    }
+    const split = splitItemsDeterministically(
+      order,
+      componentData.firstSourceTriangles,
+      componentData.data,
+      componentData.weights,
+    );
+    if (!split || !split.left.length || !split.right.length) {
+      throw new Error('connected-SAH could not split a multi-component group');
+    }
+    await visit(split.left);
+    await visit(split.right);
+  }
+  await visit(componentOrder);
 }
 
 export async function partitionRenderable(renderable, options = {}) {
   const targetBytes = positiveInteger(options.targetBytes ?? TARGET_UNIT_BYTES, 'targetBytes');
   if (!renderable || renderable.indices.length % 3 !== 0) throw new Error('renderable must contain triangle indices');
-  const primitiveBounds = renderable.bounds || boundsForPositions(renderable.positions);
-  const componentDescriptors = connectedTriangleGroups(renderable)
-    .map((triangles, ordinal) => componentDescriptor(renderable, triangles, primitiveBounds))
-    .sort((left, right) => left.morton - right.morton || left.firstTriangle - right.firstTriangle);
-  const parts = [];
-  for (let ordinal = 0; ordinal < componentDescriptors.length; ordinal += 1) {
-    const descriptor = componentDescriptors[ordinal];
-    const full = await makePart(renderable, sortedTriangles(renderable, descriptor.triangles, primitiveBounds), [ordinal], 'natural-primitive');
-    if (full.compression.encodedGeometryBytes <= targetBytes || descriptor.triangles.length === 1) {
-      parts.push(full);
-    } else {
-      parts.push(...await splitComponent(renderable, descriptor, targetBytes, ordinal));
-    }
-  }
-
-  const packed = [];
-  let currentTriangles = [];
-  let currentComponents = [];
-  let currentEstimate = 0;
-  for (const part of parts) {
-    const candidateTriangles = currentTriangles.concat(part.sourceTriangleIndices);
-    const candidateComponents = currentComponents.concat(part.sourceComponentOrdinals);
-    const candidateEstimate = currentEstimate + part.compression.encodedGeometryBytes;
-    if (currentTriangles.length > 0 && candidateEstimate > targetBytes) {
-      packed.push(await makePart(
-        renderable,
-        currentTriangles,
-        [...new Set(currentComponents)],
-        currentComponents.length > 1 ? 'adjacent-small-components-morton' : parts.length > 1 ? 'connected-component-morton' : 'natural-primitive',
-      ));
-      currentTriangles = part.sourceTriangleIndices.slice();
-      currentComponents = part.sourceComponentOrdinals.slice();
-      currentEstimate = part.compression.encodedGeometryBytes;
-    } else {
-      currentTriangles = candidateTriangles;
-      currentComponents = candidateComponents;
-      currentEstimate = candidateEstimate;
-    }
-  }
-  if (currentTriangles.length > 0) {
-    packed.push(await makePart(
-      renderable,
-      currentTriangles,
-      [...new Set(currentComponents)],
-      currentComponents.length > 1 ? 'adjacent-small-components-morton' : parts.length > 1 ? 'connected-component-morton' : 'natural-primitive',
-    ));
-  }
-  return packed;
+  if (renderable.positions.length % 3 !== 0) throw new Error('renderable positions must contain xyz triples');
+  const connected = unionFindComponents(renderable);
+  const componentCount = connected.componentCount;
+  if (componentCount === 0) return [];
+  const componentData = buildItemData(
+    renderable,
+    componentCount,
+    connected.componentOffsets,
+    connected.componentTriangles,
+  );
+  const componentOrder = new Uint32Array(componentCount);
+  for (let component = 0; component < componentCount; component += 1) componentOrder[component] = component;
+  const remapper = createVertexRemapper(renderable.positions.length / 3);
+  const onPart = options.onPart || null;
+  const parts = onPart ? null : [];
+  const emit = async (part) => {
+    if (onPart) await onPart(part);
+    else parts.push(part);
+  };
+  await partitionComponentGroups(
+    renderable,
+    connected,
+    componentData,
+    componentOrder,
+    targetBytes,
+    remapper,
+    emit,
+  );
+  return parts || [];
 }
 
 export async function partitionScene(scene, options = {}) {
@@ -373,21 +747,88 @@ export async function partitionScene(scene, options = {}) {
     || Number(left.sourcePrimitiveIndex) - Number(right.sourcePrimitiveIndex)
     || Number(left.sourceMeshIndex) - Number(right.sourceMeshIndex)
   ));
-  const units = [];
+  const retainUnits = options.retainUnits !== false;
+  const units = retainUnits ? [] : null;
+  let componentCount = 0;
+  let unitCount = 0;
+  let oversizeUnitCount = 0;
+  let oversizeTriangleCount = 0;
+  let packedMultiComponentUnitCount = 0;
+  let packedComponentCount = 0;
+  let oversizedComponentSplitUnitCount = 0;
   for (let renderableIndex = 0; renderableIndex < renderables.length; renderableIndex += 1) {
-    const parts = await partitionRenderable(renderables[renderableIndex], { targetBytes });
-    for (const part of parts) {
-      units.push({
-        ...part,
-        unitId: units.length,
-        sourceRenderableIndex: renderableIndex,
-        targetUnitBytes: targetBytes,
-      });
+    let renderableComponentCount = 0;
+    const parts = await partitionRenderable(renderables[renderableIndex], {
+      targetBytes,
+      onPart: options.onUnit
+        ? async (part) => {
+          renderableComponentCount = part.sourceComponentCount;
+          const unit = {
+            ...part,
+            unitId: unitCount,
+            sourceRenderableIndex: renderableIndex,
+            targetUnitBytes: targetBytes,
+          };
+          if (unit.oversize) {
+            oversizeUnitCount += 1;
+            oversizeTriangleCount += unit.triangleCount;
+          }
+          if (unit.componentCount > 1) {
+            packedMultiComponentUnitCount += 1;
+            packedComponentCount += unit.componentCount;
+          }
+          if (unit.oversizedComponentSplit) oversizedComponentSplitUnitCount += 1;
+          await options.onUnit(unit);
+          if (units) units.push(unit);
+          unitCount += 1;
+        }
+        : null,
+    });
+    if (!options.onUnit) {
+      renderableComponentCount = parts.length
+        ? parts[0].sourceComponentCount
+        : 0;
+      for (const part of parts) {
+        const unit = {
+          ...part,
+          unitId: unitCount,
+          sourceRenderableIndex: renderableIndex,
+          targetUnitBytes: targetBytes,
+        };
+        if (unit.oversize) {
+          oversizeUnitCount += 1;
+          oversizeTriangleCount += unit.triangleCount;
+        }
+        if (unit.componentCount > 1) {
+          packedMultiComponentUnitCount += 1;
+          packedComponentCount += unit.componentCount;
+        }
+        if (unit.oversizedComponentSplit) oversizedComponentSplitUnitCount += 1;
+        if (units) units.push(unit);
+        unitCount += 1;
+      }
     }
+    componentCount += renderableComponentCount;
   }
   return {
     targetUnitBytes: targetBytes,
-    units,
+    partitionSchema: PARTITION_SCHEMA,
+    componentCount,
+    unitCount,
+    partition: {
+      schema: PARTITION_SCHEMA,
+      algorithm: 'shared-vertex connected components with deterministic binned SAH component packing and internal triangle splitting',
+      binCount: SAH_BIN_COUNT,
+      maxGeometryProbeTriangles: MAX_GEOMETRY_PROBE_TRIANGLES,
+      targetUnitBytes: targetBytes,
+      componentCount,
+      packedMultiComponentUnitCount,
+      packedComponentCount,
+      oversizedComponentSplitUnitCount,
+      oversizeUnitCount,
+      oversizeTriangleCount,
+    },
+    units: units || [],
     source: scene.source,
     excluded: [...(scene.excluded || []), ...blendExcluded],
     imageResources: scene.imageResources || [],

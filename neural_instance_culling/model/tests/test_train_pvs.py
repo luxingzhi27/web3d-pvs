@@ -20,9 +20,12 @@ from fixed_geometry_encoder import InstancePointNetPPGeoEncoder  # noqa: E402
 from train_pvs import (  # noqa: E402
     _ambiguity_balanced_pose_sampling,
     _calibration_blend,
+    _calibration_workpoints,
     _initialize_model_from_checkpoint,
     _load_relation_bundle,
+    _recall_guard_schedule_scale,
     _resolve_split,
+    _tail_separation_schedule_scale,
     _validation_key,
     _validate_args,
     _weighted_recall_safety_gate,
@@ -170,6 +173,45 @@ class TrainPvsTests(unittest.TestCase):
         self.assertEqual(_calibration_blend(0, 100, 0.1, 0.2), 0.0)
         self.assertGreater(_calibration_blend(20, 100, 0.1, 0.2), 0.0)
         self.assertEqual(_calibration_blend(99, 100, 0.1, 0.2), 1.0)
+
+    def test_loss_course_uses_total_step_fractions(self) -> None:
+        self.assertEqual(
+            _recall_guard_schedule_scale(100, 1000, 0.10, 0.30, 0.25),
+            0.0,
+        )
+        self.assertAlmostEqual(
+            _recall_guard_schedule_scale(300, 1000, 0.10, 0.30, 0.25),
+            0.25,
+        )
+        self.assertAlmostEqual(
+            _recall_guard_schedule_scale(1000, 1000, 0.10, 0.30, 0.25),
+            1.0,
+        )
+        self.assertEqual(
+            _tail_separation_schedule_scale(100, 1000, 0.10, 0.30),
+            0.0,
+        )
+        self.assertAlmostEqual(
+            _tail_separation_schedule_scale(200, 1000, 0.10, 0.30),
+            0.5,
+        )
+        self.assertAlmostEqual(
+            _tail_separation_schedule_scale(300, 1000, 0.10, 0.30),
+            1.0,
+        )
+
+    def test_unsafe_exact_calibration_point_is_not_replayed_on_validation(self) -> None:
+        rows = [{
+            "threshold": 0.2,
+            "aggregateWeightedRecall": 0.98,
+            "aggregateWeightedRecallLowerConfidenceBound": 0.97,
+            "agg_balanced_accuracy": 0.6,
+            "agg_precision": 0.5,
+        }]
+        selected, diagnostic, frozen = _calibration_workpoints(rows)
+        self.assertIsNone(selected)
+        self.assertIsNotNone(diagnostic)
+        self.assertIsNone(frozen)
 
     def test_warm_start_loads_v4_model_state_but_records_fresh_adamw(self) -> None:
         import torch

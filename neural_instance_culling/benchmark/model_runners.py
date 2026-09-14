@@ -51,7 +51,7 @@ DEFAULT_MODEL_SPECS: dict[str, dict[str, str]] = {
     },
 }
 V4_CALIBRATION_SUMMARY_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-calibration-summary-v4"
-EXACT_CALIBRATION_SCHEMA = "pvs-ifcbench-v4-exact-calibration-v1"
+EXACT_CALIBRATION_SCHEMA = "pvs-v4-exact-calibration-v1"
 
 
 @dataclass

@@ -1,14 +1,18 @@
 """Threshold sweeps and score diagnostics for the current PVS model."""
 from __future__ import annotations
 
+from pathlib import Path
+import tempfile
 from typing import Any
 
 import numpy as np
 import torch
 
-from common.threshold_selection import (
-    select_weighted_precision_workpoint,
-    target_weighted_recall_from_payload,
+from common.culling_metrics import candidate_normalized_occlusion_recall
+from common.exact_calibration import (
+    EXACT_THRESHOLD_SOURCE,
+    FixedPoseBootstrap,
+    select_highest_safe_score_change_point,
 )
 
 
@@ -257,6 +261,479 @@ def score_distribution_summary(
     }
 
 
+def _collect_exact_score_stream(
+    model,
+    split,
+    runtime_features: torch.Tensor,
+    world_aabbs: np.ndarray,
+    device: torch.device,
+    *,
+    poses_per_batch: int,
+    max_steps: int | None,
+    max_candidates_per_pose: int,
+    seed: int,
+    directory: Path,
+    allow_candidate_visible_union: bool,
+) -> dict[str, Any]:
+    """Run one model pass and spill the candidate-aligned score stream to disk."""
+    rng = np.random.default_rng(seed)
+    paths = {
+        "scores": directory / "scores_f32.bin",
+        "labels": directory / "labels_f32.bin",
+        "weights": directory / "weights_f32.bin",
+        "candidateIds": directory / "candidate_ids_u32.bin",
+    }
+    pose_offsets = [0]
+    pose_indices: list[int] = []
+    score_count = 0
+    with (
+        paths["scores"].open("wb") as score_stream,
+        paths["labels"].open("wb") as label_stream,
+        paths["weights"].open("wb") as weight_stream,
+        paths["candidateIds"].open("wb") as candidate_stream,
+    ):
+        for current_pose_indices in split.pose_set_batches(
+            poses_per_batch, rng, max_steps, include_empty=True
+        ):
+            batch = split.build_pose_set_batch(
+                current_pose_indices,
+                world_aabbs,
+                rng,
+                max_candidates_per_pose=max_candidates_per_pose,
+                allow_candidate_visible_union=allow_candidate_visible_union,
+                include_empty=True,
+            )
+            batch_offsets = np.asarray(batch["pose_offsets"], dtype=np.int64)
+            batch_visible_counts = np.asarray(batch.get("visible_counts", []), dtype=np.int64)
+            empty_rows = np.flatnonzero(np.diff(batch_offsets) == 0)
+            for row_index in empty_rows.tolist():
+                if (
+                    row_index < batch_visible_counts.size
+                    and int(batch_visible_counts[row_index]) != 0
+                ):
+                    raise ValueError(
+                        "Stored candidate semantics are invalid at an empty-candidate pose: "
+                        "the pose has visible GT instances but no candidate references."
+                    )
+
+            if batch["instance"].size:
+                camera = torch.from_numpy(batch["camera"]).to(device)
+                camera_world = torch.from_numpy(batch["camera_world"]).to(device)
+                view = torch.from_numpy(batch["camera_view"]).to(device)
+                ids = torch.from_numpy(batch["instance"]).to(device)
+                query_center_world = torch.from_numpy(batch["query_center_world"]).to(device)
+                viewcell_radius_m = torch.from_numpy(batch["viewcell_radius_m"]).to(device)
+                with torch.no_grad():
+                    logits = model.compute_visibility_logits(
+                        camera,
+                        view,
+                        camera_world,
+                        ids,
+                        runtime_features=runtime_features,
+                        query_center_world=query_center_world,
+                        viewcell_radius_m=viewcell_radius_m,
+                        pose_offsets=batch["pose_offsets"],
+                    )
+                    scores = torch.sigmoid(logits).detach().cpu().numpy().reshape(-1)
+                scores = np.asarray(scores, dtype="<f4")
+            else:
+                scores = np.zeros((0,), dtype="<f4")
+            labels = np.asarray(batch["target"], dtype="<f4").reshape(-1)
+            weights = np.asarray(
+                batch.get("visible_weights", np.zeros_like(labels)), dtype="<f4"
+            ).reshape(-1)
+            candidate_ids = np.asarray(batch["instance"], dtype="<u4").reshape(-1)
+            if not (scores.size == labels.size == weights.size == candidate_ids.size):
+                raise ValueError("exact calibration score stream is not candidate-aligned")
+            scores.tofile(score_stream)
+            labels.tofile(label_stream)
+            weights.tofile(weight_stream)
+            candidate_ids.tofile(candidate_stream)
+            pose_offsets.extend((score_count + batch_offsets[1:]).tolist())
+            pose_indices.extend(np.asarray(current_pose_indices, dtype=np.int64).tolist())
+            score_count += int(scores.size)
+
+    return {
+        "paths": paths,
+        "scoreCount": int(score_count),
+        "poseOffsets": np.asarray(pose_offsets, dtype=np.int64),
+        "poseIndices": np.asarray(pose_indices, dtype=np.int64),
+    }
+
+
+def _open_exact_array(path: Path, dtype: str, count: int) -> np.ndarray:
+    if int(count) == 0:
+        return np.zeros((0,), dtype=np.dtype(dtype))
+    expected = int(count) * np.dtype(dtype).itemsize
+    if not path.is_file() or path.stat().st_size != expected:
+        raise ValueError(f"exact calibration stream has an invalid file size: {path}")
+    return np.memmap(path, dtype=dtype, mode="r", shape=(int(count),))
+
+
+def _exact_metrics_at_threshold(
+    scores: np.ndarray,
+    target: np.ndarray,
+    weights: np.ndarray,
+    candidate_ids: np.ndarray,
+    pose_offsets: np.ndarray,
+    pose_indices: np.ndarray,
+    threshold: float,
+    bootstrap: FixedPoseBootstrap,
+    *,
+    collect_score_stats: bool,
+    collect_per_pose: bool,
+    collect_raw_scores: bool,
+    instance_to_glb: np.ndarray | None,
+    glb_bytes: np.ndarray | None,
+) -> dict[str, Any]:
+    """Compute one exact threshold row without a threshold-by-candidate matrix."""
+    values = np.asarray(scores, dtype=np.float32).reshape(-1)
+    labels = np.asarray(target, dtype=np.float32).reshape(-1)
+    visible_weights = np.asarray(weights, dtype=np.float64).reshape(-1)
+    candidates = np.asarray(candidate_ids, dtype=np.uint32).reshape(-1)
+    offsets = np.asarray(pose_offsets, dtype=np.int64).reshape(-1)
+    poses = np.asarray(pose_indices, dtype=np.int64).reshape(-1)
+    if not (values.size == labels.size == visible_weights.size == candidates.size):
+        raise ValueError("exact calibration arrays are not candidate-aligned")
+    if offsets.size != poses.size + 1 or int(offsets[0]) != 0 or int(offsets[-1]) != values.size:
+        raise ValueError("exact calibration pose offsets are invalid")
+    if bool(np.any(np.diff(offsets) < 0)):
+        raise ValueError("exact calibration pose offsets are not monotone")
+    if not bool(np.isfinite(values).all()) or not bool(np.isfinite(labels).all()):
+        raise FloatingPointError("exact calibration score stream contains non-finite values")
+    positive = labels > 0.5
+    predicted = values >= np.float32(threshold)
+    row_ids = np.repeat(np.arange(poses.size, dtype=np.int32), np.diff(offsets))
+    tp_mask = predicted & positive
+    fp_mask = predicted & ~positive
+    fn_mask = ~predicted & positive
+    tn_mask = ~predicted & ~positive
+    tp_pose = np.bincount(row_ids, weights=tp_mask.astype(np.float64), minlength=poses.size)
+    fp_pose = np.bincount(row_ids, weights=fp_mask.astype(np.float64), minlength=poses.size)
+    fn_pose = np.bincount(row_ids, weights=fn_mask.astype(np.float64), minlength=poses.size)
+    tn_pose = np.bincount(row_ids, weights=tn_mask.astype(np.float64), minlength=poses.size)
+    weighted_tp_pose = np.bincount(
+        row_ids,
+        weights=np.where(tp_mask, visible_weights, 0.0),
+        minlength=poses.size,
+    )
+    gt_mass = np.bincount(
+        row_ids,
+        weights=np.where(positive, visible_weights, 0.0),
+        minlength=poses.size,
+    )
+    candidate_counts = np.diff(offsets).astype(np.float64)
+    gt_counts = tp_pose + fn_pose
+    predicted_counts = tp_pose + fp_pose
+    pose_precision = np.divide(
+        tp_pose,
+        predicted_counts,
+        out=np.ones_like(tp_pose),
+        where=predicted_counts > 0.0,
+    )
+    pose_recall = np.divide(
+        tp_pose,
+        gt_counts,
+        out=np.ones_like(tp_pose),
+        where=gt_counts > 0.0,
+    )
+    pose_specificity = np.divide(
+        tn_pose,
+        tn_pose + fp_pose,
+        out=np.ones_like(tn_pose),
+        where=tn_pose + fp_pose > 0.0,
+    )
+    pose_weighted_recall = np.divide(
+        weighted_tp_pose,
+        gt_mass,
+        out=np.ones_like(weighted_tp_pose),
+        where=gt_mass > 1e-12,
+    )
+    pose_accuracy = np.divide(
+        tp_pose + tn_pose,
+        candidate_counts,
+        out=np.ones_like(candidate_counts),
+        where=candidate_counts > 0.0,
+    )
+    pose_balanced_accuracy = 0.5 * (pose_recall + pose_specificity)
+    pose_useful_cull = np.divide(
+        tn_pose,
+        candidate_counts,
+        out=np.ones_like(tn_pose),
+        where=candidate_counts > 0.0,
+    )
+    pose_bad_cull = np.divide(
+        fn_pose,
+        candidate_counts,
+        out=np.zeros_like(fn_pose),
+        where=candidate_counts > 0.0,
+    )
+    tp = float(tp_pose.sum())
+    fp = float(fp_pose.sum())
+    fn = float(fn_pose.sum())
+    tn = float(tn_pose.sum())
+    candidate_count = float(candidate_counts.sum())
+    gt_count = float(gt_counts.sum())
+    predicted_count = float(predicted_counts.sum())
+    weighted_tp = float(weighted_tp_pose.sum())
+    weighted_gt = float(gt_mass.sum())
+    aggregate_weighted_recall = weighted_tp / max(1e-12, weighted_gt)
+    aggregate_lcb = bootstrap.lower_confidence_bound(weighted_tp_pose, gt_mass)
+    aggregate_recall = tp / max(1.0, gt_count)
+    aggregate_precision = tp / max(1.0, tp + fp)
+    aggregate_specificity = tn / max(1.0, tn + fp)
+    pose_f1 = 2.0 * pose_precision * pose_recall / np.maximum(1e-8, pose_precision + pose_recall)
+    pose_jaccard = np.divide(
+        tp_pose,
+        tp_pose + fp_pose + fn_pose,
+        out=np.ones_like(tp_pose),
+        where=tp_pose + fp_pose + fn_pose > 0.0,
+    )
+
+    predicted_glb_counts = 0.0
+    predicted_glb_bytes = 0.0
+    candidate_glb_counts = 0.0
+    candidate_glb_bytes = 0.0
+    resource_mapping = None
+    resource_bytes = None
+    if (instance_to_glb is None) != (glb_bytes is None):
+        raise ValueError("instance_to_glb and glb_bytes must be supplied together")
+    if instance_to_glb is not None and glb_bytes is not None:
+        resource_mapping = np.asarray(instance_to_glb, dtype=np.int64).reshape(-1)
+        resource_bytes = np.asarray(glb_bytes, dtype=np.float64).reshape(-1)
+        if candidates.size and (
+            int(candidates.max()) >= resource_mapping.size
+            or int(candidates.min()) < 0
+        ):
+            raise ValueError("exact calibration candidate ID is outside runtime metadata")
+        if not bool(np.isfinite(resource_bytes).all()) or bool(np.any(resource_bytes < 0.0)):
+            raise ValueError("glb_bytes must be finite and non-negative")
+        for start, end in zip(offsets[:-1], offsets[1:], strict=True):
+            pose_candidates = candidates[int(start) : int(end)]
+            pose_glbs = np.unique(resource_mapping[pose_candidates.astype(np.int64, copy=False)])
+            predicted_pose_glbs = np.unique(
+                resource_mapping[pose_candidates[predicted[int(start) : int(end)]].astype(np.int64, copy=False)]
+            )
+            candidate_glb_counts += float(pose_glbs.size)
+            predicted_glb_counts += float(predicted_pose_glbs.size)
+            if pose_glbs.size:
+                candidate_glb_bytes += float(resource_bytes[pose_glbs].sum())
+            if predicted_pose_glbs.size:
+                predicted_glb_bytes += float(resource_bytes[predicted_pose_glbs].sum())
+
+    pose_count = max(1, int(poses.size))
+    row: dict[str, Any] = {
+        "threshold": float(np.float32(threshold)),
+        "thresholdDtype": "float32",
+        "thresholdIsScoreChangePoint": bool(np.any(values == np.float32(threshold))),
+        "thresholdSource": EXACT_THRESHOLD_SOURCE,
+        "pose_precision": float(pose_precision.mean()) if poses.size else 1.0,
+        "pose_recall": float(pose_recall.mean()) if poses.size else 1.0,
+        "pose_f1": float(pose_f1.mean()) if poses.size else 1.0,
+        "pose_jaccard": float(pose_jaccard.mean()) if poses.size else 1.0,
+        "pose_weighted_recall": float(pose_weighted_recall.mean()) if poses.size else 1.0,
+        "pose_specificity": float(pose_specificity.mean()) if poses.size else 1.0,
+        "pose_accuracy": float(pose_accuracy.mean()) if poses.size else 1.0,
+        "pose_balanced_accuracy": float(pose_balanced_accuracy.mean()) if poses.size else 1.0,
+        "pose_useful_cull": float(pose_useful_cull.mean()) if poses.size else 1.0,
+        "pose_bad_cull": float(pose_bad_cull.mean()) if poses.size else 0.0,
+        "candidate_normalized_occlusion_recall": candidate_normalized_occlusion_recall(
+            tn_pose, fp_pose, candidate_counts
+        ),
+        "agg_precision": float(aggregate_precision),
+        "agg_recall": float(aggregate_recall),
+        "agg_weighted_recall": float(aggregate_weighted_recall),
+        "agg_specificity": float(aggregate_specificity),
+        "agg_accuracy": float((tp + tn) / max(1.0, candidate_count)),
+        "agg_balanced_accuracy": float(0.5 * (aggregate_recall + aggregate_specificity)),
+        "agg_useful_cull": float(tn / max(1.0, candidate_count)),
+        "agg_bad_cull": float(fn / max(1.0, candidate_count)),
+        "agg_f1": float(2.0 * aggregate_precision * aggregate_recall / max(1e-8, aggregate_precision + aggregate_recall)),
+        "avg_pred_count": float(predicted_count / pose_count),
+        "avg_gt_count": float(gt_count / pose_count),
+        "avg_candidate_count": float(candidate_count / pose_count),
+        "avg_pred_glb_count": float(predicted_glb_counts / pose_count),
+        "avg_pred_glb_bytes": float(predicted_glb_bytes / pose_count),
+        "avg_candidate_glb_count": float(candidate_glb_counts / pose_count),
+        "avg_candidate_glb_bytes": float(candidate_glb_bytes / pose_count),
+        "candidate_reduction_ratio": float(1.0 - predicted_count / max(1.0, candidate_count)),
+        "aggregateWeightedRecall": float(aggregate_weighted_recall),
+        "aggregateWeightedRecallLowerConfidenceBound": float(aggregate_lcb),
+        "aggregate_weighted_recall": float(aggregate_weighted_recall),
+        "weighted_recall_lower_confidence_bound": float(aggregate_lcb),
+        "poseMacroWeightedRecall": float(pose_weighted_recall.mean()) if poses.size else 1.0,
+        "poseMacroWeightedRecallLowerConfidenceBound": None,
+        "weightedRecallBootstrapReplicates": int(bootstrap.replicates),
+        "tp": int(tp),
+        "fp": int(fp),
+        "fn": int(fn),
+        "tn": int(tn),
+        "eval_pose_count": int(poses.size),
+        "zero_gt_pose_count": int(np.count_nonzero(gt_counts <= 0.0)),
+        "scoreCount": int(values.size),
+        "positiveCount": int(np.count_nonzero(positive)),
+        "positiveFraction": float(np.mean(positive)) if values.size else 0.0,
+    }
+    if collect_score_stats:
+        row["scoreDistribution"] = score_distribution_summary(
+            values, labels, visible_weights
+        )
+    if resource_mapping is not None:
+        row["glb_bytes_available"] = True
+    row["_pose_weighted_recall_values"] = pose_weighted_recall.tolist()
+    if collect_per_pose:
+        per_pose: list[dict[str, Any]] = []
+        for pose_row, pose_index in enumerate(poses.tolist()):
+            start = int(offsets[pose_row])
+            end = int(offsets[pose_row + 1])
+            local_candidates = candidates[start:end]
+            local_predicted = predicted[start:end]
+            local_candidate_count = float(end - start)
+            local_candidate_glbs = np.zeros((0,), dtype=np.int64)
+            local_predicted_glbs = np.zeros((0,), dtype=np.int64)
+            local_candidate_bytes = 0.0
+            local_predicted_bytes = 0.0
+            if resource_mapping is not None and resource_bytes is not None:
+                local_candidate_glbs = np.unique(
+                    resource_mapping[local_candidates.astype(np.int64, copy=False)]
+                )
+                local_predicted_glbs = np.unique(
+                    resource_mapping[local_candidates[local_predicted].astype(np.int64, copy=False)]
+                )
+                local_candidate_bytes = float(resource_bytes[local_candidate_glbs].sum()) if local_candidate_glbs.size else 0.0
+                local_predicted_bytes = float(resource_bytes[local_predicted_glbs].sum()) if local_predicted_glbs.size else 0.0
+            per_pose.append({
+                "poseIndex": int(pose_index),
+                "candidateIds": local_candidates.tolist(),
+                "predictedIds": local_candidates[local_predicted].tolist(),
+                "candidateScores": values[start:end].astype(float).tolist() if collect_raw_scores else None,
+                "targets": labels[start:end].astype(np.uint8).tolist() if collect_raw_scores else None,
+                "visibleWeights": visible_weights[start:end].astype(float).tolist() if collect_raw_scores else None,
+                "metrics": {
+                    "precision": float(pose_precision[pose_row]),
+                    "recall": float(pose_recall[pose_row]),
+                    "weightedRecall": float(pose_weighted_recall[pose_row]),
+                    "f1": float(pose_f1[pose_row]),
+                    "jaccard": float(pose_jaccard[pose_row]),
+                    "accuracy": float(pose_accuracy[pose_row]),
+                    "balancedAccuracy": float(pose_balanced_accuracy[pose_row]),
+                    "specificity": float(pose_specificity[pose_row]),
+                    "usefulCull": float(pose_useful_cull[pose_row]),
+                    "badCull": float(pose_bad_cull[pose_row]),
+                    "avgPredCount": float(local_predicted.sum()),
+                    "avgCandidateCount": local_candidate_count,
+                    "avgGtCount": float(gt_counts[pose_row]),
+                    "candidateGlbCount": float(local_candidate_glbs.size),
+                    "candidateGlbBytes": local_candidate_bytes,
+                    "predictedGlbCount": float(local_predicted_glbs.size),
+                    "predictedGlbBytes": local_predicted_bytes,
+                    "glbByteReduction": float(
+                        1.0 - local_predicted_bytes / local_candidate_bytes
+                        if local_candidate_bytes > 0.0 else 0.0
+                    ),
+                    "missPixelRate": 0.0,
+                    "wrongIdPixelRate": 0.0,
+                    "extraPixelRate": 0.0,
+                },
+            })
+        row["_per_pose"] = per_pose
+    return row
+
+
+def evaluate_exact_calibration(
+    model,
+    split,
+    runtime_features: torch.Tensor,
+    world_aabbs: np.ndarray,
+    device: torch.device,
+    *,
+    poses_per_batch: int,
+    max_steps: int | None,
+    max_candidates_per_pose: int,
+    seed: int,
+    bootstrap_replicates: int,
+    collect_pose_stats: bool = True,
+    allow_candidate_visible_union: bool = False,
+    collect_score_stats: bool = True,
+    collect_per_pose: bool = False,
+    collect_raw_scores: bool = False,
+    instance_to_glb: np.ndarray | None = None,
+    glb_bytes: np.ndarray | None = None,
+    target_weighted_recall: float = 0.99,
+) -> list[dict[str, Any]]:
+    """Evaluate calibration at its exact score change-points and return one row.
+
+    The returned row is the selected workpoint (or the lowest-score diagnostic
+    point when no workpoint passes the safety gate).  Validation must call the
+    ordinary evaluator with one frozen threshold instead of this function.
+    """
+    if str(getattr(split, "split_name", "")).lower() == "test":
+        raise ValueError("exact calibration is forbidden from reading the test split")
+    if collect_raw_scores and not collect_per_pose:
+        raise ValueError("raw score capture requires per-pose collection")
+    if not collect_pose_stats:
+        raise ValueError("exact calibration requires pose-level bootstrap statistics")
+    model.eval()
+    with tempfile.TemporaryDirectory(prefix="pvs_exact_calibration_") as temporary:
+        stream = _collect_exact_score_stream(
+            model,
+            split,
+            runtime_features,
+            world_aabbs,
+            device,
+            poses_per_batch=poses_per_batch,
+            max_steps=max_steps,
+            max_candidates_per_pose=max_candidates_per_pose,
+            seed=seed,
+            directory=Path(temporary),
+            allow_candidate_visible_union=allow_candidate_visible_union,
+        )
+        count = int(stream["scoreCount"])
+        scores = _open_exact_array(stream["paths"]["scores"], "<f4", count)
+        labels = _open_exact_array(stream["paths"]["labels"], "<f4", count)
+        weights = _open_exact_array(stream["paths"]["weights"], "<f4", count)
+        candidate_ids = _open_exact_array(stream["paths"]["candidateIds"], "<u4", count)
+        selection = select_highest_safe_score_change_point(
+            scores,
+            labels,
+            weights,
+            stream["poseOffsets"],
+            bootstrap_replicates=bootstrap_replicates,
+            bootstrap_seed=seed,
+            target_weighted_recall=target_weighted_recall,
+        )
+        gt_mass = np.bincount(
+            np.repeat(
+                np.arange(stream["poseIndices"].size, dtype=np.int32),
+                np.diff(stream["poseOffsets"]),
+            ),
+            weights=np.where(labels > 0.5, np.asarray(weights, dtype=np.float64), 0.0),
+            minlength=stream["poseIndices"].size,
+        )
+        bootstrap = FixedPoseBootstrap.from_gt_mass(
+            gt_mass,
+            replicates=bootstrap_replicates,
+            seed=seed,
+        )
+        row = _exact_metrics_at_threshold(
+            scores,
+            labels,
+            weights,
+            candidate_ids,
+            stream["poseOffsets"],
+            stream["poseIndices"],
+            selection["threshold"],
+            bootstrap,
+            collect_score_stats=collect_score_stats,
+            collect_per_pose=collect_per_pose,
+            collect_raw_scores=collect_raw_scores,
+            instance_to_glb=instance_to_glb,
+            glb_bytes=glb_bytes,
+        )
+        row["thresholdSelection"] = selection
+        return [row]
+
+
 def evaluate_thresholds(
     model,
     split,
@@ -267,7 +744,7 @@ def evaluate_thresholds(
     max_steps: int | None,
     max_candidates_per_pose: int,
     seed: int,
-    thresholds: np.ndarray,
+    thresholds: np.ndarray | None,
     collect_pose_stats: bool = False,
     allow_candidate_visible_union: bool = False,
     bootstrap_replicates: int = 0,
@@ -279,6 +756,26 @@ def evaluate_thresholds(
 ) -> list[dict[str, Any]]:
     if collect_raw_scores and not collect_per_pose:
         raise ValueError("raw score capture requires per-pose collection")
+    if thresholds is None:
+        return evaluate_exact_calibration(
+            model,
+            split,
+            runtime_features,
+            world_aabbs,
+            device,
+            poses_per_batch=poses_per_batch,
+            max_steps=max_steps,
+            max_candidates_per_pose=max_candidates_per_pose,
+            seed=seed,
+            bootstrap_replicates=bootstrap_replicates,
+            collect_pose_stats=collect_pose_stats,
+            allow_candidate_visible_union=allow_candidate_visible_union,
+            collect_score_stats=collect_score_stats,
+            collect_per_pose=collect_per_pose,
+            collect_raw_scores=collect_raw_scores,
+            instance_to_glb=instance_to_glb,
+            glb_bytes=glb_bytes,
+        )
     model.eval()
     rng = np.random.default_rng(seed)
     th = thresholds.astype(np.float32)

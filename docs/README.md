@@ -1,6 +1,6 @@
 # NeuralStreamWeb3D 文档索引
 
-更新时间：2026-09-10
+更新时间：2026-09-15
 
 当前论文主线是 HKUST 与 Metropolis/IFCBench 两场景的 V4 实例级可见性模型：离线固定实例特征和遮挡生存系数，浏览器以 `66°` 后退视锥建立候选，以真实 `60°` 视锥完成显示过滤。两场景三种子正式 test 已完成，运行成员均按 validation 规则冻结。
 
@@ -14,6 +14,7 @@
 |---|---|
 | [`evaluation/pvs_gt_convergence_2026-09-09.md`](evaluation/pvs_gt_convergence_2026-09-09.md) | 两场景现有 subpose 的 GT 并集收敛初检与 128 点补采样要求 |
 | [`evaluation/ifcbench_calibration_finetune_2026-09-09.md`](evaluation/ifcbench_calibration_finetune_2026-09-09.md) | IFCBench 精确校准、warm-start 微调扫描与三种子确认执行记录 |
+| [`evaluation/pvs_exact_recalibration_2026-09-15.md`](evaluation/pvs_exact_recalibration_2026-09-15.md) | HKUST/IFCBench 冻结 Full checkpoint 的 float32 精确阈值重校准与 validation 选择 |
 | [`evaluation/ifcbench_mainline_finalization_template.md`](evaluation/ifcbench_mainline_finalization_template.md) | IFCBench validation 决策、三种子冻结 test 与运行资产导出的最终记录模板 |
 | [`current/pvs_mainline_2026-08-23.md`](current/pvs_mainline_2026-08-23.md) | V4 模型结构、代码入口、主 split、当前工作点和 validation 摘要 |
 | [`experiments/pvs_mainline_training_2026-08-21.md`](experiments/pvs_mainline_training_2026-08-21.md) | 三种子 `40 × 900` 正式训练及六项核心消融协议 |

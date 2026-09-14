@@ -78,7 +78,7 @@ class IfcbenchCalibrationFinetuneRunnerTests(unittest.TestCase):
     ) -> None:
         stage = root / "scan" / config
         calibration = {
-            "schema": "pvs-ifcbench-v4-exact-calibration-v1",
+            "schema": "pvs-v4-exact-calibration-v1",
             "checkpoint": f"/models/scan/{config}/last.pt",
             "status": calibration_status,
             "selection": {"threshold": 0.25},
@@ -86,7 +86,7 @@ class IfcbenchCalibrationFinetuneRunnerTests(unittest.TestCase):
             "testRead": False,
         }
         validation = {
-            "schema": "pvs-ifcbench-v4-frozen-threshold-validation-v1",
+            "schema": "pvs-v4-frozen-threshold-validation-v1",
             "metrics": _validation_metrics(
                 weighted_recall=weighted_recall,
                 lcb=lcb,
@@ -252,6 +252,12 @@ class IfcbenchCalibrationFinetuneRunnerTests(unittest.TestCase):
     def test_score_command_rejects_test_split(self) -> None:
         with self.assertRaisesRegex(ValueError, "calibration and validation"):
             score_command(Path("/data"), Path("/checkpoint.pt"), "test", Path("/out"))
+
+    def test_score_command_passes_the_generic_scene_name(self) -> None:
+        command = score_command(
+            Path("/data"), Path("/checkpoint.pt"), "calibration", Path("/out")
+        )
+        self.assertEqual(command[command.index("--scene") + 1], "IFCBench/Fantasy Metropolis")
 
 
 if __name__ == "__main__":

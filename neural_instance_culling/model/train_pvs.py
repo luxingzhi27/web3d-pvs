@@ -25,6 +25,7 @@ if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
 
 from common.runtime_meta import load_runtime_meta  # noqa: E402
+from common.exact_calibration import EXACT_THRESHOLD_SOURCE  # noqa: E402
 from common.stratified_survival_sampler import StratifiedSurvivalObservationSampler  # noqa: E402
 from common.survival_loss import stratified_survival_censoring_loss  # noqa: E402
 from common.threshold_selection import (  # noqa: E402
@@ -38,7 +39,7 @@ from common.train_observed_relation_csr import (  # noqa: E402
     validate_survival_observations_v3,
 )
 from common.visibility_loss import pose_balanced_rvl_contrastive_visibility_loss  # noqa: E402
-from pvs_threshold_metrics import evaluate_thresholds, threshold_grid  # noqa: E402
+from pvs_threshold_metrics import evaluate_thresholds  # noqa: E402
 from pose_csr_dataset import PoseCSRDataset  # noqa: E402
 from pvs_model import (  # noqa: E402
     BoundedRelationSurvivalMomentModel,
@@ -370,11 +371,12 @@ def _evaluate(
     world_aabbs: np.ndarray,
     device: torch.device,
     *,
-    thresholds: np.ndarray,
+    thresholds: np.ndarray | None,
     seed: int,
     poses_per_batch: int,
     max_poses: int,
     bootstrap_replicates: int,
+    collect_score_stats: bool = False,
     instance_to_glb: np.ndarray | None = None,
     glb_bytes: np.ndarray | None = None,
 ) -> list[dict[str, Any]]:
@@ -385,6 +387,7 @@ def _evaluate(
         seed=seed, thresholds=thresholds, collect_pose_stats=True,
         allow_candidate_visible_union=False,
         bootstrap_replicates=bootstrap_replicates,
+        collect_score_stats=collect_score_stats,
         instance_to_glb=instance_to_glb, glb_bytes=glb_bytes,
     )
 
@@ -408,7 +411,9 @@ def _calibration_workpoints(rows: list[dict[str, Any]]):
         minimum_lower_confidence_bound=WEIGHTED_RECALL_FLOOR,
     )
     diagnostic = _diagnostic_row(rows)
-    return safe, diagnostic, safe if safe is not None else diagnostic
+    # Validation is a replay of a frozen safe calibration threshold.  An
+    # unsafe diagnostic point is never promoted to a validation threshold.
+    return safe, diagnostic, safe
 
 
 def _weighted_recall_safety_gate(row: Mapping[str, Any] | None) -> bool:
@@ -437,6 +442,53 @@ def _calibration_blend(step: int, total: int, warmup: float, ramp: float) -> flo
     if ramp <= 0:
         return 1.0
     return float(np.clip((progress - warmup) / ramp, 0, 1))
+
+
+def _recall_guard_schedule_scale(
+    step: int,
+    total_steps: int,
+    zero_fraction: float,
+    middle_end_fraction: float,
+    middle_scale: float,
+) -> float:
+    """Ramp the guard in two stages over total training progress.
+
+    The first interval is zero, the middle interval rises slowly to
+    ``middle_scale``, and the remaining interval rises linearly to one.  The
+    boundaries are fractions of total optimizer steps, so the schedule does
+    not depend on a hard-coded epoch count.
+    """
+    progress = float(np.clip(step / max(1, total_steps), 0.0, 1.0))
+    zero = float(zero_fraction)
+    middle_end = float(middle_end_fraction)
+    plateau = float(middle_scale)
+    if progress <= zero:
+        return 0.0
+    if progress <= middle_end:
+        return float(plateau * (progress - zero) / max(1e-8, middle_end - zero))
+    return float(
+        plateau
+        + (1.0 - plateau)
+        * (progress - middle_end)
+        / max(1e-8, 1.0 - middle_end)
+    )
+
+
+def _tail_separation_schedule_scale(
+    step: int,
+    total_steps: int,
+    zero_fraction: float,
+    ramp_end_fraction: float,
+) -> float:
+    """Keep tail separation off, then ramp it to one over total-step fractions."""
+    progress = float(np.clip(step / max(1, total_steps), 0.0, 1.0))
+    zero = float(zero_fraction)
+    ramp_end = float(ramp_end_fraction)
+    if progress <= zero:
+        return 0.0
+    if progress >= ramp_end:
+        return 1.0
+    return float((progress - zero) / max(1e-8, ramp_end - zero))
 
 
 def _checkpoint(
@@ -707,7 +759,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--integrated-rvl-pose-cvar-fraction", type=float, default=0.25)
     parser.add_argument("--integrated-rvl-pose-cvar-weight", type=float, default=0.25)
     parser.add_argument("--integrated-separation-weight", type=float, default=0.20)
-    parser.add_argument("--integrated-tail-ramp-fraction", type=float, default=0.15)
+    parser.add_argument(
+        "--integrated-rvl-recall-guard-zero-fraction",
+        type=float,
+        default=0.10,
+        help="fraction of total steps with recall guard scale fixed at zero",
+    )
+    parser.add_argument(
+        "--integrated-rvl-recall-guard-middle-end-fraction",
+        type=float,
+        default=0.30,
+        help="fraction of total steps where the guard leaves its slow middle ramp",
+    )
+    parser.add_argument(
+        "--integrated-rvl-recall-guard-middle-scale",
+        type=float,
+        default=0.25,
+        help="guard scale reached at the end of the slow middle ramp",
+    )
+    parser.add_argument(
+        "--integrated-tail-zero-fraction",
+        type=float,
+        default=0.10,
+        help="fraction of total steps with tail separation disabled",
+    )
+    parser.add_argument(
+        "--integrated-tail-ramp-fraction",
+        type=float,
+        default=0.30,
+        help="fraction of total steps where tail separation reaches full weight",
+    )
     parser.add_argument("--frontier-positive-mass-fraction", type=float, default=0.005)
     parser.add_argument("--frontier-positive-count-cap", type=int, default=64)
     parser.add_argument("--frontier-negative-fraction", type=float, default=0.01)
@@ -736,6 +817,11 @@ def _validate_args(args: argparse.Namespace) -> None:
         args.instance_calibration_max_abs, args.sparse_instance_penalty,
         args.relation_gradient_cap, args.integrated_rvl_recall_guard_weight,
         args.integrated_rvl_recall_temperature, args.integrated_separation_weight,
+        args.integrated_rvl_recall_guard_zero_fraction,
+        args.integrated_rvl_recall_guard_middle_end_fraction,
+        args.integrated_rvl_recall_guard_middle_scale,
+        args.integrated_tail_zero_fraction,
+        args.integrated_tail_ramp_fraction,
         args.frontier_margin, args.frontier_temperature,
     )
     if not all(math.isfinite(value) and value >= 0 for value in values):
@@ -761,6 +847,24 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("ambiguity-balanced pose sampling requires a positive hard-pose fraction")
     if not 0 < args.hard_pose_quantile < 1:
         raise ValueError("hard-pose quantile must lie strictly between 0 and 1")
+    if not (
+        0.0 <= args.integrated_rvl_recall_guard_zero_fraction
+        < args.integrated_rvl_recall_guard_middle_end_fraction
+        < 1.0
+    ):
+        raise ValueError(
+            "recall guard schedule requires 0 <= zero fraction < middle end fraction < 1"
+        )
+    if not 0.0 <= args.integrated_rvl_recall_guard_middle_scale <= 1.0:
+        raise ValueError("recall guard middle scale must lie in [0, 1]")
+    if not (
+        0.0 <= args.integrated_tail_zero_fraction
+        < args.integrated_tail_ramp_fraction
+        <= 1.0
+    ):
+        raise ValueError(
+            "tail separation schedule requires 0 <= zero fraction < ramp end fraction <= 1"
+        )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -901,6 +1005,32 @@ def main(argv: list[str] | None = None) -> None:
                 dataset.meta.get("frontendRenderFovYDeg", 60.0)
             ),
         },
+        "trainingCourse": {
+            "schema": "pvs-total-step-loss-course-v1",
+            "unit": "fraction_of_total_optimizer_steps",
+            "totalSteps": int(total_steps),
+            "recallGuard": {
+                "finalWeight": float(args.integrated_rvl_recall_guard_weight),
+                "zeroFraction": float(args.integrated_rvl_recall_guard_zero_fraction),
+                "middleEndFraction": float(
+                    args.integrated_rvl_recall_guard_middle_end_fraction
+                ),
+                "middleScale": float(args.integrated_rvl_recall_guard_middle_scale),
+                "scaleFunction": "zero_then_slow_ramp_then_linear_to_one",
+            },
+            "tailSeparation": {
+                "finalWeight": float(args.integrated_separation_weight),
+                "zeroFraction": float(args.integrated_tail_zero_fraction),
+                "rampEndFraction": float(args.integrated_tail_ramp_fraction),
+                "scaleFunction": "zero_then_linear_to_one",
+            },
+            "observedScaleFields": [
+                "recallGuardScheduleScale",
+                "recallGuardEffectiveWeight",
+                "tailSeparationScheduleScale",
+                "tailSeparationEffectiveWeight",
+            ],
+        },
         "occlusionRepresentation": dict(model.config["occlusionRepresentation"]),
         "candidateUnion": False,
         "testRead": False,
@@ -962,6 +1092,22 @@ def main(argv: list[str] | None = None) -> None:
                 )
             )
             model.set_instance_calibration_blend(blend)
+            recall_guard_scale = _recall_guard_schedule_scale(
+                global_step,
+                total_steps,
+                args.integrated_rvl_recall_guard_zero_fraction,
+                args.integrated_rvl_recall_guard_middle_end_fraction,
+                args.integrated_rvl_recall_guard_middle_scale,
+            )
+            tail_separation_scale = _tail_separation_schedule_scale(
+                global_step,
+                total_steps,
+                args.integrated_tail_zero_fraction,
+                args.integrated_tail_ramp_fraction,
+            )
+            effective_recall_guard_weight = (
+                args.integrated_rvl_recall_guard_weight * recall_guard_scale
+            )
             runtime, coefficients, coefficient_diagnostics = _runtime_features(
                 model, geometry, relation_tensors, local_ids, structural_ids
             )
@@ -980,31 +1126,18 @@ def main(argv: list[str] | None = None) -> None:
                 viewcell_radius_m=tensors["viewcell_radius_m"].float(),
                 pose_offsets=tensors["pose_offsets"].long(),
             )
-            separation_scale = (
-                1.0
-                if args.init_checkpoint is not None
-                else (
-                    min(
-                        1.0,
-                        (global_step / max(1, total_steps))
-                        / max(args.integrated_tail_ramp_fraction, 1e-8),
-                    )
-                    if args.integrated_tail_ramp_fraction > 0
-                    else 1.0
-                )
-            )
             visibility_loss, visibility_parts = pose_balanced_rvl_contrastive_visibility_loss(
                 logits,
                 tensors["target"].float(),
                 tensors["pose_offsets"].long(),
                 tensors["visible_weights"].float(),
-                recall_guard_weight=args.integrated_rvl_recall_guard_weight,
+                recall_guard_weight=effective_recall_guard_weight,
                 recall_target=args.integrated_rvl_recall_target,
                 recall_temperature=args.integrated_rvl_recall_temperature,
                 recall_pose_cvar_fraction=args.integrated_rvl_pose_cvar_fraction,
                 recall_pose_cvar_weight=args.integrated_rvl_pose_cvar_weight,
                 separation_weight=args.integrated_separation_weight,
-                separation_scale=separation_scale,
+                separation_scale=tail_separation_scale,
                 positive_mass_fraction=args.frontier_positive_mass_fraction,
                 positive_count_cap=args.frontier_positive_count_cap,
                 negative_top_fraction=args.frontier_negative_fraction,
@@ -1056,6 +1189,12 @@ def main(argv: list[str] | None = None) -> None:
                 "lossRegularizationWeighted": args.regularization_weight * regularization,
                 "lossInstanceCalibrationWeighted": args.instance_calibration_regularization_weight * calibration_regularization,
                 "instanceCalibrationBlend": blend,
+                "recallGuardScheduleScale": recall_guard_scale,
+                "recallGuardEffectiveWeight": effective_recall_guard_weight,
+                "tailSeparationScheduleScale": tail_separation_scale,
+                "tailSeparationEffectiveWeight": (
+                    args.integrated_separation_weight * tail_separation_scale
+                ),
                 **visibility_parts,
                 **survival_parts,
                 **relation_parts,
@@ -1073,6 +1212,8 @@ def main(argv: list[str] | None = None) -> None:
                     "step": step + 1,
                     "globalStep": global_step,
                     "loss": float(loss.detach().cpu()),
+                    "recallGuardScheduleScale": recall_guard_scale,
+                    "tailSeparationScheduleScale": tail_separation_scale,
                     "stepSeconds": time.perf_counter() - step_started,
                     "stepsPerSecond": steps_per_second,
                     "etaSeconds": max(0.0, (total_steps - global_step) / max(steps_per_second, 1e-8)),
@@ -1094,6 +1235,37 @@ def main(argv: list[str] | None = None) -> None:
                 for key, values in epoch_values.items() if values
             },
             "elapsedSeconds": time.time() - started,
+            "trainingCourse": {
+                "progress": float(np.clip(global_step / max(1, total_steps), 0.0, 1.0)),
+                "recallGuardScheduleScale": _recall_guard_schedule_scale(
+                    global_step,
+                    total_steps,
+                    args.integrated_rvl_recall_guard_zero_fraction,
+                    args.integrated_rvl_recall_guard_middle_end_fraction,
+                    args.integrated_rvl_recall_guard_middle_scale,
+                ),
+                "recallGuardEffectiveWeight": args.integrated_rvl_recall_guard_weight
+                * _recall_guard_schedule_scale(
+                    global_step,
+                    total_steps,
+                    args.integrated_rvl_recall_guard_zero_fraction,
+                    args.integrated_rvl_recall_guard_middle_end_fraction,
+                    args.integrated_rvl_recall_guard_middle_scale,
+                ),
+                "tailSeparationScheduleScale": _tail_separation_schedule_scale(
+                    global_step,
+                    total_steps,
+                    args.integrated_tail_zero_fraction,
+                    args.integrated_tail_ramp_fraction,
+                ),
+                "tailSeparationEffectiveWeight": args.integrated_separation_weight
+                * _tail_separation_schedule_scale(
+                    global_step,
+                    total_steps,
+                    args.integrated_tail_zero_fraction,
+                    args.integrated_tail_ramp_fraction,
+                ),
+            },
             "testRead": False,
         }
         calibration_payload = None
@@ -1101,9 +1273,10 @@ def main(argv: list[str] | None = None) -> None:
         if (epoch + 1) % args.eval_every == 0 or epoch + 1 == args.epochs:
             calibration_rows = _evaluate(
                 model, calibration_split, runtime, world_aabbs, device,
-                thresholds=threshold_grid(), seed=args.seed + 50_000,
+                thresholds=None, seed=args.seed + 50_000,
                 poses_per_batch=args.poses_per_batch, max_poses=args.max_eval_poses,
                 bootstrap_replicates=args.calibration_bootstrap_replicates,
+                collect_score_stats=True,
             )
             selected, diagnostic, frozen = _calibration_workpoints(calibration_rows)
             if frozen is not None:
@@ -1123,6 +1296,12 @@ def main(argv: list[str] | None = None) -> None:
                 "diagnostic": diagnostic,
                 "thresholdRows": calibration_rows,
                 "bootstrapReplicates": args.calibration_bootstrap_replicates,
+                "thresholdSource": EXACT_THRESHOLD_SOURCE,
+                "predictionRule": "score >= threshold",
+                "selectionRule": (
+                    "highest float32 score change-point with aggregateWeightedRecall > 0.99 "
+                    "and fixed-pose bootstrap one-sided 95% LCB > 0.99"
+                ),
                 "testRead": False,
             }
             row["calibration"] = calibration_payload

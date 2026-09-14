@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { MeshoptEncoder } from 'meshoptimizer/encoder';
 
 import { auditSourceScene, auditUnits } from './audit_scene.mjs';
-import { partitionScene, TARGET_UNIT_BYTES } from './partition_units.mjs';
+import { PARTITION_SCHEMA, partitionScene, TARGET_UNIT_BYTES } from './partition_units.mjs';
 import { readGltfScene } from './read_gltf.mjs';
 
 const GLB_MAGIC = 0x46546c67;
@@ -72,10 +72,9 @@ async function encodeIndices(indices, vertexCount) {
   };
 }
 
-function writeSharedImages(outputAssets, imageResources, units) {
+function writeSharedImages(outputAssets, imageResources, units, referencedImageIndices = null) {
   const referenced = [...new Set(
-    units
-      .map((unit) => unit.materialTexture?.imageIndex)
+    (referencedImageIndices || units.map((unit) => unit.materialTexture?.imageIndex))
       .filter((index) => Number.isInteger(index) && index >= 0),
   )].sort((left, right) => left - right);
   const byImage = new Map();
@@ -312,7 +311,13 @@ function unitRecord(unit, writeResult, relativePath) {
     sourceMaterialIndex: unit.sourceMaterialIndex,
     sourceTriangleCount: unit.sourceTriangleIndices.length,
     sourceComponentOrdinals: unit.sourceComponentOrdinals,
+    partitionSchema: unit.partitionSchema,
+    componentCount: unit.componentCount,
+    sourceComponentCount: unit.sourceComponentCount,
     partitionReason: unit.partitionReason,
+    oversizedComponentSplit: unit.oversizedComponentSplit,
+    oversize: unit.oversize,
+    oversizeReason: unit.oversizeReason,
     triangleCount: unit.triangleCount,
     vertexCount: unit.vertexCount,
     targetUnitBytes: unit.targetUnitBytes,
@@ -336,23 +341,33 @@ function unitRecord(unit, writeResult, relativePath) {
 export async function writeSlmScene(scene, outputAssets, options = {}) {
   const resolvedOutput = path.resolve(outputAssets);
   const targetUnitBytes = Number(options.targetBytes ?? TARGET_UNIT_BYTES);
-  const conversion = await partitionScene(scene, { targetBytes: targetUnitBytes });
+  const sceneBounds = sceneBoundsOrEmpty(scene.sceneBounds);
+  const sceneName = options.sceneName || path.basename(scene.source?.filePath || 'graphics_scene').replace(/\.(gltf|glb)$/i, '');
+  prepareOutput(resolvedOutput, Boolean(options.overwrite));
+  const referencedImageIndices = (scene.renderables || [])
+    .filter((item) => item.material?.alphaMode !== 'BLEND')
+    .map((item) => item.materialTexture?.imageIndex);
+  const sharedImages = writeSharedImages(
+    resolvedOutput,
+    scene.imageResources || [],
+    [],
+    referencedImageIndices,
+  );
+  const unitRecords = [];
+  const conversion = await partitionScene(scene, {
+    targetBytes: targetUnitBytes,
+    retainUnits: false,
+    onUnit: async (unit) => {
+      const relativePath = `task-0/glb/LOD0/sub_${unit.unitId}.glb`;
+      const result = await writeUnitGlb(path.join(resolvedOutput, relativePath), unit, sharedImages.byImage);
+      unitRecords.push(unitRecord(unit, result, relativePath));
+    },
+  });
   const sourceAudit = auditSourceScene({
     ...scene,
     renderables: (scene.renderables || []).filter((item) => item.material?.alphaMode !== 'BLEND'),
     excluded: conversion.excluded,
   });
-  prepareOutput(resolvedOutput, Boolean(options.overwrite));
-  const sharedImages = writeSharedImages(resolvedOutput, conversion.imageResources, conversion.units);
-
-  const unitRecords = [];
-  for (const unit of conversion.units) {
-    const relativePath = `task-0/glb/LOD0/sub_${unit.unitId}.glb`;
-    const result = await writeUnitGlb(path.join(resolvedOutput, relativePath), unit, sharedImages.byImage);
-    unitRecords.push(unitRecord(unit, result, relativePath));
-  }
-  const sceneBounds = sceneBoundsOrEmpty(scene.sceneBounds);
-  const sceneName = options.sceneName || path.basename(scene.source?.filePath || 'graphics_scene').replace(/\.(gltf|glb)$/i, '');
   const runtimeRecords = unitRecords.map((unit) => ({
     componentGlobalId: unit.unitId,
     instanceId: unit.unitId,
@@ -361,6 +376,11 @@ export async function writeSlmScene(scene, outputAssets, options = {}) {
     baseId: unit.unitId,
     sourceNodePath: unit.sourceNodePath,
     sourcePrimitiveIndex: unit.sourcePrimitiveIndex,
+    partitionSchema: unit.partitionSchema,
+    componentCount: unit.componentCount,
+    sourceComponentCount: unit.sourceComponentCount,
+    partitionReason: unit.partitionReason,
+    oversizedComponentSplit: unit.oversizedComponentSplit,
     alphaMode: unit.alphaMode,
     staticPvsEligible: unit.staticPvsEligible,
     alwaysResident: unit.alwaysResident,
@@ -386,14 +406,17 @@ export async function writeSlmScene(scene, outputAssets, options = {}) {
     rvcStats: zeroRvcStats(),
   }));
   const conversionManifest = {
-    schema: 'pvs-standard-graphics-scene-conversion-v1',
-    generatedBy: 'slm-graphics-scene-importer-g1',
+    schema: 'pvs-standard-graphics-scene-connected-sah-pack-v2',
+    generatedBy: 'slm-graphics-scene-importer-connected-sah-pack-v2',
     sceneName,
     source: scene.source,
     targetUnitBytes,
+    partitionSchema: PARTITION_SCHEMA,
+    componentCount: conversion.componentCount,
+    partition: conversion.partition,
     compression: EXTENSION,
     compressionParameters: { mode: 'ATTRIBUTES/TRIANGLES', encoder: 'meshoptimizer', version: 0 },
-    unitSemantics: 'one renderable unit -> one componentGlobalId -> one GLB/resource',
+    unitSemantics: 'one connected-SAH packed unit -> one componentGlobalId -> one GLB/resource; source components never cross primitive/material boundaries',
     oneUnitPerResource: true,
     unitCount: unitRecords.length,
     instanceCount: unitRecords.length,
@@ -408,11 +431,16 @@ export async function writeSlmScene(scene, outputAssets, options = {}) {
   const sceneWeb = {
     materials: { proxy: [], useHdrJpg: false },
     groups: [{ idRange: [0, Math.max(-1, unitRecords.length - 1)], instances: {} }],
-    groupSemantics: 'Each deterministic renderable unit is an independent resource; no prototype reuse is performed.',
+    partitionSchema: PARTITION_SCHEMA,
+    componentCount: conversion.componentCount,
+    groupSemantics: 'Each deterministic connected-SAH packed unit is an independent resource; small source components may pack within one primitive/material, while oversized components split only internally.',
     config: {
       sceneName,
       source: path.basename(scene.source?.filePath || ''),
-      renderableUnitSemantics: 'source node/primitive or deterministic Morton cluster',
+      partitionSchema: PARTITION_SCHEMA,
+      componentCount: conversion.componentCount,
+      targetUnitBytes,
+      renderableUnitSemantics: 'shared-vertex connected components packed by deterministic 16-bin SAH to the encoded geometry target; oversized components split internally',
       bounds: { center: sceneBounds.center, size: sceneBounds.size },
     },
   };
@@ -425,8 +453,10 @@ export async function writeSlmScene(scene, outputAssets, options = {}) {
   };
   const runtimeVisibilityMeta = {
     schemaVersion: 1,
+    partitionSchema: PARTITION_SCHEMA,
+    connectedComponentCount: conversion.componentCount,
     idSpaces: {
-      componentGlobalId: 'dense deterministic renderable unit id',
+      componentGlobalId: 'dense deterministic connected-SAH renderable unit id',
       globalGlbId: 'one-to-one dense resource id equal to componentGlobalId',
     },
     sceneName,

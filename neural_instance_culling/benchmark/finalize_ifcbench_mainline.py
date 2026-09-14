@@ -58,7 +58,7 @@ DECISION_SCHEMA = "pvs-ifcbench-final-freeze-decision-v1"
 PREFLIGHT_SCHEMA = "pvs-ifcbench-finalize-preflight-v1"
 PLAN_SCHEMA = "pvs-ifcbench-finalize-plan-v1"
 FINALIZE_SCHEMA = "pvs-ifcbench-finalize-manifest-v1"
-EXACT_CALIBRATION_SCHEMA = "pvs-ifcbench-v4-exact-calibration-v1"
+EXACT_CALIBRATION_SCHEMA = "pvs-v4-exact-calibration-v1"
 RUNTIME_EXPORT_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-runtime-v4"
 
 

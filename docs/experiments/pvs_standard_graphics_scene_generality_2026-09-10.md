@@ -917,3 +917,130 @@ Sponza V2 三种子已完整执行 `40 x 900`，全程 `testRead=false`。seed20
 按安全池内 Useful Cull 优先的冻结规则，Sponza V2 当前选择 seed20260802；在 Viking 和
 Big City V2 也完成前不读取任何标准场景 test。Sponza 三个 GPU 任务释放后，runner 已自动
 启动 Viking Village V2 三种子。
+
+## 19. 2026-09-15 Connected-SAH 单位与精确校准重启协议
+
+### 19.1 决策与边界
+
+当前 Morton 单位在 Big City 上会将同一源 primitive 内空间邻近但拓扑不连通的小片段
+重新打包。一个单位只要任一片段在 32 个 subpose 中可见就成为区域正例，而单位 AABB、
+固定点云特征和遮挡关系同时覆盖其它片段，造成标签与几何支持不一致。Big City sampling V2
+在 epoch 28 还出现明显分数断崖：seed02 的 calibration 阈值从 `0.60` 提高到 `0.62` 时，
+平均保留数从 `569.60` 降到 `0.80`，weighted recall 从 `0.999935` 降到约 `0.4006`；
+seed01/03 长期接近 Keep-All。因此停止当前矩阵，不把它继续完成后冒充正式结果。
+
+本轮只修改以下三部分：
+
+1. 三个标准图形学场景统一采用 Connected-SAH `128 KiB` renderable-unit 划分；
+2. 标准场景 Full 的学习率、pose batch、困难 pose 比例和损失课程做小幅统一调整；
+3. 所有神经场景统一采用 calibration 实际 float32 分数变化点的精确安全阈值。
+
+明确不修改 V4 的 96D 固定几何表示、结构化生存场、运行时查询头、survival rank 或关系
+K；HKUST 和 IFCBench 不重新训练，只从其冻结 checkpoint 在 calibration 上重新选择精确
+阈值，再重放 validation/test 派生产物。标准场景继续保持 `r=0.75 m`、32 个圆盘 subpose、
+`60/66` 度 FOV、`1.299038 m` 后退距离、中心组 split 和 test 一次读取协议。
+
+### 19.2 Connected-SAH `128 KiB` 单位契约
+
+转换名称固定为 `standard_graphics_connected_sah_128k_v1`。每个源节点、primitive、材质和
+alpha mode 独立处理。先求共享顶点三角形连通分量：低于目标大小的连通分量作为原子项，
+再用确定性 binned SAH 按空间紧凑性聚合到接近 `128 KiB`；超过目标大小的连通分量使用
+三角形质心的确定性 binned SAH 递归二分。最终以实际 meshopt 编码字节检查上限，编码后
+仍超限则继续拆分。不同 primitive 或材质不允许混合，单三角形是不可再分割的唯一例外，
+必须在 manifest 中显式登记。SAH 平局依次按轴、分割 bin 和最小源三角形编号裁决。
+
+该约束同时避免两个已观测失败模式：旧 Morton 打包会把空间跨度过大的不连通片段放入同
+一单位；严格的一连通分量一单位则在 Sponza/Viking 实测产生 `8,091/141,460` 个极小单位，
+Viking 输出约 `1.4 GiB`，不再代表 128 KiB 流式分块。这两份诊断输出不进入后续数据集。
+
+转换 manifest 必须新增 partition schema、每单位连通分量数、划分原因、AABB、压缩几何
+字节和源三角形范围。主结果仍使用一 unit 对应一 resource；不利用原型复用。正式评价除
+unit 指标外同时报告 triangle/encoded-byte cull，防止通过增加大量微小单位抬高剔除率。
+旧 Morton 结果只作为单位划分消融，不再是标准场景默认输入。
+
+当前正式转换 schema 为 `connected-sah-pack-v2`，三场景转换与 1024 点/96D 几何表已经
+完成：
+
+| Scene | Source components | Streaming units | Asset directory | Geometry table |
+|---|---:|---:|---:|---:|
+| Sponza | `8,091` | `129` | `26 MiB` | `[129, 96] FP16` |
+| Viking Village | `141,456` | `1,763` | `123 MiB` | `[1763, 96] FP16` |
+| Big City | `652,925` | `2,861` | `318 MiB` | `[2861, 96] FP16` |
+
+三场景均无编码超限单位。此前严格一连通分量一单位的 Sponza/Viking 诊断输出已经删除。
+Sponza 与 Viking 的正式 Color-ID 硬件门均通过；成功 subpose 数为 `213,504/86,784`，
+`candidateMissVisible=0`。对应 Pose CSR 的平均 candidate/GT 为
+`44.1667/7.9519` 与 `544.4108/125.9956`。Big City 的 `514,560` 个 Color-ID subpose
+随后也通过硬件门，平均 candidate/GT 为 `748.5629/155.0919`，同样
+`candidateMissVisible=0`。
+
+深度关系 manifest 不再为每个 shard 重复全部 view-cell 选择记录：一个完整 manifest 保存
+审计后的 pose 列表，轻量 sharder 只写当前 pose 范围并引用共享场景绑定。Sponza+Viking
+manifest 目录由约 `1.47 GiB` 降至约 `99 MiB`。光栅阶段沿用已验证的稀疏关系链：每个
+稠密 shard 完成后立即聚合遮挡边、生存观察和深度矩，验证稀疏产物后删除 ID/depth
+payload；因此磁盘峰值由并发 shard 限定，不累计成全场稠密缓存。
+
+由于 unit ID 和几何边界改变，三个场景必须重新生成 GLB、1024 点固定几何表、Color-ID
+区域 GT、Pose CSR 和 train-only 关系。旧标签、关系、AABB/HZB 结果不得映射复用。
+
+### 19.3 Full 训练配置
+
+三个场景使用同一配置，从随机初始化训练：
+
+| 项目 | 新值 |
+|---|---:|
+| epoch x step | `40 x 900` |
+| learning rate | `5e-5` |
+| poses per batch | `8` |
+| hard pose fraction | `0.35` |
+| hard pose quantile | `0.65` |
+| weighted-recall target | `0.99` |
+| recall guard final weight | `0.30` |
+| pose CVaR fraction/weight | `0.25/0.25` |
+| tail separation final weight | `0.30` |
+| positive tail mass | `0.01` |
+| negative top fraction | `0.02` |
+| positive importance floor/power | `0.25/0.5` |
+
+Epoch 1--4 只建立普通分类、关系和生存场；epoch 5--12 将困难尾部分离线性升到最终权重；
+epoch 13--40 再将单侧 weighted-recall guard 升到最终权重。安全门仍只由 checkpoint 自己的
+calibration 精确阈值是否满足 weighted recall 及单侧 95% LCB 严格大于 `0.99` 决定。
+
+### 19.4 场景优先与 GPU 编排
+
+训练优先级按场景而不是按种子展开。第一轮固定同时启动：Sponza seed20260801、Viking
+Village seed20260801、Big City seed20260801。三个场景都有首轮 validation 后，再启动
+三个 seed20260802；最后启动三个 seed20260803。这样最早可以判断统一修改是否同时改善
+三个场景，不能先耗时完成单场景全部种子。
+
+GPU 调度按启动时的实际显存与利用率决定，不固定一张卡只能运行一个实验。单任务显存峰值
+和 step/s 必须先记录；只有同卡剩余显存满足两个任务峰值加安全余量，且首个任务的吞吐下降
+可接受时才允许同卡并发。不得终止或抢占不属于本项目的进程，也不得让正式浏览器 HZB、
+Color-ID 或 WebGPU timing 与 CUDA 训练并发。
+
+### 19.5 精确阈值与执行顺序
+
+训练期和冻结复评均使用 calibration 的实际 float32 score change-points。预测规则固定为
+`score >= threshold`；通过单调搜索定位最高安全分数边界，搜索过程复用固定的
+10,000 次 pose bootstrap 计划。阈值必须同时满足 aggregate weighted recall 与单侧 95% LCB
+严格大于 `0.99`，再以 Useful Cull、balanced accuracy、Occlusion Recall、precision 和
+更少保留数选择。Validation 只重放该阈值，不参与阈值搜索。
+
+统一执行顺序为：
+
+1. 完成 Connected-SAH 转换及三个场景几何审计；
+2. 完成三个场景 Color-ID、Pose CSR 与 train-only K=8 关系；
+3. 按场景优先顺序完成 Full 三种子 calibration/validation；
+4. 冻结每场景 Full 成员和精确阈值；
+5. 再训练和评价同单位、同 split 的 AABB + Ray MLP；
+6. 再执行同单位的 lossless/equal-asset HZB calibration、test 与 timing；
+7. 最后执行一次标准场景 Full/AABB/HZB frozen test、图像和端侧 runtime。
+
+AABB 与 HZB 不得在 Full 之前抢占采样、训练或独占浏览器 GPU 窗口。HKUST/IFCBench 的
+精确阈值复评可在标准场景 GPU 空闲窗口执行，但不改变 checkpoint 或读取 test 选阈值。
+
+### 19.6 停止记录
+
+2026-09-15 已按用户决定终止 sampling V2 Big City 三个未完成长训及 Sponza/AABB 后续
+watcher。终止前最新完整结果为 epoch 28；checkpoint、train history 和日志保留为失败
+诊断，不进入默认 runner。项目 GPU 1--3 已释放；GPU0 上的外部任务未被干预。
