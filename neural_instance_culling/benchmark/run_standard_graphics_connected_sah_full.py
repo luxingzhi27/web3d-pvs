@@ -503,10 +503,16 @@ def run_round(
     return skipped
 
 
-def plan(scenes: Sequence[str], model_root: Path, *, smoke: bool = False) -> dict[str, Any]:
+def plan(
+    scenes: Sequence[str],
+    model_root: Path,
+    *,
+    seeds: Sequence[int] = SEEDS,
+    smoke: bool = False,
+) -> dict[str, Any]:
     """Return a side-effect-free plan for all seed rounds."""
     rounds = []
-    for seed in SEEDS:
+    for seed in seeds:
         rounds.append({
             "seed": int(seed),
             "sceneOrder": list(scenes),
@@ -529,7 +535,7 @@ def plan(scenes: Sequence[str], model_root: Path, *, smoke: bool = False) -> dic
         "experiment": EXPERIMENT,
         "sceneFirst": True,
         "sceneOrder": list(scenes),
-        "seeds": list(SEEDS),
+        "seeds": list(seeds),
         "epochs": 1 if smoke else EPOCHS,
         "stepsPerEpoch": 2 if smoke else STEPS_PER_EPOCH,
         "testRead": False,
@@ -547,10 +553,18 @@ def _scene_names(value: str) -> list[str]:
     return [scene for scene in SCENE_ORDER if scene in names]
 
 
+def _seed_values(values: Sequence[int]) -> tuple[int, ...]:
+    unknown = sorted(set(values) - set(SEEDS))
+    if unknown:
+        raise ValueError(f"unknown seed(s) {unknown}; choose from {list(SEEDS)}")
+    return tuple(seed for seed in SEEDS if seed in values)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=MODES)
     parser.add_argument("--scenes", default=",".join(SCENE_ORDER))
+    parser.add_argument("--seeds", type=int, nargs="+", default=list(SEEDS))
     parser.add_argument("--gpu-slots", type=int, nargs="+", default=[0, 1, 2])
     parser.add_argument("--model-root", type=Path, default=MODEL_ROOT)
     parser.add_argument("--log-root", type=Path, default=LOG_ROOT)
@@ -558,11 +572,12 @@ def main() -> None:
     if any(int(value) < 0 for value in args.gpu_slots):
         parser.error("GPU slot IDs must be non-negative")
     scenes = _scene_names(args.scenes)
+    seeds = _seed_values(args.seeds)
     model_root = args.model_root.resolve()
     log_root = args.log_root.resolve()
 
     if args.mode == "plan":
-        print(json.dumps(plan(scenes, model_root), ensure_ascii=False, indent=2))
+        print(json.dumps(plan(scenes, model_root, seeds=seeds), ensure_ascii=False, indent=2))
         return
     if args.mode == "preflight":
         reports = [preflight(scene) for scene in scenes]
@@ -571,12 +586,12 @@ def main() -> None:
     if args.mode == "smoke":
         for scene in scenes:
             preflight(scene)
-        for seed in (SEEDS[0],):
+        for seed in (seeds[0],):
             run_round(scenes, seed, args.gpu_slots, model_root, log_root, smoke=True)
         return
     for scene in scenes:
         preflight(scene)
-    for seed in SEEDS:
+    for seed in seeds:
         skipped = run_round(scenes, seed, args.gpu_slots, model_root, log_root)
         if skipped:
             print(json.dumps({"seed": seed, "skippedCompleted": skipped}), flush=True)

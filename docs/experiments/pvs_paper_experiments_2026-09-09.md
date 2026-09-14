@@ -207,8 +207,8 @@ conda run -n slm_pvs python \
 - 三场景 GLB、1024 点/96D 几何表、硬件 Color-ID、Pose CSR 和 train-only K=8 关系均已
   完成。Sponza/Viking/Big City 单位数为 `129/1763/2861`，split 分别为
   `4800/528/672/672`、`1944/216/276/276`、`11580/1284/1608/1608`。
-- 第一轮 seed20260801 已同时在 GPU 1/2/3 启动。三个场景完成同轮 validation 后才启动
-  seed20260802，最后启动 seed20260803。GPU 同卡并发只由实测显存和吞吐决定。
+- seed20260801 与 seed20260802 已分别按完整三场景 round 在 GPU 1/2/3 启动。两任务同卡后
+  GPU 利用率约 `87-99%`，seed20260803 等待当前任务释放资源；不能只为单个场景提前补种子。
 - calibration 阈值统一改为实际 float32 分数变化点；HKUST/IFCBench 对现有 checkpoint
   重做 calibration/validation 阈值冻结和派生结果，不用 test 选阈值、不重新训练。
 - 精确重校准已完成。HKUST 三种子均通过 validation 安全门，选择 seed02；其

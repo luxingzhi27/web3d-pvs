@@ -111,6 +111,19 @@ class ConnectedSahFullRunnerTests(unittest.TestCase):
             self.assertTrue(all("--test" not in job["command"] for job in row["jobs"]))
         self.assertFalse(payload["testRead"])
 
+    def test_plan_can_select_one_complete_scene_round(self) -> None:
+        payload = plan(
+            SCENE_ORDER,
+            Path("/tmp/connected-sah-model"),
+            seeds=(SEEDS[1],),
+        )
+        self.assertEqual(payload["seeds"], [SEEDS[1]])
+        self.assertEqual([row["seed"] for row in payload["rounds"]], [SEEDS[1]])
+        self.assertEqual(
+            [job["scene"] for job in payload["rounds"][0]["jobs"]],
+            list(SCENE_ORDER),
+        )
+
     def test_preflight_checks_exact_dataset_relation_and_geometry_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

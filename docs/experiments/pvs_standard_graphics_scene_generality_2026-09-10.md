@@ -131,20 +131,20 @@ balanced accuracy、Occlusion Recall、precision 和平均保留数。
 Full 固定按 seed round 执行：
 
 1. Sponza、Viking Village、Big City 的 seed20260801 同时训练；
-2. 三者完成后，同时训练三个场景 seed20260802；
-3. 三者完成后，同时训练三个场景 seed20260803；
+2. 首轮稳定后，如果单卡显存和利用率仍有余量，同时启动三个场景 seed20260802；
+3. 再按同一资源门决定是否同时启动三个场景 seed20260803；
 4. 三种子 validation 完成后，冻结每场景唯一 Full 成员与阈值。
 
-不能先完成一个场景的三个种子。GPU 参数表示并发 slot，允许重复 GPU ID，但启动前必须按
-实际显存、利用率和吞吐判断。同卡并发不能打破 seed round，也不能与正式 Color-ID、HZB、
-WebGPU timing 同时运行。GPU0 上的外部任务不得终止或抢占。
+不能只给一个场景提前启动额外种子；增加并发时必须整轮覆盖三个场景。GPU 参数表示并发
+slot，允许重复 GPU ID，但启动前必须按实际显存、利用率和吞吐判断。同卡并发不能与正式
+Color-ID、HZB、WebGPU timing 同时运行。GPU0 上的外部任务不得终止或抢占。
 
 正式 runner：
 
 ```bash
 conda run --no-capture-output -n slm_pvs python -u \
   neural_instance_culling/benchmark/run_standard_graphics_connected_sah_full.py \
-  train --gpu-slots 1 2 3
+  train --seeds 20260802 --gpu-slots 1 2 3
 ```
 
 ## 8. 基线与执行顺序
@@ -233,8 +233,8 @@ visible-weight coverage，不与 HKUST/IFCBench 的资源复用主表混合。
 
 - 三场景转换、固定几何表、硬件 Color-ID、Pose CSR、深度分片和 K=8 关系均完成；
 - 三场景 preflight 与 seed20260801 smoke 均通过，且没有读取 test；
-- seed20260801 已按 Sponza/Viking/Big City 三场景并行正式训练；
-- seed20260802/03 由同一 runner 在前一轮三个场景全部完成后自动接续；
+- seed20260801 与 seed20260802 均已按 Sponza/Viking/Big City 完整三场景 round 启动；
+- 两任务同卡后 GPU 利用率达到约 `87-99%`，因此 seed20260803 等待当前 round 释放资源；
 - AABB、HZB、标准场景 test、图像和 runtime 尚未启动，等待 Full 冻结；
 - HKUST/IFCBench checkpoint 不重训，已完成精确 calibration/validation 重校准；新阈值下
   的 test、图像、streaming 和前端资产尚未重放。
