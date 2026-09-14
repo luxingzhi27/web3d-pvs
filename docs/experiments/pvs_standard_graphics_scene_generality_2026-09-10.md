@@ -879,3 +879,15 @@ AABB V2 的 `2e-4/1e-3` 学习率扫描已在三个场景全部完成，只读�
 train/calibration/validation。GPU0 随后提前执行 Big City AABB 三种子长训；Sponza 与
 Viking AABB 在九个 V2 Full 成员全部完成后分别使用独立 GPU 队列补齐。三条 AABB runner
 均带 `--skip-test`，完成 validation 汇总前不打开 test。
+
+Sponza V2 三种子已完整执行 `40 x 900`，全程 `testRead=false`。seed20260801 没有
+满足严格 validation WR/LCB 安全门；另外两个成员的最佳安全点如下：
+
+| Seed | Epoch | WR | WR 95% LCB | Occlusion Recall | Useful Cull | Precision | Balanced Accuracy | Avg Pred |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 20260802 | 40 | 0.993122 | 0.991115 | 0.745124 | 0.598600 | 0.458749 | 0.813831 | 18.18 |
+| 20260803 | 24 | 0.993134 | 0.990752 | 0.610691 | 0.490603 | 0.374047 | 0.780546 | 24.01 |
+
+按安全池内 Useful Cull 优先的冻结规则，Sponza V2 当前选择 seed20260802；在 Viking 和
+Big City V2 也完成前不读取任何标准场景 test。Sponza 三个 GPU 任务释放后，runner 已自动
+启动 Viking Village V2 三种子。
