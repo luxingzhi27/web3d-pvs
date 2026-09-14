@@ -233,8 +233,10 @@ visible-weight coverage，不与 HKUST/IFCBench 的资源复用主表混合。
 
 - 三场景转换、固定几何表、硬件 Color-ID、Pose CSR、深度分片和 K=8 关系均完成；
 - 三场景 preflight 与 seed20260801 smoke 均通过，且没有读取 test；
-- seed20260801 与 seed20260802 均已按 Sponza/Viking/Big City 完整三场景 round 启动；
-- 两任务同卡后 GPU 利用率达到约 `87-99%`，因此 seed20260803 等待当前 round 释放资源；
+- seed20260801、seed20260802 和 seed20260803 均已按 Sponza/Viking/Big City 完整三场景
+  round 启动；每张训练卡并发三个种子；
+- 三任务同卡后 GPU 1/2/3 显存约 `1.6/3.3/7.8 GiB`，利用率约 `99-100%`，功耗约
+  `123/131/130 W`；后续不再增加训练任务，只监控总吞吐、数值和首次 validation；
 - AABB、HZB、标准场景 test、图像和 runtime 尚未启动，等待 Full 冻结；
 - HKUST/IFCBench checkpoint 不重训，已完成精确 calibration/validation 重校准；新阈值下
   的 test、图像、streaming 和前端资产尚未重放。
