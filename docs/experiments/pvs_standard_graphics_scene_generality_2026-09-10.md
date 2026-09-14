@@ -880,6 +880,17 @@ train/calibration/validation。GPU0 随后提前执行 Big City AABB 三种子�
 Viking AABB 在九个 V2 Full 成员全部完成后分别使用独立 GPU 队列补齐。三条 AABB runner
 均带 `--skip-test`，完成 validation 汇总前不打开 test。
 
+Big City AABB V2 三种子 `40 x 900` 已完成，三者 calibration 工作点都通过安全门且
+`testRead=false`，但安全约束下几乎退化为 Keep-All。validation 中 Useful Cull 分别为
+`0.000026/0.000090/0.000046`，对应 Occlusion Recall
+`0.000035/0.000123/0.000064`；最佳 seed20260802 的 WR/LCB 为
+`0.999903/0.999844`、Precision `0.271731`、Balanced Accuracy `0.500035`。
+这说明仅使用 AABB、投影和相机射线特征无法在 Big City 同时维持严格画面安全与有效遮挡
+剔除。stderr 内容仅为评价进度条，没有训练错误。
+
+GPU0 已接续 Viking AABB 三种子；GPU1-3 继续 Viking Full，随后执行 Big City Full V2。
+所有 Full 与 Viking/Big City AABB 完成后，Sponza AABB 使用三卡并行补齐，仍不读取 test。
+
 Sponza V2 三种子已完整执行 `40 x 900`，全程 `testRead=false`。seed20260801 没有
 满足严格 validation WR/LCB 安全门；另外两个成员的最佳安全点如下：
 
