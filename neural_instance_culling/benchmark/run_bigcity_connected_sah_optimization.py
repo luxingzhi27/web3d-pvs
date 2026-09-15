@@ -35,7 +35,7 @@ EXPERIMENT = "pvs_v4_bigcity_connected_sah_occlusion_opportunity_v1"
 MODEL_ROOT = ROOT / "neural_instance_culling/model/out" / EXPERIMENT
 RESULT_ROOT = ROOT / "neural_instance_culling/benchmark/out/paper_results" / EXPERIMENT
 RELATION_BUILDER = ROOT / "neural_instance_culling/dataset/build_observed_relation_csr.py"
-RELATION_K_VALUES = (16, 24)
+RELATION_K_VALUES = (8, 16, 24)
 
 PILOT_EPOCHS = 8
 PILOT_STEPS = 450
@@ -54,10 +54,12 @@ class PilotConfig:
 
 
 PILOT_CONFIGS = (
-    PilotConfig("p1_k16_lr5e5_neg25", 16, 5e-5, 0.250, 0.375),
-    PilotConfig("p2_k16_lr2e5_neg25", 16, 2e-5, 0.250, 0.375),
-    PilotConfig("p3_k16_lr5e5_neg375", 16, 5e-5, 0.375, 0.250),
-    PilotConfig("p4_k24_lr5e5_neg25", 24, 5e-5, 0.250, 0.375),
+    PilotConfig("p0_k8_lr5e5_neg0", 8, 5e-5, 0.000, 0.350),
+    PilotConfig("p1_k16_lr5e5_neg0", 16, 5e-5, 0.000, 0.350),
+    PilotConfig("p2_k8_lr5e5_neg25", 8, 5e-5, 0.250, 0.375),
+    PilotConfig("p3_k16_lr5e5_neg25", 16, 5e-5, 0.250, 0.375),
+    PilotConfig("p4_k16_lr2e5_neg25", 16, 2e-5, 0.250, 0.375),
+    PilotConfig("p5_k24_lr5e5_neg25", 24, 5e-5, 0.250, 0.375),
 )
 
 
@@ -78,6 +80,8 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
 
 def relation_dir(relation_k: int) -> Path:
     scene_root = Path(SCENES[SCENE]["scene_root"])
+    if relation_k == 8:
+        return scene_root / "relation_csr"
     return scene_root / f"relation_csr_k{relation_k}"
 
 
@@ -137,8 +141,8 @@ def train_command(
         "--integrated-rvl-recall-guard-zero-fraction": "0.10",
         "--integrated-rvl-recall-guard-middle-end-fraction": "0.30",
         "--integrated-rvl-recall-guard-middle-scale": "0.25",
-        "--integrated-tail-zero-fraction": "0.05",
-        "--integrated-tail-ramp-fraction": "0.20",
+        "--integrated-tail-zero-fraction": "0.10",
+        "--integrated-tail-ramp-fraction": "0.30",
         "--frontier-negative-fraction": "0.04",
     }
     for flag, value in values.items():
@@ -332,6 +336,8 @@ def main() -> None:
     full_preflight(SCENE)
     if args.mode == "build-relations":
         for relation_k in RELATION_K_VALUES:
+            if relation_k == 8:
+                continue
             if (relation_dir(relation_k) / "relation_csr_meta.json").is_file():
                 continue
             run_logged(
@@ -346,7 +352,7 @@ def main() -> None:
         print(json.dumps({"relations": relation_reports, "testRead": False}, ensure_ascii=False, indent=2))
         return
     if args.mode == "smoke":
-        config = PILOT_CONFIGS[0]
+        config = next(item for item in PILOT_CONFIGS if item.negative_only_fraction > 0)
         output = MODEL_ROOT / "smoke" / config.name
         run_parallel(
             [(config.name, train_command(config, output, SEEDS[0], full=False, smoke=True))],

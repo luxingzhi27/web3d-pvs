@@ -220,10 +220,10 @@ conda run -n slm_pvs python \
   基线不得提前占用 Full 的采样、训练和浏览器 GPU 资源。
 - Big City 原 `128 KiB / K=8` 三种子在 epoch 20-22 停止并降级为诊断结果：validation
   CNOR 仅为 `0.2101/0.2232/0.2958`，且都未满足 `weighted recall LCB > 0.99`。专项实验
-  `pvs_v4_bigcity_connected_sah_occlusion_opportunity_v1` 固定完成四项 train-only pilot：
-  `K=16/24`、学习率 `2e-5/5e-5`、纯负例 pose 比例 `25%/37.5%`，并提前召回保护、扩大
-  困难负例尾部。pilot 只运行 3,600 步，但所有课程按完整 36,000 步计算，防止短训把学习率
-  和损失课程错误压缩。纯负例增强只重采样现有合法 train view-cell，不修改 GT。若相对最优配置
+  `pvs_v4_bigcity_connected_sah_occlusion_opportunity_v1` 固定完成六项 train-only 单因素
+  pilot：K8 旧采样控制、只增 K、只加 25% 纯负例、K16+纯负例、低学习率和 K24+纯负例。
+  pilot 只运行 3,600 步，但所有课程按完整 36,000 步计算，且尾部分离在 10% 后才启动，
+  防止短训压缩或提前损失课程。纯负例增强只重采样现有合法 train view-cell，不修改 GT。若相对最优配置
   仍未通过安全门或安全 CNOR 低于 `0.50`，则重建 `64 KiB + 每单位最多 128 连通片` 数据。
   该专项仍遵守 `pilot 全部完成 -> validation 选配置 -> 三种子从头长训 -> 基线/test` 顺序。
 - 完整单位契约和重建步骤以
