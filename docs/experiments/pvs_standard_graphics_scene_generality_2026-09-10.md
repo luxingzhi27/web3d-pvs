@@ -313,7 +313,30 @@ train/calibration/validation，不读取 test。每个 pilot 从随机初始化�
 第一阶段完成前不启动 AABB MLP、HZB 或 test；这些基线必须使用最终冻结的 Big City 单位、
 候选、GT 和 split。
 
-## 13. 引用边界
+## 13. Sponza 与 Viking 安全性损失微调
+
+日期：2026-09-16。实验名为 `pvs_v4_standard_graphics_safety_refinement_v1`。Sponza 三种子
+已完成但 validation LCB 为 `0.9773/0.9780/0.9812`，均未过安全门；Viking 当前只有 seed01
+通过安全门，另外两个种子的最近 LCB 为 `0.9886/0.9860`。两场景不修改单位、GT、split、
+关系 K、学习率主协议或候选集合，先从各自现有最佳 checkpoint 用 fresh AdamW、`lr=1e-5`
+执行 `4 x 450` 的 train-only 安全 refinement：
+
+| 配置 | 尾部分离 | 召回保护 | 最差 pose 权重 | 生存场 | 关系一致性 |
+|---|---:|---:|---:|---:|---:|
+| R1 | 0.15 | 0.30 | 0.25 | 0.25 | 0.10 |
+| R2 | 0.15 | 0.45 | 0.35 | 0.25 | 0.10 |
+| R3 | 0.10 | 0.45 | 0.35 | 0.15 | 0.05 |
+
+R1 只降低过强的困难尾部分离；R2 再增强加权召回和最差 pose 保护；R3 同时降低结构辅助
+损失，检验生存/关系监督是否在训练后期继续压制最终可见性分类。refinement 的前 5% 步数
+线性恢复目标权重，之后保持全权重；不重置运行时头，不读取 test。
+
+每场景先在 validation 安全池中最大化 Useful Cull、CNOR 和 balanced accuracy；没有安全
+成员时按 LCB、weighted recall、CNOR 选相对最优。选定后，对该场景三个原始种子分别执行
+同一配置的 `4 x 900` refinement 和 10,000 次 calibration bootstrap，作为正式三种子候选。
+Viking 原始三种子必须先完成，不能用未完成 checkpoint 进入正式 refinement。
+
+## 14. 引用边界
 
 - Wang et al., NeuralPVS: Learned Estimation of Potentially Visible Sets, SIGGRAPH Asia 2025。
 - Greene et al., Hierarchical Z-Buffer Visibility。

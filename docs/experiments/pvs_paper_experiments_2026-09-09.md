@@ -218,6 +218,10 @@ conda run -n slm_pvs python \
   重放 test、图像、streaming 或前端资产。
 - 标准场景执行顺序固定为 `Full -> AABB MLP / HZB -> frozen test/image/runtime`，后两类
   基线不得提前占用 Full 的采样、训练和浏览器 GPU 资源。
+- Sponza 与 Viking 使用 `pvs_v4_standard_graphics_safety_refinement_v1` 做快速损失调参：
+  固定数据和 K，从现有最佳 checkpoint 比较降低尾部分离、增强召回/CVaR，以及降低生存场
+  与关系辅助权重三种配置；pilot 为 `4 x 450`，validation 选定后对三个原始种子执行
+  `4 x 900` 正式 refinement。全程不读取 test。
 - Big City 原 `128 KiB / K=8` 三种子在 epoch 20-22 停止并降级为诊断结果：validation
   CNOR 仅为 `0.2101/0.2232/0.2958`，且都未满足 `weighted recall LCB > 0.99`。专项实验
   `pvs_v4_bigcity_connected_sah_occlusion_opportunity_v1` 固定完成六项 train-only 单因素
