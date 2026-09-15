@@ -41,6 +41,7 @@ PILOT_EPOCHS = 8
 PILOT_STEPS = 450
 FULL_EPOCHS = 40
 FULL_STEPS = 900
+FULL_COURSE_STEPS = FULL_EPOCHS * FULL_STEPS
 
 
 @dataclass(frozen=True)
@@ -143,6 +144,8 @@ def train_command(
     for flag, value in values.items():
         replace_value(command, flag, value)
     command.extend([
+        "--training-course-total-steps",
+        str(FULL_COURSE_STEPS),
         "--negative-only-pose-fraction",
         str(config.negative_only_fraction),
     ])

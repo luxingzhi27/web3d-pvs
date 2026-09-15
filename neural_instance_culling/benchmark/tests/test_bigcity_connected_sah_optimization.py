@@ -26,6 +26,7 @@ class BigCityConnectedSahOptimizationTest(unittest.TestCase):
             args = parse_args(command[3:])
         self.assertEqual(args.epochs, 8)
         self.assertEqual(args.steps_per_epoch, 450)
+        self.assertEqual(args.training_course_total_steps, 36000)
         self.assertEqual(args.negative_only_pose_fraction, 0.25)
         self.assertEqual(args.hard_pose_fraction, 0.375)
         self.assertEqual(args.integrated_rvl_recall_guard_zero_fraction, 0.10)

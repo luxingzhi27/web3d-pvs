@@ -727,6 +727,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--validation-split", default="auto")
     parser.add_argument("--epochs", type=int, default=12)
     parser.add_argument("--steps-per-epoch", type=int, default=100)
+    parser.add_argument(
+        "--training-course-total-steps",
+        type=int,
+        default=0,
+        help="loss/LR course horizon; zero uses epochs times steps-per-epoch",
+    )
     parser.add_argument("--poses-per-batch", type=int, default=4)
     parser.add_argument(
         "--pose-sampling",
@@ -809,6 +815,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def _validate_args(args: argparse.Namespace) -> None:
     if min(args.epochs, args.steps_per_epoch, args.poses_per_batch, args.observation_batch_size) <= 0:
         raise ValueError("training counts must be positive")
+    if args.training_course_total_steps < 0:
+        raise ValueError("training course total steps must be zero or positive")
     if args.eval_every <= 0 or args.calibration_bootstrap_replicates <= 0:
         raise ValueError("evaluation cadence and bootstrap count must be positive")
     if args.occlusion_representation == "survival":
@@ -992,10 +1000,15 @@ def main(argv: list[str] | None = None) -> None:
     local_ids = local_ids.to(device)
     structural_ids = structural_ids.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, args.epochs))
+    run_total_steps = args.epochs * args.steps_per_epoch
+    course_total_steps = args.training_course_total_steps or run_total_steps
+    course_total_epochs = max(1, math.ceil(course_total_steps / args.steps_per_epoch))
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=course_total_epochs,
+    )
     glb_bytes = _load_glb_bytes(args.glb_index, args.glb_root, num_glbs)
-    total_steps = args.epochs * args.steps_per_epoch
-    initialization["plannedExtraUpdates"] = int(total_steps)
+    initialization["plannedExtraUpdates"] = int(run_total_steps)
     if dataset.viewcell_radii_m is None or dataset.viewcell_radii_m.size == 0:
         raise ValueError("V4 training requires explicit viewcell_radius_m values")
     viewcell_radius_min = float(np.min(dataset.viewcell_radii_m))
@@ -1034,7 +1047,9 @@ def main(argv: list[str] | None = None) -> None:
         "trainingCourse": {
             "schema": "pvs-total-step-loss-course-v1",
             "unit": "fraction_of_total_optimizer_steps",
-            "totalSteps": int(total_steps),
+            "runTotalSteps": int(run_total_steps),
+            "totalSteps": int(course_total_steps),
+            "lrTotalEpochs": int(course_total_epochs),
             "recallGuard": {
                 "finalWeight": float(args.integrated_rvl_recall_guard_weight),
                 "zeroFraction": float(args.integrated_rvl_recall_guard_zero_fraction),
@@ -1116,7 +1131,7 @@ def main(argv: list[str] | None = None) -> None:
                 float(initialization["inheritedInstanceCalibrationBlend"])
                 if args.init_checkpoint is not None
                 else _calibration_blend(
-                    global_step - 1, total_steps,
+                    global_step - 1, course_total_steps,
                     args.instance_calibration_warmup_fraction,
                     args.instance_calibration_ramp_fraction,
                 )
@@ -1124,14 +1139,14 @@ def main(argv: list[str] | None = None) -> None:
             model.set_instance_calibration_blend(blend)
             recall_guard_scale = _recall_guard_schedule_scale(
                 global_step,
-                total_steps,
+                course_total_steps,
                 args.integrated_rvl_recall_guard_zero_fraction,
                 args.integrated_rvl_recall_guard_middle_end_fraction,
                 args.integrated_rvl_recall_guard_middle_scale,
             )
             tail_separation_scale = _tail_separation_schedule_scale(
                 global_step,
-                total_steps,
+                course_total_steps,
                 args.integrated_tail_zero_fraction,
                 args.integrated_tail_ramp_fraction,
             )
@@ -1246,7 +1261,7 @@ def main(argv: list[str] | None = None) -> None:
                     "tailSeparationScheduleScale": tail_separation_scale,
                     "stepSeconds": time.perf_counter() - step_started,
                     "stepsPerSecond": steps_per_second,
-                    "etaSeconds": max(0.0, (total_steps - global_step) / max(steps_per_second, 1e-8)),
+                    "etaSeconds": max(0.0, (run_total_steps - global_step) / max(steps_per_second, 1e-8)),
                     "elapsedSeconds": elapsed,
                 }), flush=True)
         scheduler.step()
@@ -1266,10 +1281,10 @@ def main(argv: list[str] | None = None) -> None:
             },
             "elapsedSeconds": time.time() - started,
             "trainingCourse": {
-                "progress": float(np.clip(global_step / max(1, total_steps), 0.0, 1.0)),
+                "progress": float(np.clip(global_step / max(1, course_total_steps), 0.0, 1.0)),
                 "recallGuardScheduleScale": _recall_guard_schedule_scale(
                     global_step,
-                    total_steps,
+                    course_total_steps,
                     args.integrated_rvl_recall_guard_zero_fraction,
                     args.integrated_rvl_recall_guard_middle_end_fraction,
                     args.integrated_rvl_recall_guard_middle_scale,
@@ -1277,21 +1292,21 @@ def main(argv: list[str] | None = None) -> None:
                 "recallGuardEffectiveWeight": args.integrated_rvl_recall_guard_weight
                 * _recall_guard_schedule_scale(
                     global_step,
-                    total_steps,
+                    course_total_steps,
                     args.integrated_rvl_recall_guard_zero_fraction,
                     args.integrated_rvl_recall_guard_middle_end_fraction,
                     args.integrated_rvl_recall_guard_middle_scale,
                 ),
                 "tailSeparationScheduleScale": _tail_separation_schedule_scale(
                     global_step,
-                    total_steps,
+                    course_total_steps,
                     args.integrated_tail_zero_fraction,
                     args.integrated_tail_ramp_fraction,
                 ),
                 "tailSeparationEffectiveWeight": args.integrated_separation_weight
                 * _tail_separation_schedule_scale(
                     global_step,
-                    total_steps,
+                    course_total_steps,
                     args.integrated_tail_zero_fraction,
                     args.integrated_tail_ramp_fraction,
                 ),

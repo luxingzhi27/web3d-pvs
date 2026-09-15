@@ -144,6 +144,22 @@ class TrainPvsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot exceed one"):
             _validate_args(args)
 
+    def test_training_course_horizon_must_not_be_negative(self) -> None:
+        args = parse_args([
+            "--dataset-dir", ".",
+            "--relation-dir", ".",
+            "--runtime-meta", "runtime.json",
+            "--initial-geo-features", "geometry.bin",
+            "--glb-index", "glb.json",
+            "--glb-root", ".",
+            "--output-dir", "out",
+            "--experiment-name", "course_test",
+            "--variant", "full_integrated_visibility_mainline",
+            "--training-course-total-steps", "-1",
+        ])
+        with self.assertRaisesRegex(ValueError, "course total steps"):
+            _validate_args(args)
+
     def test_test_split_is_rejected_before_dataset_access(self) -> None:
         with self.assertRaisesRegex(ValueError, "test is forbidden"):
             _resolve_split(mock.Mock(), "test", "validation")
