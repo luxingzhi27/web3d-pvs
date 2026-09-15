@@ -108,6 +108,38 @@ class PoseCSRViewCellQueryContractTest(unittest.TestCase):
             self.assertEqual(np.unique(batch).size, 4)
             self.assertEqual(np.isin(batch, hard).sum(), 2)
 
+    def test_occlusion_opportunity_batches_include_negative_only_poses(self) -> None:
+        class DatasetStub:
+            visible_counts = np.asarray([1] * 12 + [0] * 8, dtype=np.int64)
+            candidate_counts = np.ones((20,), dtype=np.int64)
+
+        split = PoseCSRSplit(
+            DatasetStub(),
+            "diagnostic",
+            pose_indices=np.arange(20, dtype=np.int64),
+        )
+        hard = np.asarray([0, 1, 2, 3], dtype=np.int64)
+        negative_only = np.arange(12, 20, dtype=np.int64)
+        batches = list(
+            split.pose_set_batches(
+                8,
+                np.random.default_rng(20260915),
+                max_steps=6,
+                include_empty=True,
+                hard_pose_indices=hard,
+                hard_pose_fraction=0.375,
+                negative_only_pose_indices=negative_only,
+                negative_only_pose_fraction=0.25,
+            )
+        )
+
+        self.assertEqual(len(batches), 6)
+        for batch in batches:
+            self.assertEqual(batch.size, 8)
+            self.assertEqual(np.unique(batch).size, 8)
+            self.assertEqual(np.isin(batch, hard).sum(), 3)
+            self.assertEqual(np.isin(batch, negative_only).sum(), 2)
+
     def test_batch_keeps_candidate_camera_and_query_center_separate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

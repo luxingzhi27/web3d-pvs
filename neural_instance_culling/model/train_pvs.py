@@ -735,6 +735,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--hard-pose-fraction", type=float, default=0.0)
     parser.add_argument("--hard-pose-quantile", type=float, default=0.65)
+    parser.add_argument(
+        "--negative-only-pose-fraction",
+        type=float,
+        default=0.0,
+        help="fixed batch fraction drawn from train poses with candidates but no visible unit",
+    )
     parser.add_argument("--observation-batch-size", type=int, default=8192)
     parser.add_argument("--eval-every", type=int, default=4)
     parser.add_argument("--snapshot-every", type=int, default=4)
@@ -831,6 +837,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         args.instance_calibration_ramp_fraction,
         args.hard_pose_fraction,
         args.hard_pose_quantile,
+        args.negative_only_pose_fraction,
         args.integrated_rvl_pose_cvar_fraction,
         args.integrated_rvl_pose_cvar_weight,
         args.integrated_tail_ramp_fraction,
@@ -841,10 +848,14 @@ def _validate_args(args: argparse.Namespace) -> None:
     ):
         if not 0 <= value <= 1:
             raise ValueError("fraction arguments must lie in [0, 1]")
-    if args.pose_sampling == "uniform" and args.hard_pose_fraction != 0:
-        raise ValueError("uniform pose sampling requires --hard-pose-fraction 0")
+    if args.pose_sampling == "uniform" and (
+        args.hard_pose_fraction != 0 or args.negative_only_pose_fraction != 0
+    ):
+        raise ValueError("uniform pose sampling requires hard and negative-only fractions to be zero")
     if args.pose_sampling == "ambiguity_balanced" and not 0 < args.hard_pose_fraction <= 1:
         raise ValueError("ambiguity-balanced pose sampling requires a positive hard-pose fraction")
+    if args.hard_pose_fraction + args.negative_only_pose_fraction > 1:
+        raise ValueError("hard and negative-only pose fractions cannot exceed one")
     if not 0 < args.hard_pose_quantile < 1:
         raise ValueError("hard-pose quantile must lie strictly between 0 and 1")
     if not (
@@ -890,6 +901,7 @@ def main(argv: list[str] | None = None) -> None:
     depth = _depth_normalization(args.relation_dir)
 
     hard_pose_indices: np.ndarray | None = None
+    negative_only_pose_indices: np.ndarray | None = None
     pose_sampling_meta: dict[str, Any] = {
         "schema": "pvs-uniform-train-pose-sampling-v1",
         "sourceSplit": "train",
@@ -904,6 +916,20 @@ def main(argv: list[str] | None = None) -> None:
             hard_quantile=args.hard_pose_quantile,
         )
         pose_sampling_meta["hardPoseFraction"] = float(args.hard_pose_fraction)
+        if args.negative_only_pose_fraction > 0:
+            train_pose_indices = np.asarray(train_split.pose_indices, dtype=np.int64)
+            negative_only_pose_indices = train_pose_indices[
+                (dataset.candidate_counts[train_pose_indices] > 0)
+                & (dataset.visible_counts[train_pose_indices] == 0)
+            ]
+            if negative_only_pose_indices.size == 0:
+                raise ValueError("negative-only pose sampling requested but the train split has no eligible pose")
+            pose_sampling_meta.update({
+                "schema": "pvs-train-only-occlusion-opportunity-balanced-pose-sampling-v1",
+                "negativeOnlyPoseFraction": float(args.negative_only_pose_fraction),
+                "negativeOnlyPoseCount": int(negative_only_pose_indices.size),
+                "negativeOnlyDefinition": "candidate_count > 0 and visible_count == 0",
+            })
 
     if args.occlusion_representation == "survival":
         relation, relation_tensors, local_ids, structural_ids, observations, relation_meta = _load_relation_bundle(
@@ -1069,8 +1095,11 @@ def main(argv: list[str] | None = None) -> None:
             args.poses_per_batch,
             rng,
             args.steps_per_epoch,
+            include_empty=args.negative_only_pose_fraction > 0,
             hard_pose_indices=hard_pose_indices,
             hard_pose_fraction=args.hard_pose_fraction,
+            negative_only_pose_indices=negative_only_pose_indices,
+            negative_only_pose_fraction=args.negative_only_pose_fraction,
         )
         for step, poses in enumerate(batches):
             step_started = time.perf_counter()
@@ -1078,6 +1107,7 @@ def main(argv: list[str] | None = None) -> None:
                 poses, world_aabbs, rng,
                 max_candidates_per_pose=0,
                 allow_candidate_visible_union=False,
+                include_empty=args.negative_only_pose_fraction > 0,
             )
             if batch["instance"].size == 0:
                 continue

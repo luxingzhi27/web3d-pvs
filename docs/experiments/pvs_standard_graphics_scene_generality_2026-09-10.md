@@ -244,7 +244,66 @@ visible-weight coverage，不与 HKUST/IFCBench 的资源复用主表混合。
 训练监控必须检查进程存活、epoch/step、loss 数值有限、step/s、ETA、显存和 GPU 利用率。
 中间 validation 只用于健康诊断，不提前取消登记的完整矩阵。
 
-## 12. 引用边界
+## 12. Big City 剔除能力专项优化
+
+日期：2026-09-15。
+
+Big City 原 `128 KiB / K=8` 三种子长训在 epoch 20-22 主动停止，只保留为训练诊断，
+不进入论文正式成员池。停止时三个种子均未通过 validation 的 `weighted recall LCB > 0.99`
+安全门，CNOR 为 `0.2101/0.2232/0.2958`。该结果不能继续消耗约 14 小时/种子的剩余训练时间，
+因为数据和训练入口存在以下结构性瓶颈：
+
+1. Big City 的 652,925 个源连通片被打包为 2,861 个单位，每单位连通片数均值 228.2、
+   p50 227、p95 476；一个 1024 点、96 维几何表征需要概括过多离散碎片；
+2. `K=8` 关系单元有 74.0% 发生截断，关系质量 q01 只有 0.5196；
+3. 训练集约 22.6% view-cell 没有 GT 可见单位，其中候选非空的纯负例 pose 未进入旧
+   `ambiguity_balanced` 采样，模型没有直接学习这批重要剔除机会；
+4. seed02 epoch20 的正样本 q01 为 0.464973、负样本 q99 为 0.476780，安全阈值落在重叠
+   尾部内，说明低 CNOR 来自分数不可分，而不是候选负例不足。Big City 平均约 736 个候选、
+   160 个 GT，可剔除机会约占 78%。
+
+### 12.1 第一阶段：固定 128 KiB 单元上的训练专项扫描
+
+实验名固定为 `pvs_v4_bigcity_connected_sah_occlusion_opportunity_v1`。只读取
+train/calibration/validation，不读取 test。每个 pilot 从随机初始化训练 `8 x 450`，使用
+相同 V4 架构和精确 float32 calibration：
+
+| 配置 | 关系 K | 学习率 | 纯负例 pose | 困难边界 pose | 普通可见 pose |
+|---|---:|---:|---:|---:|---:|
+| P1 | 16 | `5e-5` | 25.0% | 37.5% | 37.5% |
+| P2 | 16 | `2e-5` | 25.0% | 37.5% | 37.5% |
+| P3 | 16 | `5e-5` | 37.5% | 25.0% | 37.5% |
+| P4 | 24 | `5e-5` | 25.0% | 37.5% | 37.5% |
+
+这里的“纯负例增强”不是修改相机或标签，而是从 train split 中显式重采样
+`candidate_count > 0 && visible_count == 0` 的合法 view-cell。每个 8-pose batch 按表中固定
+配额组成；困难边界池仍由 train-only 实例可见频率和 subpose 边界命中率构造。困难负例尾部
+比例由 `0.02` 提到 `0.04`，召回保护从总步数 10% 后开始、30% 时离开慢速段，避免旧协议
+到 epoch 13 后才有效约束安全尾部。
+
+完整四项 pilot 不由中间指标提前取消。选择时先取通过 calibration 和 validation 安全门的
+成员，再比较 Useful Cull、CNOR、balanced accuracy、Occlusion Recall 和平均保留数；若无
+安全成员，按 validation LCB、weighted recall、CNOR、Useful Cull 的顺序选相对最优配置，
+如实标记为诊断配置。选定配置必须从头完成三种子 `40 x 900`，不能从已停止 checkpoint
+续训，也不能用 test 选参数。
+
+关系重建与训练 smoke 已完成：`K=16` 的截断 cell 为 30,986、保留质量 q01 为 0.7327；
+`K=24` 为 21,266 和 0.8456。两者均来自同一 train-only 深度缓存。修正后的两步 smoke
+每批实际进入损失的 pose 数为 8，纯负例配额没有在训练张量构造阶段被丢弃，loss 数值有限。
+
+### 12.2 第二阶段：单元粒度重建触发条件
+
+若第一阶段相对最优配置仍未通过 `weighted recall LCB > 0.99`，或安全工作点 CNOR 仍低于
+`0.50`，则必须执行场景无关的细粒度规则：目标压缩大小 `64 KiB`，且每个单位最多包含
+128 个源连通片。两项限制都只使用源几何和编码字节，不读取标签或模型结果。单位 ID 改变后
+必须重建 GLB、1024 点/96D 几何表、硬件 Color-ID、Pose CSR、train-only depth/relation，
+并用同一 split 中心划分协议重新训练。正式论文同时报告单位数、候选数、模型资产、运行时
+和 byte/triangle cull，避免只靠更细单位获得好看的 unit-level 指标。
+
+第一阶段完成前不启动 AABB MLP、HZB 或 test；这些基线必须使用最终冻结的 Big City 单位、
+候选、GT 和 split。
+
+## 13. 引用边界
 
 - Wang et al., NeuralPVS: Learned Estimation of Potentially Visible Sets, SIGGRAPH Asia 2025。
 - Greene et al., Hierarchical Z-Buffer Visibility。

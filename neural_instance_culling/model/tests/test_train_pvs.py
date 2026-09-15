@@ -124,6 +124,26 @@ class TrainPvsTests(unittest.TestCase):
         self.assertEqual(args.seed, 20260801)
         _validate_args(args)
 
+    def test_negative_only_sampling_requires_ambiguity_mode_and_valid_total(self) -> None:
+        args = parse_args([
+            "--dataset-dir", ".",
+            "--relation-dir", ".",
+            "--runtime-meta", "runtime.json",
+            "--initial-geo-features", "geometry.bin",
+            "--glb-index", "glb.json",
+            "--glb-root", ".",
+            "--output-dir", "out",
+            "--experiment-name", "sampling_test",
+            "--variant", "full_integrated_visibility_mainline",
+            "--pose-sampling", "ambiguity_balanced",
+            "--hard-pose-fraction", "0.375",
+            "--negative-only-pose-fraction", "0.25",
+        ])
+        _validate_args(args)
+        args.negative_only_pose_fraction = 0.75
+        with self.assertRaisesRegex(ValueError, "cannot exceed one"):
+            _validate_args(args)
+
     def test_test_split_is_rejected_before_dataset_access(self) -> None:
         with self.assertRaisesRegex(ValueError, "test is forbidden"):
             _resolve_split(mock.Mock(), "test", "validation")

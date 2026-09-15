@@ -218,5 +218,12 @@ conda run -n slm_pvs python \
   重放 test、图像、streaming 或前端资产。
 - 标准场景执行顺序固定为 `Full -> AABB MLP / HZB -> frozen test/image/runtime`，后两类
   基线不得提前占用 Full 的采样、训练和浏览器 GPU 资源。
+- Big City 原 `128 KiB / K=8` 三种子在 epoch 20-22 停止并降级为诊断结果：validation
+  CNOR 仅为 `0.2101/0.2232/0.2958`，且都未满足 `weighted recall LCB > 0.99`。专项实验
+  `pvs_v4_bigcity_connected_sah_occlusion_opportunity_v1` 固定完成四项 train-only pilot：
+  `K=16/24`、学习率 `2e-5/5e-5`、纯负例 pose 比例 `25%/37.5%`，并提前召回保护、扩大
+  困难负例尾部。纯负例增强只重采样现有合法 train view-cell，不修改 GT。若相对最优配置
+  仍未通过安全门或安全 CNOR 低于 `0.50`，则重建 `64 KiB + 每单位最多 128 连通片` 数据。
+  该专项仍遵守 `pilot 全部完成 -> validation 选配置 -> 三种子从头长训 -> 基线/test` 顺序。
 - 完整单位契约和重建步骤以
   [标准图形学场景方案](pvs_standard_graphics_scene_generality_2026-09-10.md)第 3-11 节为准。
