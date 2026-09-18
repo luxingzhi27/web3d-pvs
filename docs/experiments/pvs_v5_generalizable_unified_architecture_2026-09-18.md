@@ -646,9 +646,9 @@ runtime 实验前的系统任务：完成 FP16 导出、PyTorch FP32 对 FP16 �
 compiled manifest 固定写 `pythonInferenceReady=true`、`browserRuntimeReady=false`，不再使用含义
 不明确的 `runtimeReady`。
 
-## 15. 参数扫描首批结果与评价资格修正（2026-09-18）
+## 15. 参数扫描结果与评价资格修正（2026-09-18）
 
-六组 `12,000 update` pilot 中，首批三个成员已经完成训练、动力学分析、五场景
+六组 `12,000 update` pilot 已全部完成训练、动力学分析、五场景
 calibration/validation score 导出和 10,000 次 bootstrap 评价。训练只读取 train；阈值只由
 各场景 calibration 选择，test 未读取。
 
@@ -659,26 +659,29 @@ calibration/validation score 导出和 10,000 次 bootstrap 评价。训练只�
 兼容口径。`benchmark/v5` 共 21 项测试通过，其中新增回归测试覆盖 calibration strict、validation
 diagnostic 的情形。
 
-首批 validation 结果：
+完整 validation 排名：
 
 | Model LR / Dual LR | Strict scenes | Mean-target scenes | Scene-equal WR LCB | Scene-equal CNOR | Scene-equal Useful Cull | Scene-equal Pred/GT |
 |---|---:|---:|---:|---:|---:|---:|
 | `1e-4 / 1e-3` | 3/5 | 4/5 | 0.989795 | 0.508721 | 0.624046 | 2.7086 |
 | `1e-4 / 3e-3` | 3/5 | 4/5 | 0.989754 | 0.507637 | 0.622681 | 2.7169 |
 | `2e-4 / 1e-3` | 3/5 | 4/5 | 0.989899 | 0.520581 | 0.634787 | 2.6423 |
+| `2e-4 / 3e-3` | 2/5 | 4/5 | 0.989853 | 0.516059 | 0.629181 | 2.6965 |
+| `4e-4 / 3e-3` | 2/5 | 3/5 | 0.989450 | 0.571412 | 0.657689 | 2.4664 |
+| `4e-4 / 1e-3` | 1/5 | 3/5 | 0.988265 | 0.566815 | 0.654021 | 2.4583 |
 
-首批相对最优为 `2e-4 / 1e-3`，但不能在后三组完成前晋级。该成员在 HKUST、Sponza 和
+完整词典序排名选择 `2e-4 / 1e-3` 和 `1e-4 / 1e-3` 进入从头 `36,000 update` 确认。前者在 HKUST、Sponza 和
 Viking Village 上达到 validation strict；IFCBench 的 WR/LCB 为 `0.990394/0.989980`，属于
 mean-target；Big City 为 `0.986267/0.985002`，属于 diagnostic。对应 Pose PR-AUC 为 HKUST
 `0.3910`、IFCBench `0.4473`、Sponza `0.6371`、Viking Village `0.7553`、Big City `0.6835`。
 
 V5 evaluator 同时补齐 `pose_accuracy` 和 `pose_balanced_accuracy`。前者先在每个 pose 内计算
 `(TP+TN)/candidate` 再宏平均，后者先在每个 pose 内计算 `(recall+specificity)/2` 再宏平均；
-它们与跨全部候选合并计算的 `accuracy`、`balanced_accuracy` 分开保存。首批三组汇总已从同一
+它们与跨全部候选合并计算的 `accuracy`、`balanced_accuracy` 分开保存。六组汇总均从同一
 冻结 score bundle 原地重算，未重新推理或改变阈值。
 
-后三组 `2e-4/3e-3`、`4e-4/1e-3` 和 `4e-4/3e-3` 已在 GPU0 并行启动。六组必须全部完成后，
-才按第 6.1 节词典序选择两个配置进行从头 `36,000 update` 确认。
+两组确认已在 GPU0 并行启动；它们不从 pilot checkpoint 恢复。确认完成并以同一评价协议排序后，
+只冻结一个优化参数配置供 15 个正式共享模型使用。
 
 当前训练同时懒加载 5 个真实场景和 96 个 synthetic source 的 PoseCSR/列式几何资产。持久
 `tmux` 服务的默认软文件描述符上限不足时，会在约第 101 个首次访问 source 处触发
