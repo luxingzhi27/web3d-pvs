@@ -1,4 +1,4 @@
-"""Calibration protocols for shared and five-fold LOSO V5 evaluation."""
+"""Calibration over re-openable columnar score streams."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,8 +6,8 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
-from .contracts import PoseRecord
 from .metrics import TARGET_WEIGHTED_RECALL, _weighted_lcb, evaluate_scene
+from .score_bundle import PoseScores
 
 
 @dataclass(frozen=True)
@@ -49,59 +49,23 @@ class CalibrationSelection:
             "qualification": self.qualification,
             "target_weighted_recall": float(self.target_weighted_recall),
             "mean_weighted_recall": float(self.mean_weighted_recall),
-            "mean_weighted_recall_lcb": (
-                None if self.mean_weighted_recall_lcb is None else float(self.mean_weighted_recall_lcb)
-            ),
+            "mean_weighted_recall_lcb": None if self.mean_weighted_recall_lcb is None else float(self.mean_weighted_recall_lcb),
             "mean_target_met": bool(self.mean_target_met),
             "confidence_target_met": bool(self.confidence_target_met),
-            "selection_split": self.selection_split,
+            "selection_split": "calibration",
             "test_read": False,
-            "scene_metrics": {
-                str(scene): dict(metrics) for scene, metrics in self.scene_metrics.items()
-            },
+            "scene_metrics": {str(scene): dict(metrics) for scene, metrics in self.scene_metrics.items()},
             "threshold_rows": [dict(row) for row in self.threshold_rows],
         }
 
 
-def _materialize_calibration(
-    records: Iterable[PoseRecord],
-    *,
-    scene: str,
-) -> tuple[PoseRecord, ...]:
-    materialized = tuple(records)
-    if not materialized:
-        raise ValueError(f"calibration split is empty for scene {scene!r}")
-    if any(record.split != "calibration" for record in materialized):
-        raise ValueError("V5 threshold selection accepts calibration rows only")
-    if any(record.scene not in (None, scene) for record in materialized):
-        raise ValueError(f"calibration row scene disagrees with {scene!r}")
-    return materialized
-
-
-def _candidate_thresholds(scene_records: Mapping[str, Sequence[PoseRecord]]) -> np.ndarray:
-    values: list[np.ndarray] = []
-    for scene, records in scene_records.items():
-        if not records:
-            raise ValueError(f"cannot calibrate an empty scene: {scene!r}")
-        for record in records:
-            if record.split == "test":
-                raise ValueError("test rows are forbidden during V5 threshold selection")
-            if record.scores.size:
-                values.append(np.asarray(record.scores, dtype=np.float64))
-    if not values:
-        raise ValueError("calibration contains no candidate scores")
-    thresholds = np.unique(np.concatenate(values))
-    if not bool(np.isfinite(thresholds).all()):
-        raise ValueError("calibration thresholds contain non-finite scores")
-    return thresholds
-
-
 @dataclass(frozen=True)
 class _SceneRecallIndex:
-    """Positive-only exact change-point index for one scene.
+    """Positive-only exact recall index.
 
-    Weighted recall and its pose bootstrap depend only on positive scores.  A
-    threshold lookup therefore never rescans the much larger negative set.
+    Weighted recall changes only when a positive score crosses the threshold;
+    retaining positive scores avoids concatenating the much larger negative
+    candidate population during calibration.
     """
 
     sorted_scores: tuple[np.ndarray, ...]
@@ -109,35 +73,53 @@ class _SceneRecallIndex:
     weighted_gt: np.ndarray
 
     @classmethod
-    def from_records(cls, records: Sequence[PoseRecord]) -> "_SceneRecallIndex":
+    def from_records(cls, records: Iterable[PoseScores], *, scene: str) -> "_SceneRecallIndex":
         scores: list[np.ndarray] = []
         prefixes: list[np.ndarray] = []
         totals: list[float] = []
+        seen = 0
         for record in records:
+            if not isinstance(record, PoseScores):
+                raise TypeError("V5 calibration requires PoseScores from a columnar sidecar")
+            if record.scene != scene:
+                raise ValueError(f"calibration record scene disagrees with {scene!r}")
+            if record.split != "calibration":
+                raise ValueError("V5 threshold selection accepts calibration rows only")
             positive = record.targets.astype(bool, copy=False)
-            pose_scores = np.asarray(record.scores[positive], dtype=np.float64)
-            pose_weights = np.asarray(record.visible_weights[positive], dtype=np.float64)
+            pose_scores = np.asarray(record.scores[positive], dtype=np.float64).copy()
+            pose_weights = np.asarray(record.visible_weights[positive], dtype=np.float64).copy()
             if pose_scores.size:
                 order = np.argsort(pose_scores, kind="stable")
                 pose_scores = pose_scores[order]
                 pose_weights = pose_weights[order]
-                prefix = np.concatenate(
-                    [np.zeros((1,), dtype=np.float64), np.cumsum(pose_weights, dtype=np.float64)]
-                )
+                prefix = np.concatenate([
+                    np.zeros((1,), dtype=np.float64),
+                    np.cumsum(pose_weights, dtype=np.float64),
+                ])
             else:
                 prefix = np.zeros((1,), dtype=np.float64)
             scores.append(pose_scores)
             prefixes.append(prefix)
             totals.append(float(pose_weights.sum()))
+            seen += 1
+        if seen == 0:
+            raise ValueError(f"calibration split is empty for scene {scene!r}")
         return cls(tuple(scores), tuple(prefixes), np.asarray(totals, dtype=np.float64))
+
+    def thresholds(self) -> np.ndarray:
+        values = [values for values in self.sorted_scores if values.size]
+        if not values:
+            raise ValueError("calibration contains no positive scores")
+        result = np.unique(np.concatenate(values))
+        if not bool(np.isfinite(result).all()):
+            raise ValueError("calibration thresholds contain non-finite scores")
+        return result
 
     def weighted_tp(self, threshold: float) -> np.ndarray:
         result = np.empty_like(self.weighted_gt)
-        for pose_index, (scores, prefix, total) in enumerate(
-            zip(self.sorted_scores, self.prefix_weights, self.weighted_gt, strict=True)
-        ):
+        for index, (scores, prefix, total) in enumerate(zip(self.sorted_scores, self.prefix_weights, self.weighted_gt, strict=True)):
             missed = int(np.searchsorted(scores, threshold, side="left"))
-            result[pose_index] = float(total) - float(prefix[missed])
+            result[index] = float(total) - float(prefix[missed])
         return result
 
     def weighted_recall(self, threshold: float) -> float:
@@ -146,13 +128,7 @@ class _SceneRecallIndex:
             return 1.0
         return float(self.weighted_tp(threshold).sum() / denominator)
 
-    def lower_confidence_bound(
-        self,
-        threshold: float,
-        *,
-        bootstrap_replicates: int,
-        bootstrap_seed: int,
-    ) -> float:
+    def lower_confidence_bound(self, threshold: float, *, bootstrap_replicates: int, bootstrap_seed: int) -> float:
         value = _weighted_lcb(
             self.weighted_tp(threshold),
             self.weighted_gt,
@@ -162,12 +138,7 @@ class _SceneRecallIndex:
         return 1.0 if value is None else float(value)
 
 
-def _highest_monotone_threshold(
-    thresholds: np.ndarray,
-    predicate: Any,
-) -> float | None:
-    """Return the highest ascending change point satisfying a monotone predicate."""
-
+def _highest_monotone_threshold(thresholds: np.ndarray, predicate: Any) -> float | None:
     lower = 0
     upper = int(thresholds.size) - 1
     best = -1
@@ -182,11 +153,7 @@ def _highest_monotone_threshold(
 
 
 def _compact_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        str(key): value
-        for key, value in metrics.items()
-        if key != "per_pose"
-    }
+    return {str(key): value for key, value in metrics.items() if key != "per_pose"}
 
 
 def _select_from_rows(
@@ -202,22 +169,15 @@ def _select_from_rows(
         raise ValueError("target weighted recall must lie strictly between zero and one")
 
     def strict(row: Mapping[str, Any]) -> bool:
-        scene_rows = row["scene_metrics"]
         return all(
             float(metrics["weighted_recall"]) > target
             and metrics.get("weighted_recall_lcb") is not None
             and float(metrics["weighted_recall_lcb"]) > target
-            for metrics in scene_rows.values()
+            for metrics in row["scene_metrics"].values()
         )
 
     def mean_target(row: Mapping[str, Any]) -> bool:
-        # source_global is a common threshold.  Requiring every source's
-        # point estimate prevents a large source from hiding an unsafe source;
-        # the reported mean remains scene-equal for comparison.
-        return all(
-            float(metrics["weighted_recall"]) > target
-            for metrics in row["scene_metrics"].values()
-        )
+        return all(float(metrics["weighted_recall"]) > target for metrics in row["scene_metrics"].values())
 
     strict_rows = [row for row in rows if strict(row)]
     mean_rows = [row for row in rows if mean_target(row)]
@@ -245,13 +205,11 @@ def _select_from_rows(
         target_weighted_recall=target,
         mean_weighted_recall=float(selected["mean_weighted_recall"]),
         mean_weighted_recall_lcb=None if mean_lcb is None else float(mean_lcb),
-        mean_target_met=bool(status in {"strict_lcb_target", "mean_target"}),
-        confidence_target_met=bool(status == "strict_lcb_target"),
+        mean_target_met=status in {"strict_lcb_target", "mean_target"},
+        confidence_target_met=status == "strict_lcb_target",
         selection_split="calibration",
         test_read=False,
-        scene_metrics={
-            str(scene): dict(metrics) for scene, metrics in selected["scene_metrics"].items()
-        },
+        scene_metrics={str(scene): dict(metrics) for scene, metrics in selected["scene_metrics"].items()},
         threshold_rows=tuple(dict(row) for row in rows),
     )
 
@@ -262,11 +220,6 @@ def select_calibration_workpoint(
     protocol: str,
     target_weighted_recall: float = TARGET_WEIGHTED_RECALL,
 ) -> CalibrationSelection:
-    """Select from already computed calibration rows.
-
-    This is intentionally a V5-specific selector: rows must contain
-    ``scene_metrics`` and cannot be built from a test split.
-    """
     normalized: list[dict[str, Any]] = []
     for index, row in enumerate(threshold_rows):
         if not isinstance(row, Mapping):
@@ -281,23 +234,17 @@ def select_calibration_workpoint(
         means = [float(metrics["weighted_recall"]) for metrics in scene_metrics.values()]
         lcb_values = [metrics.get("weighted_recall_lcb") for metrics in scene_metrics.values()]
         finite_lcb = [float(value) for value in lcb_values if value is not None]
-        normalized.append(
-            {
-                "threshold": float(row["threshold"]),
-                "scene_metrics": {str(scene): dict(metrics) for scene, metrics in scene_metrics.items()},
-                "mean_weighted_recall": float(np.mean(means)),
-                "mean_weighted_recall_lcb": float(np.mean(finite_lcb)) if finite_lcb else None,
-            }
-        )
-    return _select_from_rows(
-        normalized,
-        protocol=protocol,
-        target_weighted_recall=target_weighted_recall,
-    )
+        normalized.append({
+            "threshold": float(row["threshold"]),
+            "scene_metrics": {str(scene): dict(metrics) for scene, metrics in scene_metrics.items()},
+            "mean_weighted_recall": float(np.mean(means)),
+            "mean_weighted_recall_lcb": float(np.mean(finite_lcb)) if finite_lcb else None,
+        })
+    return _select_from_rows(normalized, protocol=protocol, target_weighted_recall=target_weighted_recall)
 
 
 def _calibrate(
-    scene_records: Mapping[str, Iterable[PoseRecord]],
+    scene_records: Mapping[str, Iterable[PoseScores]],
     *,
     protocol: str,
     target_weighted_recall: float,
@@ -306,31 +253,26 @@ def _calibrate(
 ) -> CalibrationSelection:
     if not scene_records:
         raise ValueError("V5 calibration requires at least one scene")
-    normalized = {
-        str(scene): _materialize_calibration(records, scene=str(scene))
-        for scene, records in scene_records.items()
+    records = {str(scene): value for scene, value in scene_records.items()}
+    indices = {
+        scene: _SceneRecallIndex.from_records(values, scene=scene)
+        for scene, values in records.items()
     }
-    scenes = tuple(sorted(normalized))
-    thresholds = _candidate_thresholds(normalized)
-    indices = {scene: _SceneRecallIndex.from_records(normalized[scene]) for scene in scenes}
+    scenes = tuple(sorted(indices))
+    threshold_values = [index.thresholds() for index in indices.values()]
+    thresholds = np.unique(np.concatenate(threshold_values))
     target = float(target_weighted_recall)
-    scene_seeds = {
-        scene: int(bootstrap_seed) + scene_index * 100_003
-        for scene_index, scene in enumerate(scenes)
-    }
-
+    scene_seeds = {scene: int(bootstrap_seed) + scene_index * 100_003 for scene_index, scene in enumerate(scenes)}
     mean_threshold = _highest_monotone_threshold(
         thresholds,
-        lambda threshold: all(
-            indices[scene].weighted_recall(threshold) > target for scene in scenes
-        ),
+        lambda value: all(indices[scene].weighted_recall(value) > target for scene in scenes),
     )
     strict_threshold = _highest_monotone_threshold(
         thresholds,
-        lambda threshold: all(
-            indices[scene].weighted_recall(threshold) > target
+        lambda value: all(
+            indices[scene].weighted_recall(value) > target
             and indices[scene].lower_confidence_bound(
-                threshold,
+                value,
                 bootstrap_replicates=int(bootstrap_replicates),
                 bootstrap_seed=scene_seeds[scene],
             ) > target
@@ -338,48 +280,39 @@ def _calibrate(
         ),
     )
     if strict_threshold is not None:
-        selected_threshold = strict_threshold
-        status = "strict_lcb_target"
+        selected_threshold, status = strict_threshold, "strict_lcb_target"
     elif mean_threshold is not None:
-        selected_threshold = mean_threshold
-        status = "mean_target"
+        selected_threshold, status = mean_threshold, "mean_target"
     else:
-        selected_threshold = float(thresholds[0])
-        status = "diagnostic"
-
-    scene_metrics: dict[str, dict[str, Any]] = {}
-    for scene in scenes:
-        scene_metrics[scene] = _compact_metrics(
+        selected_threshold, status = float(thresholds[0]), "diagnostic"
+    scene_metrics = {
+        scene: _compact_metrics(
             evaluate_scene(
-                normalized[scene],
+                records[scene],
                 selected_threshold,
                 bootstrap_replicates=int(bootstrap_replicates),
                 bootstrap_seed=scene_seeds[scene],
             )
         )
+        for scene in scenes
+    }
     recalls = [float(metrics["weighted_recall"]) for metrics in scene_metrics.values()]
-    lcb_values = [
-        float(metrics["weighted_recall_lcb"])
-        for metrics in scene_metrics.values()
-        if metrics.get("weighted_recall_lcb") is not None
-    ]
-    mean_recall = float(np.mean(recalls))
-    mean_lcb = float(np.mean(lcb_values)) if lcb_values else None
+    lcbs = [float(metrics["weighted_recall_lcb"]) for metrics in scene_metrics.values() if metrics.get("weighted_recall_lcb") is not None]
     final_row = {
         "threshold": selected_threshold,
         "selection_split": "calibration",
         "test_read": False,
         "scene_metrics": scene_metrics,
-        "mean_weighted_recall": mean_recall,
-        "mean_weighted_recall_lcb": mean_lcb,
+        "mean_weighted_recall": float(np.mean(recalls)),
+        "mean_weighted_recall_lcb": float(np.mean(lcbs)) if lcbs else None,
     }
     return CalibrationSelection(
         protocol=str(protocol),
         threshold=selected_threshold,
         status=status,
         target_weighted_recall=target,
-        mean_weighted_recall=mean_recall,
-        mean_weighted_recall_lcb=mean_lcb,
+        mean_weighted_recall=float(np.mean(recalls)),
+        mean_weighted_recall_lcb=float(np.mean(lcbs)) if lcbs else None,
         mean_target_met=status in {"strict_lcb_target", "mean_target"},
         confidence_target_met=status == "strict_lcb_target",
         selection_split="calibration",
@@ -390,13 +323,12 @@ def _calibrate(
 
 
 def calibrate_source_global(
-    source_calibration: Mapping[str, Iterable[PoseRecord]],
+    source_calibration: Mapping[str, Iterable[PoseScores]],
     *,
     target_weighted_recall: float = TARGET_WEIGHTED_RECALL,
     bootstrap_replicates: int = 10_000,
     bootstrap_seed: int = 0,
 ) -> CalibrationSelection:
-    """Freeze one common threshold using only the four source calibrations."""
     return _calibrate(
         source_calibration,
         protocol="source_global",
@@ -407,14 +339,13 @@ def calibrate_source_global(
 
 
 def calibrate_target(
-    target_calibration: Iterable[PoseRecord],
+    target_calibration: Iterable[PoseScores],
     *,
     scene: str = "target",
     target_weighted_recall: float = TARGET_WEIGHTED_RECALL,
     bootstrap_replicates: int = 10_000,
     bootstrap_seed: int = 0,
 ) -> CalibrationSelection:
-    """Freeze one scalar threshold from the held-out scene calibration only."""
     return _calibrate(
         {str(scene): target_calibration},
         protocol="target_calibrated",

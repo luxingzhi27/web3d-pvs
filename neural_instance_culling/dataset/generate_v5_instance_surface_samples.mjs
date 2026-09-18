@@ -50,6 +50,7 @@ export const POINTS_PER_UNIT = 256;
 export const POINT_FEATURE_DIM = 6;
 export const POINT_RECORD_BYTES = POINTS_PER_UNIT * POINT_FEATURE_DIM * Float32Array.BYTES_PER_ELEMENT;
 export const DEFAULT_SAMPLING_SEED = 20260918;
+export const DEFAULT_GC_EVERY = 10;
 
 const CANONICAL_FILES = Object.freeze({
   points: 'surface_points_fp32.bin',
@@ -324,6 +325,7 @@ export function matchTrianglesToComponents(triangles, componentRecords, options 
     1,
   );
   const normalizedTriangles = triangles.map((triangle, index) => normalizeTriangle(triangle, index));
+  const componentById = new Map(components.map((component) => [component.componentGlobalId, component]));
   const assignments = new Map(components.map((component) => [component.componentGlobalId, []]));
   const componentStats = new Map(components.map((component) => [component.componentGlobalId, {
     assignedTriangleCount: 0,
@@ -344,43 +346,36 @@ export function matchTrianglesToComponents(triangles, componentRecords, options 
   };
 
   for (const triangle of normalizedTriangles) {
-    const candidates = components
-      .map((component) => candidateForTriangle(triangle, component, sceneScale))
-      .filter(Boolean)
-      .sort((left, right) => (
-        right.score - left.score
-        || left.component.componentGlobalId - right.component.componentGlobalId
-      ));
     const hinted = triangle.instanceComponentGlobalId == null
       ? null
-      : components.find((component) => component.componentGlobalId === Number(triangle.instanceComponentGlobalId));
+      : componentById.get(Number(triangle.instanceComponentGlobalId));
+    const candidates = hinted
+      ? []
+      : components
+        .map((component) => candidateForTriangle(triangle, component, sceneScale))
+        .filter(Boolean)
+        .sort((left, right) => (
+          right.score - left.score
+          || left.component.componentGlobalId - right.component.componentGlobalId
+        ));
     let chosen = null;
     let mode = null;
 
-    // InstancedMesh carries an explicit instance-to-component ordering.  It is
-    // used only to disambiguate an overlapping AABB, or to repair a tiny bounds
-    // mismatch; ordinary multi-mesh GLBs still rely on geometric matching.
-    if (hinted && (candidates.length === 0 || candidates[0].component.componentGlobalId !== hinted.componentGlobalId)) {
-      const hintedCandidate = candidates.find(
-        (candidate) => candidate.component.componentGlobalId === hinted.componentGlobalId,
-      );
-      if (hintedCandidate && candidates[0] && Math.abs(hintedCandidate.score - candidates[0].score) <= 1e-6) {
-        chosen = hinted;
-        mode = 'instance-index-geometric';
-      } else if (candidates.length === 0) {
-        chosen = hinted;
-        mode = 'instance-index-fallback';
-      }
-    }
-    if (!chosen && candidates.length > 0) {
+    // EXT_mesh_gpu_instancing supplies the component identity directly.  The
+    // runtime metadata is generated from the same instance list, so this
+    // mapping remains valid even when rotation or a loose source AABB makes a
+    // transformed triangle miss the component bounds.  AABB matching is only
+    // used for ordinary, non-instanced multi-mesh GLBs.
+    if (triangle.instanceComponentGlobalId != null) {
+      assert(hinted, `triangle references unknown instance component ${triangle.instanceComponentGlobalId}`);
+      chosen = hinted;
+      mode = 'instance-index-explicit';
+    } else if (candidates.length > 0) {
       const best = candidates[0];
       const tied = candidates.filter((candidate) => Math.abs(candidate.score - best.score) <= 1e-6);
       if (tied.length === 1) {
         chosen = best.component;
         mode = 'geometric-aabb-centroid';
-      } else if (hinted && tied.some((candidate) => candidate.component.componentGlobalId === hinted.componentGlobalId)) {
-        chosen = hinted;
-        mode = 'instance-index-geometric';
       } else {
         stats.ambiguousTriangleCount += 1;
         note('ambiguous');
@@ -570,6 +565,217 @@ function collectObjectTriangles(THREE, object, instanceIndex, sourceIndexStart, 
   return { triangles, sourceTriangleCount, degenerateTriangleCount };
 }
 
+function transformAttributePoint(attribute, index, matrix, output) {
+  const x = attribute.getX(index);
+  const y = attribute.getY(index);
+  const z = attribute.getZ(index);
+  output[0] = matrix[0] * x + matrix[4] * y + matrix[8] * z + matrix[12];
+  output[1] = matrix[1] * x + matrix[5] * y + matrix[9] * z + matrix[13];
+  output[2] = matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14];
+}
+
+function computePartTriangle(part, triangleIndex, a, b, c, cross) {
+  const ia = part.index ? part.index.getX(triangleIndex * 3) : triangleIndex * 3;
+  const ib = part.index ? part.index.getX(triangleIndex * 3 + 1) : triangleIndex * 3 + 1;
+  const ic = part.index ? part.index.getX(triangleIndex * 3 + 2) : triangleIndex * 3 + 2;
+  transformAttributePoint(part.position, ia, part.matrix, a);
+  transformAttributePoint(part.position, ib, part.matrix, b);
+  transformAttributePoint(part.position, ic, part.matrix, c);
+  const abx = b[0] - a[0];
+  const aby = b[1] - a[1];
+  const abz = b[2] - a[2];
+  const acx = c[0] - a[0];
+  const acy = c[1] - a[1];
+  const acz = c[2] - a[2];
+  cross[0] = aby * acz - abz * acy;
+  cross[1] = abz * acx - abx * acz;
+  cross[2] = abx * acy - aby * acx;
+  return Math.hypot(cross[0], cross[1], cross[2]);
+}
+
+function makeGeometryPart(THREE, object, instanceIndex, mode) {
+  const geometry = object.geometry;
+  const position = geometry?.attributes?.position;
+  if (!position) return null;
+  const index = geometry.index;
+  const sourceTriangleCount = Math.floor((index ? index.count : position.count) / 3);
+  const instanceMatrix = new THREE.Matrix4().identity();
+  if (instanceIndex !== null) object.getMatrixAt(instanceIndex, instanceMatrix);
+  const finalMatrix = new THREE.Matrix4().multiplyMatrices(
+    object.matrixWorld,
+    instanceIndex === null ? new THREE.Matrix4().identity() : instanceMatrix,
+  );
+  return {
+    position,
+    index,
+    sourceTriangleCount,
+    matrix: finalMatrix.elements.slice(),
+    mode,
+  };
+}
+
+function makeSurfacePlan(part) {
+  const cumulative = new Float64Array(part.sourceTriangleCount);
+  const sourceIndices = new Uint32Array(part.sourceTriangleCount);
+  const a = new Float64Array(3);
+  const b = new Float64Array(3);
+  const c = new Float64Array(3);
+  const cross = new Float64Array(3);
+  let validCount = 0;
+  let degenerateTriangleCount = 0;
+  let totalArea = 0;
+  for (let triangleIndex = 0; triangleIndex < part.sourceTriangleCount; triangleIndex += 1) {
+    const crossLength = computePartTriangle(part, triangleIndex, a, b, c, cross);
+    if (!Number.isFinite(crossLength) || crossLength <= AREA_EPSILON) {
+      degenerateTriangleCount += 1;
+      continue;
+    }
+    totalArea += crossLength * 0.5;
+    cumulative[validCount] = totalArea;
+    sourceIndices[validCount] = triangleIndex;
+    validCount += 1;
+  }
+  return {
+    ...part,
+    cumulative,
+    sourceIndices,
+    validCount,
+    totalArea,
+    degenerateTriangleCount,
+  };
+}
+
+function sampleSurfacePlans(THREE, plans, componentBounds, { seed, componentGlobalId }) {
+  const bounds = boundsFromRecord(componentBounds, 'component bounds');
+  const features = zeroFeatureBlock();
+  const planEnds = new Float64Array(plans.length);
+  let totalArea = 0;
+  let usableTriangleCount = 0;
+  let degenerateTriangleCount = 0;
+  for (let index = 0; index < plans.length; index += 1) {
+    totalArea += plans[index].totalArea;
+    planEnds[index] = totalArea;
+    usableTriangleCount += plans[index].validCount;
+    degenerateTriangleCount += plans[index].degenerateTriangleCount;
+  }
+  if (usableTriangleCount === 0 || totalArea <= AREA_EPSILON) {
+    return {
+      features,
+      emptyGeometry: true,
+      sampledArea: 0,
+      usableTriangleCount: 0,
+      degenerateTriangleCount,
+      outOfBoundsPointCount: 0,
+    };
+  }
+  assert(bounds.halfDiagonal > AREA_EPSILON, 'component AABB half diagonal must be positive for surface sampling');
+  const rng = createRng(deriveUnitSeed(seed, componentGlobalId));
+  const a = new Float64Array(3);
+  const b = new Float64Array(3);
+  const c = new Float64Array(3);
+  const cross = new Float64Array(3);
+  let outOfBoundsPointCount = 0;
+  for (let pointIndex = 0; pointIndex < POINTS_PER_UNIT; pointIndex += 1) {
+    const target = rng() * totalArea;
+    let planLow = 0;
+    let planHigh = planEnds.length - 1;
+    while (planLow < planHigh) {
+      const middle = (planLow + planHigh) >> 1;
+      if (target < planEnds[middle]) planHigh = middle;
+      else planLow = middle + 1;
+    }
+    const previousEnd = planLow === 0 ? 0 : planEnds[planLow - 1];
+    const plan = plans[planLow];
+    let triangleLow = 0;
+    let triangleHigh = plan.validCount - 1;
+    const localTarget = target - previousEnd;
+    while (triangleLow < triangleHigh) {
+      const middle = (triangleLow + triangleHigh) >> 1;
+      if (localTarget < plan.cumulative[middle]) triangleHigh = middle;
+      else triangleLow = middle + 1;
+    }
+    const sourceTriangleIndex = plan.sourceIndices[triangleLow];
+    const crossLength = computePartTriangle(plan, sourceTriangleIndex, a, b, c, cross);
+    assert(crossLength > AREA_EPSILON && Number.isFinite(crossLength), 'streamed surface triangle area is invalid');
+    const sqrtU = Math.sqrt(rng());
+    const v = rng();
+    const wa = 1 - sqrtU;
+    const wb = sqrtU * (1 - v);
+    const wc = sqrtU * v;
+    const worldPoint = [
+      a[0] * wa + b[0] * wb + c[0] * wc,
+      a[1] * wa + b[1] * wb + c[1] * wc,
+      a[2] * wa + b[2] * wb + c[2] * wc,
+    ];
+    const normalized = [
+      (worldPoint[0] - bounds.center[0]) / bounds.halfDiagonal,
+      (worldPoint[1] - bounds.center[1]) / bounds.halfDiagonal,
+      (worldPoint[2] - bounds.center[2]) / bounds.halfDiagonal,
+    ];
+    if (normalized.some((value) => Math.abs(value) > 1 + 1e-5)) outOfBoundsPointCount += 1;
+    const offset = pointIndex * POINT_FEATURE_DIM;
+    features[offset] = normalized[0];
+    features[offset + 1] = normalized[1];
+    features[offset + 2] = normalized[2];
+    features[offset + 3] = cross[0] / crossLength;
+    features[offset + 4] = cross[1] / crossLength;
+    features[offset + 5] = cross[2] / crossLength;
+  }
+  assert(Number.isFinite(features[features.length - 1]), 'streamed surface feature block contains non-finite values');
+  return {
+    features,
+    emptyGeometry: false,
+    sampledArea: totalArea,
+    usableTriangleCount,
+    degenerateTriangleCount,
+    outOfBoundsPointCount,
+  };
+}
+
+/**
+ * Stream a GLB that maps to one runtime component without materializing all
+ * triangles as JavaScript objects. Large single-component meshes are common
+ * in HKUST and otherwise exceed the V8 heap before sampling can start.
+ */
+function collectSingleComponentSurfaceFeatures(THREE, gltf, component, { seed }) {
+  assert(gltf?.scene, 'GLB has no scene');
+  const parts = [];
+  let renderableObjectCount = 0;
+  let instancedPartCount = 0;
+  gltf.scene.updateMatrixWorld(true);
+  gltf.scene.traverse((object) => {
+    if (!object.isMesh && !object.isInstancedMesh) return;
+    renderableObjectCount += 1;
+    if (object.isInstancedMesh) {
+      assert(object.count === 1, `single-component GLB has ${object.count} instanced placements`);
+      const part = makeGeometryPart(THREE, object, 0, 'instance-index-explicit');
+      if (part) {
+        parts.push(part);
+        instancedPartCount += 1;
+      }
+      return;
+    }
+    const part = makeGeometryPart(THREE, object, null, 'single-component-stream');
+    if (part) parts.push(part);
+  });
+  const plans = parts.map(makeSurfacePlan);
+  const sampled = sampleSurfacePlans(THREE, plans, component.bounds, {
+    seed,
+    componentGlobalId: component.componentGlobalId,
+  });
+  const modeCounts = {};
+  for (const plan of plans) {
+    modeCounts[plan.mode] = (modeCounts[plan.mode] || 0) + plan.validCount;
+  }
+  return {
+    ...sampled,
+    renderableObjectCount,
+    sourceTriangleCount: plans.reduce((sum, plan) => sum + plan.sourceTriangleCount, 0),
+    modeCounts,
+    matchMode: instancedPartCount > 0 ? 'instance-index-explicit' : 'single-component-stream',
+  };
+}
+
 /** Collect transformed face triangles from every renderable object in a GLB. */
 export function collectWorldTriangles(THREE, gltf, componentGlobalIds = []) {
   assert(gltf?.scene, 'GLB has no scene');
@@ -583,10 +789,12 @@ export function collectWorldTriangles(THREE, gltf, componentGlobalIds = []) {
     if (!object.isMesh && !object.isInstancedMesh) return;
     renderableObjectCount += 1;
     if (object.isInstancedMesh) {
+      assert(
+        componentGlobalIds.length === object.count,
+        `instanced GLB component mapping has ${componentGlobalIds.length} components for ${object.count} instances`,
+      );
       for (let instanceIndex = 0; instanceIndex < object.count; instanceIndex += 1) {
-        const hintedComponent = componentGlobalIds.length === object.count
-          ? componentGlobalIds[instanceIndex]
-          : null;
+        const hintedComponent = componentGlobalIds[instanceIndex];
         const result = collectObjectTriangles(
           THREE,
           object,
@@ -630,6 +838,30 @@ function disposeLoadedGltf(gltf) {
       material.dispose?.();
     }
   });
+  // GLTFParser retains decoded dependencies in per-parse registries. Clear
+  // those references before the next GLB so an explicit V8 collection can
+  // reclaim the completed parse graph.
+  const parser = gltf?.parser;
+  parser?.cache?.removeAll?.();
+  parser?.associations?.clear?.();
+  if (parser) {
+    parser.json = null;
+    parser.extensions = {};
+    parser.plugins = {};
+    parser.primitiveCache = {};
+    parser.nodeCache = {};
+    parser.meshCache = { refs: {}, uses: {} };
+    parser.cameraCache = { refs: {}, uses: {} };
+    parser.lightCache = { refs: {}, uses: {} };
+    parser.sourceCache = {};
+    parser.textureCache = {};
+  }
+}
+
+export function collectGarbageIfAvailable() {
+  if (typeof globalThis.gc !== 'function') return false;
+  globalThis.gc();
+  return true;
 }
 
 function readJson(filePath) {
@@ -759,8 +991,48 @@ export function createGltfLoader({ GLTFLoader, DRACOLoader, MeshoptDecoder }) {
   return { loader, dracoLoader };
 }
 
+/**
+ * Remove material dependencies before geometry-only extraction. Surface
+ * features use transformed positions and computed triangle normals; decoding
+ * images here only creates large, irrelevant CPU/Blob resources.
+ */
+export function stripGlbMaterials(value) {
+  const source = Buffer.isBuffer(value)
+    ? value
+    : Buffer.from(value.buffer, value.byteOffset || 0, value.byteLength);
+  if (source.length < 20 || source.readUInt32LE(0) !== 0x46546c67) return source;
+  const jsonLength = source.readUInt32LE(12);
+  const jsonType = source.readUInt32LE(16);
+  assert(jsonType === 0x4e4f534a, 'GLB first chunk must be JSON');
+  const jsonStart = 20;
+  assert(jsonStart + jsonLength <= source.length, 'GLB JSON chunk exceeds file length');
+  const jsonText = source.subarray(jsonStart, jsonStart + jsonLength).toString('utf8').trim();
+  const json = JSON.parse(jsonText);
+  let changed = false;
+  for (const mesh of json.meshes || []) {
+    for (const primitive of mesh.primitives || []) {
+      if (primitive.material !== undefined) {
+        delete primitive.material;
+        changed = true;
+      }
+    }
+  }
+  for (const key of ['materials', 'textures', 'images', 'samplers']) {
+    if (json[key] !== undefined) {
+      delete json[key];
+      changed = true;
+    }
+  }
+  if (!changed) return source;
+  const encoded = Buffer.from(JSON.stringify(json), 'utf8');
+  assert(encoded.length <= jsonLength, 'geometry-only GLB JSON does not fit in its original chunk');
+  source.fill(0x20, jsonStart, jsonStart + jsonLength);
+  encoded.copy(source, jsonStart);
+  return source;
+}
+
 export async function loadGltf(loader, filePath) {
-  const data = fs.readFileSync(filePath);
+  const data = stripGlbMaterials(fs.readFileSync(filePath));
   const arrayBuffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
   return new Promise((resolve, reject) => {
     loader.parse(arrayBuffer, `${path.dirname(filePath).replace(/\\/g, '/')}/`, resolve, reject);
@@ -967,6 +1239,51 @@ async function processGlbEntry({ THREE, loader, entry, componentIds, stateById, 
     return;
   }
 
+  if (componentIds.length === 1) {
+    const component = stateById.get(componentIds[0]).component;
+    const streamed = collectSingleComponentSurfaceFeatures(THREE, gltf, component, { seed });
+    disposeLoadedGltf(gltf);
+    gltf = null;
+    totals.glbCountProcessed += 1;
+    totals.sourceTriangleCount += streamed.sourceTriangleCount;
+    totals.usableTriangleCount += streamed.usableTriangleCount;
+    totals.degenerateTriangleCount += streamed.degenerateTriangleCount;
+    totals.matchedTriangleCount += streamed.usableTriangleCount;
+    totals.renderableObjectCount += streamed.renderableObjectCount;
+    for (const [mode, count] of Object.entries(streamed.modeCounts)) {
+      totals.matchModeCounts[mode] = (totals.matchModeCounts[mode] || 0) + count;
+    }
+    const state = stateById.get(componentIds[0]);
+    if (streamed.emptyGeometry) {
+      totals.emptyGeometryGlbCount += 1;
+      stateById.set(componentIds[0], createEmptyState(
+        state.component,
+        entry,
+        { sourceTriangleCount: streamed.sourceTriangleCount },
+      ));
+      return;
+    }
+    stateById.set(componentIds[0], {
+      component: state.component,
+      glbPath: entry.path,
+      features: streamed.features,
+      fallback: false,
+      fallbackReason: null,
+      emptyGeometry: false,
+      analysis: {
+        sourceTriangleCount: streamed.sourceTriangleCount,
+        usableTriangleCount: streamed.usableTriangleCount,
+        assignedTriangleCount: streamed.usableTriangleCount,
+        assignedArea: streamed.sampledArea,
+        outOfBoundsPointCount: streamed.outOfBoundsPointCount,
+        matchMode: streamed.matchMode,
+        unmatchedTriangleCount: 0,
+        ambiguousTriangleCount: 0,
+      },
+    });
+    return;
+  }
+
   const geometry = collectWorldTriangles(THREE, gltf, componentIds);
   disposeLoadedGltf(gltf);
   gltf = null;
@@ -1080,6 +1397,9 @@ function normalizeOptions(options = {}) {
   const progressEvery = options.progressEvery === undefined
     ? 50
     : asNonNegativeInteger(options.progressEvery, 'progressEvery');
+  const gcEvery = options.gcEvery === undefined
+    ? DEFAULT_GC_EVERY
+    : asNonNegativeInteger(options.gcEvery, 'gcEvery');
   return {
     assetsDir,
     runtimeMetaPath,
@@ -1088,6 +1408,7 @@ function normalizeOptions(options = {}) {
     seed,
     maxGlbs,
     progressEvery,
+    gcEvery,
     runtimeMeta: options.runtimeMeta,
     glbIndex: options.glbIndex,
     dependencies: options.dependencies,
@@ -1152,6 +1473,9 @@ export async function generateV5InstanceSurfaceSamples(options = {}) {
           seed: args.seed,
           totals,
         });
+      }
+      if (args.gcEvery > 0 && (index + 1) % args.gcEvery === 0) {
+        collectGarbageIfAvailable();
       }
       if (args.progressEvery > 0 && (index + 1) % args.progressEvery === 0) {
         console.log(`[v5-surface] ${index + 1}/${selectedEntries.length} GLBs processed`);
@@ -1232,6 +1556,7 @@ export function parseArgs(argv = process.argv) {
     seed: DEFAULT_SAMPLING_SEED,
     maxGlbs: null,
     progressEvery: 50,
+    gcEvery: DEFAULT_GC_EVERY,
     help: false,
   };
   for (let index = 2; index < argv.length; index += 1) {
@@ -1251,6 +1576,7 @@ export function parseArgs(argv = process.argv) {
     else if (key === '--seed') args.seed = asNonNegativeInteger(value, 'seed');
     else if (key === '--max-glbs') args.maxGlbs = asPositiveInteger(value, 'max-glbs');
     else if (key === '--progress-every') args.progressEvery = asNonNegativeInteger(value, 'progress-every');
+    else if (key === '--gc-every') args.gcEvery = asNonNegativeInteger(value, 'gc-every');
     else throw new Error(`unknown argument ${key}`);
   }
   return args;
@@ -1267,6 +1593,7 @@ Options:
   --seed N               Deterministic non-negative sampling seed.
   --max-glbs N           Process only the first N indexed GLBs.
   --progress-every N     Print progress every N GLBs; zero disables it.
+  --gc-every N           Run V8 GC every N GLBs when started with --expose-gc; zero disables it.
 `);
 }
 

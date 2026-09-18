@@ -54,6 +54,7 @@ def compile_surface(scene: dict[str, Any], scene_root: Path, overwrite: bool) ->
     _prepare_stage(output, overwrite)
     command = [
         "node",
+        "--expose-gc",
         str(SURFACE_GENERATOR),
         "--assets-dir",
         str(_path(scene["assetsDir"])),
@@ -65,6 +66,8 @@ def compile_surface(scene: dict[str, Any], scene_root: Path, overwrite: bool) ->
         str(output),
         "--progress-every",
         "50",
+        "--gc-every",
+        "10",
     ]
     started = time.monotonic()
     _run_logged(command, scene_root / "logs/surface_stdout.log", scene_root / "logs/surface_stderr.log")

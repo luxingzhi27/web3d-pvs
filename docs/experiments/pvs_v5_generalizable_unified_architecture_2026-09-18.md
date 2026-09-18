@@ -529,7 +529,7 @@ for shard in $(seq 0 7); do
     --runtime-meta neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/viking_village_64k/assets/runtimeVisibilityMeta.json \
     --glb-index neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/viking_village_64k/assets/glbIndex.json \
     --surface-manifest "$VIKING_ROOT/surface/surface_manifest.json" \
-    --output-dir "$VIKING_ROOT/probes/shard_${shard}" \
+    --output-dir "$VIKING_ROOT/probe_shards/shard_${shard}" \
     --shard-index "$shard" --shard-count 8 \
     --progress-every 25 --gc-every 25 \
     > "$VIKING_ROOT/logs/probes_shard_${shard}_stdout.log" \
@@ -543,8 +543,8 @@ Viking 分片完成后合并：
 node --input-type=module -e '
 import { mergeExternalHitProbeShards } from "./neural_instance_culling/dataset/v5/generate_external_hit_probes.mjs";
 mergeExternalHitProbeShards({
-  shardDirs: Array.from({ length: 8 }, (_, i) => `neural_instance_culling/dataset/out/pvs_v5_geometry_compilation_v1/viking_village_64k/probes/shard_${i}`),
-  outputDir: "neural_instance_culling/dataset/out/pvs_v5_geometry_compilation_v1/viking_village_64k/probes/merged",
+  shardDirs: Array.from({ length: 8 }, (_, i) => `neural_instance_culling/dataset/out/pvs_v5_geometry_compilation_v1/viking_village_64k/probe_shards/shard_${i}`),
+  outputDir: "neural_instance_culling/dataset/out/pvs_v5_geometry_compilation_v1/viking_village_64k/probes",
 });
 '
 ```
@@ -560,7 +560,7 @@ for shard in $(seq 0 3); do
     --runtime-meta neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/bigcity_64k/assets/runtimeVisibilityMeta.json \
     --glb-index neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/bigcity_64k/assets/glbIndex.json \
     --surface-manifest "$CITY_ROOT/surface/surface_manifest.json" \
-    --output-dir "$CITY_ROOT/probes/shard_${shard}" \
+    --output-dir "$CITY_ROOT/probe_shards/shard_${shard}" \
     --shard-index "$shard" --shard-count 4 \
     --progress-every 25 --gc-every 25 \
     > "$CITY_ROOT/logs/probes_shard_${shard}_stdout.log" \
@@ -574,8 +574,8 @@ Big City 分片完成后合并：
 node --input-type=module -e '
 import { mergeExternalHitProbeShards } from "./neural_instance_culling/dataset/v5/generate_external_hit_probes.mjs";
 mergeExternalHitProbeShards({
-  shardDirs: Array.from({ length: 4 }, (_, i) => `neural_instance_culling/dataset/out/pvs_v5_geometry_compilation_v1/big_city_64k/probes/shard_${i}`),
-  outputDir: "neural_instance_culling/dataset/out/pvs_v5_geometry_compilation_v1/big_city_64k/probes/merged",
+  shardDirs: Array.from({ length: 4 }, (_, i) => `neural_instance_culling/dataset/out/pvs_v5_geometry_compilation_v1/big_city_64k/probe_shards/shard_${i}`),
+  outputDir: "neural_instance_culling/dataset/out/pvs_v5_geometry_compilation_v1/big_city_64k/probes",
 });
 '
 ```

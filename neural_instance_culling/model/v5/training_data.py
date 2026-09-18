@@ -173,6 +173,7 @@ class V5SceneTrainingData:
         viewcell_half_extent_m: tuple[float, float, float],
         camera_clip_m: tuple[float, float],
         probe_policy: FoldAccessPolicy | Mapping[str, Any] | None = None,
+        region_manifest: Path | None = None,
     ) -> None:
         self.scene_id = str(scene_id)
         self.pose_dataset_path = Path(pose_dataset)
@@ -185,6 +186,38 @@ class V5SceneTrainingData:
         self.viewcell_shape = str(viewcell_shape)
         self.viewcell_half_extent_m = np.asarray(viewcell_half_extent_m, dtype=np.float32)
         self.camera_clip_m = tuple(float(value) for value in camera_clip_m)
+        self.region_specs: tuple[dict[str, Any], ...] | None = None
+        if region_manifest is not None:
+            manifest = json.loads(Path(region_manifest).read_text(encoding="utf-8"))
+            regions = manifest.get("viewCells", {}).get("regions")
+            if not isinstance(regions, list) or len(regions) != self.dataset.poses.size:
+                raise ValueError(f"{self.scene_id} region manifest does not match pose count")
+            parsed: list[dict[str, Any]] = []
+            for pose_id, region in enumerate(regions):
+                if not isinstance(region, Mapping):
+                    raise ValueError(f"{self.scene_id} region {pose_id} is not an object")
+                region_type = str(region.get("regionType", ""))
+                support = np.asarray(region.get("supportPoints"), dtype=np.float32)
+                if support.shape != (9, 3) or not bool(np.isfinite(support).all()):
+                    raise ValueError(f"{self.scene_id} region {pose_id} has invalid support points")
+                if region_type == "disk":
+                    radius = float(region.get("radius", 0.0))
+                    if not math.isfinite(radius) or radius <= 0.0:
+                        raise ValueError(f"{self.scene_id} region {pose_id} has invalid disk radius")
+                    half_axes = np.asarray([radius, 0.0, radius], dtype=np.float32)
+                    encoded_type = 0.0
+                elif region_type == "oriented_box":
+                    axes = np.asarray(region.get("halfAxes"), dtype=np.float32)
+                    if axes.shape != (3, 3) or not bool(np.isfinite(axes).all()):
+                        raise ValueError(f"{self.scene_id} region {pose_id} has invalid box axes")
+                    half_axes = np.linalg.norm(axes, axis=1).astype(np.float32)
+                    if bool((half_axes <= 0.0).any()):
+                        raise ValueError(f"{self.scene_id} region {pose_id} has degenerate box axes")
+                    encoded_type = 1.0
+                else:
+                    raise ValueError(f"{self.scene_id} region {pose_id} has unknown type {region_type!r}")
+                parsed.append({"support": support, "half_axes": half_axes, "region_type": encoded_type})
+            self.region_specs = tuple(parsed)
 
         surface_dir = self.compiled_dir / "surface"
         surface_manifest = json.loads((surface_dir / "surface_manifest.json").read_text(encoding="utf-8"))
@@ -252,11 +285,6 @@ class V5SceneTrainingData:
         all_supports: list[np.ndarray] = []
         all_centers: list[np.ndarray] = []
         all_radii: list[np.ndarray] = []
-        half_axes = self.viewcell_half_extent_m.copy()
-        if self.viewcell_shape == "horizontal_disk":
-            half_axes = np.asarray([half_axes[0], 0.0, half_axes[1]], dtype=np.float32)
-        region_type = 0.0 if self.viewcell_shape == "horizontal_disk" else 1.0
-
         for pose_row, pose_id in enumerate(selected.tolist()):
             candidates = np.asarray(self.dataset.candidate_slice(pose_id), dtype=np.int64)
             candidates = candidates[self.valid_unit_mask[candidates]]
@@ -278,12 +306,22 @@ class V5SceneTrainingData:
             region_center = self.dataset.query_center_world(pose_id, required=True)
             view = self.dataset.camera_view(pose_id)
             basis = _camera_basis(view[:3])
-            support = _support_points(
-                region_center,
-                basis,
-                self.viewcell_shape,
-                self.viewcell_half_extent_m,
-            )
+            if self.region_specs is None:
+                half_axes = self.viewcell_half_extent_m.copy()
+                if self.viewcell_shape == "horizontal_disk":
+                    half_axes = np.asarray([half_axes[0], 0.0, half_axes[1]], dtype=np.float32)
+                region_type = 0.0 if self.viewcell_shape == "horizontal_disk" else 1.0
+                support = _support_points(
+                    region_center,
+                    basis,
+                    self.viewcell_shape,
+                    self.viewcell_half_extent_m,
+                )
+            else:
+                spec = self.region_specs[int(pose_id)]
+                half_axes = np.asarray(spec["half_axes"], dtype=np.float32)
+                region_type = float(spec["region_type"])
+                support = np.asarray(spec["support"], dtype=np.float32)
             query = _query_geometry_numpy(
                 centers,
                 radii,

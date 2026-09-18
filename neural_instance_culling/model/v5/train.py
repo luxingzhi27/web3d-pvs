@@ -276,7 +276,11 @@ def train_step(
     optimizer.step()
     if scheduler is not None:
         scheduler.step()
-    dual_state.update(scene.scene_id, risks)
+    # PBCE_OBJECTIVE is the registered objective-only control.  It keeps the
+    # Full representation and field supervision, but deliberately does not
+    # optimize the constrained objective or advance its dual variables.
+    if objective_name != "PBCE_OBJECTIVE":
+        dual_state.update(scene.scene_id, risks)
     lambda_index = dual_state.scene_ids.index(scene.scene_id)
     return TrainStepResult(
         scene_id=scene.scene_id,

@@ -1,4 +1,4 @@
-"""Pose-set metrics used by the GCOF-PVS V5 evaluation layer."""
+"""Streaming pose-set metrics for the columnar GCOF-PVS V5 benchmark."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,28 +8,23 @@ from typing import Any, Iterable, Mapping
 import numpy as np
 
 from neural_instance_culling.benchmark.score_sidecar import average_precision
-from neural_instance_culling.model.common.culling_metrics import (
-    candidate_normalized_occlusion_recall,
-)
+from neural_instance_culling.model.common.culling_metrics import candidate_normalized_occlusion_recall
 
-# The existing threshold-metric module is a model-side script and imports its
-# sibling ``common`` package as a top-level module.  Register that model root
-# once so V5 can reuse its bootstrap implementation without changing V4 code.
 _MODEL_ROOT = Path(__file__).resolve().parents[2] / "model"
 if str(_MODEL_ROOT) not in sys.path:
     sys.path.insert(0, str(_MODEL_ROOT))
-from neural_instance_culling.model.pvs_threshold_metrics import (
-    weighted_recall_lower_confidence_bound,
-)
+from neural_instance_culling.model.pvs_threshold_metrics import weighted_recall_lower_confidence_bound
 
-from .contracts import PoseRecord
+from .score_bundle import PoseScores
 
 
 TARGET_WEIGHTED_RECALL = 0.99
+AGGREGATE_AP_MAX_VALUES = 2_000_000
 METRIC_FIELDS = (
     "weighted_recall",
     "weighted_recall_lcb",
     "ordinary_recall",
+    "pose_recall",
     "fn_over_gt",
     "bad_cull",
     "cnor",
@@ -39,24 +34,23 @@ METRIC_FIELDS = (
     "pose_pr_auc",
     "pose_prevalence",
     "pose_ap_lift",
+    "precision",
+    "specificity",
+    "accuracy",
+    "balanced_accuracy",
+    "f1",
+    "jaccard",
+    "avg_candidate_count",
+    "avg_gt_count",
+    "avg_pred_count",
+    "aggregate_pr_auc",
+    "aggregate_prevalence",
+    "aggregate_ap_lift",
 )
 
 
 def _safe_ratio(numerator: float, denominator: float, default: float = 0.0) -> float:
     return float(numerator / denominator) if denominator > 0.0 else float(default)
-
-
-def _materialize_records(records: Iterable[PoseRecord]) -> tuple[PoseRecord, ...]:
-    materialized = tuple(records)
-    if not materialized:
-        raise ValueError("V5 evaluation requires at least one pose")
-    split = materialized[0].split
-    scenes = {record.scene for record in materialized if record.scene is not None}
-    if any(record.split != split for record in materialized):
-        raise ValueError("V5 evaluation records must belong to one split")
-    if len(scenes) > 1:
-        raise ValueError("V5 scene evaluation records must belong to one scene")
-    return materialized
 
 
 def _weighted_lcb(
@@ -81,33 +75,29 @@ def _weighted_lcb(
     )
 
 
-def _pose_row(record: PoseRecord, threshold: float) -> dict[str, Any]:
+def _pose_metrics(record: PoseScores, threshold: float) -> dict[str, Any]:
     predicted = record.scores >= float(threshold)
     truth = record.targets.astype(bool, copy=False)
-    positive = truth
     negative = ~truth
     candidate_count = int(truth.size)
-    gt_count = int(positive.sum())
+    gt_count = int(truth.sum())
     pred_count = int(predicted.sum())
-    tp = int(np.logical_and(predicted, positive).sum())
+    tp = int(np.logical_and(predicted, truth).sum())
     fp = int(np.logical_and(predicted, negative).sum())
-    fn = int(np.logical_and(~predicted, positive).sum())
+    fn = int(np.logical_and(~predicted, truth).sum())
     tn = int(np.logical_and(~predicted, negative).sum())
-    weighted_tp = float(record.visible_weights[np.logical_and(predicted, positive)].sum())
-    weighted_gt = float(record.visible_weights[positive].sum())
-    precision = _safe_ratio(tp, tp + fp, 1.0)
+    weighted_tp = float(record.visible_weights[np.logical_and(predicted, truth)].sum())
+    weighted_gt = float(record.visible_weights[truth].sum())
     recall = _safe_ratio(tp, gt_count, 1.0)
     specificity = _safe_ratio(tn, tn + fp, 1.0)
-    accuracy = _safe_ratio(tp + tn, candidate_count, 1.0)
-    balanced_accuracy = 0.5 * (recall + specificity)
-    f1 = _safe_ratio(2.0 * tp, 2.0 * tp + fp + fn)
-    jaccard = _safe_ratio(tp, tp + fp + fn, 1.0)
-    pose_ap = average_precision(
-        record.scores.astype(np.float32, copy=False),
-        record.targets.astype(np.uint8, copy=False),
-    ) if gt_count > 0 else None
+    pose_ap = (
+        average_precision(record.scores, record.targets)
+        if gt_count > 0
+        else None
+    )
     return {
-        "pose_id": record.pose_id,
+        "pose_id": str(record.pose_index),
+        "pose_index": int(record.pose_index),
         "candidate_count": candidate_count,
         "gt_count": gt_count,
         "pred_count": pred_count,
@@ -119,12 +109,12 @@ def _pose_row(record: PoseRecord, threshold: float) -> dict[str, Any]:
         "weighted_gt": weighted_gt,
         "ordinary_recall": recall,
         "weighted_recall": _safe_ratio(weighted_tp, weighted_gt, 1.0),
-        "precision": precision,
+        "precision": _safe_ratio(tp, tp + fp, 1.0),
         "specificity": specificity,
-        "accuracy": accuracy,
-        "balanced_accuracy": balanced_accuracy,
-        "f1": f1,
-        "jaccard": jaccard,
+        "accuracy": _safe_ratio(tp + tn, candidate_count, 1.0),
+        "balanced_accuracy": 0.5 * (recall + specificity),
+        "f1": _safe_ratio(2.0 * tp, 2.0 * tp + fp + fn),
+        "jaccard": _safe_ratio(tp, tp + fp + fn, 1.0),
         "useful_cull": _safe_ratio(tn, candidate_count),
         "bad_cull": _safe_ratio(fn, candidate_count),
         "fp_over_gt": _safe_ratio(fp, gt_count),
@@ -135,126 +125,176 @@ def _pose_row(record: PoseRecord, threshold: float) -> dict[str, Any]:
     }
 
 
+def _record_iterator(records: Iterable[PoseScores]) -> Iterable[PoseScores]:
+    scene: str | None = None
+    split: str | None = None
+    seen = 0
+    for record in records:
+        if not isinstance(record, PoseScores):
+            raise TypeError("V5 metrics require lazy PoseScores records from a columnar sidecar")
+        if scene is None:
+            scene = record.scene
+            split = record.split
+        elif record.scene != scene or record.split != split:
+            raise ValueError("V5 evaluation records must belong to one scene and split")
+        seen += 1
+        yield record
+    if seen == 0:
+        raise ValueError("V5 evaluation requires at least one pose")
+
+
 def evaluate_scene(
-    records: Iterable[PoseRecord],
+    records: Iterable[PoseScores],
     threshold: float,
     *,
     bootstrap_replicates: int = 10_000,
     bootstrap_seed: int = 0,
+    include_pose_rows: bool = False,
+    max_aggregate_score_values: int = AGGREGATE_AP_MAX_VALUES,
 ) -> dict[str, Any]:
-    """Evaluate one scene at one frozen threshold.
+    """Evaluate a score stream without materializing a pose-row JSON document.
 
-    Aggregate safety and culling metrics are computed from summed confusion
-    counts.  CNOR is delegated to the repository's shared implementation and
-    therefore keeps its per-pose candidate-normalized denominator.  AP and
-    prevalence are pose-macro quantities over poses with at least one GT
-    positive; aggregate AP/prevalence are included separately for diagnostics.
+    The score sidecar is memory-mapped and only the current pose is expanded.
+    Pose-macro AP and all confusion statistics remain exact for arbitrarily
+    large splits.  Aggregate AP is computed exactly while the configured
+    bounded diagnostic buffer fits; for larger splits it is explicitly
+    ``None`` rather than allocating a second giant array.
     """
     threshold_value = float(threshold)
     if not np.isfinite(threshold_value):
         raise ValueError("V5 threshold must be finite")
-    materialized = _materialize_records(records)
-    rows = [_pose_row(record, threshold_value) for record in materialized]
+    tp = fp = fn = tn = 0
+    weighted_tp = weighted_gt = 0.0
+    candidate_count = gt_count = pred_count = 0
+    positive_pose_count = 0
+    pose_count = 0
+    pose_recall_values: list[float] = []
+    pose_ap_values: list[float] = []
+    pose_prevalence_values: list[float] = []
+    per_pose_candidate: list[float] = []
+    per_pose_tn: list[float] = []
+    per_pose_fp: list[float] = []
+    weighted_tp_rows: list[float] = []
+    weighted_gt_rows: list[float] = []
+    pose_rows: list[dict[str, Any]] = []
+    aggregate_scores: list[np.ndarray] = []
+    aggregate_targets: list[np.ndarray] = []
+    aggregate_value_count = 0
+    scene: str | None = None
+    split: str | None = None
 
-    tp = float(sum(row["tp"] for row in rows))
-    fp = float(sum(row["fp"] for row in rows))
-    fn = float(sum(row["fn"] for row in rows))
-    tn = float(sum(row["tn"] for row in rows))
-    weighted_tp = float(sum(row["weighted_tp"] for row in rows))
-    weighted_gt = float(sum(row["weighted_gt"] for row in rows))
-    candidate_count = float(sum(row["candidate_count"] for row in rows))
-    gt_count = float(sum(row["gt_count"] for row in rows))
-    pred_count = float(sum(row["pred_count"] for row in rows))
-    per_pose_candidate = np.asarray([row["candidate_count"] for row in rows], dtype=np.float64)
-    per_pose_tn = np.asarray([row["tn"] for row in rows], dtype=np.float64)
-    per_pose_fp = np.asarray([row["fp"] for row in rows], dtype=np.float64)
-    positive_rows = [row for row in rows if row["gt_count"] > 0]
-    pose_ap_values = np.asarray(
-        [row["average_precision"] for row in positive_rows], dtype=np.float64
-    )
-    pose_prevalence_values = np.asarray(
-        [row["prevalence"] for row in positive_rows], dtype=np.float64
-    )
-    all_scores = np.concatenate([record.scores for record in materialized])
-    all_targets = np.concatenate([record.targets for record in materialized])
-    aggregate_ap = average_precision(
-        all_scores.astype(np.float32, copy=False), all_targets.astype(np.uint8, copy=False)
-    ) if gt_count > 0 else None
-    aggregate_prevalence = _safe_ratio(gt_count, candidate_count)
-    pose_pr_auc = float(np.mean(pose_ap_values)) if pose_ap_values.size else None
-    pose_prevalence = float(np.mean(pose_prevalence_values)) if pose_prevalence_values.size else None
-    aggregate_lift = _safe_ratio(aggregate_ap, aggregate_prevalence) if aggregate_ap is not None else None
-    pose_lift = _safe_ratio(pose_pr_auc, pose_prevalence) if pose_pr_auc is not None else None
-    ordinary_recall = _safe_ratio(tp, gt_count, 1.0)
-    weighted_recall = _safe_ratio(weighted_tp, weighted_gt, 1.0)
-    precision = _safe_ratio(tp, tp + fp, 1.0)
-    specificity = _safe_ratio(tn, tn + fp, 1.0)
+    for record in _record_iterator(records):
+        scene = record.scene if scene is None else scene
+        split = record.split if split is None else split
+        row = _pose_metrics(record, threshold_value)
+        pose_count += 1
+        tp += int(row["tp"])
+        fp += int(row["fp"])
+        fn += int(row["fn"])
+        tn += int(row["tn"])
+        weighted_tp += float(row["weighted_tp"])
+        weighted_gt += float(row["weighted_gt"])
+        candidate_count += int(row["candidate_count"])
+        gt_count += int(row["gt_count"])
+        pred_count += int(row["pred_count"])
+        per_pose_candidate.append(float(row["candidate_count"]))
+        per_pose_tn.append(float(row["tn"]))
+        per_pose_fp.append(float(row["fp"]))
+        weighted_tp_rows.append(float(row["weighted_tp"]))
+        weighted_gt_rows.append(float(row["weighted_gt"]))
+        pose_recall_values.append(float(row["ordinary_recall"]))
+        if int(row["gt_count"]) > 0:
+            positive_pose_count += 1
+            pose_prevalence_values.append(float(row["prevalence"]))
+            if row["average_precision"] is not None:
+                pose_ap_values.append(float(row["average_precision"]))
+        if include_pose_rows:
+            pose_rows.append(row)
+        if aggregate_value_count + int(record.scores.size) <= int(max_aggregate_score_values):
+            aggregate_scores.append(np.asarray(record.scores, dtype=np.float32).copy())
+            aggregate_targets.append(np.asarray(record.targets, dtype=np.uint8).copy())
+            aggregate_value_count += int(record.scores.size)
+        else:
+            aggregate_scores.clear()
+            aggregate_targets.clear()
+            aggregate_value_count = int(max_aggregate_score_values) + 1
+
     lcb = _weighted_lcb(
-        np.asarray([row["weighted_tp"] for row in rows], dtype=np.float64),
-        np.asarray([row["weighted_gt"] for row in rows], dtype=np.float64),
+        np.asarray(weighted_tp_rows, dtype=np.float64),
+        np.asarray(weighted_gt_rows, dtype=np.float64),
         bootstrap_replicates=int(bootstrap_replicates),
         seed=int(bootstrap_seed),
     )
-    scene_values = {record.scene for record in materialized if record.scene is not None}
-    scene = next(iter(scene_values)) if scene_values else None
+    aggregate_ap: float | None = None
+    if aggregate_scores and aggregate_value_count <= int(max_aggregate_score_values):
+        aggregate_ap = average_precision(
+            np.concatenate(aggregate_scores), np.concatenate(aggregate_targets)
+        )
+    ordinary_recall = _safe_ratio(tp, gt_count, 1.0)
+    weighted_recall = _safe_ratio(weighted_tp, weighted_gt, 1.0)
+    pose_pr_auc = float(np.mean(pose_ap_values)) if pose_ap_values else None
+    pose_prevalence = float(np.mean(pose_prevalence_values)) if pose_prevalence_values else None
+    aggregate_prevalence = _safe_ratio(gt_count, candidate_count)
     return {
         "scene": scene,
-        "split": materialized[0].split,
+        "split": split,
         "threshold": threshold_value,
-        "pose_count": len(rows),
-        "positive_pose_count": len(positive_rows),
-        "empty_gt_pose_count": len(rows) - len(positive_rows),
-        "candidate_count": int(candidate_count),
-        "gt_count": int(gt_count),
-        "pred_count": int(pred_count),
-        "tp": int(tp),
-        "fp": int(fp),
-        "fn": int(fn),
-        "tn": int(tn),
+        "pose_count": pose_count,
+        "positive_pose_count": positive_pose_count,
+        "empty_gt_pose_count": pose_count - positive_pose_count,
+        "candidate_count": candidate_count,
+        "gt_count": gt_count,
+        "pred_count": pred_count,
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "tn": tn,
         "weighted_tp": weighted_tp,
         "weighted_gt": weighted_gt,
         "weighted_recall": weighted_recall,
         "weighted_recall_lcb": lcb,
         "ordinary_recall": ordinary_recall,
-        "pose_recall": float(np.mean([row["ordinary_recall"] for row in rows])),
+        "pose_recall": float(np.mean(pose_recall_values)),
         "fn_over_gt": _safe_ratio(fn, gt_count),
         "bad_cull": _safe_ratio(fn, candidate_count),
         "cnor": candidate_normalized_occlusion_recall(
-            per_pose_tn,
-            per_pose_fp,
-            per_pose_candidate,
+            np.asarray(per_pose_tn, dtype=np.float64),
+            np.asarray(per_pose_fp, dtype=np.float64),
+            np.asarray(per_pose_candidate, dtype=np.float64),
         ),
         "useful_cull": _safe_ratio(tn, candidate_count),
         "fp_over_gt": _safe_ratio(fp, gt_count),
         "pred_over_gt": _safe_ratio(pred_count, gt_count),
-        "precision": precision,
-        "specificity": specificity,
+        "precision": _safe_ratio(tp, tp + fp, 1.0),
+        "specificity": _safe_ratio(tn, tn + fp, 1.0),
         "accuracy": _safe_ratio(tp + tn, candidate_count, 1.0),
-        "balanced_accuracy": 0.5 * (ordinary_recall + specificity),
+        "balanced_accuracy": 0.5 * (ordinary_recall + _safe_ratio(tn, tn + fp, 1.0)),
         "f1": _safe_ratio(2.0 * tp, 2.0 * tp + fp + fn),
         "jaccard": _safe_ratio(tp, tp + fp + fn, 1.0),
-        "avg_candidate_count": _safe_ratio(candidate_count, len(rows)),
-        "avg_gt_count": _safe_ratio(gt_count, len(rows)),
-        "avg_pred_count": _safe_ratio(pred_count, len(rows)),
+        "avg_candidate_count": _safe_ratio(candidate_count, pose_count),
+        "avg_gt_count": _safe_ratio(gt_count, pose_count),
+        "avg_pred_count": _safe_ratio(pred_count, pose_count),
         "pose_pr_auc": pose_pr_auc,
         "pose_prevalence": pose_prevalence,
-        "pose_ap_lift": pose_lift,
+        "pose_ap_lift": _safe_ratio(pose_pr_auc, pose_prevalence) if pose_pr_auc is not None and pose_prevalence is not None else None,
         "aggregate_pr_auc": aggregate_ap,
         "aggregate_prevalence": aggregate_prevalence,
-        "aggregate_ap_lift": aggregate_lift,
-        "per_pose": rows,
-        "test_read": False,
+        "aggregate_ap_lift": _safe_ratio(aggregate_ap, aggregate_prevalence) if aggregate_ap is not None else None,
+        "per_pose": pose_rows if include_pose_rows else None,
+        "test_read": split == "test",
+        "aggregate_ap_status": "exact_bounded_buffer" if aggregate_ap is not None else "omitted_large_split",
     }
 
 
 def metric_projection(metrics: Mapping[str, Any]) -> dict[str, Any]:
-    """Return the fixed result-table metric subset without changing values."""
     return {field: metrics.get(field) for field in METRIC_FIELDS}
 
 
 __all__ = [
+    "AGGREGATE_AP_MAX_VALUES",
     "METRIC_FIELDS",
     "TARGET_WEIGHTED_RECALL",
     "evaluate_scene",
     "metric_projection",
+    "_weighted_lcb",
 ]

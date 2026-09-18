@@ -62,5 +62,6 @@
 | [`experiments/pvs_third_scene_and_geometry_shell_hzb_baseline_2026-09-08.md`](experiments/pvs_third_scene_and_geometry_shell_hzb_baseline_2026-09-08.md) | 独立来源第三 BIM 场景选择与 Geometry-only shell HZB 基线计划 |
 | [`experiments/pvs_standard_graphics_scene_generality_2026-09-10.md`](experiments/pvs_standard_graphics_scene_generality_2026-09-10.md) | Sponza/Viking/Big City 等标准场景的一单位一资源转换、训练、Hi-Z 对比和 non-BIM 泛化方案 |
 | [`experiments/pvs_v5_generalizable_unified_architecture_2026-09-18.md`](experiments/pvs_v5_generalizable_unified_architecture_2026-09-18.md) | V5 共享泛化模型的训练数据、统一架构、约束损失、精简消融和 LOSO/最终部署协议 |
+| [`experiments/pvs_v5_formal_training_runner_2026-09-18.md`](experiments/pvs_v5_formal_training_runner_2026-09-18.md) | V5 正式训练 CLI、source-only 权限、固定调度、参数扫描和 checkpoint 恢复记录 |
 | [`current/browser_instance_visibility_streaming_patent_application_2026-09-02.md`](current/browser_instance_visibility_streaming_patent_application_2026-09-02.md) | 浏览器区域可见性、资源调度和增量加载专利正文 |
 | [`current/browser_visibility_streaming_patent_figures_plan_2026-09-01.md`](current/browser_visibility_streaming_patent_figures_plan_2026-09-01.md) | 专利附图规划、参考标号、可编辑图源和导出规范 |

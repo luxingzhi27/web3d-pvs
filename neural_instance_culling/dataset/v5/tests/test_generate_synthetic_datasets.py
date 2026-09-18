@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,15 +14,19 @@ from neural_instance_culling.dataset.v5.generate_synthetic_datasets import (
     PrimitiveUnit,
     build_external_hit_probe_asset,
     build_primitive_scene,
+    build_viewcells,
     expand_probe_distance_grid,
     generate_scene_dataset,
     raycast_primitive_hits,
+    select_catalog_scene_ids,
 )
+from neural_instance_culling.dataset.v5.permissions import make_universal_training_policy
 from neural_instance_culling.dataset.v5.synthetic_scene_manifest import generate_synthetic_scene_manifest
-from neural_instance_culling.model.pose_csr_dataset import PoseCSRDataset
+from neural_instance_culling.model.v5.training_data import V5SceneTrainingData
+from neural_instance_culling.model.pose_csr_dataset import PoseCSRDataset, frustum_candidate_ids_for_pose
 
 
-def _small_entry(unit_count: int = 8) -> dict:
+def _small_entry(unit_count: int = 64) -> dict:
     return {
         "sceneId": "synthetic_test_scene",
         "structureFamily": "rooms_doorways_long_corridors",
@@ -33,7 +39,7 @@ def _small_entry(unit_count: int = 8) -> dict:
             "scaleRange": [1.0, 1.0],
             "density": 0.5,
             "layers": 1,
-            "channelWidth": 4.0,
+            "channelWidth": 8.0,
             "occlusionDepth": 20.0,
             "unitSizeDistribution": 0.5,
             "repeatRate": 0.0,
@@ -67,6 +73,23 @@ def _box_unit(unit_id: int, x: float) -> PrimitiveUnit:
 
 
 class SyntheticDatasetGeneratorTest(unittest.TestCase):
+    def test_scene_shards_are_disjoint_and_cover_the_frozen_catalog(self) -> None:
+        catalog = generate_synthetic_scene_manifest(20260918)
+        entries = {str(entry["sceneId"]): entry for entry in catalog["scenes"]}
+        shards = [
+            select_catalog_scene_ids(
+                entries,
+                all_scenes=True,
+                requested_scene_ids=None,
+                shard_index=index,
+                shard_count=4,
+            )
+            for index in range(4)
+        ]
+        self.assertTrue(all(len(shard) == 30 for shard in shards))
+        self.assertEqual(len(set().union(*map(set, shards))), 120)
+        self.assertEqual(sum(len(shard) for shard in shards), 120)
+
     def test_catalog_split_is_seed_level_and_deterministic(self) -> None:
         first = generate_synthetic_scene_manifest(20260918)
         second = generate_synthetic_scene_manifest(20260918)
@@ -126,32 +149,88 @@ class SyntheticDatasetGeneratorTest(unittest.TestCase):
     def test_output_is_posecsr_readable_and_visible_is_subset_of_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            entry = _small_entry()
             manifest = generate_scene_dataset(
-                _small_entry(),
+                entry,
                 root,
                 device="cpu",
-                views_per_scene=2,
+                views_per_scene=4,
                 render_width=16,
                 render_height=9,
                 allow_small_scene=True,
             )
             scene_root = root / "synthetic_test_scene"
-            self.assertEqual(manifest["viewCells"]["count"], 2)
+            self.assertEqual(manifest["viewCells"]["count"], 4)
             self.assertEqual(set(manifest["viewCells"]["shapes"]), {"disk", "oriented_box"})
             self.assertTrue((scene_root / "compiled/surface").is_dir())
             self.assertTrue((scene_root / "compiled/relation").is_dir())
             self.assertTrue((scene_root / "compiled/probes").is_dir())
-            dataset = PoseCSRDataset(scene_root / "pose_csr", 8)
-            self.assertEqual(dataset.poses.size, 2)
+            dataset = PoseCSRDataset(scene_root / "pose_csr", int(entry["unitCount"]))
+            self.assertEqual(dataset.poses.size, 4)
+            candidate_counts = []
+            scene = build_primitive_scene(entry, allow_small=True)
+            viewcells = build_viewcells(scene, entry, views_per_scene=4)
+            tan_y = math.tan(math.radians(66.0) * 0.5)
+            tan_x = tan_y * 16.0 / 9.0
             for pose_id in range(dataset.poses.size):
                 visible, weights = dataset.visible_slice(pose_id)
                 candidates = dataset.candidate_slice(pose_id)
                 self.assertTrue(np.isfinite(weights).all())
                 self.assertTrue(set(visible.tolist()).issubset(set(candidates.tolist())))
-            probe_manifest = (scene_root / "compiled/probes/probe_manifest.json").read_text(encoding="utf-8")
-            self.assertIn('"rowCount": 4608', probe_manifest)
+                candidate_counts.append(int(candidates.size))
+                cell = viewcells[pose_id]
+                backed_positions = cell.subpose_positions - cell.subpose_forwards * cell.back_offset
+                expected = np.unique(
+                    np.concatenate(
+                        [
+                            frustum_candidate_ids_for_pose(
+                                origin,
+                                forward,
+                                tan_x,
+                                tan_y,
+                                scene.aabbs.reshape(scene.unit_count, 6),
+                            )
+                            for origin, forward in zip(backed_positions, cell.subpose_forwards)
+                        ]
+                    )
+                ).astype(np.uint32)
+                np.testing.assert_array_equal(candidates, expected)
+                np.testing.assert_allclose(
+                    dataset.candidate_camera_world(pose_id),
+                    cell.center - cell.forward * cell.back_offset,
+                    atol=1.0e-5,
+                )
+            self.assertTrue(all(count < int(entry["unitCount"]) for count in candidate_counts))
+            self.assertGreater(len(set(candidate_counts)), 1)
+            pose_meta = (scene_root / "pose_csr/dataset_meta.json").read_text(encoding="utf-8")
+            self.assertNotIn("candidateFallbackAllUnitsViewcells", pose_meta)
+            probe_manifest = (scene_root / "compiled/probes/external_hit_probe_manifest.json").read_text(encoding="utf-8")
+            self.assertFalse((scene_root / "compiled/probes/probe_manifest.json").exists())
+            self.assertIn('"rowCount": 36864', probe_manifest)
+            probe_data = json.loads(probe_manifest)
+            self.assertEqual(probe_data["files"]["unitIds"], "probe_unit_ids_uint32.bin")
+            self.assertEqual(probe_data["files"]["directions"], "probe_directions_fp32.bin")
             surface_manifest = (scene_root / "compiled/surface/surface_manifest.json").read_text(encoding="utf-8")
             self.assertIn('"pointsPerUnit": 256', surface_manifest)
+
+            training_data = V5SceneTrainingData(
+                scene_id=manifest["sceneId"],
+                pose_dataset=scene_root / "pose_csr",
+                runtime_meta=scene_root / "runtimeVisibilityMeta.json",
+                compiled_dir=scene_root / "compiled",
+                viewcell_shape="horizontal_disk",
+                viewcell_half_extent_m=(1.0, 1.0, 1.0),
+                camera_clip_m=(0.01, 1_000_000.0),
+                probe_policy=make_universal_training_policy([manifest["sceneId"]]),
+                region_manifest=scene_root / "scene_manifest.json",
+            )
+            pose_batch = training_data.sample_pose_batch(np.random.default_rng(7), pose_count=2)
+            probe_batch = training_data.sample_probe_batch(np.random.default_rng(11), observation_count=32)
+            self.assertGreater(pose_batch.candidate_ids.size, 0)
+            self.assertEqual(pose_batch.query_geometry.shape[1], 16)
+            self.assertEqual(probe_batch.unit_ids.shape, (32,))
+            self.assertEqual(probe_batch.directions.shape, (32, 3))
+            self.assertTrue(np.isfinite(probe_batch.distances).all())
 
 
 if __name__ == "__main__":

@@ -155,7 +155,7 @@ function normalizeDirection(value, name) {
   return vector.map((component) => component / length);
 }
 
-function boundsFromRecord(record, name) {
+function boundsFromRecord(record, name, allowDegenerate = false) {
   const raw = record?.bounds || record?.aabb || record;
   assert(raw && typeof raw === 'object', `${name} must contain bounds`);
   let min;
@@ -175,19 +175,29 @@ function boundsFromRecord(record, name) {
   const size = min.map((value, axis) => max[axis] - value);
   const center = min.map((value, axis) => (value + max[axis]) * 0.5);
   const radius = Math.hypot(size[0], size[1], size[2]) * 0.5;
-  assert(Number.isFinite(radius) && radius > AREA_EPSILON, `${name} must have a positive diagonal radius`);
+  assert(Number.isFinite(radius), `${name} must have a finite diagonal radius`);
+  if (!allowDegenerate) {
+    assert(radius > AREA_EPSILON, `${name} must have a positive diagonal radius`);
+  }
   return { min, max, size, center, radius };
 }
 
-function normalizeUnitRecords(runtimeMeta, glbIndex) {
+function normalizeUnitRecords(runtimeMeta, glbIndex, degenerateUnitIds = []) {
   const input = validateRuntimeInputs(runtimeMeta, glbIndex);
+  const allowedDegenerate = new Set(degenerateUnitIds);
+  const components = input.components.map((component) => ({
+    ...component,
+    componentGlobalId: asUint32(component.componentGlobalId, 'componentGlobalId'),
+    bounds: boundsFromRecord(
+      component.bounds,
+      `component ${component.componentGlobalId} bounds`,
+      allowedDegenerate.has(component.componentGlobalId),
+    ),
+  }));
   return {
     ...input,
-    components: input.components.map((component) => ({
-      ...component,
-      componentGlobalId: asUint32(component.componentGlobalId, 'componentGlobalId'),
-      bounds: boundsFromRecord(component.bounds, `component ${component.componentGlobalId} bounds`),
-    })),
+    components,
+    componentById: new Map(components.map((component) => [component.componentGlobalId, component])),
   };
 }
 
@@ -321,13 +331,14 @@ function resolveManifestFile(manifestPath, value, fallbackName) {
   return path.resolve(path.dirname(manifestPath), file);
 }
 
-function boundsFromSurfaceManifest(manifestPath, manifest, unitIds) {
+function boundsFromSurfaceManifest(manifestPath, manifest, unitIds, requestedUnitIds = unitIds) {
+  const requested = new Set(requestedUnitIds);
   const byUnit = new Map();
   if (Array.isArray(manifest.records)) {
     for (const record of manifest.records) {
       const unitId = record.componentGlobalId ?? record.unitId;
       const normalization = record.normalization;
-      if (unitId === undefined || !normalization) continue;
+      if (unitId === undefined || !normalization || !requested.has(Number(unitId))) continue;
       const center = asVec3(normalization.center, `surface record ${unitId} center`);
       const radius = asFiniteNumber(normalization.halfDiagonal, `surface record ${unitId} halfDiagonal`);
       assert(radius > AREA_EPSILON, `surface record ${unitId} has invalid halfDiagonal`);
@@ -339,6 +350,7 @@ function boundsFromSurfaceManifest(manifestPath, manifest, unitIds) {
     const maxs = parseNpy(resolveManifestFile(manifestPath, manifest.files.aabbMax)).data;
     assert(mins.length === unitIds.length * 3 && maxs.length === unitIds.length * 3, 'surface AABB arrays have an invalid shape');
     for (let index = 0; index < unitIds.length; index += 1) {
+      if (!requested.has(unitIds[index])) continue;
       const min = mins.slice(index * 3, index * 3 + 3);
       const max = maxs.slice(index * 3, index * 3 + 3);
       const center = min.map((value, axis) => (value + max[axis]) * 0.5);
@@ -405,7 +417,13 @@ function normalizeSurfaceStarts(options, units) {
         ? parseNpy(resolveManifestFile(manifestPath, manifest.files.unitIds)).data.map((value, index) => asUint32(value, `surface unitIds[${index}]`))
         : null;
   assert(manifestUnitIds && manifestUnitIds.length === header.numUnits, 'surface manifest must expose unit order');
-  const normalizationByUnit = boundsFromSurfaceManifest(manifestPath, manifest, manifestUnitIds);
+  const requestedUnitIds = units.map((unit) => unit.componentGlobalId);
+  const normalizationByUnit = boundsFromSurfaceManifest(
+    manifestPath,
+    manifest,
+    manifestUnitIds,
+    requestedUnitIds,
+  );
   const result = new Map();
   const unitIndexById = new Map(manifestUnitIds.map((unitId, index) => [unitId, index]));
   for (const unit of units) {
@@ -469,7 +487,13 @@ function collectObjectTriangles(THREE, object, instanceIndex, sourceIndexStart, 
       ab[2] * ac[0] - ab[0] * ac[2],
       ab[0] * ac[1] - ab[1] * ac[0],
     ];
-    if (![...a, ...b, ...c].every(Number.isFinite) || Math.hypot(...cross) <= AREA_EPSILON) {
+    const crossLength = Math.hypot(...cross);
+    if (
+      ![...a, ...b, ...c].every(Number.isFinite)
+      || !Number.isFinite(crossLength)
+      || crossLength <= AREA_EPSILON
+      || crossLength * 0.5 <= AREA_EPSILON
+    ) {
       degenerateTriangleCount += 1;
       continue;
     }
@@ -686,8 +710,14 @@ function assertNonDegenerateTriangle(a, b, c, index) {
 }
 
 /** Build the exact triangle acceleration structure used by every probe. */
-export function buildTriangleBvh(THREE, trianglesByUnit, MeshBvh = MeshBVH) {
+export function buildTriangleBvh(
+  THREE,
+  trianglesByUnit,
+  MeshBvh = MeshBVH,
+  { targetLeafSize = 10 } = {},
+) {
   assert(THREE && THREE.BufferGeometry, 'buildTriangleBvh requires Three.js');
+  const leafSize = asPositiveInteger(targetLeafSize, 'BVH targetLeafSize');
   const store = trianglesByUnit instanceof CompactTriangleStore
     ? trianglesByUnit
     : compactDirectTriangles(
@@ -700,7 +730,7 @@ export function buildTriangleBvh(THREE, trianglesByUnit, MeshBvh = MeshBVH) {
   const { positions, triangleUnitIds, stats } = store.finalize();
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  const bvh = new MeshBvh(geometry, { indirect: false });
+  const bvh = new MeshBvh(geometry, { indirect: false, targetLeafSize: leafSize });
   return {
     geometry,
     bvh,
@@ -1214,7 +1244,44 @@ function normalizeOptions(options = {}) {
     triangleChunkCapacity: options.triangleChunkCapacity === undefined
       ? 262144
       : asPositiveInteger(options.triangleChunkCapacity, 'triangleChunkCapacity'),
+    bvhTargetLeafSize: options.bvhTargetLeafSize === undefined
+      ? 10
+      : asPositiveInteger(options.bvhTargetLeafSize, 'bvhTargetLeafSize'),
   };
+}
+
+
+function surfaceDegenerateUnitIds(options) {
+  const direct = options.surfaceStartsByUnit || options.surfaceStarts || options.surfacePoints;
+  if (direct) return [];
+  const manifestPath = path.resolve(
+    options.surfaceManifestPath
+      || options.surfaceManifest
+      || options.surfaceMetaPath
+      || DEFAULT_SURFACE_MANIFEST,
+  );
+  const manifest = options.surfaceManifestObject || readJson(manifestPath);
+  const values = manifest.degenerateUnitIds || [];
+  assert(Array.isArray(values), 'surface degenerateUnitIds must be an array');
+  return values.map((value, index) => asUint32(value, `surface degenerateUnitIds[${index}]`));
+}
+
+
+export function excludeDegenerateProbeUnits(input, degenerateUnitIds) {
+  const excluded = new Set(degenerateUnitIds.map((value) => asUint32(value, 'degenerate unit ID')));
+  if (excluded.size === 0) return input;
+  for (const unitId of excluded) {
+    assert(input.componentById.has(unitId), `surface degenerate unit ${unitId} is absent from runtime metadata`);
+  }
+  const components = input.components.filter((unit) => !excluded.has(unit.componentGlobalId));
+  assert(components.length > 0, 'all runtime units are degenerate');
+  const componentById = new Map(components.map((unit) => [unit.componentGlobalId, unit]));
+  const componentIdsByGlb = new Map();
+  for (const [glbId, unitIds] of input.componentIdsByGlb) {
+    const retained = unitIds.filter((unitId) => !excluded.has(unitId));
+    if (retained.length > 0) componentIdsByGlb.set(glbId, retained);
+  }
+  return { ...input, components, componentById, componentIdsByGlb };
 }
 
 /** Generate one complete or partitioned binary external-hit probe asset. */
@@ -1222,10 +1289,12 @@ export async function generateExternalHitProbes(options = {}) {
   const args = normalizeOptions(options);
   const runtimeMeta = args.runtimeMeta || readJson(args.runtimeMetaPath);
   const glbIndex = args.glbIndex || readJson(args.glbIndexPath);
-  const input = normalizeUnitRecords(runtimeMeta, glbIndex);
+  const degenerateUnitIds = surfaceDegenerateUnitIds(args);
+  const input = normalizeUnitRecords(runtimeMeta, glbIndex, degenerateUnitIds);
+  const probeInput = excludeDegenerateProbeUnits(input, degenerateUnitIds);
   const sceneId = args.sceneId || String(runtimeMeta.sceneId || runtimeMeta.scene || path.basename(args.assetsDir));
   assert(sceneId.length > 0, 'sceneId is required');
-  const selectedUnits = selectedShardUnits(input.components, args.shardIndex, args.shardCount);
+  const selectedUnits = selectedShardUnits(probeInput.components, args.shardIndex, args.shardCount);
   assert(selectedUnits.length > 0, 'selected shard contains no units');
   const selectedUnitIds = selectedUnits.map((unit) => unit.componentGlobalId);
   const manifest = makeProbeManifest({
@@ -1253,21 +1322,26 @@ export async function generateExternalHitProbes(options = {}) {
       ...args.dependencies,
     }
     : await importDefaultDependencies();
-  const startsByUnit = normalizeSurfaceStarts(args, input.components);
+  const startsByUnit = normalizeSurfaceStarts(args, probeInput.components);
   const loadedTriangles = args.trianglesByUnit
     ? {
-      triangleStore: compactDirectTriangles(args.trianglesByUnit, input.components),
+      triangleStore: compactDirectTriangles(args.trianglesByUnit, probeInput.components),
       totals: { source: 'direct', retainedTriangleObjects: 0 },
     }
     : await loadTrianglesFromGlbs({
       dependencies,
-      input,
+      input: probeInput,
       assetsDir: args.assetsDir,
       progressEvery: args.progressEvery,
       gcEvery: args.gcEvery,
       triangleChunkCapacity: args.triangleChunkCapacity,
     });
-  const bvhIndex = buildTriangleBvh(dependencies.THREE, loadedTriangles.triangleStore, args.MeshBVH || MeshBVH);
+  const bvhIndex = buildTriangleBvh(
+    dependencies.THREE,
+    loadedTriangles.triangleStore,
+    args.MeshBVH || MeshBVH,
+    { targetLeafSize: args.bvhTargetLeafSize },
+  );
   const geometryStats = {
     ...loadedTriangles.totals,
     ...bvhIndex.memoryStats,
@@ -1438,6 +1512,7 @@ export function parseArgs(argv = process.argv) {
     progressEvery: 50,
     gcEvery: 0,
     triangleChunkCapacity: 262144,
+    bvhTargetLeafSize: 10,
     help: false,
   };
   for (let index = 2; index < argv.length; index += 1) {
@@ -1471,6 +1546,7 @@ export function parseArgs(argv = process.argv) {
     else if (key === '--progress-every') args.progressEvery = asNonNegativeInteger(value, 'progress-every');
     else if (key === '--gc-every') args.gcEvery = asNonNegativeInteger(value, 'gc-every');
     else if (key === '--triangle-chunk-capacity') args.triangleChunkCapacity = asPositiveInteger(value, 'triangle-chunk-capacity');
+    else if (key === '--bvh-target-leaf-size') args.bvhTargetLeafSize = asPositiveInteger(value, 'bvh-target-leaf-size');
     else throw new Error(`unknown argument ${key}`);
   }
   return args;
@@ -1494,6 +1570,7 @@ Options:
   --progress-every N        Progress interval in GLBs/units; zero disables it.
   --gc-every N              Call exposed V8 GC every N decoded GLBs (default 0).
   --triangle-chunk-capacity N  Triangles per compact typed-array chunk (default 262144).
+  --bvh-target-leaf-size N  Target triangles per BVH leaf (default 10).
 `);
 }
 

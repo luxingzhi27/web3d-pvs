@@ -62,6 +62,7 @@ MODEL_FOV_Y_DEG = 66.0
 RENDER_FOV_Y_DEG = 60.0
 DEFAULT_NEAR = 0.05
 DEFAULT_FAR = 1_000_000.0
+SYNTHETIC_CAMERA_ORBIT_FRACTION = 0.20
 SURFACE_STARTS_PER_UNIT = 16
 PROBE_DIRECTIONS_PER_UNIT = 36
 PROBE_RECORD_SCHEMA = "parallel_external_hit_current_status-v1"
@@ -1279,7 +1280,7 @@ class ViewCell:
         if self.region_type == "disk":
             support = [self.center]
             angles = np.arange(8, dtype=np.float64) * math.pi / 4.0
-            horizontal_forward = _normalize(np.cross(self.right, self.up), [0.0, 0.0, -1.0])
+            horizontal_forward = _normalize(self.half_axes[2], [0.0, 0.0, -1.0])
             support.extend(self.center + self.radius * (np.cos(angle) * self.right + np.sin(angle) * horizontal_forward) for angle in angles)
             return {
                 "regionType": "disk",
@@ -1312,7 +1313,10 @@ def build_viewcells(
     scene_center = (scene.bounds[0] + scene.bounds[1]) * 0.5
     scene_extent = scene.bounds[1] - scene.bounds[0]
     horizontal_extent = max(float(scene_extent[0]), float(scene_extent[2]), 1.0)
-    orbit_radius = max(horizontal_extent * 0.9, 8.0)
+    # The old external orbit put the complete synthetic scene inside one 66
+    # degree frustum. V5 samples view cells in the navigable scene volume so
+    # candidate generation exercises the intended geometry-only culling path.
+    orbit_radius = max(horizontal_extent * SYNTHETIC_CAMERA_ORBIT_FRACTION, 8.0)
     viewcells: list[ViewCell] = []
     for viewcell_id in range(views_per_scene):
         azimuth = 2.0 * math.pi * viewcell_id / views_per_scene + float(rng.uniform(-0.04, 0.04))
@@ -1381,9 +1385,16 @@ def _candidate_ids_for_viewcell(
     tan_x = tan_y * float(width) / float(height)
     aabbs = scene.aabbs.reshape(scene.unit_count, 6)
     selected: list[np.ndarray] = []
-    for origin in viewcell.subpose_positions:
+    # A subpose stores the query position. Candidate generation uses the
+    # corresponding backed candidate camera, matching the runtime formula
+    # candidate_camera = query_center - forward * back_offset.
+    candidate_origins = (
+        viewcell.subpose_positions
+        - viewcell.subpose_forwards * float(viewcell.back_offset)
+    )
+    for origin, forward in zip(candidate_origins, viewcell.subpose_forwards):
         selected.append(
-            frustum_candidate_ids_for_pose(origin, viewcell.forward, tan_x, tan_y, aabbs, near=near).astype(np.uint32)
+            frustum_candidate_ids_for_pose(origin, forward, tan_x, tan_y, aabbs, near=near).astype(np.uint32)
         )
     if not selected:
         return np.zeros((0,), dtype=np.uint32)
@@ -1467,7 +1478,7 @@ def _probe_manifest(scene_id: str, split: str, num_units: int, files: Mapping[st
         "version": 1,
         "assetKind": "external_hit_probe",
         "sceneId": str(scene_id),
-        "split": "train",
+        "split": str(split),
         "sourceRole": "source_train",
         "permissions": {
             "assetKind": "external_hit_probe",
@@ -1556,12 +1567,12 @@ def build_external_hit_probe_asset(
     finite = np.isfinite(hit_from_offset) & (hit_from_offset + epsilon <= max_distances + 1.0e-6)
     hit_distances = np.where(finite, hit_from_offset + epsilon, np.nan).astype(np.float32)
     files = {
-        "unitIds": "unit_ids_uint32.bin",
-        "directions": "directions_float32.bin",
-        "hitDistances": "hit_distances_float32.bin",
-        "maxDistances": "max_distances_float32.bin",
-        "startIds": "start_ids_uint8.bin",
-        "directionIds": "direction_ids_uint8.bin",
+        "unitIds": "probe_unit_ids_uint32.bin",
+        "directions": "probe_directions_fp32.bin",
+        "hitDistances": "probe_hit_distances_fp32.bin",
+        "maxDistances": "probe_max_distances_fp32.bin",
+        "startIds": "probe_start_ids_uint8.bin",
+        "directionIds": "probe_direction_ids_uint8.bin",
     }
     manifest = _probe_manifest(scene.scene_id, scene_split, scene.unit_count, files)
     return ColumnarProbeAsset(
@@ -1604,8 +1615,10 @@ def write_columnar_probe_asset(asset: ColumnarProbeAsset, output_dir: str | Path
     np.asarray(asset.max_distances, dtype="<f4").tofile(output / asset.manifest["files"]["maxDistances"])
     np.asarray(asset.start_ids, dtype="u1").tofile(output / asset.manifest["files"]["startIds"])
     np.asarray(asset.direction_ids, dtype="u1").tofile(output / asset.manifest["files"]["directionIds"])
-    _json_dump(output / "probe_manifest.json", asset.manifest)
-    return output / "probe_manifest.json"
+    # Keep the generated asset on the same canonical manifest name consumed
+    # by the protected V5 loader and by registered real-scene probes.
+    _json_dump(output / "external_hit_probe_manifest.json", asset.manifest)
+    return output / "external_hit_probe_manifest.json"
 
 
 def expand_probe_distance_grid(
@@ -1725,7 +1738,6 @@ def _write_pose_csr(
     mvps = np.zeros((view_count, 16), dtype=np.float32)
     viewcell_split_ids = np.zeros((view_count,), dtype=np.uint8)
     category_id = _FAMILY_CATEGORY_IDS.get(str(scene_entry.get("structureFamily")), 255)
-    fallback_all_count = 0
     visible_subset_failures = 0
     per_view_stats: list[dict[str, Any]] = []
     for index, (viewcell, labels) in enumerate(zip(viewcells, rendered)):
@@ -1733,12 +1745,11 @@ def _write_pose_csr(
         candidates = _candidate_ids_for_viewcell(scene, viewcell, width=render_width, height=render_height)
         missing = np.setdiff1d(visible, candidates, assume_unique=True)
         if missing.size:
-            # This fallback is still geometry-only: it broadens the candidate
-            # universe rather than copying selected GT IDs into a candidate CSR.
-            candidates = np.arange(scene.unit_count, dtype=np.uint32)
-            fallback_all_count += 1
-        if np.setdiff1d(visible, candidates, assume_unique=True).size:
             visible_subset_failures += 1
+            raise ValueError(
+                f"{scene.scene_id} view-cell {index} has {missing.size} visible units "
+                "outside the four-subpose 66-degree AABB candidate union"
+            )
         pose_split = _pose_split(index, view_count)
         poses["camera_world"][index] = viewcell.center - viewcell.forward * viewcell.back_offset
         poses["camera_forward"][index] = viewcell.forward.astype(np.float32)
@@ -1758,7 +1769,7 @@ def _write_pose_csr(
         subpose_offsets[index + 1] = len(subpose_positions)
         mvps[index] = _conservative_mvp(poses["camera_world"][index], viewcell.forward, model_tan_x, model_tan_y)
         viewcell_split_ids[index] = _SPLIT_IDS[pose_split]
-        per_view_stats.append({"viewcellId": index, "poseSplit": pose_split, "candidateCount": int(candidates.size), "visibleCount": int(visible.size), "missingCandidateCountBeforeFallback": int(missing.size)})
+        per_view_stats.append({"viewcellId": index, "poseSplit": pose_split, "candidateCount": int(candidates.size), "visibleCount": int(visible.size), "missingCandidateCount": int(missing.size)})
     poses["camera_norm"] = np.asarray([_normalize_camera(value, camera_bounds) for value in poses["camera_world"]], dtype=np.float32)
     poses.tofile(pose_dir / "poses.bin")
     mvps.tofile(pose_dir / "mvp.bin")
@@ -1804,13 +1815,13 @@ def _write_pose_csr(
         "mvpStrideBytes": 64,
         "visibleCount": len(visible_ids),
         "candidateCount": len(candidate_ids),
-        "candidateSemantics": "union of geometry-only 66-degree AABB frusta at the four registered subpose positions",
+        "candidateSemantics": "union of geometry-only 66-degree AABB frusta at the four backed subpose candidate cameras",
         "candidateVisibleUnionAllowed": False,
-        "candidateFallbackAllUnitsViewcells": fallback_all_count,
         "rawCandidateFile": "raw_candidate_ids.bin",
         "rawCandidateOffsets": "raw_candidate_offsets.bin",
         "rawCandidateSemantics": "same geometry-only candidate table before label aggregation",
-        "cameraSemantics": "poses.camera_world is the single backed 66-degree candidate camera",
+        "cameraSemantics": "poses.camera_world is the backed 66-degree candidate camera for the view-cell center",
+        "subposeCandidateCameraSemantics": "subpose_camera_pos - subpose_camera_forward * back_offset",
         "queryCenterSemantics": "view-cell center used by the nine-point region contract",
         "viewcellGeometrySemantics": "disk and camera-oriented box regions share one forward direction and four offline subposes",
         "sourceViewcellCount": view_count,
@@ -1990,7 +2001,7 @@ def generate_scene_dataset(
             "visibleCount": pose_meta["visibleCount"],
         },
         "probe": {
-            "manifest": "compiled/probes/probe_manifest.json" if probe_asset is not None else None,
+            "manifest": "compiled/probes/external_hit_probe_manifest.json" if probe_asset is not None else None,
             "rowCount": None if probe_asset is None else probe_asset.manifest["rowCount"],
             "distanceRatios": list(PROBE_DISTANCE_RATIOS),
             "trainingAllowed": probe_asset is not None,
@@ -2075,17 +2086,54 @@ def _resolve_device(value: str) -> str:
     return resolved
 
 
+def select_catalog_scene_ids(
+    entries: Mapping[str, Any],
+    *,
+    all_scenes: bool,
+    requested_scene_ids: Sequence[str] | None,
+    shard_index: int | None,
+    shard_count: int | None,
+) -> list[str]:
+    """Select one deterministic, disjoint scene shard from the frozen catalog."""
+
+    if (shard_index is None) != (shard_count is None):
+        raise ValueError("scene-shard-index and scene-shard-count must be provided together")
+    if shard_index is not None:
+        if not all_scenes:
+            raise ValueError("scene sharding is supported only with --all")
+        if shard_count is None or shard_count <= 1 or not 0 <= shard_index < shard_count:
+            raise ValueError("scene shard requires count > 1 and 0 <= index < count")
+    selected = (
+        sorted(str(scene_id) for scene_id in entries)
+        if all_scenes
+        else sorted(set(str(value) for value in (requested_scene_ids or ())))
+    )
+    unknown = sorted(set(selected) - set(entries))
+    if unknown:
+        raise ValueError(f"unknown synthetic scene IDs: {', '.join(unknown)}")
+    if shard_index is not None and shard_count is not None:
+        selected = selected[shard_index::shard_count]
+    return selected
+
+
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate deterministic procedural synthetic V5 datasets.")
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--scene-id", action="append", help="Generate one catalog scene; repeat for several scenes.")
     selection.add_argument("--all", action="store_true", help="Generate all 120 catalog scenes.")
+    selection.add_argument(
+        "--finalize-existing",
+        action="store_true",
+        help="Validate all 120 existing scene outputs and write the canonical root manifest.",
+    )
     parser.add_argument("--base-seed", type=int, default=DEFAULT_BASE_SEED)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="cpu")
     parser.add_argument("--views-per-scene", type=int, default=DEFAULT_VIEWS_PER_SCENE)
     parser.add_argument("--render-width", type=int, default=DEFAULT_RENDER_WIDTH)
     parser.add_argument("--render-height", type=int, default=DEFAULT_RENDER_HEIGHT)
+    parser.add_argument("--scene-shard-index", type=int)
+    parser.add_argument("--scene-shard-count", type=int)
     return parser.parse_args(argv)
 
 
@@ -2096,10 +2144,43 @@ def main(argv: Sequence[str] | None = None) -> None:
     device = _resolve_device(args.device)
     catalog = generate_synthetic_scene_manifest(int(args.base_seed))
     entries = {str(entry["sceneId"]): entry for entry in catalog["scenes"]}
-    selected = sorted(entries) if args.all else sorted(set(str(value) for value in args.scene_id))
-    unknown = sorted(set(selected) - set(entries))
-    if unknown:
-        raise SystemExit(f"unknown synthetic scene IDs: {', '.join(unknown)}")
+    if args.finalize_existing:
+        selected = sorted(entries)
+        missing = [
+            scene_id
+            for scene_id in selected
+            if not (args.output_root / scene_id / "scene_manifest.json").is_file()
+        ]
+        if missing:
+            raise SystemExit(
+                f"cannot finalize synthetic dataset; missing {len(missing)} scene manifests"
+            )
+        root_manifest = build_dataset_manifest(
+            catalog,
+            generated_scene_ids=selected,
+            device=device,
+            views_per_scene=int(args.views_per_scene),
+            render_width=int(args.render_width),
+            render_height=int(args.render_height),
+            output_root=args.output_root,
+        )
+        _json_dump(args.output_root / "synthetic_dataset_manifest.json", root_manifest)
+        print(json.dumps({
+            "schema": DATASET_SCHEMA,
+            "generatedSceneCount": len(selected),
+            "finalized": True,
+        }), flush=True)
+        return
+    try:
+        selected = select_catalog_scene_ids(
+            entries,
+            all_scenes=bool(args.all),
+            requested_scene_ids=args.scene_id,
+            shard_index=args.scene_shard_index,
+            shard_count=args.scene_shard_count,
+        )
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     args.output_root.mkdir(parents=True, exist_ok=True)
     generated: list[str] = []
     for scene_id in selected:
@@ -2122,7 +2203,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         render_height=int(args.render_height),
         output_root=args.output_root,
     )
-    _json_dump(args.output_root / "synthetic_dataset_manifest.json", root_manifest)
+    manifest_name = (
+        "synthetic_dataset_manifest.json"
+        if args.scene_shard_index is None
+        else f"synthetic_dataset_manifest_shard_{args.scene_shard_index:02d}_of_{args.scene_shard_count:02d}.json"
+    )
+    _json_dump(args.output_root / manifest_name, root_manifest)
     print(json.dumps({"schema": DATASET_SCHEMA, "generatedSceneCount": len(generated), "scenes": generated}, ensure_ascii=False), flush=True)
 
 

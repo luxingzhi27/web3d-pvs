@@ -11,9 +11,13 @@ import {
   POINT_FEATURE_DIM,
   POINT_RECORD_BYTES,
   SURFACE_BINARY_HEADER_BYTES,
+  collectGarbageIfAvailable,
+  DEFAULT_GC_EVERY,
   generateV5InstanceSurfaceSamples,
+  parseArgs,
   parseDenseFp32Header,
   sampleUnitSurfaceFeatures,
+  stripGlbMaterials,
 } from './generate_v5_instance_surface_samples.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -86,6 +90,75 @@ function writeTwoComponentGlb(filePath) {
   }, binary);
 }
 
+function writeTranslatedInstancedGlb(filePath) {
+  const positions = new Float32Array([
+    0, 0, 0,
+    1, 0, 0,
+    0, 1, 0,
+  ]);
+  const indices = new Uint16Array([0, 1, 2]);
+  const translations = new Float32Array([
+    0, 0, 0,
+    10, 0, 0,
+  ]);
+  const halfTurn = Math.sqrt(0.5);
+  const rotations = new Float32Array([
+    0, 0, 0, 1,
+    0, 0, halfTurn, halfTurn,
+  ]);
+  const scales = new Float32Array([
+    1, 1, 1,
+    1, 1, 1,
+  ]);
+  const chunks = [
+    Buffer.from(positions.buffer),
+    Buffer.from(indices.buffer),
+    Buffer.from(translations.buffer),
+    Buffer.from(rotations.buffer),
+    Buffer.from(scales.buffer),
+  ];
+  const offsets = [];
+  let binaryLength = 0;
+  for (const chunk of chunks) {
+    binaryLength = pad4(binaryLength);
+    offsets.push(binaryLength);
+    binaryLength += chunk.length;
+  }
+  const binary = Buffer.alloc(binaryLength);
+  chunks.forEach((chunk, index) => chunk.copy(binary, offsets[index]));
+  writeGlb(filePath, {
+    asset: { version: '2.0', generator: 'v5-surface-test-instanced' },
+    scene: 0,
+    scenes: [{ nodes: [0] }],
+    meshes: [{
+      primitives: [{ attributes: { POSITION: 0 }, indices: 1 }],
+    }],
+    buffers: [{ byteLength: binary.length }],
+    bufferViews: chunks.map((chunk, index) => ({
+      buffer: 0,
+      byteOffset: offsets[index],
+      byteLength: chunk.length,
+    })),
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: 3, type: 'VEC3', min: [0, 0, 0], max: [1, 1, 0] },
+      { bufferView: 1, componentType: 5123, count: 3, type: 'SCALAR' },
+      { bufferView: 2, componentType: 5126, count: 2, type: 'VEC3' },
+      { bufferView: 3, componentType: 5126, count: 2, type: 'VEC4' },
+      { bufferView: 4, componentType: 5126, count: 2, type: 'VEC3' },
+    ],
+    extensionsUsed: ['EXT_mesh_gpu_instancing'],
+    extensionsRequired: ['EXT_mesh_gpu_instancing'],
+    nodes: [{
+      mesh: 0,
+      extensions: {
+        EXT_mesh_gpu_instancing: {
+          attributes: { TRANSLATION: 2, ROTATION: 3, SCALE: 4 },
+        },
+      },
+    }],
+  }, binary);
+}
+
 function writeEmptyGlb(filePath) {
   writeGlb(filePath, {
     asset: { version: '2.0', generator: 'v5-surface-test-empty' },
@@ -93,6 +166,28 @@ function writeEmptyGlb(filePath) {
     scenes: [{ nodes: [0] }],
     nodes: [{}],
   });
+}
+
+function writeMaterialReferenceGlb(filePath) {
+  const positions = new Float32Array([
+    0, 0, 0,
+    1, 0, 0,
+    0, 1, 0,
+  ]);
+  const positionBytes = Buffer.from(positions.buffer);
+  writeGlb(filePath, {
+    asset: { version: '2.0', generator: 'v5-surface-test-material' },
+    scene: 0,
+    scenes: [{ nodes: [0] }],
+    nodes: [{ mesh: 0 }],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0 }, material: 0 }] }],
+    materials: [{ pbrMetallicRoughness: { baseColorTexture: { index: 0 } } }],
+    textures: [{ source: 0 }],
+    images: [{ bufferView: 1, mimeType: 'image/png' }],
+    buffers: [{ byteLength: positionBytes.length }],
+    bufferViews: [{ buffer: 0, byteOffset: 0, byteLength: positionBytes.length }],
+    accessors: [{ bufferView: 0, componentType: 5126, count: 3, type: 'VEC3', min: [0, 0, 0], max: [1, 1, 0] }],
+  }, positionBytes);
 }
 
 function bounds(min, max) {
@@ -155,6 +250,19 @@ try {
   fs.mkdirSync(assetsDir, { recursive: true });
   writeTwoComponentGlb(path.join(assetsDir, 'multi.glb'));
   writeEmptyGlb(path.join(assetsDir, 'empty.glb'));
+  const materialGlbPath = path.join(assetsDir, 'material.glb');
+  writeMaterialReferenceGlb(materialGlbPath);
+  const materialInput = fs.readFileSync(materialGlbPath);
+  const materialStripped = stripGlbMaterials(materialInput);
+  const materialJsonLength = materialStripped.readUInt32LE(12);
+  const materialJson = JSON.parse(materialStripped.subarray(20, 20 + materialJsonLength).toString('utf8').trim());
+  assert.equal(materialJson.meshes[0].primitives[0].material, undefined);
+  assert.equal(materialJson.materials, undefined);
+  assert.equal(materialJson.images, undefined);
+
+  const instancedAssetsDir = path.join(root, 'instanced-assets');
+  fs.mkdirSync(instancedAssetsDir, { recursive: true });
+  writeTranslatedInstancedGlb(path.join(instancedAssetsDir, 'translated-instanced.glb'));
 
   const runtimeMetaPath = path.join(assetsDir, 'runtimeVisibilityMeta.json');
   const glbIndexPath = path.join(assetsDir, 'glbIndex.json');
@@ -271,12 +379,127 @@ try {
     outputDir: outputB,
     seed: 17,
     progressEvery: 0,
+    gcEvery: 1,
   });
   for (const file of OUTPUT_FILES) {
     assert.deepEqual(fs.readFileSync(path.join(outputB, file)), fs.readFileSync(path.join(outputA, file)));
   }
 
   verifyWithCanonicalPythonLoader(outputA);
+
+  const instancedStats = {
+    visiblePoses: 0,
+    visibleRatio: 0,
+    weightMean: 0,
+    weightP90: 0,
+    weightMax: 0,
+    priorityPrior: 0,
+  };
+  const instancedRuntimeMeta = {
+    schemaVersion: 1,
+    componentCount: 2,
+    instanceCount: 2,
+    globalGlbCount: 1,
+    componentRecords: [
+      { componentGlobalId: 0, instanceId: 0, globalGlbId: 0, bounds: bounds([0, 0, 0], [1, 1, 0]), rvcStats: instancedStats },
+      { componentGlobalId: 1, instanceId: 1, globalGlbId: 0, bounds: bounds([9, 0, 0], [10, 1, 0]), rvcStats: instancedStats },
+    ],
+    globalGlbRecords: [
+      { globalGlbId: 0, componentGlobalIds: [0, 1], aabb: bounds([0, 0, 0], [10, 1, 0]), rvcStats: instancedStats },
+    ],
+  };
+  const instancedRuntimeMetaPath = path.join(instancedAssetsDir, 'runtimeVisibilityMeta.json');
+  const instancedGlbIndexPath = path.join(instancedAssetsDir, 'glbIndex.json');
+  fs.writeFileSync(instancedRuntimeMetaPath, JSON.stringify(instancedRuntimeMeta, null, 2));
+  fs.writeFileSync(instancedGlbIndexPath, JSON.stringify({
+    version: 1,
+    ordering: 'test-order',
+    lod: 'LOD0',
+    total: 1,
+    entries: [{ globalId: 0, path: 'translated-instanced.glb', componentGlobalIds: [0, 1] }],
+  }, null, 2));
+  const instancedOutput = path.join(root, 'surface-instanced');
+  const instancedResult = await generateV5InstanceSurfaceSamples({
+    assetsDir: instancedAssetsDir,
+    runtimeMetaPath: instancedRuntimeMetaPath,
+    glbIndexPath: instancedGlbIndexPath,
+    outputDir: instancedOutput,
+    seed: 17,
+    progressEvery: 0,
+    gcEvery: 1,
+  });
+  assert.deepEqual(instancedResult.manifest.unitIds, [0, 1]);
+  assert.deepEqual(instancedResult.manifest.degenerateUnitIds, []);
+  assert.equal(instancedResult.stats.matchModeCounts['instance-index-explicit'], 2);
+  const instancedPoints = readDenseFp32(path.join(instancedOutput, instancedResult.manifest.files.points));
+  for (let unitIndex = 0; unitIndex < 2; unitIndex += 1) {
+    const base = unitIndex * POINTS_PER_UNIT * POINT_FEATURE_DIM;
+    let nonZeroPointCount = 0;
+    for (let pointIndex = 0; pointIndex < POINTS_PER_UNIT; pointIndex += 1) {
+      const offset = base + pointIndex * POINT_FEATURE_DIM;
+      if (Math.abs(instancedPoints.values[offset]) > 1e-6
+        || Math.abs(instancedPoints.values[offset + 1]) > 1e-6) nonZeroPointCount += 1;
+      assert.ok(instancedPoints.values[offset + 5] > 0.99, 'instanced surface normal must remain +Z');
+    }
+    assert.ok(nonZeroPointCount > 0, 'translated instance must have sampled surface points');
+  }
+
+  const streamedAssetsDir = path.join(root, 'streamed-assets');
+  fs.mkdirSync(streamedAssetsDir, { recursive: true });
+  writeTwoComponentGlb(path.join(streamedAssetsDir, 'single-component.glb'));
+  const streamedStats = {
+    visiblePoses: 0,
+    visibleRatio: 0,
+    weightMean: 0,
+    weightP90: 0,
+    weightMax: 0,
+    priorityPrior: 0,
+  };
+  const streamedRuntimeMetaPath = path.join(streamedAssetsDir, 'runtimeVisibilityMeta.json');
+  const streamedGlbIndexPath = path.join(streamedAssetsDir, 'glbIndex.json');
+  fs.writeFileSync(streamedRuntimeMetaPath, JSON.stringify({
+    schemaVersion: 1,
+    componentCount: 1,
+    instanceCount: 1,
+    globalGlbCount: 1,
+    componentRecords: [
+      { componentGlobalId: 0, instanceId: 0, globalGlbId: 0, bounds: bounds([0, 0, 0], [11, 1, 0]), rvcStats: streamedStats },
+    ],
+    globalGlbRecords: [
+      { globalGlbId: 0, componentGlobalIds: [0], aabb: bounds([0, 0, 0], [11, 1, 0]), rvcStats: streamedStats },
+    ],
+  }, null, 2));
+  fs.writeFileSync(streamedGlbIndexPath, JSON.stringify({
+    version: 1,
+    ordering: 'test-order',
+    lod: 'LOD0',
+    total: 1,
+    entries: [{ globalId: 0, path: 'single-component.glb', componentGlobalIds: [0] }],
+  }, null, 2));
+  const streamedResult = await generateV5InstanceSurfaceSamples({
+    assetsDir: streamedAssetsDir,
+    runtimeMetaPath: streamedRuntimeMetaPath,
+    glbIndexPath: streamedGlbIndexPath,
+    outputDir: path.join(root, 'surface-streamed'),
+    seed: 17,
+    progressEvery: 0,
+    gcEvery: 1,
+  });
+  assert.deepEqual(streamedResult.manifest.degenerateUnitIds, []);
+  assert.equal(streamedResult.stats.matchModeCounts['single-component-stream'], 2);
+
+  assert.equal(DEFAULT_GC_EVERY, 10);
+  assert.equal(parseArgs(['node', 'surface.mjs', '--gc-every', '3']).gcEvery, 3);
+  const originalGc = globalThis.gc;
+  let gcCalls = 0;
+  globalThis.gc = () => { gcCalls += 1; };
+  try {
+    assert.equal(collectGarbageIfAvailable(), true);
+    assert.equal(gcCalls, 1);
+  } finally {
+    if (originalGc === undefined) delete globalThis.gc;
+    else globalThis.gc = originalGc;
+  }
   console.log('V5 instance surface sample tests passed.');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });

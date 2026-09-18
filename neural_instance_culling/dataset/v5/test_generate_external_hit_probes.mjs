@@ -9,10 +9,12 @@ import * as THREE from '../../../slm2viewer/node_modules/three/build/three.modul
 import {
   buildTriangleBvh,
   CompactTriangleStore,
+  excludeDegenerateProbeUnits,
   generateExternalHitProbes,
   mergeExternalHitProbeShards,
   readColumnarProbeAsset,
   traceNearestExternalHit,
+  visitRenderableTriangleBatches,
 } from './generate_external_hit_probes.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -186,6 +188,42 @@ function writeSceneInputs(directory) {
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v5-external-hit-'));
 try {
+  const filteredInput = excludeDegenerateProbeUnits({
+    components: [
+      { componentGlobalId: 0, globalGlbId: 0 },
+      { componentGlobalId: 1, globalGlbId: 0 },
+      { componentGlobalId: 2, globalGlbId: 1 },
+    ],
+    componentById: new Map([
+      [0, { componentGlobalId: 0 }],
+      [1, { componentGlobalId: 1 }],
+      [2, { componentGlobalId: 2 }],
+    ]),
+    componentIdsByGlb: new Map([[0, [0, 1]], [1, [2]]]),
+  }, [1]);
+  assert.deepEqual(filteredInput.components.map((unit) => unit.componentGlobalId), [0, 2]);
+  assert.deepEqual(filteredInput.componentIdsByGlb.get(0), [0]);
+  assert.deepEqual(filteredInput.componentIdsByGlb.get(1), [2]);
+
+  const mixedGeometry = new THREE.BufferGeometry();
+  mixedGeometry.setAttribute('position', new THREE.Float32BufferAttribute([
+    0, 0, 0, 1e-8, 0, 0, 0, 1e-8, 0,
+    0, 0, 0, 1, 0, 0, 0, 1, 0,
+  ], 3));
+  const mixedScene = new THREE.Scene();
+  mixedScene.add(new THREE.Mesh(mixedGeometry, new THREE.MeshBasicMaterial()));
+  let retainedTriangles = 0;
+  const mixedStats = visitRenderableTriangleBatches(
+    THREE,
+    { scene: mixedScene },
+    [0],
+    (batch) => { retainedTriangles += batch.length; },
+  );
+  assert.equal(mixedStats.sourceTriangleCount, 2);
+  assert.equal(mixedStats.degenerateTriangleCount, 1);
+  assert.equal(retainedTriangles, 1, 'zero-area faces must not enter component matching or the BVH');
+  mixedGeometry.dispose();
+
   makeBoxGlb(path.join(root, 'boxes.glb'));
   writeSceneInputs(root);
   writeSurfaceAsset(root);

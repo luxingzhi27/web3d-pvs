@@ -52,6 +52,57 @@ def _check_evaluation_split(split: str) -> str:
     return value
 
 
+def evaluate_shared_run(
+    run: V5Run,
+    *,
+    evaluation_split: str = "validation",
+    target_weighted_recall: float = 0.99,
+    calibration_bootstrap_replicates: int = 10_000,
+    evaluation_bootstrap_replicates: int = 10_000,
+    bootstrap_seed: int = 0,
+    final_test: bool = False,
+) -> list[dict[str, Any]]:
+    """Evaluate one five-scene shared checkpoint for scan or final replay."""
+
+    split = _check_evaluation_split(evaluation_split)
+    if run.protocol != "shared" or len(run.scenes) != 5:
+        raise ValueError("single shared evaluation requires one five-scene shared run")
+    if split == "test":
+        if not final_test or not run.test_read:
+            raise PermissionError("test evaluation requires an explicit final-test bundle")
+    elif run.test_read:
+        raise PermissionError("test-tainted bundles cannot enter validation selection")
+    rows: list[dict[str, Any]] = []
+    for scene in sorted(run.scenes):
+        bundle = run.scenes[scene]
+        if "calibration" not in bundle.splits or split not in bundle.splits:
+            raise ValueError(f"shared run {run.variant}/{run.seed} lacks calibration or {split} for {scene}")
+        selection = calibrate_target(
+            run.records(scene, "calibration"),
+            scene=scene,
+            target_weighted_recall=target_weighted_recall,
+            bootstrap_replicates=calibration_bootstrap_replicates,
+            bootstrap_seed=bootstrap_seed + run.seed,
+        )
+        metrics = evaluate_scene(
+            run.records(scene, split, allow_test=bool(final_test)),
+            selection.threshold,
+            bootstrap_replicates=evaluation_bootstrap_replicates,
+            bootstrap_seed=bootstrap_seed + run.seed + 10_000,
+        )
+        rows.append(
+            _result_row(
+                run=run,
+                scene=scene,
+                split=split,
+                threshold_mode="target_calibrated",
+                selection=selection,
+                metrics=metrics,
+            )
+        )
+    return rows
+
+
 def evaluate_shared_matrix(
     runs: Iterable[V5Run],
     *,
@@ -61,6 +112,7 @@ def evaluate_shared_matrix(
     evaluation_bootstrap_replicates: int = 10_000,
     bootstrap_seed: int = 0,
     expected_scenes: tuple[str, ...] | None = None,
+    final_test: bool = False,
 ) -> list[dict[str, Any]]:
     """Evaluate one shared checkpoint/seed on all five scenes.
 
@@ -70,40 +122,25 @@ def evaluate_shared_matrix(
     scene-equal summary rather than pooling candidate observations.
     """
     split = _check_evaluation_split(evaluation_split)
+    if split == "test" and not final_test:
+        raise PermissionError("test evaluation requires explicit final-test permission")
     materialized = validate_matrix(
         runs,
         protocol="shared",
         expected_scenes=expected_scenes,
+        allow_test_read=bool(final_test),
     )
     rows: list[dict[str, Any]] = []
     for run in sorted(materialized, key=lambda item: (item.variant, item.seed)):
-        for scene in sorted(run.scenes):
-            bundle = run.scenes[scene]
-            if split not in bundle.splits:
-                raise ValueError(f"shared run {run.variant}/{run.seed} has no {split} rows for {scene}")
-            selection = calibrate_target(
-                bundle.splits["calibration"],
-                scene=scene,
-                target_weighted_recall=target_weighted_recall,
-                bootstrap_replicates=calibration_bootstrap_replicates,
-                bootstrap_seed=bootstrap_seed + run.seed,
-            )
-            metrics = evaluate_scene(
-                bundle.splits[split],
-                selection.threshold,
-                bootstrap_replicates=evaluation_bootstrap_replicates,
-                bootstrap_seed=bootstrap_seed + run.seed + 10_000,
-            )
-            rows.append(
-                _result_row(
-                    run=run,
-                    scene=scene,
-                    split=split,
-                    threshold_mode="target_calibrated",
-                    selection=selection,
-                    metrics=metrics,
-                )
-            )
+        rows.extend(evaluate_shared_run(
+            run,
+            evaluation_split=split,
+            target_weighted_recall=target_weighted_recall,
+            calibration_bootstrap_replicates=calibration_bootstrap_replicates,
+            evaluation_bootstrap_replicates=evaluation_bootstrap_replicates,
+            bootstrap_seed=bootstrap_seed,
+            final_test=final_test,
+        ))
     return rows
 
 
@@ -116,6 +153,7 @@ def evaluate_loso_matrix(
     evaluation_bootstrap_replicates: int = 10_000,
     bootstrap_seed: int = 0,
     expected_scenes: tuple[str, ...] | None = None,
+    final_test: bool = False,
 ) -> list[dict[str, Any]]:
     """Evaluate every LOSO fold with both threshold provenance modes.
 
@@ -124,10 +162,13 @@ def evaluate_loso_matrix(
     alter the source-global threshold or its result.
     """
     split = _check_evaluation_split(evaluation_split)
+    if split == "test" and not final_test:
+        raise PermissionError("test evaluation requires explicit final-test permission")
     materialized = validate_matrix(
         runs,
         protocol="loso",
         expected_scenes=expected_scenes,
+        allow_test_read=bool(final_test),
     )
     rows: list[dict[str, Any]] = []
     for run in sorted(
@@ -136,7 +177,7 @@ def evaluate_loso_matrix(
     ):
         assert run.held_out_scene is not None
         source_calibration = {
-            scene: run.scenes[scene].splits["calibration"]
+            scene: run.records(scene, "calibration")
             for scene in run.source_scenes
         }
         source_selection = calibrate_source_global(
@@ -151,7 +192,7 @@ def evaluate_loso_matrix(
                 f"LOSO run {run.variant}/{run.seed}/{run.held_out_scene} has no {split} rows"
             )
         source_metrics = evaluate_scene(
-            target_bundle.splits[split],
+            run.records(run.held_out_scene, split, allow_test=bool(final_test)),
             source_selection.threshold,
             bootstrap_replicates=evaluation_bootstrap_replicates,
             bootstrap_seed=bootstrap_seed + run.seed + 10_000,
@@ -168,14 +209,14 @@ def evaluate_loso_matrix(
             )
         )
         target_selection = calibrate_target(
-            target_bundle.splits["calibration"],
+            run.records(run.held_out_scene, "calibration"),
             scene=run.held_out_scene,
             target_weighted_recall=target_weighted_recall,
             bootstrap_replicates=calibration_bootstrap_replicates,
             bootstrap_seed=bootstrap_seed + run.seed + 20_000,
         )
         target_metrics = evaluate_scene(
-            target_bundle.splits[split],
+            run.records(run.held_out_scene, split, allow_test=bool(final_test)),
             target_selection.threshold,
             bootstrap_replicates=evaluation_bootstrap_replicates,
             bootstrap_seed=bootstrap_seed + run.seed + 30_000,
@@ -194,4 +235,4 @@ def evaluate_loso_matrix(
     return rows
 
 
-__all__ = ["evaluate_loso_matrix", "evaluate_shared_matrix"]
+__all__ = ["evaluate_loso_matrix", "evaluate_shared_matrix", "evaluate_shared_run"]
