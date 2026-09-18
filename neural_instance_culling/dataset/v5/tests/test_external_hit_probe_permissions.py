@@ -18,9 +18,19 @@ from neural_instance_culling.dataset.v5.permissions import (
     authorize_asset_read,
     make_loso_training_policy,
 )
+from neural_instance_culling.dataset.v5.schemas import SchemaError, validate_probe_manifest
 
 
 class ExternalHitProbePermissionTest(unittest.TestCase):
+    def test_surface_origin_v1_probe_is_rejected(self) -> None:
+        manifest = make_probe_manifest("source_scene", 1)
+        manifest["schema"] = "parallel_external_hit_current_status-v1"
+        manifest["version"] = 1
+        manifest["raySchema"] = "surface_origin_first_external_hit_right_censor_v1"
+        manifest["hitDistanceOrigin"] = "original_surface_start_world"
+        with self.assertRaises(SchemaError):
+            validate_probe_manifest(manifest)
+
     def test_source_probe_can_be_read_but_held_out_probe_cannot(self) -> None:
         policy = make_loso_training_policy(["source_scene"], "held_out_scene")
         manifest = make_probe_manifest("source_scene", 1)

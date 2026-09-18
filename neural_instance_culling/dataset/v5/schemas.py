@@ -6,10 +6,15 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+import numpy as np
+
+from .directions import icosahedron12_directions
+
 LOCAL_SURFACE_SCHEMA = "gcof-pvs-v5-local-surface-v1"
 RELATION_SCHEMA = "pvs-geometry-proxy-relation-csr-v1"
 REGION_SUPPORT_SCHEMA = "gcof-pvs-v5-region-support-v1"
-EXTERNAL_HIT_PROBE_SCHEMA = "parallel_external_hit_current_status-v1"
+EXTERNAL_HIT_PROBE_SCHEMA = "parallel_external_hit_target_depth_current_status-v2"
+EXTERNAL_HIT_RAY_SCHEMA = "surface_origin_target_center_depth_first_external_hit_right_censor_v2"
 FOLD_ACCESS_SCHEMA = "gcof-pvs-v5-fold-access-v1"
 SYNTHETIC_SCENE_SCHEMA = "gcof-pvs-v5-synthetic-scene-catalog-v1"
 
@@ -99,6 +104,7 @@ def validate_relation_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
             "usesVisibilityLabels",
             "anchors",
             "anchorCount",
+            "anchorDirections",
             "K",
             "projection",
             "depthPredicate",
@@ -119,6 +125,11 @@ def validate_relation_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
         raise SchemaError("V5 relations must set usesVisibilityLabels=false")
     if value["anchors"] != ANCHOR_SCHEMA or value["anchorCount"] != RELATION_ANCHOR_COUNT:
         raise SchemaError("relation anchors must be the fixed 12-direction icosahedron")
+    directions = np.asarray(value["anchorDirections"], dtype=np.float64)
+    if directions.shape != (RELATION_ANCHOR_COUNT, 3) or not bool(
+        np.allclose(directions, icosahedron12_directions(dtype=np.float64), atol=1.0e-7, rtol=0.0)
+    ):
+        raise SchemaError("relation anchorDirections disagree with the canonical ordered table")
     if value["K"] != RELATION_TOP_K:
         raise SchemaError("V5 relation K is fixed at 8")
     if value["projection"] != "orthographic_aabb_overlap":
@@ -247,6 +258,7 @@ def validate_probe_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
             "surfaceStartsPerUnit",
             "directionsPerUnit",
             "directionSet",
+            "anchorDirections",
             "distanceRatios",
             "maxTraceDistanceRatio",
             "recordFields",
@@ -275,7 +287,7 @@ def validate_probe_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
         },
         name="probe manifest",
     )
-    if value["schema"] != EXTERNAL_HIT_PROBE_SCHEMA or value["version"] != 1:
+    if value["schema"] != EXTERNAL_HIT_PROBE_SCHEMA or value["version"] != 2:
         raise SchemaError("unsupported external-hit probe schema")
     if value["assetKind"] != "external_hit_probe":
         raise SchemaError("probe assetKind must be external_hit_probe")
@@ -284,12 +296,22 @@ def validate_probe_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
         raise SchemaError("external-hit probes are source-train-only assets")
     if value["containsVisibilityLabels"] is not False:
         raise SchemaError("external-hit probes cannot contain visibility labels")
-    if value["raySchema"] != "surface_origin_first_external_hit_right_censor_v1":
+    if value["raySchema"] != EXTERNAL_HIT_RAY_SCHEMA:
         raise SchemaError("unsupported external-hit ray schema")
     if value["surfaceStartsPerUnit"] != 16 or value["directionsPerUnit"] != 36:
         raise SchemaError("V5 probes require 16 starts and 36 fixed directions per unit")
     if value["directionSet"] != "icosahedron12_plus_fibonacci24":
         raise SchemaError("unsupported V5 probe direction set")
+    anchor_directions = np.asarray(value["anchorDirections"], dtype=np.float64)
+    if anchor_directions.shape != (RELATION_ANCHOR_COUNT, 3) or not bool(
+        np.allclose(
+            anchor_directions,
+            icosahedron12_directions(dtype=np.float64),
+            atol=1.0e-7,
+            rtol=0.0,
+        )
+    ):
+        raise SchemaError("probe anchorDirections disagree with the canonical ordered table")
     ratios = value["distanceRatios"]
     if ratios != [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0]:
         raise SchemaError("probe distance ratios do not match the frozen V5 grid")
@@ -301,11 +323,13 @@ def validate_probe_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "probeId",
         "startPointWorld",
         "directionWorld",
-        "hitDistance",
-        "maxTraceDistance",
+        "hitTargetCenterDepth",
+        "maxTargetCenterDepth",
         "event",
     ]:
         raise SchemaError("probe record field order is not the V5 contract")
+    if value.get("hitDistanceOrigin") != "target_center_directional_projection":
+        raise SchemaError("probe hitDistanceOrigin must use target-centered directional depth")
     _require_positive_int(value["numUnits"], "probe numUnits")
     _require_string(value["recordsFile"], "probe recordsFile")
     if "files" in value:

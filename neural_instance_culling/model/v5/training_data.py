@@ -18,6 +18,7 @@ from neural_instance_culling.dataset.v5.build_external_hit_probes import (
     sample_grouped_current_status_observations,
 )
 from neural_instance_culling.dataset.v5.permissions import FoldAccessPolicy
+from neural_instance_culling.dataset.v5.schemas import validate_relation_manifest
 from neural_instance_culling.model.common.runtime_meta import load_runtime_meta
 from neural_instance_culling.model.pose_csr_dataset import PoseCSRDataset
 
@@ -29,6 +30,7 @@ SURFACE_MAGIC = b"GPV5"
 @dataclass(frozen=True)
 class SceneRiskDenominators:
     pose_count: int
+    eligible_pose_count: int
     visible_occurrences: int
     visible_weight_sum: float
 
@@ -234,13 +236,18 @@ class V5SceneTrainingData:
         self.degenerate_unit_ids = np.asarray(
             surface_manifest.get("degenerateUnitIds", []), dtype=np.int64
         )
+        if self.degenerate_unit_ids.size and (
+            bool((self.degenerate_unit_ids < 0).any())
+            or bool((self.degenerate_unit_ids >= self.num_units).any())
+        ):
+            raise ValueError(f"{self.scene_id} degenerate unit IDs are outside the scene")
         self.valid_unit_mask = np.ones((self.num_units,), dtype=bool)
         self.valid_unit_mask[self.degenerate_unit_ids] = False
 
         relation_dir = self.compiled_dir / "relation"
-        relation_manifest = json.loads((relation_dir / "relation_manifest.json").read_text(encoding="utf-8"))
-        if relation_manifest.get("usesVisibilityLabels") is not False:
-            raise ValueError("V5 training refuses label-derived relation assets")
+        relation_manifest = validate_relation_manifest(
+            json.loads((relation_dir / "relation_manifest.json").read_text(encoding="utf-8"))
+        )
         if int(relation_manifest["numUnits"]) != self.num_units:
             raise ValueError(f"{self.scene_id} relation/runtime unit count mismatch")
         self.relation_source_ids = np.load(
@@ -263,13 +270,25 @@ class V5SceneTrainingData:
         occurrences = 0
         weight_sum = 0.0
         indices = np.asarray(self.train_split.pose_indices, dtype=np.int64)
+        eligible = indices[self.dataset.candidate_counts[indices] > 0]
         for pose_id in indices.tolist():
-            _ids, weights = self.dataset.visible_slice(int(pose_id))
+            visible_ids, weights = self.dataset.visible_slice(int(pose_id))
+            visible_ids = np.asarray(visible_ids, dtype=np.int64)
+            if self.degenerate_unit_ids.size and visible_ids.size and bool(
+                np.isin(visible_ids, self.degenerate_unit_ids).any()
+            ):
+                raise ValueError(
+                    f"{self.scene_id} train pose {pose_id} contains visible degenerate units"
+                )
             occurrences += int(weights.size)
             weight_sum += float(np.asarray(weights, dtype=np.float64).sum())
         if occurrences <= 0 or weight_sum <= 0:
             raise ValueError(f"{self.scene_id} train split has no positive supervision")
-        return SceneRiskDenominators(int(indices.size), occurrences, weight_sum)
+        if eligible.size <= 0:
+            raise ValueError(f"{self.scene_id} train split has no candidate-nonempty poses")
+        return SceneRiskDenominators(
+            int(indices.size), int(eligible.size), occurrences, weight_sum
+        )
 
     def sample_pose_batch(self, rng: np.random.Generator, pose_count: int = 4) -> PoseBatch:
         eligible = np.asarray(self.train_split.pose_indices, dtype=np.int64)

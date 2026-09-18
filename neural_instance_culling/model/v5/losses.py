@@ -24,7 +24,7 @@ COUNT_BUDGET = 0.02
 VISUAL_BUDGET = 0.01
 FIELD_NLL_WEIGHT = 0.25
 DISTANCE_GRID_COUNT = 13
-EXTERNAL_HIT_SCHEMA = "parallel_external_hit_current_status-v1"
+EXTERNAL_HIT_SCHEMA = "parallel_external_hit_target_depth_current_status-v2"
 DUAL_STATE_SCHEMA = "gcof-pvs-v5-dual-state-v1"
 _LN2 = math.log(2.0)
 

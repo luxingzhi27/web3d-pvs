@@ -432,6 +432,8 @@ def _model_variant_and_objective(variant: str) -> tuple[str, str]:
         raise ValueError(f"variant must be one of {ALL_RUN_VARIANTS}")
     if normalized == "PBCE_OBJECTIVE":
         return "FULL", "PBCE_OBJECTIVE"
+    if normalized == "FULL_NO_FIELD_NLL":
+        return "FULL", "FULL_NO_FIELD_NLL"
     return normalized, "FULL"
 
 
@@ -461,8 +463,8 @@ def train_run(
     """Train one registered V5 member and return its non-test summary."""
 
     model_variant, objective = _model_variant_and_objective(variant)
-    if protocol == "loso" and variant == "PBCE_OBJECTIVE":
-        raise ValueError("PBCE_OBJECTIVE is a shared ablation only")
+    if protocol == "loso" and variant in {"PBCE_OBJECTIVE", "FULL_NO_FIELD_NLL"}:
+        raise ValueError(f"{variant} is a shared ablation only")
     if checkpoint_every <= 0 or log_every <= 0 or pose_count <= 0 or probe_count <= 0:
         raise ValueError("checkpoint/log/pose/probe counts must be positive")
     if probe_count % PROBE_OBSERVATIONS_PER_UNIT:
@@ -579,7 +581,7 @@ def train_run(
         restore_rng_states(payload["rngStates"], data_rng)
         logger.info("resumed checkpoint=%s at global_step=%d", Path(resume), global_step)
 
-    require_probe = variant != "GENERIC_RELATION_28"
+    require_probe = variant not in {"GENERIC_RELATION_28", "FULL_NO_FIELD_NLL"}
     store = _SceneDataStore(specs, policy, require_probe=require_probe)
     assignments = balanced_step_schedule(
         real_ids,
@@ -739,6 +741,10 @@ def preflight_training_assets(
             "numUnits": scene.num_units,
             "validUnits": int(np.count_nonzero(scene.valid_unit_mask)),
             "trainPoseCount": int(scene.train_split.pose_indices.size),
+            "eligiblePoseCount": int(scene.denominators.eligible_pose_count),
+            "candidateEmptyPoseCount": int(
+                scene.denominators.pose_count - scene.denominators.eligible_pose_count
+            ),
             "sampleCandidateCount": int(pose.candidate_ids.size),
             "sampleVisibleCount": int(np.count_nonzero(pose.targets)),
             "sampleProbeCount": int(probe.unit_ids.size),

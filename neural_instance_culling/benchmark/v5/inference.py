@@ -18,6 +18,7 @@ from neural_instance_culling.config.pvs_v5_scene_registry import (
     load_registry,
 )
 from neural_instance_culling.model.common.runtime_meta import load_runtime_meta
+from neural_instance_culling.dataset.v5.schemas import validate_relation_manifest
 from neural_instance_culling.model.pose_csr_dataset import PoseCSRDataset
 from neural_instance_culling.model.v5.core import (
     FIELD_SHAPE,
@@ -162,9 +163,9 @@ def load_checkpoint(path: str | Path, *, device: str | torch.device = "cpu") -> 
     variant = str(config.get("variant", ""))
     if protocol not in {"shared", "loso"}:
         raise ValueError("checkpoint protocol must be shared or loso")
-    if variant not in {"FULL", "GEOMETRY_FIELD", "GENERIC_RELATION_28", "PBCE_OBJECTIVE"}:
+    if variant not in {"FULL", "GEOMETRY_FIELD", "GENERIC_RELATION_28", "FULL_NO_FIELD_NLL", "PBCE_OBJECTIVE"}:
         raise ValueError("checkpoint training variant is not registered")
-    model_variant = "FULL" if variant == "PBCE_OBJECTIVE" else variant
+    model_variant = "FULL" if variant in {"FULL_NO_FIELD_NLL", "PBCE_OBJECTIVE"} else variant
     if model_config.get("variant") != model_variant:
         raise ValueError("checkpoint training and model variants disagree")
     seed = int(config.get("seed", -1))
@@ -232,11 +233,7 @@ def _scene_assets(spec: InferenceSceneSpec) -> tuple[dict[str, Any], np.ndarray,
             raise ValueError(f"{spec.scene_id} degenerateUnitIds are outside the scene")
         valid_mask[invalid_ids] = False
     relation_dir = spec.compiled_dir / "relation"
-    relation_manifest = _json(relation_dir / "relation_manifest.json")
-    if relation_manifest.get("schema") != GEOMETRY_RELATION_SCHEMA:
-        raise ValueError(f"{spec.scene_id} relation schema is not geometry-only V5")
-    if relation_manifest.get("usesVisibilityLabels") is not False:
-        raise ValueError(f"{spec.scene_id} relation uses visibility labels")
+    relation_manifest = validate_relation_manifest(_json(relation_dir / "relation_manifest.json"))
     source_ids = np.load(relation_dir / "source_ids_int64.npy", mmap_mode="r", allow_pickle=False)
     valid_edges = np.load(relation_dir / "valid_mask_bool.npy", mmap_mode="r", allow_pickle=False)
     edge_features = np.load(relation_dir / "edge_features_fp32.npy", mmap_mode="r", allow_pickle=False)

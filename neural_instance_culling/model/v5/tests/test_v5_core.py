@@ -45,6 +45,7 @@ def geometry_relation(
             "schema": GEOMETRY_RELATION_SCHEMA,
             "source": "geometry_only",
             "usesVisibilityLabels": False,
+            "anchorDirections": icosahedron_anchors().tolist(),
         },
         "source_ids": source_ids,
         "edge_features": edge_features,
@@ -149,6 +150,17 @@ class CompilerTests(unittest.TestCase):
         self.assertNotIn("direction_projection", dict(self.compiler.named_parameters()))
         self.assertNotIn("anchors", dict(self.compiler.named_parameters()))
 
+    def test_relation_anchor_order_mismatch_is_rejected(self) -> None:
+        relation = geometry_relation(
+            torch.full((1, ANCHOR_COUNT, 1), -1),
+            torch.zeros(1, ANCHOR_COUNT, 1, 8),
+            valid_mask=torch.zeros(1, ANCHOR_COUNT, 1, dtype=torch.bool),
+        )
+        directions = relation["metadata"]["anchorDirections"]
+        relation["metadata"]["anchorDirections"] = list(reversed(directions))
+        with self.assertRaisesRegex(ValueError, "anchorDirections"):
+            self.compiler(torch.randn(1, GEOMETRY_DIM), relation)
+
     def test_selective_sparse_compile_matches_full_rows(self) -> None:
         full = self.compiler(self.geometry, self.sparse)
         selected_ids = torch.tensor([5, 0, 2])
@@ -175,16 +187,17 @@ class CompilerTests(unittest.TestCase):
 
 
 class VariantTests(unittest.TestCase):
-    def test_head_shapes_and_capacity_match(self) -> None:
+    def test_head_shapes_and_generic_control_capacity(self) -> None:
         models = {variant: GCOFPVSV5(variant) for variant in VARIANTS}
         self.assertEqual(models["FULL"].config["headShape"], [52, 32, 1])
         self.assertEqual(models["GEOMETRY_FIELD"].config["headShape"], [52, 32, 1])
         self.assertEqual(models["GENERIC_RELATION_28"].config["headShape"], [76, 22, 1])
-        full_count = models["FULL"].parameter_count
         for variant, model in models.items():
-            self.assertLess(abs(model.parameter_count - full_count) / full_count, 0.05, variant)
             self.assertFalse(any("embedding" in name.lower() for name, _ in model.named_parameters()))
             self.assertFalse(any("residual" in name.lower() for name, _ in model.named_parameters()))
+        generic = models["GENERIC_RELATION_28"]
+        self.assertEqual(tuple(generic.generic_projection.weight.shape), (28, 12 * 7))
+        self.assertGreaterEqual(generic.parameter_count, models["FULL"].parameter_count)
 
     def test_variant_outputs_have_expected_shapes(self) -> None:
         torch.manual_seed(9)

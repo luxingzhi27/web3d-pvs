@@ -159,10 +159,12 @@ def train_step(
     if geometry_chunk_size <= 0:
         raise ValueError("geometry_chunk_size must be positive")
     objective_name = str(objective).upper()
-    if objective_name not in {"FULL", "PBCE_OBJECTIVE"}:
-        raise ValueError("objective must be FULL or PBCE_OBJECTIVE")
-    if objective_name == "PBCE_OBJECTIVE" and model.variant != "FULL":
-        raise ValueError("PBCE_OBJECTIVE uses the unchanged FULL architecture")
+    if objective_name not in {"FULL", "FULL_NO_FIELD_NLL", "PBCE_OBJECTIVE"}:
+        raise ValueError("objective must be FULL, FULL_NO_FIELD_NLL or PBCE_OBJECTIVE")
+    if objective_name in {"FULL_NO_FIELD_NLL", "PBCE_OBJECTIVE"} and model.variant != "FULL":
+        raise ValueError(f"{objective_name} uses the unchanged FULL architecture")
+    if objective_name == "FULL_NO_FIELD_NLL" and probe_batch is not None:
+        raise ValueError("FULL_NO_FIELD_NLL must not receive external-hit supervision")
 
     candidate_targets = np.unique(pose_batch.candidate_ids.astype(np.int64, copy=False))
     if probe_batch is not None and model.variant != "GENERIC_RELATION_28":
@@ -243,7 +245,7 @@ def train_step(
         logits,
         pose["targets"],
         pose["weights"],
-        float(pose_batch.denominators.pose_count) / float(pose_batch.pose_ids.size),
+        float(pose_batch.denominators.eligible_pose_count) / float(pose_batch.pose_ids.size),
         pose_batch.denominators.visible_occurrences,
         pose_batch.denominators.visible_weight_sum,
     )

@@ -177,7 +177,7 @@ q_ik = base + has_neighbor * delta
 
 ### 4.4 解析外部命中场
 
-`C_i` 表示面积均匀表面探针沿查询方向在给定距离内未命中其他 unit 的概率分布。距离采用：
+`C_i` 表示面积均匀表面探针沿查询方向在给定目标中心深度内未命中其他 unit 的概率分布。距离采用：
 
 $$t=\log(1+d/r_i).$$
 
@@ -186,7 +186,9 @@ $$t=\log(1+d/r_i).$$
 统计，不宣称等于有限物体的真实可见概率。
 
 field probe 只在 source train scene 生成。每个 unit 使用 16 个面积均匀表面起点、12 个 anchor
-加 24 个固定 Fibonacci 方向，并记录首次外部命中距离。新场景部署不生成 probe。
+加 24 个固定 Fibonacci 方向。射线仍从表面出发以避免自身相交，但命中值存为
+`max(0, (hit-target_center) dot direction)`，与运行时从目标中心到 support 的方向深度完全同坐标。
+新场景部署不生成 probe。
 
 ### 4.5 区域查询
 
@@ -329,7 +331,7 @@ field coefficient:  0.25 fixed
 5. 五场景等权 predicted/GT，越低越优。
 
 若参数扫描结果不好，可以在上述两个学习率轴的相邻数量级内追加一次最多 4 个成员的局部扫描，
-但不得改变损失项、数据权限或评价顺序。参数冻结后，正文 12 个消融和 45 个 LOSO 模型全部从头
+但不得改变损失项、数据权限或评价顺序。参数冻结后，正文 15 个消融和 45 个 LOSO 模型全部从头
 训练，不从 pilot checkpoint 微调。后续允许的“微调”仅指对同一冻结架构和数据协议调整已登记的
 优化器参数并重新从头训练；不得按单个目标场景标签更新 universal/LOSO 权重。
 
@@ -342,8 +344,8 @@ source 的更新次数。训练与恢复都拒绝未知 schema、旧 V4 loss 字
 
 ## 7. 精简消融
 
-正文只保留 Full 加三个因果对照。消融不按实现模块逐项删除，而是分别检验论文的三条核心
-主张：场景关系、结构化遮挡场和约束目标。所有变体在 Universal shared in-domain 协议上训练
+正文只保留 Full 加四个因果对照。消融不按实现模块逐项删除，而是分别检验论文的四条核心
+主张：场景关系、结构化表示、外部命中监督和约束目标。所有变体在 Universal shared in-domain 协议上训练
 三种子，使用相同五场景/合成数据序列、更新数、量化和校准协议。
 
 | ID | 受控表示或目标 | 论文问题 |
@@ -351,17 +353,23 @@ source 的更新次数。训练与恢复都拒绝未知 schema、旧 V4 loss 字
 | FULL | 完整 V5 | 最终方法 |
 | GEOMETRY_FIELD | 共享 MLP 只从 `z_i` 生成相同 4x7 场；无邻域输入，其他均同 Full | 新场景中目标自身几何是否足以替代场景遮挡关系 |
 | GENERIC_RELATION_28 | 使用相同 proxy graph 和关系编译器，但输出同容量 28D 通用 latent；无解析 field/probe NLL | 收益来自关系信息和容量，还是具有方向/距离语义的结构化场 |
+| FULL_NO_FIELD_NLL | 架构、4x7 场、解析查询和约束任务目标均与 Full 相同，但不读取 external-hit probe，不加入场 NLL | Full 的收益来自结构化场本身，还是仅来自额外射线监督 |
 | PBCE_OBJECTIVE | 架构、field probe 和数据完全同 Full，只把约束任务目标换成 pose-balanced BCE | 直接优化安全约束下冗余是否优于普通分类训练 |
 
 `GENERIC_RELATION_28` 的运行时 latent 与 Full 的 4x7 场同为 28 个 FP16 数。它把 12 个 anchor
-token 通过共享投影压成 28D，并将 `z_i + latent + query16` 送入容量匹配的小头。匹配只计算
-实际参与 forward 的参数，目标误差不超过 5%。该对照仍可零样本编译新场景，不使用自由实例表。
+token 的完整 `12x7=84D` 有序证据一次性线性压成 28D，并将 `z_i + latent + query16` 送入查询头。
+它不再先逐 anchor 做 `7->28` 后求均值，因此不会把方向结构和有效信息秩人为压到 7 以下。
+该对照的共享网络参数量允许略大于 Full，使结论对 Full 更保守；双方运行时逐 unit 表仍同为 28 个数。
+
+`FULL_NO_FIELD_NLL` 与 Full 使用同一个模型类和运行时资产结构，唯一差别是训练时不实例化 probe
+读取器且场损失严格为零。因而 `FULL_NO_FIELD_NLL` 对 Full 只测量 external-hit 监督价值；
+`GENERIC_RELATION_28` 对 `FULL_NO_FIELD_NLL` 才用于判断结构化方向场归纳偏置本身的价值。
 
 Full 结果在所有表中复用。旧 V4、Keep-All、AABB-query MLP 和 HZB 属于 baseline，不混进
 消融矩阵。Free per-instance field、residual、SH 阶数、K 和支持点数量都不进入正文核心消融。
 若 reviewer 或实现诊断需要，SH0/SH2 只作为附录单种子资产敏感性，不参与方法选择。
 
-训练规模：正文消融 4 配置 x 3 seeds，共 12 个共享模型。
+训练规模：正文消融 5 配置 x 3 seeds，共 15 个共享模型。
 
 ## 8. 泛化实验
 
@@ -383,9 +391,9 @@ Universal final 直接复用正文消融中的 FULL 三种子。架构和 seed �
 V5 核心训练总数为：
 
 ```text
-12 main ablation models
+15 main ablation models
 45 LOSO models
-= 57 models
+= 60 models
 ```
 
 这 57 个模型覆盖三个核心方法主张与跨场景泛化；不执行两份草案中 156 个模型的完整矩阵。
@@ -419,11 +427,11 @@ V5 核心训练总数为：
 3. 实现共享模型、约束风险、对偶更新、梯度重计算和 CPU 数值测试。
 4. 用五个真实场景的小子集完成一个 shared seed smoke，验证 loss、显存和跨场景 batch。
 5. 按 6.1 节完成 FULL 参数扫描和双候选确认，冻结优化器参数。
-6. 跑 FULL、GEOMETRY_FIELD、GENERIC_RELATION_28、PBCE_OBJECTIVE 的单 seed 开发训练；只读
+6. 跑 FULL、GEOMETRY_FIELD、GENERIC_RELATION_28、FULL_NO_FIELD_NLL、PBCE_OBJECTIVE 的单 seed 开发训练；只读
    calibration/validation。
 7. 若 FULL 没有相对三个对照改善平均安全—紧致前沿，先检查 proxy graph recall 和 field NLL，
    不增加新的 loss 项。
-8. 架构冻结后完成 12 个正文消融模型。
+8. 架构冻结后完成 15 个正文消融模型。
 9. 完成 45 个 LOSO 模型，再训练/复用 Universal final。
 10. 最后读取 frozen test、blind holdout，并执行图像、HZB、runtime 和 streaming 实验。
 
@@ -434,6 +442,7 @@ V5 成为论文主线至少需要满足：
 - Shared Full 在五场景平均安全—紧致前沿上不弱于 scene-specific V4；
 - FULL 稳定优于 GEOMETRY_FIELD，证明纯几何关系提供可迁移场景上下文；
 - FULL 稳定优于同容量 GENERIC_RELATION_28，证明结构化方向场不只是 28D 通用 latent；
+- FULL 稳定优于 FULL_NO_FIELD_NLL，证明 external-hit 监督确实改善了结构化场，而不是只增加训练成本；
 - FULL 在同一架构下优于 PBCE_OBJECTIVE，证明约束目标改善安全—紧致折中；
 - LOSO FULL 在多数 held-out scene 上优于 GEOMETRY_FIELD 和 GENERIC_RELATION_28；
 - target-calibrated 不更新权重即可恢复合格工作点；
@@ -475,8 +484,8 @@ schedule。开发阶段 V4 保留为冻结 baseline；V5 通过采用条件后�
 unit ID 数组。每个 GLB 处理完成后会释放 geometry、material、texture 和 GLTFParser 缓存，
 可选地在 `--expose-gc` 下按间隔触发 V8 回收。
 
-BVH 语义没有改变：它仍查询最近外部真实三角形；射线起点沿方向偏移 `1e-5*r`，距离仍从
-原始表面点计量，当前 unit 的全部三角形都会被跳过，超过 `1024*r` 的结果用
+BVH 仍查询最近外部真实三角形；射线起点沿方向偏移 `1e-5*r`，但存储深度统一改为
+`max(0, (hit-target_center) dot direction)`。当前 unit 的全部三角形都会被跳过，目标中心坐标超过 `1024*r` 的结果用
 `hitDistances=NaN` 表示右删失。正式 Color-ID 协议的 `DoubleSide` 规则用于 BVH 射线查询，
 源材质的透明度字段不会被误当成 Color-ID 的可见性规则。
 
@@ -484,12 +493,12 @@ BVH 语义没有改变：它仍查询最近外部真实三角形；射线起点�
 
 - `neural_instance_culling/dataset/v5/generate_external_hit_probes.mjs`
 - `neural_instance_culling/dataset/v5/test_generate_external_hit_probes.mjs`
-- `neural_instance_culling/dataset/v5/schemas.py`（允许并严格校验列式 v1 manifest）
+- `neural_instance_culling/dataset/v5/schemas.py`（只接受中心深度列式 v2 manifest）
 - `neural_instance_culling/package.json`、`package-lock.json`（加入 `three-mesh-bvh`）
 
 输出目录固定暴露 `unitIds`、`directions`、`hitDistances`、`maxDistances`、`startIds`、
 `directionIds` 六个小端无头二进制列，行序为 `[unit][directionId][startId]`，每个 unit 576 行。
-manifest 保留 `parallel_external_hit_current_status-v1`、source-train 权限字段、13 个距离比和
+manifest 使用 `parallel_external_hit_target_depth_current_status-v2`、source-train 权限字段、13 个距离比和
 列 dtype/shape；训练器均匀抽取 ray 后即时展开距离事件，不生成每条 ray 的 13 份 JSON 记录。
 生成器支持无哈希进度恢复、连续分片和按 unit ID 合并。
 
@@ -502,7 +511,7 @@ python -m py_compile neural_instance_culling/dataset/v5/schemas.py
 ```
 
 测试覆盖两个真实 GLB 盒子、反向面 DoubleSide 命中、当前 unit 全部跳过、1024 倍尺度右删失、
-六列 shape/dtype、逆序分片合并和完整输出恢复；另有 10,000 三角形多分块规模 smoke，验证
+不同表面起点命中同一点时中心深度一致、六列 shape/dtype、逆序分片合并和完整输出恢复；另有 10,000 三角形多分块规模 smoke，验证
 三角形对象保留数为 0、位置/归属均为 typed arrays，且 BVH 索引不含 `triangles` 对象数组。
 画面安全指标、剔除效率指标和前端延迟尚未在本生成器任务中实现，需由后续训练与 benchmark
 读取列式资产后报告。
@@ -593,3 +602,32 @@ node neural_instance_culling/dataset/v5/test_generate_external_hit_probes.mjs
 git diff --check -- neural_instance_culling/dataset/v5/generate_external_hit_probes.mjs \
   neural_instance_culling/dataset/v5/test_generate_external_hit_probes.mjs
 ```
+
+## 14. 正式训练前语义审查修正（2026-09-18）
+
+本轮静态审查在启动参数扫描前冻结了以下契约，旧错误资产不保留兼容入口：
+
+1. 12 个 anchor 只从 `dataset/v5/directions.json` 读取。relation manifest 显式保存有序
+   `anchorDirections`，数据加载器和模型编译器都逐项核对，Node probe 生成器读取同一资源。
+2. external-hit probe 升级为 target-centered v2。旧 surface-origin v1 manifest 会直接失败；
+   五个真实场景和 96 个 synthetic train scene 的 probe 必须重建，PoseCSR/Color-ID GT 不重采样。
+3. `GENERIC_RELATION_28` 读取完整 84D anchor evidence 后压成 28D，不再先求方向均值。
+4. shared 核心消融新增 `FULL_NO_FIELD_NLL`，正式矩阵为 5 变体 x 3 seeds；LOSO 仍为原三变体。
+5. 场景风险的逆采样因子改用 candidate 非空的 `eligiblePoseCount`；preflight 同时报告总 train pose、
+   eligible pose 和 candidate-empty pose 数。
+6. train 标签若包含退化 unit 立即失败；calibration/validation/test 仍只在对应 score sidecar 被授权
+   读取时检查，禁止为预检提前读取 test 标签。
+
+合成场景使用 `--rebuild-compiled` 只重建 deterministic surface/relation/probe 和编译 manifest，
+保留现有 PoseCSR、Color-ID GT、runtime metadata 与 split。正式恢复生成前先运行：
+
+```bash
+conda run --no-capture-output -n slm_pvs \
+  python -m neural_instance_culling.dataset.v5.generate_synthetic_datasets \
+  --all --rebuild-compiled --device cuda \
+  > synthetic_rebuild_stdout.log 2> synthetic_rebuild_stderr.log
+```
+
+当前 Python compiled artifact 仍是 FP32，V5 WebGPU/WASM query kernel 尚未实现。这两项属于正式
+runtime 实验前的系统任务：完成 FP16 导出、PyTorch FP32 对 FP16 安全重放和浏览器 parity 后，
+才能报告 148 B/unit 或 WebGPU/WASM 硬件延迟；此前只报告 Python FP32 实际字节和耗时。

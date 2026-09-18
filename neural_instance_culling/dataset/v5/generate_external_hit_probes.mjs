@@ -56,8 +56,8 @@ const MESHOPT_URL = pathToFileURL(
 
 if (!globalThis.self) globalThis.self = globalThis;
 
-export const EXTERNAL_HIT_PROBE_SCHEMA = 'parallel_external_hit_current_status-v1';
-export const RAY_SCHEMA = 'surface_origin_first_external_hit_right_censor_v1';
+export const EXTERNAL_HIT_PROBE_SCHEMA = 'parallel_external_hit_target_depth_current_status-v2';
+export const RAY_SCHEMA = 'surface_origin_target_center_depth_first_external_hit_right_censor_v2';
 export const SURFACE_STARTS_PER_UNIT = 16;
 export const DIRECTIONS_PER_UNIT = 36;
 export const RAYS_PER_UNIT = SURFACE_STARTS_PER_UNIT * DIRECTIONS_PER_UNIT;
@@ -201,23 +201,13 @@ function normalizeUnitRecords(runtimeMeta, glbIndex, degenerateUnitIds = []) {
   };
 }
 
+const DIRECTION_RESOURCE = path.join(__dirname, 'directions.json');
+
 function makeIcosahedronDirections() {
-  const phi = (1 + Math.sqrt(5)) * 0.5;
-  const coordinates = [
-    [0, 1, phi],
-    [0, 1, -phi],
-    [0, -1, phi],
-    [0, -1, -phi],
-    [1, phi, 0],
-    [1, -phi, 0],
-    [-1, phi, 0],
-    [-1, -phi, 0],
-    [phi, 0, 1],
-    [phi, 0, -1],
-    [-phi, 0, 1],
-    [-phi, 0, -1],
-  ];
-  return coordinates.map((value) => normalizeDirection(value, 'icosahedron direction'));
+  const payload = readJson(DIRECTION_RESOURCE);
+  assert(payload.schema === 'gcof-pvs-v5-fixed-directions-v1', 'fixed direction schema is invalid');
+  assert(Array.isArray(payload.anchorDirections) && payload.anchorDirections.length === 12, 'fixed direction table must have 12 anchors');
+  return payload.anchorDirections.map((value) => normalizeDirection(value, 'icosahedron direction'));
 }
 
 function makeFibonacciDirections() {
@@ -751,6 +741,7 @@ export function traceNearestExternalHit({
   THREE,
   bvhIndex,
   startPoint,
+  targetCenter,
   direction,
   unitId,
   radius,
@@ -760,10 +751,14 @@ export function traceNearestExternalHit({
   assert(THREE && THREE.Ray, 'traceNearestExternalHit requires Three.js');
   assert(bvhIndex?.bvh && bvhIndex.triangleUnitIds, 'traceNearestExternalHit requires a BVH index');
   const start = asVec3(startPoint, 'startPoint');
+  const center = asVec3(targetCenter, 'targetCenter');
   const dir = normalizeDirection(direction, 'direction');
   const rayRadius = asFiniteNumber(radius, 'radius');
   assert(rayRadius > AREA_EPSILON, 'radius must be positive');
-  const maxDistance = asFiniteNumber(maxTraceDistanceRatio, 'maxTraceDistanceRatio') * rayRadius;
+  const maxTargetDepth = asFiniteNumber(maxTraceDistanceRatio, 'maxTraceDistanceRatio') * rayRadius;
+  const startDepth = dir.reduce((sum, value, axis) => sum + (start[axis] - center[axis]) * value, 0);
+  const maxDistance = maxTargetDepth - startDepth;
+  assert(maxDistance > originOffsetRatio * rayRadius, 'surface start exceeds target-centered trace range');
   const originOffset = asFiniteNumber(originOffsetRatio, 'originOffsetRatio') * rayRadius;
   const origin = start.map((value, axis) => value + dir[axis] * originOffset);
   const ray = new THREE.Ray(
@@ -783,6 +778,7 @@ export function traceNearestExternalHit({
     if (!nearest || distance < nearest.distance) {
       nearest = {
         distance,
+        targetCenterDepth: Math.max(0, startDepth + distance),
         triangleIndex,
         point: intersection.point,
       };
@@ -792,7 +788,7 @@ export function traceNearestExternalHit({
 }
 
 /** Trace the fixed 16x36 ray block for one unit. */
-export function traceUnitRays({ THREE, bvhIndex, unitId, starts, radius }) {
+export function traceUnitRays({ THREE, bvhIndex, unitId, starts, targetCenter, radius }) {
   assert(Array.isArray(starts) && starts.length === SURFACE_STARTS_PER_UNIT, 'a unit must have exactly 16 starts');
   const hitDistances = new Float32Array(RAYS_PER_UNIT);
   hitDistances.fill(Number.NaN);
@@ -814,11 +810,12 @@ export function traceUnitRays({ THREE, bvhIndex, unitId, starts, radius }) {
         THREE,
         bvhIndex,
         startPoint: start,
+        targetCenter,
         direction,
         unitId,
         radius,
       });
-      if (hit) hitDistances[row] = hit.distance;
+      if (hit) hitDistances[row] = hit.targetCenterDepth;
     }
   }
   return { hitDistances, maxDistances, directions, startIds, directionIds };
@@ -870,7 +867,7 @@ function makeColumnManifestFiles(outputDir) {
 export function validateProbeManifest(manifest) {
   assert(manifest && typeof manifest === 'object', 'probe manifest must be an object');
   assert(manifest.schema === EXTERNAL_HIT_PROBE_SCHEMA, 'probe manifest has an unexpected schema');
-  assert(manifest.version === 1, 'unsupported external-hit probe manifest version');
+  assert(manifest.version === 2, 'unsupported external-hit probe manifest version');
   assert(manifest.assetKind === 'external_hit_probe', 'probe manifest assetKind is invalid');
   assert(typeof manifest.sceneId === 'string' && manifest.sceneId.length > 0, 'probe manifest sceneId is required');
   assert(manifest.split === 'train' && manifest.sourceRole === 'source_train', 'external-hit probes are source-train-only');
@@ -879,6 +876,7 @@ export function validateProbeManifest(manifest) {
   assert(manifest.surfaceStartsPerUnit === SURFACE_STARTS_PER_UNIT, 'surfaceStartsPerUnit is not 16');
   assert(manifest.directionsPerUnit === DIRECTIONS_PER_UNIT, 'directionsPerUnit is not 36');
   assert(manifest.directionSet === 'icosahedron12_plus_fibonacci24', 'probe direction set is invalid');
+  assert(JSON.stringify(manifest.anchorDirections) === JSON.stringify(FIXED_DIRECTIONS.slice(0, 12)), 'probe anchor direction order is invalid');
   assert(JSON.stringify(manifest.distanceRatios) === JSON.stringify(DISTANCE_RATIOS), 'probe distance grid is invalid');
   assert(manifest.maxTraceDistanceRatio === MAX_TRACE_DISTANCE_RATIO, 'maxTraceDistanceRatio is invalid');
   assert(Number.isInteger(manifest.numUnits) && manifest.numUnits > 0, 'probe numUnits must be positive');
@@ -892,6 +890,7 @@ export function validateProbeManifest(manifest) {
   }
   assert(manifest.storage === 'columnar_memmap_little_endian_v1', 'probe storage is invalid');
   assert(manifest.eventEncoding === 'finite_hit_distance_is_event', 'probe event encoding is invalid');
+  assert(manifest.hitDistanceOrigin === 'target_center_directional_projection', 'probe hit distance origin is invalid');
   const expectedFiles = Object.keys(COLUMN_FILES).sort();
   assert(manifest.files && JSON.stringify(Object.keys(manifest.files).sort()) === JSON.stringify(expectedFiles), 'probe column file set is invalid');
   assert(manifest.columnDtypes?.unitIds === 'uint32', 'unitIds dtype must be uint32');
@@ -911,7 +910,7 @@ export function makeProbeManifest({ sceneId, unitIds, totalUnitCount, outputDir,
   const rowCount = selectedUnitIds.length * RAYS_PER_UNIT;
   const manifest = {
     schema: EXTERNAL_HIT_PROBE_SCHEMA,
-    version: 1,
+    version: 2,
     assetKind: 'external_hit_probe',
     sceneId,
     split: 'train',
@@ -927,6 +926,7 @@ export function makeProbeManifest({ sceneId, unitIds, totalUnitCount, outputDir,
     surfaceStartsPerUnit: SURFACE_STARTS_PER_UNIT,
     directionsPerUnit: DIRECTIONS_PER_UNIT,
     directionSet: 'icosahedron12_plus_fibonacci24',
+    anchorDirections: FIXED_DIRECTIONS.slice(0, 12).map((value) => [...value]),
     distanceRatios: [...DISTANCE_RATIOS],
     maxTraceDistanceRatio: MAX_TRACE_DISTANCE_RATIO,
     recordFields: [
@@ -935,8 +935,8 @@ export function makeProbeManifest({ sceneId, unitIds, totalUnitCount, outputDir,
       'probeId',
       'startPointWorld',
       'directionWorld',
-      'hitDistance',
-      'maxTraceDistance',
+      'hitTargetCenterDepth',
+      'maxTargetCenterDepth',
       'event',
     ],
     recordsFile: 'external_hit_probes.columnar',
@@ -944,7 +944,7 @@ export function makeProbeManifest({ sceneId, unitIds, totalUnitCount, outputDir,
     rowCount,
     rowLayout: '[unit][directionId][startId]',
     eventEncoding: 'finite_hit_distance_is_event',
-    hitDistanceOrigin: 'original_surface_start_world',
+    hitDistanceOrigin: 'target_center_directional_projection',
     rayOriginOffset: 'direction_world_times_1e-5_times_unit_radius',
     unitRadius: 'component_aabb_half_diagonal',
     unitOrder: 'unitIds_column_order_matches_source_unit_order',
@@ -1048,7 +1048,7 @@ function readProgress(progressPath, selectedUnitIds, manifest) {
 function writeProgress(progressPath, selectedUnitIds, completedUnitIds, manifest) {
   writeJsonAtomically(progressPath, {
     schema: EXTERNAL_HIT_PROBE_SCHEMA,
-    version: 1,
+    version: 2,
     rowCount: manifest.rowCount,
     selectedUnitIds,
     completedUnitIds: [...completedUnitIds].sort((left, right) => left - right),
@@ -1360,6 +1360,7 @@ export async function generateExternalHitProbes(options = {}) {
         bvhIndex,
         unitId: unit.componentGlobalId,
         starts: startsByUnit.get(unit.componentGlobalId),
+        targetCenter: unit.bounds.center,
         radius: unit.bounds.radius,
       });
       writeUnitColumns(descriptors, localUnitIndex, unit.componentGlobalId, rows);

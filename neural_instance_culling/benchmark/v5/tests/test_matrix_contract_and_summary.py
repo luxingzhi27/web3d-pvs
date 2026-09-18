@@ -77,9 +77,9 @@ def _loso_runs() -> list[V5Run]:
 
 
 class V5MatrixTests(unittest.TestCase):
-    def test_shared_matrix_requires_all_four_variants_and_three_seeds(self) -> None:
+    def test_shared_matrix_requires_all_five_variants_and_three_seeds(self) -> None:
         runs = _shared_runs()
-        self.assertEqual(len(validate_matrix(runs, protocol="shared", expected_scenes=SCENES)), 12)
+        self.assertEqual(len(validate_matrix(runs, protocol="shared", expected_scenes=SCENES)), 15)
         with self.assertRaisesRegex(ValueError, "variant"):
             validate_matrix(runs[:-3], protocol="shared", expected_scenes=SCENES)
 

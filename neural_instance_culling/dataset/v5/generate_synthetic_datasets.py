@@ -42,7 +42,12 @@ from neural_instance_culling.dataset.v5.proxy_relation_graph import (
 from neural_instance_culling.dataset.v5.synthetic_scene_manifest import (
     generate_synthetic_scene_manifest,
 )
-from neural_instance_culling.dataset.v5.schemas import validate_probe_manifest
+from neural_instance_culling.dataset.v5.schemas import (
+    EXTERNAL_HIT_PROBE_SCHEMA,
+    EXTERNAL_HIT_RAY_SCHEMA,
+    validate_relation_manifest,
+    validate_probe_manifest,
+)
 from neural_instance_culling.model.pose_csr_dataset import (
     DIRECTIONAL_POSE_DTYPE,
     frustum_candidate_ids_for_pose,
@@ -65,7 +70,7 @@ DEFAULT_FAR = 1_000_000.0
 SYNTHETIC_CAMERA_ORBIT_FRACTION = 0.20
 SURFACE_STARTS_PER_UNIT = 16
 PROBE_DIRECTIONS_PER_UNIT = 36
-PROBE_RECORD_SCHEMA = "parallel_external_hit_current_status-v1"
+PROBE_RECORD_SCHEMA = EXTERNAL_HIT_PROBE_SCHEMA
 PROBE_DISTANCE_RATIOS = [
     0.25,
     0.5,
@@ -1475,7 +1480,7 @@ def _probe_manifest(scene_id: str, split: str, num_units: int, files: Mapping[st
     records = int(num_units) * SURFACE_STARTS_PER_UNIT * PROBE_DIRECTIONS_PER_UNIT
     return {
         "schema": PROBE_RECORD_SCHEMA,
-        "version": 1,
+        "version": 2,
         "assetKind": "external_hit_probe",
         "sceneId": str(scene_id),
         "split": str(split),
@@ -1487,7 +1492,7 @@ def _probe_manifest(scene_id: str, split: str, num_units: int, files: Mapping[st
             "visibilityLabelsIncluded": False,
         },
         "containsVisibilityLabels": False,
-        "raySchema": "surface_origin_first_external_hit_right_censor_v1",
+        "raySchema": EXTERNAL_HIT_RAY_SCHEMA,
         "surfaceStartsPerUnit": SURFACE_STARTS_PER_UNIT,
         "directionsPerUnit": PROBE_DIRECTIONS_PER_UNIT,
         "recordsFile": "external_hit_probes.columnar",
@@ -1495,14 +1500,15 @@ def _probe_manifest(scene_id: str, split: str, num_units: int, files: Mapping[st
         "rowCount": records,
         "rowLayout": "[unit][directionId][startId]",
         "eventEncoding": "finite_hit_distance_is_event",
-        "hitDistanceOrigin": "original_surface_start_world",
+        "hitDistanceOrigin": "target_center_directional_projection",
         "rayOriginOffset": "direction_world_times_1e-5_times_unit_radius",
         "unitRadius": "component_aabb_half_diagonal",
         "unitOrder": "unitIds_column_order_matches_source_unit_order",
         "directionSet": "icosahedron12_plus_fibonacci24",
+        "anchorDirections": icosahedron12_directions(dtype=np.float64).tolist(),
         "distanceRatios": list(PROBE_DISTANCE_RATIOS),
         "maxTraceDistanceRatio": 1024.0,
-        "recordFields": ["sceneId", "unitId", "probeId", "startPointWorld", "directionWorld", "hitDistance", "maxTraceDistance", "event"],
+        "recordFields": ["sceneId", "unitId", "probeId", "startPointWorld", "directionWorld", "hitTargetCenterDepth", "maxTargetCenterDepth", "event"],
         "numUnits": int(num_units),
         "sceneNumUnits": int(num_units),
         "unitIds": list(range(int(num_units))),
@@ -1553,19 +1559,28 @@ def build_external_hit_probe_asset(
     epsilon = np.maximum(radii[unit_ids.astype(np.int64)] * 1.0e-5, 1.0e-7)
     origins = probe_starts + epsilon[:, None] * probe_directions
     max_distances = radii[unit_ids.astype(np.int64)] * 1024.0
+    origin_depths = np.einsum(
+        "bi,bi->b",
+        origins - centers[unit_ids.astype(np.int64)],
+        probe_directions,
+    )
+    trace_limits = max_distances - origin_depths
+    if np.any(trace_limits <= 0.0):
+        raise ValueError("synthetic surface origin exceeds target-centered probe range")
     hit_ids, hit_from_offset = raycast_primitive_hits(
         scene,
         origins,
         probe_directions,
         device=device,
-        max_distance=max_distances,
+        max_distance=trace_limits,
         ignore_unit_ids=unit_ids.astype(np.int64),
         ray_chunk=2048,
         unit_chunk=256,
     )
     del hit_ids
-    finite = np.isfinite(hit_from_offset) & (hit_from_offset + epsilon <= max_distances + 1.0e-6)
-    hit_distances = np.where(finite, hit_from_offset + epsilon, np.nan).astype(np.float32)
+    hit_target_depths = np.maximum(0.0, origin_depths + hit_from_offset)
+    finite = np.isfinite(hit_from_offset) & (hit_target_depths <= max_distances + 1.0e-6)
+    hit_distances = np.where(finite, hit_target_depths, np.nan).astype(np.float32)
     files = {
         "unitIds": "probe_unit_ids_uint32.bin",
         "directions": "probe_directions_fp32.bin",
@@ -1601,7 +1616,7 @@ def validate_columnar_probe_asset(asset: ColumnarProbeAsset) -> None:
         raise ValueError("probe hit distances contain invalid non-finite values")
     if not np.allclose(np.linalg.norm(asset.directions, axis=1), 1.0, atol=1.0e-5):
         raise ValueError("probe directions must be unit vectors")
-    if np.any(asset.max_distances <= 0.0) or np.any(np.isfinite(asset.hit_distances) & (asset.hit_distances <= 0.0)) or np.any(np.isfinite(asset.hit_distances) & (asset.hit_distances > asset.max_distances)):
+    if np.any(asset.max_distances <= 0.0) or np.any(np.isfinite(asset.hit_distances) & (asset.hit_distances < 0.0)) or np.any(np.isfinite(asset.hit_distances) & (asset.hit_distances > asset.max_distances)):
         raise ValueError("probe hit/max distance columns are invalid")
 
 
@@ -2017,6 +2032,94 @@ def generate_scene_dataset(
     return output_manifest
 
 
+def rebuild_compiled_scene_assets(
+    scene_entry: Mapping[str, Any],
+    output_root: str | Path,
+    *,
+    device: str = "cpu",
+    allow_small_scene: bool = False,
+) -> dict[str, Any]:
+    """Rebuild deterministic geometry assets without touching frozen pose GT."""
+
+    scene = build_primitive_scene(scene_entry, allow_small=allow_small_scene)
+    scene_root = Path(output_root) / scene.scene_id
+    manifest_path = scene_root / "scene_manifest.json"
+    required_frozen = (
+        scene_root / "runtimeVisibilityMeta.json",
+        scene_root / "glbIndex.json",
+        scene_root / "pose_csr/dataset_meta.json",
+        manifest_path,
+    )
+    missing = [str(path) for path in required_frozen if not path.is_file()]
+    if missing:
+        raise ValueError(
+            f"cannot rebuild compiled assets for {scene.scene_id}; missing frozen inputs: "
+            + ", ".join(missing)
+        )
+    output_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if (
+        output_manifest.get("sceneId") != scene.scene_id
+        or int(output_manifest.get("unitCount", -1)) != scene.unit_count
+        or output_manifest.get("seedSplit") != str(scene_entry["split"])
+    ):
+        raise ValueError(f"existing synthetic scene identity disagrees for {scene.scene_id}")
+
+    compiled_root = scene_root / "compiled"
+    surface_root = compiled_root / "surface"
+    relation_root = compiled_root / "relation"
+    probes_root = compiled_root / "probes"
+    surface_asset = build_local_surface_asset(
+        scene.surface_inputs(), sampling_seed=int(scene_entry["generatorSeed"]) + 17
+    )
+    write_local_surface_asset(surface_asset, surface_root)
+    relation = build_proxy_relation_graph(scene.aabbs, unit_ids=scene.unit_ids.astype(np.uint64))
+    write_proxy_relation_graph(relation, relation_root)
+    probe_asset: ColumnarProbeAsset | None = None
+    if str(scene_entry["split"]) == "train":
+        probe_asset = build_external_hit_probe_asset(
+            scene, surface_asset, scene_split="train", device=device
+        )
+        write_columnar_probe_asset(probe_asset, probes_root)
+    else:
+        probes_root.mkdir(parents=True, exist_ok=True)
+
+    _json_dump(
+        compiled_root / "primitive_units.json",
+        {
+            "schema": "gcof-pvs-v5-procedural-primitive-units-v1",
+            "sceneId": scene.scene_id,
+            "unitCount": scene.unit_count,
+            "primitiveTypes": list(_PRIMITIVE_TYPES),
+            "units": [unit.mapping() for unit in scene.units],
+        },
+    )
+    _json_dump(
+        compiled_root / "compiled_manifest.json",
+        {
+            "schema": COMPILED_SCHEMA,
+            "version": 1,
+            "sceneId": scene.scene_id,
+            "numUnits": scene.unit_count,
+            "surface": "surface",
+            "relation": "relation",
+            "probes": "probes",
+            "probeTrainingAllowed": probe_asset is not None,
+            "geometrySource": "procedural_closed_primitive_meshes",
+            "primitiveTypes": list(_PRIMITIVE_TYPES),
+        },
+    )
+    output_manifest["probe"] = {
+        "manifest": "compiled/probes/external_hit_probe_manifest.json" if probe_asset is not None else None,
+        "rowCount": None if probe_asset is None else probe_asset.manifest["rowCount"],
+        "distanceRatios": list(PROBE_DISTANCE_RATIOS),
+        "trainingAllowed": probe_asset is not None,
+        "generated": probe_asset is not None,
+    }
+    output_manifest.setdefault("determinism", {})["compiledAssetDevice"] = str(device)
+    _json_dump(manifest_path, output_manifest)
+    return dict(output_manifest)
+
+
 def load_complete_scene_output(
     scene_entry: Mapping[str, Any],
     output_root: str | Path,
@@ -2058,6 +2161,11 @@ def load_complete_scene_output(
             f"existing synthetic scene {scene_id} is incomplete despite its final manifest: "
             + ", ".join(missing)
         )
+    relation_manifest = json.loads(required[4].read_text(encoding="utf-8"))
+    validate_relation_manifest(relation_manifest)
+    if str(scene_entry["split"]) == "train":
+        probe_manifest = json.loads(required[-1].read_text(encoding="utf-8"))
+        validate_probe_manifest(probe_manifest)
     return dict(manifest)
 
 
@@ -2183,6 +2291,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="validate and skip scenes that already have a complete matching final manifest",
     )
+    parser.add_argument(
+        "--rebuild-compiled",
+        action="store_true",
+        help="rebuild deterministic surface/relation/probe assets while preserving frozen PoseCSR",
+    )
     return parser.parse_args(argv)
 
 
@@ -2195,11 +2308,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     entries = {str(entry["sceneId"]): entry for entry in catalog["scenes"]}
     if args.finalize_existing:
         selected = sorted(entries)
-        missing = [
-            scene_id
-            for scene_id in selected
-            if not (args.output_root / scene_id / "scene_manifest.json").is_file()
-        ]
+        missing = [scene_id for scene_id in selected if load_complete_scene_output(entries[scene_id], args.output_root) is None]
         if missing:
             raise SystemExit(
                 f"cannot finalize synthetic dataset; missing {len(missing)} scene manifests"
@@ -2233,6 +2342,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     args.output_root.mkdir(parents=True, exist_ok=True)
     generated: list[str] = []
     for scene_id in selected:
+        if args.rebuild_compiled:
+            print(f"rebuild compiled {scene_id} device={device}", flush=True)
+            rebuild_compiled_scene_assets(entries[scene_id], args.output_root, device=device)
+            generated.append(scene_id)
+            continue
         if args.skip_existing and load_complete_scene_output(entries[scene_id], args.output_root) is not None:
             print(f"skip complete {scene_id}", flush=True)
             generated.append(scene_id)

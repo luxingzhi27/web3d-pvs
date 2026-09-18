@@ -18,6 +18,7 @@ from neural_instance_culling.dataset.v5.generate_synthetic_datasets import (
     expand_probe_distance_grid,
     generate_scene_dataset,
     load_complete_scene_output,
+    rebuild_compiled_scene_assets,
     raycast_primitive_hits,
     select_catalog_scene_ids,
 )
@@ -169,6 +170,17 @@ class SyntheticDatasetGeneratorTest(unittest.TestCase):
             self.assertTrue((scene_root / "compiled/surface").is_dir())
             self.assertTrue((scene_root / "compiled/relation").is_dir())
             self.assertTrue((scene_root / "compiled/probes").is_dir())
+            frozen_pose_meta = (scene_root / "pose_csr/dataset_meta.json").read_bytes()
+            rebuilt = rebuild_compiled_scene_assets(entry, root, device="cpu", allow_small_scene=True)
+            self.assertEqual(rebuilt["sceneId"], manifest["sceneId"])
+            self.assertEqual(
+                (scene_root / "pose_csr/dataset_meta.json").read_bytes(),
+                frozen_pose_meta,
+            )
+            self.assertEqual(
+                json.loads((scene_root / "compiled/probes/external_hit_probe_manifest.json").read_text())["version"],
+                2,
+            )
             dataset = PoseCSRDataset(scene_root / "pose_csr", int(entry["unitCount"]))
             self.assertEqual(dataset.poses.size, 4)
             candidate_counts = []

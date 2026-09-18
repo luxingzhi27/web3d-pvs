@@ -58,13 +58,14 @@ conda run --no-capture-output -n slm_pvs \
 ```
 
 LOSO 使用 `--protocol loso --held-out-scene <scene-id>`。LOSO 不接受
-`PBCE_OBJECTIVE`，因为该项只属于 shared 消融。
+`FULL_NO_FIELD_NLL` 或 `PBCE_OBJECTIVE`，因为两项只属于 shared 消融。
 
 ## 固定训练矩阵
 
-可用变体为 `FULL`、`GEOMETRY_FIELD`、`GENERIC_RELATION_28` 和
-`PBCE_OBJECTIVE`。最后一项使用 Full 表示架构，但把约束任务目标换成注册的
-pose-balanced BCE；它不是另一套网络。
+可用变体为 `FULL`、`GEOMETRY_FIELD`、`GENERIC_RELATION_28`、
+`FULL_NO_FIELD_NLL` 和 `PBCE_OBJECTIVE`。`FULL_NO_FIELD_NLL` 使用 Full 架构与约束目标，
+但不读取 external-hit probe；`PBCE_OBJECTIVE` 使用 Full 架构和场监督，只把任务目标换成
+pose-balanced BCE。后两项都不是另一套网络。
 
 每两个 real scene step 插入一个 synthetic scene step，real scene 按 registry
 顺序轮转，synthetic scene 由固定 schedule seed 均匀轮转。正式 shared 成员使用每个

@@ -239,6 +239,7 @@ try {
     THREE,
     bvhIndex,
     startPoint: [1, 0.5, 0.5],
+    targetCenter: [0.5, 0.5, 0.5],
     direction: [1, 0, 0],
     unitId: 0,
     radius: 1,
@@ -246,12 +247,24 @@ try {
   assert.ok(exactHit, 'a real triangle hit should be found');
   assert.equal(exactHit.triangleIndex >= 12, true, 'the hit should belong to the other box');
   assert.ok(Math.abs(exactHit.distance - 2) < 1e-5, `unexpected external hit distance ${exactHit.distance}`);
+  assert.ok(Math.abs(exactHit.targetCenterDepth - 2.5) < 1e-5, `unexpected target-centered depth ${exactHit.targetCenterDepth}`);
+  const shiftedStartHit = traceNearestExternalHit({
+    THREE,
+    bvhIndex,
+    startPoint: [0.75, 0.5, 0.5],
+    targetCenter: [0.5, 0.5, 0.5],
+    direction: [1, 0, 0],
+    unitId: 0,
+    radius: 1,
+  });
+  assert.ok(Math.abs(shiftedStartHit.targetCenterDepth - exactHit.targetCenterDepth) < 1e-5, 'center depth must not depend on surface start');
   const reverseWindingHit = traceNearestExternalHit({
     THREE,
     bvhIndex: buildTriangleBvh(THREE, new Map([[1, [{
       a: [3, 0, 0], b: [3, 1, 0], c: [3, 0, 1],
     }]]])),
     startPoint: [0, 0.2, 0.2],
+    targetCenter: [0, 0, 0],
     direction: [1, 0, 0],
     unitId: 0,
     radius: 1,
@@ -261,6 +274,7 @@ try {
     THREE,
     bvhIndex: buildTriangleBvh(THREE, new Map([[1, boxTriangles([2000, 0, 0], [2001, 1, 1])]])),
     startPoint: [0, 0.5, 0.5],
+    targetCenter: [0, 0, 0],
     direction: [1, 0, 0],
     unitId: 0,
     radius: 1,
@@ -270,6 +284,7 @@ try {
     THREE,
     bvhIndex: buildTriangleBvh(THREE, new Map([[0, boxTriangles([0, 0, 0], [1, 1, 1])]])),
     startPoint: [1, 0.5, 0.5],
+    targetCenter: [0.5, 0.5, 0.5],
     direction: [1, 0, 0],
     unitId: 0,
     radius: 1,
@@ -313,7 +328,8 @@ try {
     ...common,
     outputDir: path.join(root, 'full'),
   });
-  assert.equal(full.manifest.schema, 'parallel_external_hit_current_status-v1');
+  assert.equal(full.manifest.schema, 'parallel_external_hit_target_depth_current_status-v2');
+  assert.equal(full.manifest.hitDistanceOrigin, 'target_center_directional_projection');
   assert.equal(full.manifest.numUnits, 2);
   assert.equal(full.manifest.rowCount, 2 * 16 * 36);
   assert.equal(full.geometryStats.retainedTriangleObjects, 0);

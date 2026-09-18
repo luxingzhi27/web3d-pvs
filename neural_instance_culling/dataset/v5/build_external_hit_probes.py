@@ -10,8 +10,8 @@ from typing import Any, Mapping
 import numpy as np
 
 from .permissions import FoldAccessPolicy, authorize_asset_manifest_read
-from .proxy_relation_graph import icosahedron12_directions
-from .schemas import EXTERNAL_HIT_PROBE_SCHEMA, validate_probe_manifest
+from .directions import icosahedron12_directions
+from .schemas import EXTERNAL_HIT_PROBE_SCHEMA, EXTERNAL_HIT_RAY_SCHEMA, validate_probe_manifest
 
 
 SURFACE_STARTS_PER_UNIT = 16
@@ -58,7 +58,7 @@ def make_probe_manifest(scene_id: str, num_units: int) -> dict[str, Any]:
     row_count = int(num_units) * RAYS_PER_UNIT
     manifest = {
         "schema": EXTERNAL_HIT_PROBE_SCHEMA,
-        "version": 1,
+        "version": 2,
         "assetKind": "external_hit_probe",
         "sceneId": str(scene_id),
         "split": "train",
@@ -70,22 +70,23 @@ def make_probe_manifest(scene_id: str, num_units: int) -> dict[str, Any]:
             "heldOutReadable": False,
             "visibilityLabelsIncluded": False,
         },
-        "raySchema": "surface_origin_first_external_hit_right_censor_v1",
+        "raySchema": EXTERNAL_HIT_RAY_SCHEMA,
         "surfaceStartsPerUnit": SURFACE_STARTS_PER_UNIT,
         "directionsPerUnit": DIRECTIONS_PER_UNIT,
         "directionSet": "icosahedron12_plus_fibonacci24",
+        "anchorDirections": icosahedron12_directions(dtype=np.float64).tolist(),
         "distanceRatios": PROBE_DISTANCE_RATIOS.astype(float).tolist(),
         "maxTraceDistanceRatio": 1024.0,
         "recordFields": [
             "sceneId", "unitId", "probeId", "startPointWorld", "directionWorld",
-            "hitDistance", "maxTraceDistance", "event",
+            "hitTargetCenterDepth", "maxTargetCenterDepth", "event",
         ],
         "recordsFile": "external_hit_probes.columnar",
         "storage": "columnar_memmap_little_endian_v1",
         "rowCount": row_count,
         "rowLayout": "[unit][directionId][startId]",
         "eventEncoding": "finite_hit_distance_is_event",
-        "hitDistanceOrigin": "original_surface_start_world",
+        "hitDistanceOrigin": "target_center_directional_projection",
         "rayOriginOffset": "direction_world_times_1e-5_times_unit_radius",
         "unitRadius": "component_aabb_half_diagonal",
         "unitOrder": "unitIds_column_order_matches_source_unit_order",

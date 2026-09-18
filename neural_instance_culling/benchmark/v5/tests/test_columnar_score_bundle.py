@@ -44,6 +44,7 @@ from neural_instance_culling.benchmark.v5.streaming_export import (
 )
 from neural_instance_culling.model.pose_csr_dataset import DIRECTIONAL_POSE_DTYPE
 from neural_instance_culling.model.v5.core import GCOFPVSV5
+from neural_instance_culling.dataset.v5.proxy_relation_graph import build_proxy_relation_graph
 from neural_instance_culling.model.v5.train import CHECKPOINT_SCHEMA
 
 
@@ -127,20 +128,15 @@ def _write_runtime_and_compiled_assets(root: Path) -> tuple[Path, Path]:
         ),
         encoding="utf-8",
     )
-    source = np.full((2, 12, 8), -1, dtype=np.int64)
-    valid = np.zeros((2, 12, 8), dtype=bool)
-    edge = np.zeros((2, 12, 8, 8), dtype=np.float32)
-    np.save(relation / "source_ids_int64.npy", source)
-    np.save(relation / "valid_mask_bool.npy", valid)
-    np.save(relation / "edge_features_fp32.npy", edge)
+    relation_graph = build_proxy_relation_graph(
+        np.asarray([[[-1.0, -1.0, -1.0], [0.0, 0.0, 0.0]], [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]])
+    )
+    np.save(relation / "source_ids_int64.npy", relation_graph.source_ids)
+    np.save(relation / "valid_mask_bool.npy", relation_graph.valid_mask)
+    np.save(relation / "edge_features_fp32.npy", relation_graph.edge_features)
     (relation / "relation_manifest.json").write_text(
         json.dumps(
-            {
-                "schema": "pvs-geometry-proxy-relation-csr-v1",
-                "numUnits": 2,
-                "usesVisibilityLabels": False,
-                "source": "geometry_only",
-            }
+            relation_graph.manifest
         ),
         encoding="utf-8",
     )
@@ -506,7 +502,7 @@ class V5MatrixContractTests(unittest.TestCase):
             for variant in ALL_VARIANTS
             for seed in (1, 2, 3)
         ]
-        self.assertEqual(len(validate_matrix(runs, protocol="shared", expected_scenes=self.scenes)), 12)
+        self.assertEqual(len(validate_matrix(runs, protocol="shared", expected_scenes=self.scenes)), 15)
 
     def test_loso_matrix_requires_all_folds(self) -> None:
         runs = []

@@ -20,35 +20,9 @@ from .schemas import (
     validate_relation_manifest,
     write_json_manifest,
 )
+from .directions import icosahedron12_directions
 
-
-_PHI = (1.0 + np.sqrt(5.0)) * 0.5
-_ANCHOR_COORDINATES = np.asarray(
-    [
-        (0.0, 1.0, _PHI),
-        (0.0, 1.0, -_PHI),
-        (0.0, -1.0, _PHI),
-        (0.0, -1.0, -_PHI),
-        (1.0, _PHI, 0.0),
-        (1.0, -_PHI, 0.0),
-        (-1.0, _PHI, 0.0),
-        (-1.0, -_PHI, 0.0),
-        (_PHI, 0.0, 1.0),
-        (_PHI, 0.0, -1.0),
-        (-_PHI, 0.0, 1.0),
-        (-_PHI, 0.0, -1.0),
-    ],
-    dtype=np.float64,
-)
-_ICOSAHEDRON12 = (_ANCHOR_COORDINATES / np.linalg.norm(_ANCHOR_COORDINATES, axis=1, keepdims=True)).astype(
-    np.float32
-)
-
-
-def icosahedron12_directions() -> np.ndarray:
-    """Return the immutable-order normalized 12-direction anchor table."""
-
-    return _ICOSAHEDRON12.copy()
+_ICOSAHEDRON12 = icosahedron12_directions()
 
 
 def _screen_basis(anchor: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -174,6 +148,7 @@ def _make_relation_manifest(unit_ids: np.ndarray) -> dict[str, Any]:
         "usesVisibilityLabels": False,
         "anchors": ANCHOR_SCHEMA,
         "anchorCount": RELATION_ANCHOR_COUNT,
+        "anchorDirections": _ICOSAHEDRON12.astype(float).tolist(),
         "K": RELATION_TOP_K,
         "projection": "orthographic_aabb_overlap",
         "depthPredicate": "source_center_forward_and_depth_interval_camera_side",

@@ -21,9 +21,12 @@ from collections.abc import Mapping
 import math
 from typing import Any
 
+import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
+
+from neural_instance_culling.dataset.v5.directions import icosahedron12_directions
 
 try:  # Support both package imports and the repository's path-based tests.
     from .geometry_encoder import (
@@ -91,27 +94,12 @@ def icosahedron_anchors(
     dtype: torch.dtype = torch.float32,
     device: torch.device | None = None,
 ) -> torch.Tensor:
-    """Return the fixed unit-norm vertices of a regular icosahedron."""
-    phi = (1.0 + math.sqrt(5.0)) / 2.0
-    values = torch.tensor(
-        [
-            [0.0, -1.0, -phi],
-            [0.0, -1.0, phi],
-            [0.0, 1.0, -phi],
-            [0.0, 1.0, phi],
-            [-1.0, -phi, 0.0],
-            [-1.0, phi, 0.0],
-            [1.0, -phi, 0.0],
-            [1.0, phi, 0.0],
-            [-phi, 0.0, -1.0],
-            [-phi, 0.0, 1.0],
-            [phi, 0.0, -1.0],
-            [phi, 0.0, 1.0],
-        ],
+    """Return the canonical ordered unit-norm icosahedron anchors."""
+    return torch.as_tensor(
+        icosahedron12_directions(dtype=np.float64),
         dtype=dtype,
         device=device,
     )
-    return F.normalize(values, dim=-1)
 
 
 def fixed_direction_projection(
@@ -194,6 +182,12 @@ def _validate_relation_provenance(relation: Any) -> None:
         "aabb_orthographic_overlap",
     }:
         raise ValueError("V5 relation source must be geometry-only")
+    relation_directions = np.asarray(metadata.get("anchorDirections"), dtype=np.float64)
+    canonical_directions = icosahedron12_directions(dtype=np.float64)
+    if relation_directions.shape != canonical_directions.shape or not bool(
+        np.allclose(relation_directions, canonical_directions, atol=1.0e-7, rtol=0.0)
+    ):
+        raise ValueError("V5 relation anchorDirections disagree with the canonical ordered table")
 
 
 def _relation_tensors(
@@ -699,9 +693,11 @@ class GCOFPVSV5(nn.Module):
             self.geometry_field_hidden_dim = None
 
         if normalized_variant == "GENERIC_RELATION_28":
-            # A shared projection of each anchor token removes directional
-            # semantics while keeping the runtime latent at 28 values.
-            self.generic_projection = nn.Linear(FIELD_PARAMETER_DIM, FIELD_DIM, bias=False)
+            # The unrestricted control receives the complete ordered 12x7
+            # evidence. Its runtime latent remains exactly 28 values.
+            self.generic_projection = nn.Linear(
+                ANCHOR_COUNT * FIELD_PARAMETER_DIM, FIELD_DIM, bias=False
+            )
             head_input_dim = GENERIC_HEAD_INPUT_DIM
             head_hidden_dim = GENERIC_HEAD_HIDDEN_DIM
         else:
@@ -788,7 +784,7 @@ class GCOFPVSV5(nn.Module):
             return {"geometry": z[selected_ids], "field": field, **diagnostics}
 
         assert self.generic_projection is not None
-        latent = self.generic_projection(responses).mean(dim=1)
+        latent = self.generic_projection(responses.flatten(start_dim=1))
         return {"geometry": z[selected_ids], "generic_latent": latent, **diagnostics}
 
     def compile_field(
