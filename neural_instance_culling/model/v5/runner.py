@@ -687,6 +687,67 @@ def train_run(
     return summary
 
 
+def preflight_training_assets(
+    *,
+    protocol: str,
+    output: Path,
+    registry_path: Path = DEFAULT_REGISTRY,
+    synthetic_root: Path = DEFAULT_SYNTHETIC_ROOT,
+    synthetic_base_seed: int = DEFAULT_SYNTHETIC_BASE_SEED,
+    held_out_scene: str | None = None,
+    seed: int = 20260918,
+) -> dict[str, Any]:
+    """Open every source asset and sample train-only pose/probe rows once."""
+
+    specs, policy = build_training_context(
+        protocol=protocol,
+        held_out_scene=held_out_scene,
+        registry_path=registry_path,
+        synthetic_root=synthetic_root,
+        synthetic_base_seed=synthetic_base_seed,
+        require_files=True,
+    )
+    store = _SceneDataStore(specs, policy, require_probe=True)
+    rng = np.random.default_rng(int(seed))
+    rows: list[dict[str, Any]] = []
+    for spec in specs:
+        scene = store.get(spec.scene_id)
+        pose = scene.sample_pose_batch(rng, pose_count=1)
+        probe = scene.sample_probe_batch(rng, observation_count=32)
+        if not bool(
+            np.isfinite(pose.query_geometry).all()
+            and np.isfinite(pose.visible_weights).all()
+            and np.isfinite(probe.directions).all()
+            and np.isfinite(probe.distances).all()
+            and np.isfinite(probe.events).all()
+        ):
+            raise ValueError(f"non-finite V5 training input in {spec.scene_id}")
+        rows.append({
+            "sceneId": spec.scene_id,
+            "sourceKind": spec.source_kind,
+            "numUnits": scene.num_units,
+            "validUnits": int(np.count_nonzero(scene.valid_unit_mask)),
+            "trainPoseCount": int(scene.train_split.pose_indices.size),
+            "sampleCandidateCount": int(pose.candidate_ids.size),
+            "sampleVisibleCount": int(np.count_nonzero(pose.targets)),
+            "sampleProbeCount": int(probe.unit_ids.size),
+        })
+    payload = {
+        "schema": "gcof-pvs-v5-training-preflight-v1",
+        "protocol": str(protocol),
+        "heldOutScene": held_out_scene,
+        "sourceSceneCount": len(rows),
+        "realSceneCount": sum(row["sourceKind"] == "real" for row in rows),
+        "syntheticSceneCount": sum(row["sourceKind"] == "synthetic" for row in rows),
+        "labelSplitsRead": ["train"],
+        "selectionSplitsRead": [],
+        "testRead": False,
+        "scenes": rows,
+    }
+    _json_dump(output, payload)
+    return payload
+
+
 def _scan_run_name(phase: str, config_name: str, protocol: str, seed: int, held_out: str | None) -> str:
     suffix = f"{protocol}_seed{int(seed)}"
     if held_out:
@@ -827,11 +888,36 @@ def _parser() -> argparse.ArgumentParser:
     scan_parser.add_argument("--selected-config", action="append", default=[])
     scan_parser.add_argument("--execute", action="store_true", help="actually train planned members")
     _parse_common(scan_parser)
+
+    preflight_parser = subparsers.add_parser("preflight", help="validate every source train asset")
+    preflight_parser.add_argument("--protocol", choices=("shared", "loso"), required=True)
+    preflight_parser.add_argument("--held-out-scene")
+    preflight_parser.add_argument("--output", type=Path, required=True)
+    preflight_parser.add_argument("--seed", type=int, default=20260918)
+    preflight_parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
+    preflight_parser.add_argument("--synthetic-root", type=Path, default=DEFAULT_SYNTHETIC_ROOT)
+    preflight_parser.add_argument("--synthetic-base-seed", type=int, default=DEFAULT_SYNTHETIC_BASE_SEED)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = _parser().parse_args(argv)
+    if args.command == "preflight":
+        payload = preflight_training_assets(
+            protocol=args.protocol,
+            output=args.output,
+            registry_path=args.registry,
+            synthetic_root=args.synthetic_root,
+            synthetic_base_seed=args.synthetic_base_seed,
+            held_out_scene=args.held_out_scene,
+            seed=args.seed,
+        )
+        print(json.dumps({
+            "output": str(args.output.resolve()),
+            "sourceSceneCount": payload["sourceSceneCount"],
+            "testRead": False,
+        }))
+        return
     if args.command == "train":
         train_run(
             protocol=args.protocol,
@@ -913,6 +999,7 @@ __all__ = [
     "build_training_context",
     "capture_rng_states",
     "expected_total_updates",
+    "preflight_training_assets",
     "restore_rng_states",
     "train_run",
 ]

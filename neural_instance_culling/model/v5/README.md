@@ -11,6 +11,18 @@ scene 的前向、约束损失、对偶更新和精确几何梯度回传；runne
 资产列入候选目录，不实例化其标签或 probe。阈值校准和 validation 比较由
 `benchmark/v5` 在训练完成后独立执行。
 
+正式 pilot 前先打开全部 5 个真实 source scene 和 96 个 synthetic train scene，并各采样一份
+train pose/probe：
+
+```bash
+conda run --no-capture-output -n slm_pvs \
+  python -m neural_instance_culling.model.v5.runner preflight \
+  --protocol shared --output <preflight.json>
+```
+
+该命令不读取 calibration、validation 或 test；任何 surface/relation/probe/region/CSR shape 或
+权限错误都会在长训前失败。
+
 ## 入口
 
 生成六个 12k pilot 的参数矩阵，不启动训练：

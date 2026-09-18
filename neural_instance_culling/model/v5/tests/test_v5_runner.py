@@ -12,6 +12,7 @@ from neural_instance_culling.model.v5.runner import (
     CONFIRMATION_UPDATES,
     PILOT_UPDATES,
     RUN_SCHEMA,
+    _parser,
     _prepare_metrics_log,
     _validate_checkpoint,
     build_scan_matrix,
@@ -27,6 +28,16 @@ from neural_instance_culling.model.v5.train import checkpoint_payload
 
 
 class V5RunnerPlanTests(unittest.TestCase):
+    def test_preflight_cli_is_train_only_and_explicit(self) -> None:
+        args = _parser().parse_args([
+            "preflight",
+            "--protocol", "shared",
+            "--output", "preflight.json",
+        ])
+        self.assertEqual(args.command, "preflight")
+        self.assertEqual(args.protocol, "shared")
+        self.assertEqual(args.output, Path("preflight.json"))
+
     def test_resume_rewinds_metric_log_to_checkpoint_step(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "train_metrics.jsonl"
