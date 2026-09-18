@@ -14,6 +14,29 @@ def _selection_summary(selection: CalibrationSelection) -> dict[str, Any]:
     return payload
 
 
+def _evaluation_qualification(
+    metrics: dict[str, Any],
+    *,
+    target_weighted_recall: float,
+) -> tuple[str, bool, bool]:
+    target = float(target_weighted_recall)
+    weighted_recall = float(metrics["weighted_recall"])
+    weighted_recall_lcb = metrics.get("weighted_recall_lcb")
+    mean_target_met = weighted_recall > target
+    confidence_target_met = (
+        mean_target_met
+        and weighted_recall_lcb is not None
+        and float(weighted_recall_lcb) > target
+    )
+    if confidence_target_met:
+        qualification = "strict_lcb_target"
+    elif mean_target_met:
+        qualification = "mean_target"
+    else:
+        qualification = "diagnostic"
+    return qualification, mean_target_met, confidence_target_met
+
+
 def _result_row(
     *,
     run: V5Run,
@@ -24,6 +47,10 @@ def _result_row(
     metrics: dict[str, Any],
     held_out_scene: str | None = None,
 ) -> dict[str, Any]:
+    qualification, mean_target_met, confidence_target_met = _evaluation_qualification(
+        metrics,
+        target_weighted_recall=selection.target_weighted_recall,
+    )
     return {
         "protocol": run.protocol,
         "variant": run.variant,
@@ -33,9 +60,9 @@ def _result_row(
         "split": split,
         "threshold_mode": threshold_mode,
         "threshold": float(selection.threshold),
-        "qualification": selection.status,
-        "mean_target_met": bool(selection.mean_target_met),
-        "confidence_target_met": bool(selection.confidence_target_met),
+        "qualification": qualification,
+        "mean_target_met": mean_target_met,
+        "confidence_target_met": confidence_target_met,
         "selection_split": selection.selection_split,
         "selection_test_read": False,
         "calibration": _selection_summary(selection),

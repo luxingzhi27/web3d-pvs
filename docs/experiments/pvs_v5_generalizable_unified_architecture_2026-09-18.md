@@ -36,17 +36,16 @@ V5 不为下载排序再训练一套不相关模型。
 关系构图以及共享模型前向编译；不允许使用该场景可见标签更新网络权重或实例表。
 
 把 HKUST、IFCBench、Sponza、Viking Village 和 Big City 全部加入训练，只能证明同一共享模型
-覆盖五个已知场景，不能证明未见场景泛化。论文使用三套互不混淆的协议：
+覆盖五个已知场景，不能证明未见场景泛化。论文使用两套互不混淆的协议：
 
 | 协议 | 模型训练数据 | 用途 |
 |---|---|---|
 | Shared in-domain | 五个真实场景 train + 合成训练集 | 架构选择、消融和已知场景效果 |
-| 五折 LOSO | 合成训练集 + 四个真实 source scene | 评价第五个完整未见场景 |
-| Universal final | 合成训练集 + 五个真实场景 train | 最终发布的一份通用权重 |
+| External blind holdout | 复用冻结的 Shared Full 权重 | 评价训练与设计阶段均未出现的新场景 |
 
-论文还应增加一个从未参与结构选择和 LOSO 训练的新公开场景作为 blind holdout。优先选择
-Robot Lab 或 Industrial Set v3.0。Universal final 冻结后才转换该场景、生成评价 GT 并读取
-结果。没有 blind holdout 时，论文只声明“五场景 LOSO 跨场景迁移”，不声明开放世界泛化。
+外部盲测场景固定为 Amazon Lumberyard Bistro，优先使用公开 glTF 资产。模型架构、优化器参数
+和 15 个正式共享模型全部冻结后，才允许转换该场景、生成评价 GT 并读取结果。论文将该实验
+表述为一个标准图形学场景上的跨场景迁移案例，不据此声称开放世界或任意场景泛化。
 
 ## 3. 训练数据
 
@@ -73,8 +72,8 @@ Viking 128 KiB 只用于分割粒度对照，不作为第六个独立训练场�
 3. train pose 的 candidate、visible label 和原始 visible weight；
 4. 只由 source train 几何生成的外部首次命中 probe。
 
-LOSO held-out scene 只允许读取前两类资产来生成运行时表。其 calibration/test 标签只由对应
-评价模式读取，probe 不得进入 source-only 训练。
+外部盲测场景只允许读取前两类资产以及由其几何确定性生成的 external-hit probe，用冻结共享
+网络编译运行时表；这些资产不触发任何参数更新。其 calibration/test 标签只由对应评价模式读取。
 
 ### 3.2 合成训练集
 
@@ -97,8 +96,8 @@ pose 划分：
 
 每个场景包含 256 至 4096 个 renderable units。生成器随机化尺度、密度、层数、通道宽度、
 遮挡深度、单位大小分布和重复率，但不提供 scene ID 或语义类别给模型。几何来源使用程序化
-primitive 和许可清楚、与 blind holdout 无关的 mesh bank。LOSO fold 不能从 held-out scene
-抽取 mesh 或统计量扩充合成集。
+primitive 和许可清楚、与 blind holdout 无关的 mesh bank。合成集不能从 Bistro 抽取 mesh、
+材质、相机或统计量。
 
 合成场景使用与真实场景相同的 candidate、Color-ID、区域 GT 和 probe 生成器。view-cell 同时
 覆盖圆盘和定向盒，尺寸范围在生成器配置中固定。单位粒度按 32/64/128 KiB 三档生成，用于学习
@@ -113,8 +112,7 @@ primitive 和许可清楚、与 blind holdout 无关的 mesh bank。LOSO fold �
 每个真实 source scene 接收 36,000 次更新。synthetic pool 的更新数固定为真实更新总数的一半：
 
 ```text
-四 source LOSO fold: 4 x 36,000 real + 72,000 synthetic = 216,000 updates
-Universal final:      5 x 36,000 real + 90,000 synthetic = 270,000 updates
+Shared formal: 5 x 36,000 real + 90,000 synthetic = 270,000 updates
 ```
 
 每步从当前 scene 均匀采样 4 个 candidate 非空 pose，保留 GT=0 的纯负 pose，并使用全部候选；
@@ -297,7 +295,7 @@ bootstrap LCB `>0.99` 的最高分数变化点。没有 LCB 合格点但平均 w
 普通实例 recall、FN/GT 和 Bad Cull 必须报告，但不作为新的 99% 硬门。这样训练中的 count
 constraint 负责避免结构性小实例崩溃，校准仍只承担论文既定的视觉安全职责。
 
-LOSO 同时报告：
+外部盲测同时报告：
 
 - `source_global`：阈值只来自各 source calibration，目标场景零标签；
 - `target_calibrated`：权重冻结，只用目标 calibration 选一个标量阈值。
@@ -343,9 +341,9 @@ update 和 synthetic family-local update，纵轴绘制 `J_extra`、`R_count`、
 场景的初始梯度尺度，但不替代 pilot 的实际参数轨迹。
 
 若参数扫描结果不好，可以在上述两个学习率轴的相邻数量级内追加一次最多 4 个成员的局部扫描，
-但不得改变损失项、数据权限或评价顺序。参数冻结后，正文 15 个消融和 45 个 LOSO 模型全部从头
-训练，不从 pilot checkpoint 微调。后续允许的“微调”仅指对同一冻结架构和数据协议调整已登记的
-优化器参数并重新从头训练；不得按单个目标场景标签更新 universal/LOSO 权重。
+但不得改变损失项、数据权限或评价顺序。参数冻结后，正文 15 个共享模型全部从头训练，不从
+pilot checkpoint 微调。后续允许的“微调”仅指对同一冻结架构和数据协议调整已登记的优化器参数
+并重新从头训练；不得按 Bistro 标签更新共享权重。
 
 几何编码、关系编译、field NLL 和最终 PVS loss 端到端更新。大场景使用精确梯度重计算：先对
 当前 step 涉及的唯一 unit 生成无图 `z_cache`，下游分块累计 `z_leaf.grad`，再按几何 chunk
@@ -384,9 +382,9 @@ Full 结果在所有表中复用。旧 V4、Keep-All、AABB-query MLP 和 HZB �
 
 训练规模：正文消融 5 配置 x 3 seeds，共 15 个共享模型。
 
-## 8. 泛化实验
+## 8. 外部盲测泛化实验
 
-五折 LOSO 只训练三种模型：
+外部盲测复用正文共享训练中的三种模型：
 
 ```text
 GEOMETRY_FIELD
@@ -394,22 +392,22 @@ GENERIC_RELATION_28
 FULL
 ```
 
-每种模型执行 5 folds x 3 seeds，共 45 个训练。每个 fold 的 held-out scene 完全不参与参数、
-对偶乘子、source normalizer、synthetic mesh bank 或阈值训练。每个模型同时输出 source_global
-和 target_calibrated 两个结果，不重复训练。
+三种模型均直接复用正文消融的三个随机种子，不增加训练。Bistro 完全不参与参数、对偶乘子、
+source normalizer、synthetic mesh bank 或模型选择。对它执行固定 64 KiB Connected-SAH 自动
+切分、局部表面提取、纯几何关系构建和 external-hit probe 生成，再由冻结模型编译实例表。
 
-Universal final 直接复用正文消融中的 FULL 三种子。架构和 seed 选择规则冻结后，导出一份
-主发布权重，并在 blind holdout 上只执行几何编译和推理。
+主结果使用 `source_global` 阈值：只由五个 source scene 的 calibration 决定，Bistro 标签使用量
+为零。辅助结果使用 `target_calibrated`：模型权重和编译表保持冻结，只由 Bistro calibration
+选择一个标量阈值。两种模式都在相同的 Bistro validation/test 上报告，不重复训练。
 
 V5 核心训练总数为：
 
 ```text
 15 main ablation models
-45 LOSO models
-= 60 models
+= 15 models
 ```
 
-这 60 个模型覆盖四个核心方法主张与跨场景泛化；不执行两份草案中 156 个模型的完整矩阵。
+这 15 个模型覆盖四个核心方法主张；同一批冻结权重同时用于 Bistro 外部盲测。
 
 ## 9. 论文结果表
 
@@ -423,10 +421,10 @@ V5 核心训练总数为：
 - pose PR-AUC、正样本比例和 AP lift；
 - GLB bytes reduction 与图像 miss/PER。
 
-### 9.2 LOSO
+### 9.2 External blind holdout
 
-每个 held-out scene 报 source_global 和 target_calibrated。跨场景均值按 scene 等权，不能混池
-所有 observation。source_global 未达到安全目标时保留原阈值和失败结果，不能用目标标签补救。
+Bistro 报告 source_global 和 target_calibrated。source_global 未达到安全目标时保留原阈值和
+失败结果，不能用目标标签补救；target_calibrated 必须明确标为阈值适配，不能写成零标签泛化。
 
 ### 9.3 系统
 
@@ -445,8 +443,8 @@ V5 核心训练总数为：
 7. 若 FULL 没有相对三个对照改善平均安全—紧致前沿，先检查 proxy graph recall 和 field NLL，
    不增加新的 loss 项。
 8. 架构冻结后完成 15 个正文消融模型。
-9. 完成 45 个 LOSO 模型，再训练/复用 Universal final。
-10. 最后读取 frozen test、blind holdout，并执行图像、HZB、runtime 和 streaming 实验。
+9. 冻结 15 个共享模型后构建 Bistro 数据与纯几何编译资产，执行外部盲测。
+10. 最后读取 frozen test，并执行图像、HZB、runtime 和 streaming 实验。
 
 ## 11. 采用条件与论文主张
 
@@ -457,9 +455,9 @@ V5 成为论文主线至少需要满足：
 - FULL 稳定优于同容量 GENERIC_RELATION_28，证明结构化方向场不只是 28D 通用 latent；
 - FULL 稳定优于 FULL_NO_FIELD_NLL，证明 external-hit 监督确实改善了结构化场，而不是只增加训练成本；
 - FULL 在同一架构下优于 PBCE_OBJECTIVE，证明约束目标改善安全—紧致折中；
-- LOSO FULL 在多数 held-out scene 上优于 GEOMETRY_FIELD 和 GENERIC_RELATION_28；
-- target-calibrated 不更新权重即可恢复合格工作点；
-- blind holdout 不依赖场景微调即可产生非零有效剔除。
+- Bistro 上的 FULL 在 source-global 模式下优于 GEOMETRY_FIELD 和 GENERIC_RELATION_28；
+- target-calibrated 不更新权重即可改善或恢复工作点；
+- Bistro 不依赖场景权重微调即可产生非零有效剔除。
 
 论文应使用“cross-scene transfer over heterogeneous scenes”或“geometry-compiled shared model”。
 除非 blind holdout 和更多外部场景支持，不使用“universal visibility model”。
@@ -625,7 +623,8 @@ git diff --check -- neural_instance_culling/dataset/v5/generate_external_hit_pro
 2. external-hit probe 升级为 target-centered v2。旧 surface-origin v1 manifest 会直接失败；
    五个真实场景和 96 个 synthetic train scene 的 probe 必须重建，PoseCSR/Color-ID GT 不重采样。
 3. `GENERIC_RELATION_28` 读取完整 84D anchor evidence 后压成 28D，不再先求方向均值。
-4. shared 核心消融新增 `FULL_NO_FIELD_NLL`，正式矩阵为 5 变体 x 3 seeds；LOSO 仍为原三变体。
+4. shared 核心消融新增 `FULL_NO_FIELD_NLL`，正式矩阵为 5 变体 x 3 seeds；外部盲测复用其中
+   `FULL`、`GEOMETRY_FIELD` 和 `GENERIC_RELATION_28` 的冻结权重。
 5. 场景风险的逆采样因子改用 candidate 非空的 `eligiblePoseCount`；preflight 同时报告总 train pose、
    eligible pose 和 candidate-empty pose 数。
 6. train 标签若包含退化 unit 立即失败；calibration/validation/test 仍只在对应 score sidecar 被授权
@@ -646,3 +645,43 @@ runtime 实验前的系统任务：完成 FP16 导出、PyTorch FP32 对 FP16 �
 才能报告 148 B/unit 或 WebGPU/WASM 硬件延迟；此前只报告 Python FP32 实际字节和耗时。
 compiled manifest 固定写 `pythonInferenceReady=true`、`browserRuntimeReady=false`，不再使用含义
 不明确的 `runtimeReady`。
+
+## 15. 参数扫描首批结果与评价资格修正（2026-09-18）
+
+六组 `12,000 update` pilot 中，首批三个成员已经完成训练、动力学分析、五场景
+calibration/validation score 导出和 10,000 次 bootstrap 评价。训练只读取 train；阈值只由
+各场景 calibration 选择，test 未读取。
+
+评价时发现结果行曾把 calibration 的 `qualification` 复制为 validation 资格，导致扫描器把
+“校准集存在严格工作点”错误计为“validation 严格达标”。主线已改为用冻结阈值在当前评价 split
+上的 weighted recall 与 LCB 重新计算 `qualification`、`mean_target_met` 和
+`confidence_target_met`；嵌套 `calibration` 字段仍保留原校准资格。错误汇总已原地重算，未建立
+兼容口径。`benchmark/v5` 共 21 项测试通过，其中新增回归测试覆盖 calibration strict、validation
+diagnostic 的情形。
+
+首批 validation 结果：
+
+| Model LR / Dual LR | Strict scenes | Mean-target scenes | Scene-equal WR LCB | Scene-equal CNOR | Scene-equal Useful Cull | Scene-equal Pred/GT |
+|---|---:|---:|---:|---:|---:|---:|
+| `1e-4 / 1e-3` | 3/5 | 4/5 | 0.989795 | 0.508721 | 0.624046 | 2.7086 |
+| `1e-4 / 3e-3` | 3/5 | 4/5 | 0.989754 | 0.507637 | 0.622681 | 2.7169 |
+| `2e-4 / 1e-3` | 3/5 | 4/5 | 0.989899 | 0.520581 | 0.634787 | 2.6423 |
+
+首批相对最优为 `2e-4 / 1e-3`，但不能在后三组完成前晋级。该成员在 HKUST、Sponza 和
+Viking Village 上达到 validation strict；IFCBench 的 WR/LCB 为 `0.990394/0.989980`，属于
+mean-target；Big City 为 `0.986267/0.985002`，属于 diagnostic。对应 Pose PR-AUC 为 HKUST
+`0.3910`、IFCBench `0.4473`、Sponza `0.6371`、Viking Village `0.7553`、Big City `0.6835`。
+
+V5 evaluator 同时补齐 `pose_accuracy` 和 `pose_balanced_accuracy`。前者先在每个 pose 内计算
+`(TP+TN)/candidate` 再宏平均，后者先在每个 pose 内计算 `(recall+specificity)/2` 再宏平均；
+它们与跨全部候选合并计算的 `accuracy`、`balanced_accuracy` 分开保存。首批三组汇总已从同一
+冻结 score bundle 原地重算，未重新推理或改变阈值。
+
+后三组 `2e-4/3e-3`、`4e-4/1e-3` 和 `4e-4/3e-3` 已在 GPU0 并行启动。六组必须全部完成后，
+才按第 6.1 节词典序选择两个配置进行从头 `36,000 update` 确认。
+
+当前训练同时懒加载 5 个真实场景和 96 个 synthetic source 的 PoseCSR/列式几何资产。持久
+`tmux` 服务的默认软文件描述符上限不足时，会在约第 101 个首次访问 source 处触发
+`Too many open files`。正式 Linux 启动命令必须在会话内先执行 `ulimit -n 65536`。本次后三组
+首次启动在约 100 step 触发该环境错误，尚无 checkpoint；三份不完整输出已删除，随后以完全
+相同的 seed、配置和数据顺序从头启动，并已稳定跨过原失败点。该环境修正不改变模型或实验口径。

@@ -6,10 +6,13 @@ from unittest import mock
 import numpy as np
 
 from neural_instance_culling.benchmark.v5.calibration import (
+    CalibrationSelection,
     calibrate_source_global,
     calibrate_target,
     select_calibration_workpoint,
 )
+from neural_instance_culling.benchmark.v5.contracts import V5Run
+from neural_instance_culling.benchmark.v5.evaluation import _result_row
 from neural_instance_culling.benchmark.v5.metrics import evaluate_scene
 from neural_instance_culling.benchmark.v5.score_bundle import PoseScores
 
@@ -35,6 +38,38 @@ def _pose(
 
 
 class V5MetricsTests(unittest.TestCase):
+    def test_result_qualification_comes_from_evaluation_not_calibration(self) -> None:
+        class _Bundle:
+            scene = "fixture"
+            sidecars = {"calibration": True, "validation": True}
+
+        selection = CalibrationSelection(
+            protocol="target_calibrated",
+            threshold=0.5,
+            status="strict_lcb_target",
+            target_weighted_recall=0.99,
+            mean_weighted_recall=0.995,
+            mean_weighted_recall_lcb=0.991,
+            mean_target_met=True,
+            confidence_target_met=True,
+            selection_split="calibration",
+            test_read=False,
+            scene_metrics={"fixture": {}},
+            threshold_rows=(),
+        )
+        row = _result_row(
+            run=V5Run(protocol="shared", variant="FULL", seed=0, scenes={"fixture": _Bundle()}),
+            scene="fixture",
+            split="validation",
+            threshold_mode="target_calibrated",
+            selection=selection,
+            metrics={"weighted_recall": 0.985, "weighted_recall_lcb": 0.98},
+        )
+        self.assertEqual(row["calibration"]["status"], "strict_lcb_target")
+        self.assertEqual(row["qualification"], "diagnostic")
+        self.assertFalse(row["mean_target_met"])
+        self.assertFalse(row["confidence_target_met"])
+
     def test_reported_denominators_and_pose_ap_are_distinct(self) -> None:
         rows = [
             _pose(0, [0.9, 0.2, 0.8], [1, 0, 1], [2.0, 0.0, 1.0]),
@@ -43,6 +78,10 @@ class V5MetricsTests(unittest.TestCase):
         result = evaluate_scene(rows, 0.85, bootstrap_replicates=64, bootstrap_seed=7)
         self.assertAlmostEqual(result["weighted_recall"], 2.0 / 3.0)
         self.assertAlmostEqual(result["ordinary_recall"], 0.5)
+        self.assertAlmostEqual(result["accuracy"], 4.0 / 5.0)
+        self.assertAlmostEqual(result["balanced_accuracy"], 3.0 / 4.0)
+        self.assertAlmostEqual(result["pose_accuracy"], 5.0 / 6.0)
+        self.assertAlmostEqual(result["pose_balanced_accuracy"], 7.0 / 8.0)
         self.assertAlmostEqual(result["fn_over_gt"], 0.5)
         self.assertAlmostEqual(result["bad_cull"], 1.0 / 5.0)
         self.assertAlmostEqual(result["useful_cull"], 3.0 / 5.0)

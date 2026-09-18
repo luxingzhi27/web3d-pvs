@@ -15,10 +15,14 @@ scene 的前向、约束损失、对偶更新和精确几何梯度回传；runne
 train pose/probe：
 
 ```bash
+ulimit -n 65536
 conda run --no-capture-output -n slm_pvs \
   python -m neural_instance_culling.model.v5.runner preflight \
   --protocol shared --output <preflight.json>
 ```
+
+共享训练会懒加载 101 个 source 的多列 memmap；持久 `tmux` 会话必须在启动训练前设置上述
+文件描述符上限，不能依赖交互 shell 的当前软上限。
 
 该命令不读取 calibration、validation 或 test；任何 surface/relation/probe/region/CSR shape 或
 权限错误都会在长训前失败。每个场景还报告 `initialRiskExtraAtZeroLogit`；它精确等于 train

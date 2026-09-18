@@ -25,6 +25,8 @@ METRIC_FIELDS = (
     "weighted_recall_lcb",
     "ordinary_recall",
     "pose_recall",
+    "pose_accuracy",
+    "pose_balanced_accuracy",
     "fn_over_gt",
     "bad_cull",
     "cnor",
@@ -169,6 +171,8 @@ def evaluate_scene(
     positive_pose_count = 0
     pose_count = 0
     pose_recall_values: list[float] = []
+    pose_accuracy_values: list[float] = []
+    pose_balanced_accuracy_values: list[float] = []
     pose_ap_values: list[float] = []
     pose_prevalence_values: list[float] = []
     per_pose_candidate: list[float] = []
@@ -203,6 +207,8 @@ def evaluate_scene(
         weighted_tp_rows.append(float(row["weighted_tp"]))
         weighted_gt_rows.append(float(row["weighted_gt"]))
         pose_recall_values.append(float(row["ordinary_recall"]))
+        pose_accuracy_values.append(float(row["accuracy"]))
+        pose_balanced_accuracy_values.append(float(row["balanced_accuracy"]))
         if int(row["gt_count"]) > 0:
             positive_pose_count += 1
             pose_prevalence_values.append(float(row["prevalence"]))
@@ -255,6 +261,8 @@ def evaluate_scene(
         "weighted_recall_lcb": lcb,
         "ordinary_recall": ordinary_recall,
         "pose_recall": float(np.mean(pose_recall_values)),
+        "pose_accuracy": float(np.mean(pose_accuracy_values)),
+        "pose_balanced_accuracy": float(np.mean(pose_balanced_accuracy_values)),
         "fn_over_gt": _safe_ratio(fn, gt_count),
         "bad_cull": _safe_ratio(fn, candidate_count),
         "cnor": candidate_normalized_occlusion_recall(
