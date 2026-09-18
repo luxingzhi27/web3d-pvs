@@ -464,11 +464,17 @@ schedule。开发阶段 V4 保留为冻结 baseline；V5 通过采用条件后�
 
 本次实现把 7.3 的场监督从旧 JSONL 记录落实为真实三角形射线资产。生成器读取已有
 `[unit,256,6]` 表面点二进制，每个 unit 固定取前 16 个点；方向固定为 12 个正二十面体方向
-加 24 个 Fibonacci 方向。GLB 经现有 Three.js loader 解码后保留世界三角形和 unit 归属，再用
-`three-mesh-bvh` 查询最近外部三角形；射线起点沿方向偏移 `1e-5*r`，距离仍从原始表面点计量，
-当前 unit 的全部三角形都会被跳过，超过 `1024*r` 的结果用 `hitDistances=NaN` 表示右删失。
-正式 Color-ID 协议的 `DoubleSide` 规则用于 BVH 射线查询，源材质的透明度字段不会被误当成
-Color-ID 的可见性规则。
+加 24 个 Fibonacci 方向。GLB 经现有 Three.js loader 解码后按 renderable object/instance
+逐批匹配到 unit，结果立即追加到紧凑的 `Float32Array` 世界位置块和 `Uint32Array` unit 归属块；
+不再把全场三角形保留为 JS `{a,b,c,...}` 对象数组。全部 GLB 完成后只做一次 typed-array
+扁平化并建立合并的 `BufferGeometry`/`three-mesh-bvh`，射线索引只保留位置、BVH 和平行的
+unit ID 数组。每个 GLB 处理完成后会释放 geometry、material、texture 和 GLTFParser 缓存，
+可选地在 `--expose-gc` 下按间隔触发 V8 回收。
+
+BVH 语义没有改变：它仍查询最近外部真实三角形；射线起点沿方向偏移 `1e-5*r`，距离仍从
+原始表面点计量，当前 unit 的全部三角形都会被跳过，超过 `1024*r` 的结果用
+`hitDistances=NaN` 表示右删失。正式 Color-ID 协议的 `DoubleSide` 规则用于 BVH 射线查询，
+源材质的透明度字段不会被误当成 Color-ID 的可见性规则。
 
 修改文件：
 
@@ -492,5 +498,94 @@ python -m py_compile neural_instance_culling/dataset/v5/schemas.py
 ```
 
 测试覆盖两个真实 GLB 盒子、反向面 DoubleSide 命中、当前 unit 全部跳过、1024 倍尺度右删失、
-六列 shape/dtype、逆序分片合并和完整输出恢复。画面安全指标、剔除效率指标和前端延迟尚未在
-本生成器任务中实现，需由后续训练与 benchmark 读取列式资产后报告。
+六列 shape/dtype、逆序分片合并和完整输出恢复；另有 10,000 三角形多分块规模 smoke，验证
+三角形对象保留数为 0、位置/归属均为 typed arrays，且 BVH 索引不含 `triangles` 对象数组。
+画面安全指标、剔除效率指标和前端延迟尚未在本生成器任务中实现，需由后续训练与 benchmark
+读取列式资产后报告。
+
+### 13.1 大场景内存修复与重跑约定（2026-09-18）
+
+Viking Village 的旧实现是在全场解码后同时保留每个三角形的多个 JS 数组、对象和材质引用，
+随后再复制成 BVH 位置数组，导致三角形对象数随全场规模线性膨胀并触及 V8 4 GiB 堆上限。
+当前实现的长期存活结构只有：合并 `BufferGeometry.position`（每三角形 9 个 `float32`）、
+`triangleUnitIds`（每三角形 1 个 `uint32`）以及 `three-mesh-bvh` 的加速结构。逐 GLB 的匹配
+数组只在回调期间存在，GLB 场景和 parser 缓存随后立即释放。`--gc-every` 只是回收辅助，不是
+正确性的前提，也不是通过增大 `--max-old-space-size` 绕过问题。
+
+重跑时继续使用原有连续 shard、progress sidecar、resume 和 unit-ID merge 语义。建议先用
+`--expose-gc`、较小的 shard 和明确日志运行：
+
+首次替换旧的完整输出时在下面命令中加入 `--no-resume`；若任务中断，后续重跑时去掉
+`--no-resume` 即按 progress sidecar 继续。
+
+```bash
+V5_ROOT=neural_instance_culling/dataset/out/pvs_v5_geometry_compilation_v1
+VIKING_ROOT="$V5_ROOT/viking_village_64k"
+
+for shard in $(seq 0 7); do
+  node --expose-gc neural_instance_culling/dataset/v5/generate_external_hit_probes.mjs \
+    --scene-id viking_village_64k \
+    --assets-dir neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/viking_village_64k/assets \
+    --runtime-meta neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/viking_village_64k/assets/runtimeVisibilityMeta.json \
+    --glb-index neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/viking_village_64k/assets/glbIndex.json \
+    --surface-manifest "$VIKING_ROOT/surface/surface_manifest.json" \
+    --output-dir "$VIKING_ROOT/probes/shard_${shard}" \
+    --shard-index "$shard" --shard-count 8 \
+    --progress-every 25 --gc-every 25 \
+    > "$VIKING_ROOT/logs/probes_shard_${shard}_stdout.log" \
+    2> "$VIKING_ROOT/logs/probes_shard_${shard}_stderr.log"
+done
+```
+
+Viking 分片完成后合并：
+
+```bash
+node --input-type=module -e '
+import { mergeExternalHitProbeShards } from "./neural_instance_culling/dataset/v5/generate_external_hit_probes.mjs";
+mergeExternalHitProbeShards({
+  shardDirs: Array.from({ length: 8 }, (_, i) => `neural_instance_culling/dataset/out/pvs_v5_geometry_compilation_v1/viking_village_64k/probes/shard_${i}`),
+  outputDir: "neural_instance_culling/dataset/out/pvs_v5_geometry_compilation_v1/viking_village_64k/probes/merged",
+});
+'
+```
+
+Big City 使用相同入口；其规模较小可使用 4 个 shard：
+
+```bash
+CITY_ROOT="$V5_ROOT/big_city_64k"
+for shard in $(seq 0 3); do
+  node --expose-gc neural_instance_culling/dataset/v5/generate_external_hit_probes.mjs \
+    --scene-id big_city_64k \
+    --assets-dir neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/bigcity_64k/assets \
+    --runtime-meta neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/bigcity_64k/assets/runtimeVisibilityMeta.json \
+    --glb-index neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/bigcity_64k/assets/glbIndex.json \
+    --surface-manifest "$CITY_ROOT/surface/surface_manifest.json" \
+    --output-dir "$CITY_ROOT/probes/shard_${shard}" \
+    --shard-index "$shard" --shard-count 4 \
+    --progress-every 25 --gc-every 25 \
+    > "$CITY_ROOT/logs/probes_shard_${shard}_stdout.log" \
+    2> "$CITY_ROOT/logs/probes_shard_${shard}_stderr.log"
+done
+```
+
+Big City 分片完成后合并：
+
+```bash
+node --input-type=module -e '
+import { mergeExternalHitProbeShards } from "./neural_instance_culling/dataset/v5/generate_external_hit_probes.mjs";
+mergeExternalHitProbeShards({
+  shardDirs: Array.from({ length: 4 }, (_, i) => `neural_instance_culling/dataset/out/pvs_v5_geometry_compilation_v1/big_city_64k/probes/shard_${i}`),
+  outputDir: "neural_instance_culling/dataset/out/pvs_v5_geometry_compilation_v1/big_city_64k/probes/merged",
+});
+'
+```
+
+分片完成后仍通过现有 `mergeExternalHitProbeShards` 按 unit ID 合并，不改变列式 manifest。
+本次代码验证命令为：
+
+```bash
+node --check neural_instance_culling/dataset/v5/generate_external_hit_probes.mjs
+node neural_instance_culling/dataset/v5/test_generate_external_hit_probes.mjs
+git diff --check -- neural_instance_culling/dataset/v5/generate_external_hit_probes.mjs \
+  neural_instance_culling/dataset/v5/test_generate_external_hit_probes.mjs
+```

@@ -435,18 +435,6 @@ function transformPoint(THREE, point, matrix) {
   return [value.x, value.y, value.z];
 }
 
-function triangleMaterial(object, triangleIndex) {
-  const source = object.material;
-  const materials = Array.isArray(source) ? source : [source];
-  const groups = object.geometry?.groups || [];
-  const indexStart = triangleIndex * 3;
-  const group = groups.find((candidate) => (
-    indexStart >= candidate.start && indexStart < candidate.start + candidate.count
-  ));
-  const materialIndex = group?.materialIndex ?? 0;
-  return materials[materialIndex] || materials[0] || null;
-}
-
 function objectIsVisible(object) {
   for (let current = object; current; current = current.parent) {
     if (current.visible === false) return false;
@@ -485,26 +473,35 @@ function collectObjectTriangles(THREE, object, instanceIndex, sourceIndexStart, 
       degenerateTriangleCount += 1;
       continue;
     }
-    const material = triangleMaterial(object, triangleIndex);
+    // The formal DoubleSide/alpha rule is conservative here: every decoded
+    // triangle is a potential hit, so retaining material objects adds no
+    // information to the probe result.
     triangles.push({
       a,
       b,
       c,
       sourceIndex: sourceIndexStart + triangleIndex,
       instanceComponentGlobalId: hintedUnitId,
-      material,
     });
   }
   return { triangles, sourceTriangleCount, degenerateTriangleCount };
 }
 
-/** Collect actual world-space render triangles, retaining material provenance. */
-export function collectRenderableTriangles(THREE, gltf, componentGlobalIds = []) {
+/**
+ * Visit one temporary triangle batch at a time.
+ *
+ * The callback owns the batch only for the duration of the call.  Keeping the
+ * callback boundary at a renderable object (and at one instance for an
+ * InstancedMesh) prevents a large GLB from becoming one long-lived JS object
+ * array before component matching.
+ */
+export function visitRenderableTriangleBatches(THREE, gltf, componentGlobalIds = [], onBatch) {
   assert(gltf?.scene, 'GLB has no scene');
-  const triangles = [];
+  assert(typeof onBatch === 'function', 'onBatch must be a function');
   let sourceTriangleCount = 0;
   let degenerateTriangleCount = 0;
   let renderableObjectCount = 0;
+  let usableTriangleCount = 0;
   let sourceIndex = 0;
   let instanceCursor = 0;
   gltf.scene.updateMatrixWorld(true);
@@ -523,56 +520,148 @@ export function collectRenderableTriangles(THREE, gltf, componentGlobalIds = [])
           sourceIndex,
           hintedUnitId,
         );
-        triangles.push(...result.triangles);
         sourceTriangleCount += result.sourceTriangleCount;
         degenerateTriangleCount += result.degenerateTriangleCount;
+        usableTriangleCount += result.triangles.length;
+        onBatch(result.triangles);
         sourceIndex += result.sourceTriangleCount;
       }
       instanceCursor += object.count;
     } else {
       const result = collectObjectTriangles(THREE, object, null, sourceIndex, null);
-      triangles.push(...result.triangles);
       sourceTriangleCount += result.sourceTriangleCount;
       degenerateTriangleCount += result.degenerateTriangleCount;
+      usableTriangleCount += result.triangles.length;
+      onBatch(result.triangles);
       sourceIndex += result.sourceTriangleCount;
     }
   });
   return {
-    triangles,
     sourceTriangleCount,
     degenerateTriangleCount,
     renderableObjectCount,
+    usableTriangleCount,
   };
 }
 
-function normalizeDirectTriangles(trianglesByUnit, units) {
-  const result = new Map(units.map((unit) => [unit.componentGlobalId, []]));
+/** Collect actual world-space render triangles. Intended for focused tests only. */
+export function collectRenderableTriangles(THREE, gltf, componentGlobalIds = []) {
+  const triangles = [];
+  const stats = visitRenderableTriangleBatches(THREE, gltf, componentGlobalIds, (batch) => {
+    for (const triangle of batch) triangles.push(triangle);
+  });
+  return { triangles, ...stats };
+}
+
+/**
+ * Compact scene-wide triangle storage.
+ *
+ * Positions and unit ownership are kept in typed-array chunks.  No per-triangle
+ * JS object survives a batch callback, and chunks are flattened exactly once
+ * when the final BufferGeometry is created.
+ */
+export class CompactTriangleStore {
+  constructor({ chunkTriangleCapacity = 262144 } = {}) {
+    assert(Number.isInteger(chunkTriangleCapacity) && chunkTriangleCapacity > 0,
+      'chunkTriangleCapacity must be a positive integer');
+    this.chunkTriangleCapacity = chunkTriangleCapacity;
+    this.chunks = [];
+    this.triangleCount = 0;
+  }
+
+  get triangleObjectCount() {
+    return 0;
+  }
+
+  _ensureChunk() {
+    const last = this.chunks[this.chunks.length - 1];
+    if (last && last.count < this.chunkTriangleCapacity) return last;
+    const chunk = {
+      positions: new Float32Array(this.chunkTriangleCapacity * 9),
+      unitIds: new Uint32Array(this.chunkTriangleCapacity),
+      count: 0,
+    };
+    this.chunks.push(chunk);
+    return chunk;
+  }
+
+  appendTriangle(unitId, triangle) {
+    const normalizedUnitId = asUint32(unitId, 'triangle unitId');
+    const a = asVec3(triangle.a, `triangle ${this.triangleCount}.a`);
+    const b = asVec3(triangle.b, `triangle ${this.triangleCount}.b`);
+    const c = asVec3(triangle.c, `triangle ${this.triangleCount}.c`);
+    assertNonDegenerateTriangle(a, b, c, this.triangleCount);
+    const chunk = this._ensureChunk();
+    const offset = chunk.count * 9;
+    chunk.positions.set(a, offset);
+    chunk.positions.set(b, offset + 3);
+    chunk.positions.set(c, offset + 6);
+    chunk.unitIds[chunk.count] = normalizedUnitId;
+    chunk.count += 1;
+    this.triangleCount += 1;
+  }
+
+  appendTriangles(unitId, triangles) {
+    assert(Array.isArray(triangles), 'triangle batch must be an array');
+    for (const triangle of triangles) this.appendTriangle(unitId, triangle);
+  }
+
+  storageStats() {
+    const positionBytes = this.triangleCount * 9 * Float32Array.BYTES_PER_ELEMENT;
+    const unitIdBytes = this.triangleCount * Uint32Array.BYTES_PER_ELEMENT;
+    return {
+      triangleCount: this.triangleCount,
+      chunkCount: this.chunks.length,
+      positionBytes,
+      unitIdBytes,
+      typedArrayBytes: positionBytes + unitIdBytes,
+      triangleObjectCount: this.triangleObjectCount,
+      storage: 'chunked_float32_positions_uint32_unit_ids',
+    };
+  }
+
+  /** Flatten chunks and release them immediately after the copy. */
+  finalize() {
+    assert(this.triangleCount > 0, 'at least one real triangle is required');
+    const positions = new Float32Array(this.triangleCount * 9);
+    const triangleUnitIds = new Uint32Array(this.triangleCount);
+    let triangleOffset = 0;
+    for (const chunk of this.chunks) {
+      positions.set(chunk.positions.subarray(0, chunk.count * 9), triangleOffset * 9);
+      triangleUnitIds.set(chunk.unitIds.subarray(0, chunk.count), triangleOffset);
+      triangleOffset += chunk.count;
+    }
+    const stats = this.storageStats();
+    this.chunks = [];
+    return { positions, triangleUnitIds, stats };
+  }
+}
+
+function compactDirectTriangles(trianglesByUnit, units) {
+  const valuesByUnit = new Map(units.map((unit) => [unit.componentGlobalId, undefined]));
   if (trianglesByUnit instanceof Map) {
     for (const [rawUnitId, triangles] of trianglesByUnit) {
       const unitId = asUint32(rawUnitId, 'triangle unitId');
-      assert(result.has(unitId), `triangle input contains unknown unit ${unitId}`);
-      result.get(unitId).push(...triangles);
+      assert(valuesByUnit.has(unitId), `triangle input contains unknown unit ${unitId}`);
+      valuesByUnit.set(unitId, triangles);
     }
   } else if (trianglesByUnit && typeof trianglesByUnit === 'object') {
     for (const [rawUnitId, triangles] of Object.entries(trianglesByUnit)) {
       const unitId = asUint32(rawUnitId, 'triangle unitId');
-      assert(result.has(unitId), `triangle input contains unknown unit ${unitId}`);
-      result.get(unitId).push(...triangles);
+      assert(valuesByUnit.has(unitId), `triangle input contains unknown unit ${unitId}`);
+      valuesByUnit.set(unitId, triangles);
     }
   } else {
     throw new Error('trianglesByUnit must be a Map or object');
   }
+
+  const store = new CompactTriangleStore();
   for (const unit of units) {
-    const triangles = result.get(unit.componentGlobalId);
+    const triangles = valuesByUnit.get(unit.componentGlobalId);
     assert(Array.isArray(triangles) && triangles.length > 0, `triangle input is missing unit ${unit.componentGlobalId}`);
-    result.set(unit.componentGlobalId, triangles.map((triangle, index) => ({
-      ...triangle,
-      a: asVec3(triangle.a, `triangle ${unit.componentGlobalId}/${index}.a`),
-      b: asVec3(triangle.b, `triangle ${unit.componentGlobalId}/${index}.b`),
-      c: asVec3(triangle.c, `triangle ${unit.componentGlobalId}/${index}.c`),
-    })));
+    store.appendTriangles(unit.componentGlobalId, triangles);
   }
-  return result;
+  return store;
 }
 
 async function importDefaultDependencies() {
@@ -585,10 +674,7 @@ async function importDefaultDependencies() {
   return { THREE, GLTFLoader, DRACOLoader, MeshoptDecoder };
 }
 
-function validateTriangleForBvh(triangle, index) {
-  const a = asVec3(triangle.a, `triangle ${index}.a`);
-  const b = asVec3(triangle.b, `triangle ${index}.b`);
-  const c = asVec3(triangle.c, `triangle ${index}.c`);
+function assertNonDegenerateTriangle(a, b, c, index) {
   const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
   const ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
   const cross = [
@@ -597,43 +683,37 @@ function validateTriangleForBvh(triangle, index) {
     ab[0] * ac[1] - ab[1] * ac[0],
   ];
   assert(Math.hypot(...cross) > AREA_EPSILON, `triangle ${index} is degenerate`);
-  return { ...triangle, a, b, c };
 }
 
 /** Build the exact triangle acceleration structure used by every probe. */
 export function buildTriangleBvh(THREE, trianglesByUnit, MeshBvh = MeshBVH) {
   assert(THREE && THREE.BufferGeometry, 'buildTriangleBvh requires Three.js');
-  assert(trianglesByUnit instanceof Map, 'trianglesByUnit must be a Map');
-  const triangles = [];
-  for (const [rawUnitId, values] of trianglesByUnit) {
-    const unitId = asUint32(rawUnitId, 'triangle unitId');
-    for (const triangle of values) {
-      triangles.push(validateTriangleForBvh({ ...triangle, unitId }, triangles.length));
-    }
-  }
-  assert(triangles.length > 0, 'at least one real triangle is required');
-  const positions = new Float32Array(triangles.length * 9);
-  const triangleUnitIds = new Uint32Array(triangles.length);
-  for (let index = 0; index < triangles.length; index += 1) {
-    const triangle = triangles[index];
-    positions.set([...triangle.a, ...triangle.b, ...triangle.c], index * 9);
-    triangleUnitIds[index] = triangle.unitId;
-  }
+  const store = trianglesByUnit instanceof CompactTriangleStore
+    ? trianglesByUnit
+    : compactDirectTriangles(
+      trianglesByUnit,
+      (trianglesByUnit instanceof Map
+        ? [...trianglesByUnit.keys()].map((value, index) => asUint32(value, `triangle unitId[${index}]`))
+        : Object.keys(trianglesByUnit || {}).map((value, index) => asUint32(value, `triangle unitId[${index}]`)))
+        .map((componentGlobalId) => ({ componentGlobalId })),
+    );
+  const { positions, triangleUnitIds, stats } = store.finalize();
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   const bvh = new MeshBvh(geometry, { indirect: false });
-  return { geometry, bvh, triangles, triangleUnitIds };
-}
-
-function materialAllowsFormalRay(material) {
-  // The registered Color-ID pass replaces every material with a DoubleSide
-  // MeshBasicMaterial and preserves only alphaTest/map.  Without a decoded
-  // image there is no CPU alpha lookup, so alpha-tested geometry remains a
-  // conservative potential hit rather than being silently dropped.  Source
-  // opacity and source `side` are intentionally ignored because the formal
-  // pass does not copy either field.
-  void material;
-  return true;
+  return {
+    geometry,
+    bvh,
+    triangleUnitIds,
+    triangleCount: stats.triangleCount,
+    memoryStats: {
+      ...stats,
+      retainedTriangleObjects: 0,
+      geometryPositionBytes: positions.byteLength,
+      geometryUnitIdBytes: triangleUnitIds.byteLength,
+      storage: 'buffer_geometry_float32_positions_uint32_unit_ids',
+    },
+  };
 }
 
 /** Trace one ray against real triangles, excluding every triangle of its unit. */
@@ -668,8 +748,6 @@ export function traceNearestExternalHit({
     const triangleIndex = Number(intersection.faceIndex);
     if (!Number.isInteger(triangleIndex) || triangleIndex < 0) continue;
     if (bvhIndex.triangleUnitIds[triangleIndex] === asUint32(unitId, 'unitId')) continue;
-    const triangle = bvhIndex.triangles[triangleIndex];
-    if (!materialAllowsFormalRay(triangle.material)) continue;
     const distance = originOffset + Number(intersection.distance);
     if (!Number.isFinite(distance) || distance <= 0 || distance > maxDistance + FLOAT_EPSILON) continue;
     if (!nearest || distance < nearest.distance) {
@@ -861,7 +939,7 @@ export function makeProbeManifest({ sceneId, unitIds, totalUnitCount, outputDir,
     byteOrder: 'little-endian',
     files: makeColumnManifestFiles(outputDir),
     materialRule: 'formal_color_id_double_side_with_source_alpha_test_provenance',
-    acceleration: 'three-mesh-bvh_exact_world_triangles',
+    acceleration: 'three-mesh-bvh_exact_world_triangles_compact_typed_storage',
   };
   if (shardIndex !== null) {
     manifest.shard = {
@@ -962,16 +1040,78 @@ function manifestIsComplete(outputDir, manifest) {
   }
 }
 
-async function loadTrianglesFromGlbs({ dependencies, input, assetsDir, progressEvery = 50 }) {
-  const trianglesByUnit = new Map(input.components.map((component) => [component.componentGlobalId, []]));
+function disposeLoadedGltf(gltf) {
+  const textures = new Set();
+  const materials = new Set();
+  gltf?.scene?.traverse((object) => {
+    object.geometry?.dispose?.();
+    const objectMaterials = Array.isArray(object.material) ? object.material : [object.material];
+    for (const material of objectMaterials) {
+      if (!material || materials.has(material)) continue;
+      materials.add(material);
+      for (const value of Object.values(material)) {
+        if (!value?.isTexture || textures.has(value)) continue;
+        textures.add(value);
+        const source = value.source?.data?.src || value.image?.src;
+        if (typeof source === 'string' && source.startsWith('blob:')) {
+          globalThis.URL?.revokeObjectURL?.(source);
+        }
+        value.dispose?.();
+      }
+      material.dispose?.();
+    }
+  });
+  // GLTFParser keeps decoded buffers, textures and dependency records alive
+  // even after the scene is no longer referenced.  Clear those registries
+  // before the next GLB is parsed.
+  const parser = gltf?.parser;
+  parser?.cache?.removeAll?.();
+  parser?.associations?.clear?.();
+  if (parser) {
+    parser.json = null;
+    parser.extensions = {};
+    parser.plugins = {};
+    parser.primitiveCache = {};
+    parser.nodeCache = {};
+    parser.meshCache = { refs: {}, uses: {} };
+    parser.cameraCache = { refs: {}, uses: {} };
+    parser.lightCache = { refs: {}, uses: {} };
+    parser.sourceCache = {};
+    parser.textureCache = {};
+    parser.nodeNamesUsed = {};
+    parser.options = {};
+    parser.textureLoader = null;
+    parser.fileLoader = null;
+  }
+  gltf?.scene?.clear?.();
+}
+
+function collectGarbageIfAvailable() {
+  if (typeof globalThis.gc !== 'function') return false;
+  globalThis.gc();
+  return true;
+}
+
+async function loadTrianglesFromGlbs({
+  dependencies,
+  input,
+  assetsDir,
+  progressEvery = 50,
+  gcEvery = 0,
+  triangleChunkCapacity = 262144,
+}) {
+  const triangleStore = new CompactTriangleStore({ chunkTriangleCapacity: triangleChunkCapacity });
+  const assignedTriangleCounts = new Map(input.components.map((component) => [component.componentGlobalId, 0]));
   const loaderBundle = createGltfLoader(dependencies);
   const totals = {
     glbCountProcessed: 0,
     sourceTriangleCount: 0,
     degenerateTriangleCount: 0,
+    usableTriangleCount: 0,
     matchedTriangleCount: 0,
     unmatchedTriangleCount: 0,
     ambiguousTriangleCount: 0,
+    renderableObjectCount: 0,
   };
   try {
     for (let index = 0; index < input.entries.length; index += 1) {
@@ -979,33 +1119,64 @@ async function loadTrianglesFromGlbs({ dependencies, input, assetsDir, progressE
       const componentIds = input.componentIdsByGlb.get(entry.globalId) || [];
       if (componentIds.length === 0) continue;
       const filePath = path.resolve(assetsDir, entry.path);
-      const gltf = await loadGltf(loaderBundle.loader, filePath);
-      const geometry = collectRenderableTriangles(dependencies.THREE, gltf, componentIds);
-      totals.glbCountProcessed += 1;
-      totals.sourceTriangleCount += geometry.sourceTriangleCount;
-      totals.degenerateTriangleCount += geometry.degenerateTriangleCount;
-      assert(geometry.triangles.length > 0, `GLB has no usable triangles: ${filePath}`);
-      const componentRecords = componentIds.map((componentId) => input.componentById.get(componentId));
-      const matched = matchTrianglesToComponents(geometry.triangles, componentRecords, {
-        sceneScale: Math.max(...componentRecords.map((component) => component.bounds.radius), 1),
-      });
-      totals.matchedTriangleCount += matched.stats.matchedTriangleCount;
-      totals.unmatchedTriangleCount += matched.stats.unmatchedTriangleCount;
-      totals.ambiguousTriangleCount += matched.stats.ambiguousTriangleCount;
-      for (const [unitId, assigned] of matched.assignments) {
-        trianglesByUnit.get(unitId).push(...assigned);
+      let gltf = null;
+      try {
+        gltf = await loadGltf(loaderBundle.loader, filePath);
+        const componentRecords = componentIds.map((componentId) => input.componentById.get(componentId));
+        const sceneScale = Math.max(...componentRecords.map((component) => component.bounds.radius), 1);
+        const geometry = visitRenderableTriangleBatches(
+          dependencies.THREE,
+          gltf,
+          componentIds,
+          (batch) => {
+            if (batch.length === 0) return;
+            const matched = matchTrianglesToComponents(batch, componentRecords, { sceneScale });
+            totals.matchedTriangleCount += matched.stats.matchedTriangleCount;
+            totals.unmatchedTriangleCount += matched.stats.unmatchedTriangleCount;
+            totals.ambiguousTriangleCount += matched.stats.ambiguousTriangleCount;
+            for (const [unitId, assigned] of matched.assignments) {
+              if (assigned.length === 0) continue;
+              triangleStore.appendTriangles(unitId, assigned);
+              assignedTriangleCounts.set(unitId, assignedTriangleCounts.get(unitId) + assigned.length);
+            }
+          },
+        );
+        totals.glbCountProcessed += 1;
+        totals.sourceTriangleCount += geometry.sourceTriangleCount;
+        totals.degenerateTriangleCount += geometry.degenerateTriangleCount;
+        totals.usableTriangleCount += geometry.usableTriangleCount;
+        totals.renderableObjectCount += geometry.renderableObjectCount;
+        assert(geometry.usableTriangleCount > 0, `GLB has no usable triangles: ${filePath}`);
+      } finally {
+        disposeLoadedGltf(gltf);
+        gltf = null;
       }
       if (progressEvery > 0 && totals.glbCountProcessed % progressEvery === 0) {
-        console.log(`[v5-external-hit] ${totals.glbCountProcessed}/${input.entries.length} GLBs decoded`);
+        const memory = process.memoryUsage?.();
+        const memoryText = memory
+          ? ` heapUsedMiB=${(memory.heapUsed / 1048576).toFixed(1)} rssMiB=${(memory.rss / 1048576).toFixed(1)}`
+          : '';
+        console.log(
+          `[v5-external-hit] ${totals.glbCountProcessed}/${input.entries.length} GLBs decoded`
+          + ` compactTriangles=${triangleStore.triangleCount}${memoryText}`,
+        );
       }
+      if (gcEvery > 0 && totals.glbCountProcessed % gcEvery === 0) collectGarbageIfAvailable();
     }
   } finally {
     loaderBundle.dracoLoader?.dispose?.();
   }
-  for (const [unitId, triangles] of trianglesByUnit) {
-    assert(triangles.length > 0, `no real triangles were assigned to unit ${unitId}`);
+  for (const [unitId, triangleCount] of assignedTriangleCounts) {
+    assert(triangleCount > 0, `no real triangles were assigned to unit ${unitId}`);
   }
-  return { trianglesByUnit, totals };
+  return {
+    triangleStore,
+    totals: {
+      ...totals,
+      compactTriangleCount: triangleStore.triangleCount,
+      retainedTriangleObjects: triangleStore.triangleObjectCount,
+    },
+  };
 }
 
 function normalizeOptions(options = {}) {
@@ -1039,6 +1210,10 @@ function normalizeOptions(options = {}) {
     shardCount,
     resume: options.resume !== false,
     progressEvery: options.progressEvery === undefined ? 50 : asNonNegativeInteger(options.progressEvery, 'progressEvery'),
+    gcEvery: options.gcEvery === undefined ? 0 : asNonNegativeInteger(options.gcEvery, 'gcEvery'),
+    triangleChunkCapacity: options.triangleChunkCapacity === undefined
+      ? 262144
+      : asPositiveInteger(options.triangleChunkCapacity, 'triangleChunkCapacity'),
   };
 }
 
@@ -1079,15 +1254,24 @@ export async function generateExternalHitProbes(options = {}) {
     }
     : await importDefaultDependencies();
   const startsByUnit = normalizeSurfaceStarts(args, input.components);
-  const trianglesByUnit = args.trianglesByUnit
-    ? normalizeDirectTriangles(args.trianglesByUnit, input.components)
-    : (await loadTrianglesFromGlbs({
+  const loadedTriangles = args.trianglesByUnit
+    ? {
+      triangleStore: compactDirectTriangles(args.trianglesByUnit, input.components),
+      totals: { source: 'direct', retainedTriangleObjects: 0 },
+    }
+    : await loadTrianglesFromGlbs({
       dependencies,
       input,
       assetsDir: args.assetsDir,
       progressEvery: args.progressEvery,
-    })).trianglesByUnit;
-  const bvhIndex = buildTriangleBvh(dependencies.THREE, trianglesByUnit, args.MeshBVH || MeshBVH);
+      gcEvery: args.gcEvery,
+      triangleChunkCapacity: args.triangleChunkCapacity,
+    });
+  const bvhIndex = buildTriangleBvh(dependencies.THREE, loadedTriangles.triangleStore, args.MeshBVH || MeshBVH);
+  const geometryStats = {
+    ...loadedTriangles.totals,
+    ...bvhIndex.memoryStats,
+  };
   const progressPath = path.join(args.outputDir, '.external_hit_probe_progress.json');
   const completed = args.resume ? readProgress(progressPath, selectedUnitIds, manifest) : new Set();
   const resumedFromProgress = completed.size > 0;
@@ -1117,7 +1301,13 @@ export async function generateExternalHitProbes(options = {}) {
   assert(completed.size === selectedUnits.length, 'external-hit probe generation did not complete all selected units');
   writeJsonAtomically(args.manifestPath, manifest);
   fs.rmSync(progressPath, { force: true });
-  return { outputDir: args.outputDir, manifestPath: args.manifestPath, manifest, resumed: resumedFromProgress };
+  return {
+    outputDir: args.outputDir,
+    manifestPath: args.manifestPath,
+    manifest,
+    resumed: resumedFromProgress,
+    geometryStats,
+  };
 }
 
 function readManifestForDirectory(directory) {
@@ -1246,6 +1436,8 @@ export function parseArgs(argv = process.argv) {
     shardCount: null,
     resume: true,
     progressEvery: 50,
+    gcEvery: 0,
+    triangleChunkCapacity: 262144,
     help: false,
   };
   for (let index = 2; index < argv.length; index += 1) {
@@ -1277,6 +1469,8 @@ export function parseArgs(argv = process.argv) {
     else if (key === '--shard-index') args.shardIndex = asNonNegativeInteger(value, 'shard-index');
     else if (key === '--shard-count') args.shardCount = asPositiveInteger(value, 'shard-count');
     else if (key === '--progress-every') args.progressEvery = asNonNegativeInteger(value, 'progress-every');
+    else if (key === '--gc-every') args.gcEvery = asNonNegativeInteger(value, 'gc-every');
+    else if (key === '--triangle-chunk-capacity') args.triangleChunkCapacity = asPositiveInteger(value, 'triangle-chunk-capacity');
     else throw new Error(`unknown argument ${key}`);
   }
   return args;
@@ -1298,6 +1492,8 @@ Options:
   --shard-count N           Number of shards.
   --resume / --no-resume    Resume from the progress sidecar (default on).
   --progress-every N        Progress interval in GLBs/units; zero disables it.
+  --gc-every N              Call exposed V8 GC every N decoded GLBs (default 0).
+  --triangle-chunk-capacity N  Triangles per compact typed-array chunk (default 262144).
 `);
 }
 
@@ -1315,6 +1511,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
         numUnits: result.manifest.numUnits,
         rowCount: result.manifest.rowCount,
         resumed: result.resumed,
+        geometryStats: result.geometryStats,
       }, null, 2));
     }
   } catch (error) {

@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as THREE from '../../../slm2viewer/node_modules/three/build/three.module.js';
 import {
   buildTriangleBvh,
+  CompactTriangleStore,
   generateExternalHitProbes,
   mergeExternalHitProbeShards,
   readColumnarProbeAsset,
@@ -194,6 +195,8 @@ try {
     [1, boxTriangles([3, 0, 0], [4, 1, 1])],
   ]);
   const bvhIndex = buildTriangleBvh(THREE, unitTriangles);
+  assert.equal('triangles' in bvhIndex, false, 'BVH index must not retain per-triangle JS objects');
+  assert.equal(bvhIndex.memoryStats.retainedTriangleObjects, 0);
   const exactHit = traceNearestExternalHit({
     THREE,
     bvhIndex,
@@ -235,6 +238,30 @@ try {
   });
   assert.equal(selfOnly, null, 'all triangles from the current unit must be skipped');
 
+  // Scale smoke: the scene store grows in fixed typed-array chunks.  This
+  // deliberately exercises more than one chunk without retaining 10k object
+  // records, which is the failure mode seen on the real Viking scene.
+  const scaleStore = new CompactTriangleStore({ chunkTriangleCapacity: 257 });
+  const scaleTriangle = { a: [0, 0, 0], b: [1, 0, 0], c: [0, 1, 0] };
+  for (let index = 0; index < 10000; index += 1) {
+    scaleStore.appendTriangle(index % 3, scaleTriangle);
+  }
+  const scaleStorage = scaleStore.storageStats();
+  assert.ok(scaleStorage.chunkCount > 1, 'scale smoke must allocate multiple typed-array chunks');
+  assert.equal(scaleStorage.triangleObjectCount, 0);
+  assert.equal(scaleStorage.typedArrayBytes, 10000 * (9 * 4 + 4));
+  console.log(
+    `[scale-smoke] triangles=${scaleStorage.triangleCount}`
+    + ` chunks=${scaleStorage.chunkCount}`
+    + ` typedArrayBytes=${scaleStorage.typedArrayBytes}`
+    + ` retainedTriangleObjects=${scaleStorage.triangleObjectCount}`,
+  );
+  const scaleBvh = buildTriangleBvh(THREE, scaleStore);
+  assert.equal(scaleBvh.memoryStats.retainedTriangleObjects, 0);
+  assert.equal(scaleBvh.geometry.getAttribute('position').array instanceof Float32Array, true);
+  assert.equal(scaleBvh.triangleUnitIds instanceof Uint32Array, true);
+  scaleBvh.geometry.dispose();
+
   const common = {
     assetsDir: root,
     runtimeMetaPath: path.join(root, 'runtimeVisibilityMeta.json'),
@@ -251,6 +278,8 @@ try {
   assert.equal(full.manifest.schema, 'parallel_external_hit_current_status-v1');
   assert.equal(full.manifest.numUnits, 2);
   assert.equal(full.manifest.rowCount, 2 * 16 * 36);
+  assert.equal(full.geometryStats.retainedTriangleObjects, 0);
+  assert.equal(full.geometryStats.storage, 'buffer_geometry_float32_positions_uint32_unit_ids');
   assert.deepEqual(Object.keys(full.manifest.files).sort(), [
     'directionIds', 'directions', 'hitDistances', 'maxDistances', 'startIds', 'unitIds',
   ]);
