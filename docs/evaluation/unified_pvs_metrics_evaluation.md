@@ -166,18 +166,19 @@ ROC-AUC 同样分别报告 pose-macro 和 aggregate。由于大量负例会让 R
 
 `weighted ROC-AUC` 只对正例使用 `visible_weights`，用于检查重要可见实例的排序；它不惩罚安全阈值下的过量 FP，不能替代 precision、useful cull 或资源指标。
 
-## 5. 冻结安全工作点指标
+## 5. 冻结 weighted-recall 工作点指标
 
 ### 5.1 阈值和 split
 
-每个 checkpoint 使用自己的 calibration split 冻结阈值。当前安全门为：
+每个 checkpoint 使用自己的 calibration split 冻结阈值。选择顺序为：
 
 ```text
-calibration aggregate weighted recall > 0.99
-calibration aggregate weighted recall 的单侧 95% 置信下界 > 0.99
+第一层：选择 aggregate weighted recall 和单侧 95% LCB 均 > 0.99 的最高阈值
+第二层：若第一层不存在，选择 aggregate weighted recall > 0.99 的最高阈值
+第三层：若平均 WR 也未达标，仅保留为诊断结果
 ```
 
-Validation 使用同一冻结阈值报告 weighted recall，并用于比较 checkpoint 或配置；它不能重选阈值。Test 只能在模型、阈值、候选协议和资产全部冻结后读取一次。
+LCB 是置信度目标和评价指标，不是平均 WR 已达标结果的硬否决门。Validation 使用同一冻结阈值报告 weighted recall 和 LCB，并用于比较 checkpoint 或配置；它不能重选阈值。Test 只能在模型、阈值、候选协议和资产全部冻结后读取一次。
 
 固定阈值 `0.5`、best-F1 阈值和最高 precision 阈值只作为分布诊断，不是安全主工作点。低阈值必须结合分数分布解释，但不能通过 bias 或 temperature 把阈值移动到中间后宣称模型改善。
 
@@ -186,8 +187,8 @@ Validation 使用同一冻结阈值报告 weighted recall，并用于比较 chec
 | 指标 | Pose-macro 定义 | Aggregate 定义 | 作用 |
 |---|---|---|---|
 | 普通 recall | `mean(TP_p / |G_p|)` | `sum(TP) / sum(|G|)` | 诊断普通实例覆盖，必须报告 |
-| weighted recall | `mean(wTP_p / wG_p)` | `sum(wTP) / sum(wG)` | 当前画面安全主指标 |
-| weighted recall LCB | 对 pose 重采样后的单侧 95% 下界 | 对 pose 的加权 TP/GT 和重采样后的单侧 95% 下界 | 安全余量，不是双侧差值 CI |
+| weighted recall | `mean(wTP_p / wG_p)` | `sum(wTP) / sum(wG)` | 画面重要性召回主指标和 `0.99` 保留条件 |
+| weighted recall LCB | 对 pose 重采样后的单侧 95% 下界 | 对 pose 的加权 TP/GT 和重采样后的单侧 95% 下界 | 置信度目标和不确定性指标，不是硬否决门 |
 | bad cull | `mean(FN_p / |C_p|)` | `sum(FN) / sum(|C|)` | 错误剔除占候选的比例 |
 | FN / GT | `mean(FN_p / |G_p|)` | `sum(FN) / sum(|G|)` | 与普通 recall 等价的漏检风险表达 |
 
@@ -261,7 +262,7 @@ pose 主导。本文增加候选归一化遮挡召回率：
 | CNOR | `N_p/C_p` | 候选规模归一化后的实际剔除机会利用率 |
 
 论文正文以 CNOR 作为跨 pose 的主要遮挡效率指标，同时保留 pose-macro 和 aggregate
-Occlusion Recall 作为诊断。CNOR 不参与画面安全门，也不替代 `Useful Cull = TN/C`：
+Occlusion Recall 作为诊断。CNOR 不替代 weighted recall、LCB 或 `Useful Cull = TN/C`：
 前者比较机会利用率，后者直接表示全部候选中正确剔除的绝对比例。
 
 ### 5.6 面向图形学读者的遮挡术语
@@ -400,7 +401,7 @@ D_g=\min_{i\in g}D_i.
 ```text
 三种子 mean ± sample standard deviation
 每个 seed 的 checkpoint epoch 和冻结阈值
-安全门通过种子数，例如 3/3
+三个资格层级各自的种子数
 ```
 
 消融差值使用相同 seed、相同 pose 的 paired bootstrap：先按 seed 聚类，再在 seed 内重采样 pose，至少 `10,000` 次。差值报告：
@@ -444,7 +445,7 @@ Pose-macro 是论文叙述“平均视点”的主口径；aggregate 必须同�
 
 每项创新至少报告：
 
-- 安全工作点 weighted recall 及 LCB；
+- 冻结工作点 weighted recall、LCB 和资格层级；
 - pose-macro 和 aggregate PR-AUC；
 - pose-macro 和 aggregate precision、recall、balanced accuracy；
 - useful cull、bad cull、平均预测数和 GLB 字节；
@@ -452,7 +453,7 @@ Pose-macro 是论文叙述“平均视点”的主口径；aggregate 必须同�
 - 图像 miss-pixel 与运行资产/延迟；
 - 相对完整模型的 paired-bootstrap 差值和 95% CI。
 
-安全门不合格的成员仍需报告，但标注“没有合格安全工作点”，不能降低安全要求后继续参与主排名。
+平均 WR 达标但 LCB 目标未达的成员仍是保留结果，标注“平均 WR 达标、LCB 目标未达”；平均 WR 未达 `0.99` 的成员标注为诊断结果。主表必须同时显示 WR、LCB 和资格层级，不能只显示一个布尔安全列。
 
 ### 8.4 附录
 
@@ -475,7 +476,7 @@ Pose-macro 是论文叙述“平均视点”的主口径；aggregate 必须同�
 - [ ] 同时报 precision、specificity、accuracy 和 balanced accuracy；
 - [ ] PR-AUC 标明 pose-macro 或 aggregate，并给出同口径正样本比例；
 - [ ] 同时报 useful cull、bad cull 和平均预测数；
-- [ ] 同时报 CNOR，并说明它不替代 weighted-recall 安全门或 Useful Cull；
+- [ ] 同时报 CNOR，并说明它不替代 weighted recall、LCB 或 Useful Cull；
 - [ ] 同时报图像漏检、GLB 数/字节和运行资产/延迟，缺失项写 `not_available`；
 - [ ] Streaming 明确 utility 来源、完整 candidate GLB 集合、冷缓存、GLB 完整到达语义和排序公式；
 - [ ] 成本指数及其他调度参数只由 calibration/validation 确定，test 不参与规则选择；

@@ -156,10 +156,10 @@ class ViewcellSplitSourceTests(unittest.TestCase):
             summary.write_text(
                 json.dumps(
                     {
-                        "schema": "pvs-v4-exact-calibration-v1",
+                        "schema": "pvs-v4-exact-calibration-v2",
                         "split": "calibration",
                         "testRead": False,
-                        "status": "safe",
+                        "status": "confidence_target_met",
                         "checkpoint": str(checkpoint),
                         "selected": {
                             "threshold": 0.5945901871,

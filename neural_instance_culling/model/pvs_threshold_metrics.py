@@ -12,7 +12,7 @@ from common.culling_metrics import candidate_normalized_occlusion_recall
 from common.exact_calibration import (
     EXACT_THRESHOLD_SOURCE,
     FixedPoseBootstrap,
-    select_highest_safe_score_change_point,
+    select_highest_recall_target_score_change_point,
 )
 
 
@@ -693,7 +693,7 @@ def evaluate_exact_calibration(
         labels = _open_exact_array(stream["paths"]["labels"], "<f4", count)
         weights = _open_exact_array(stream["paths"]["weights"], "<f4", count)
         candidate_ids = _open_exact_array(stream["paths"]["candidateIds"], "<u4", count)
-        selection = select_highest_safe_score_change_point(
+        selection = select_highest_recall_target_score_change_point(
             scores,
             labels,
             weights,
@@ -753,6 +753,7 @@ def evaluate_thresholds(
     collect_raw_scores: bool = False,
     instance_to_glb: np.ndarray | None = None,
     glb_bytes: np.ndarray | None = None,
+    target_weighted_recall: float = 0.99,
 ) -> list[dict[str, Any]]:
     if collect_raw_scores and not collect_per_pose:
         raise ValueError("raw score capture requires per-pose collection")
@@ -775,6 +776,7 @@ def evaluate_thresholds(
             collect_raw_scores=collect_raw_scores,
             instance_to_glb=instance_to_glb,
             glb_bytes=glb_bytes,
+            target_weighted_recall=target_weighted_recall,
         )
     model.eval()
     rng = np.random.default_rng(seed)

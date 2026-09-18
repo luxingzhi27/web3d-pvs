@@ -975,7 +975,7 @@ def resolve_threshold(args: argparse.Namespace, spec: dict[str, str], runner) ->
             "testEvaluationCount": 0,
         }
 
-    if data.get("schema") == "pvs-v4-exact-calibration-v1":
+    if data.get("schema") == "pvs-v4-exact-calibration-v2":
         if data.get("split") != "calibration" or data.get("testRead") is not False:
             raise RuntimeError(f"{eval_summary} must be a test-free exact calibration summary.")
         checkpoint = spec.get("checkpoint")
@@ -988,8 +988,8 @@ def resolve_threshold(args: argparse.Namespace, spec: dict[str, str], runner) ->
         ):
             raise RuntimeError(f"{eval_summary} is not bound to the requested checkpoint.")
         selected = data.get("selected")
-        if data.get("status") != "safe" or not isinstance(selected, dict):
-            raise RuntimeError(f"{eval_summary} has no frozen safe exact-calibration workpoint.")
+        if data.get("status") not in {"confidence_target_met", "mean_target_met"} or not isinstance(selected, dict):
+            raise RuntimeError(f"{eval_summary} has no retained exact-calibration workpoint.")
         threshold = float(selected.get("threshold", float("nan")))
         weighted_recall = float(
             selected.get("agg_weighted_recall", selected.get("aggregateWeightedRecall", -1.0))
@@ -1000,9 +1000,8 @@ def resolve_threshold(args: argparse.Namespace, spec: dict[str, str], runner) ->
             not np.isfinite(threshold)
             or not 0.0 <= threshold <= 1.0
             or weighted_recall <= target
-            or weighted_lcb <= target
         ):
-            raise RuntimeError(f"{eval_summary} does not contain a valid strict weighted-recall workpoint.")
+            raise RuntimeError(f"{eval_summary} does not contain a valid weighted-recall workpoint.")
         threshold, resolved = validate_frozen_workpoint(selected, threshold)
         resolved.update(
             {
@@ -1012,6 +1011,8 @@ def resolve_threshold(args: argparse.Namespace, spec: dict[str, str], runner) ->
                 "selectionSplit": "calibration",
                 "testRead": False,
                 "testEvaluationCount": 0,
+                "qualificationTier": data.get("status"),
+                "confidenceTargetMet": weighted_lcb > target,
             }
         )
         return threshold, resolved

@@ -29,7 +29,7 @@ from common.runtime_meta import load_runtime_meta  # noqa: E402
 from common.exact_calibration import (  # noqa: E402
     EXACT_THRESHOLD_SOURCE,
     FixedPoseBootstrap,
-    select_highest_safe_score_change_point,
+    select_highest_recall_target_score_change_point,
 )
 from pvs_model import (  # noqa: E402
     BoundedRelationSurvivalMomentModel,
@@ -47,8 +47,8 @@ CHECKPOINT_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-check
 TRAINING_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-training-v4"
 SCORE_SIDECAR_SCHEMA = "pvs-v4-calibration-score-sidecar-v1"
 BOOTSTRAP_SCHEMA = "pvs-v4-fixed-pose-bootstrap-v1"
-CALIBRATION_SCHEMA = "pvs-v4-exact-calibration-v1"
-VALIDATION_SCHEMA = "pvs-v4-frozen-threshold-validation-v1"
+CALIBRATION_SCHEMA = "pvs-v4-exact-calibration-v2"
+VALIDATION_SCHEMA = "pvs-v4-frozen-threshold-validation-v2"
 WEIGHTED_RECALL_FLOOR = 0.99
 FORMAL_BOOTSTRAP_REPLICATES = 10_000
 FORMAL_BOOTSTRAP_SEED = 20260909
@@ -731,7 +731,7 @@ def _calibrate(args: argparse.Namespace) -> dict[str, Any]:
         seed=seed,
         indices=bootstrap,
     )
-    selection = select_highest_safe_score_change_point(
+    selection = select_highest_recall_target_score_change_point(
         np.asarray(sidecar.scores),
         np.asarray(sidecar.labels),
         np.asarray(sidecar.weights),
@@ -782,8 +782,8 @@ def _evaluate_frozen(args: argparse.Namespace) -> dict[str, Any]:
     calibration = _read_json(Path(args.calibration).resolve())
     if calibration.get("schema") != CALIBRATION_SCHEMA or calibration.get("testRead") is not False:
         raise ValueError("frozen validation requires an exact, test-free calibration summary")
-    if calibration.get("status") != "safe":
-        raise ValueError("validation replay requires a calibration checkpoint with a safe threshold")
+    if calibration.get("status") not in {"confidence_target_met", "mean_target_met"}:
+        raise ValueError("validation replay requires a calibration threshold meeting the mean WR target")
     selection = calibration.get("selection")
     if not isinstance(selection, Mapping):
         raise ValueError("calibration summary has no frozen selection")

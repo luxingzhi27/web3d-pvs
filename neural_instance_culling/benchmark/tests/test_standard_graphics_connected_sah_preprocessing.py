@@ -20,6 +20,7 @@ from neural_instance_culling.benchmark.run_standard_graphics_connected_sah_prepr
 )
 from neural_instance_culling.benchmark.standard_graphics_connected_sah_config import (
     EXPERIMENT,
+    DEFAULT_SCENES,
     OUTPUT_ROOT,
     POINTS_PER_GLB,
     RELATION_K,
@@ -42,11 +43,18 @@ class ConnectedSahPreprocessingTests(unittest.TestCase):
         self.assertEqual(EXPERIMENT, "pvs_v4_standard_graphics_connected_sah_128k_v1")
         self.assertEqual(SEEDS, (20260801, 20260802, 20260803))
         self.assertEqual(OUTPUT_ROOT.name, "standard_graphics_connected_sah_128k_v1")
-        self.assertEqual(set(SCENES), {"sponza_128k", "viking_village_128k", "bigcity_128k"})
+        self.assertEqual(DEFAULT_SCENES, ("sponza_128k", "viking_village_128k", "bigcity_128k"))
+        self.assertEqual(
+            set(SCENES),
+            {*DEFAULT_SCENES, "bigcity_64k", "sponza_64k", "viking_village_64k"},
+        )
         expected_source_names = {
             "sponza_128k": "Sponza.gltf",
             "viking_village_128k": "VikingVillage.glb",
             "bigcity_128k": "scene.gltf",
+            "bigcity_64k": "scene.gltf",
+            "sponza_64k": "Sponza.gltf",
+            "viking_village_64k": "VikingVillage.glb",
         }
         for scene, config in SCENES.items():
             with self.subTest(scene=scene):
@@ -67,6 +75,9 @@ class ConnectedSahPreprocessingTests(unittest.TestCase):
             "sponza_128k": {"train": 4800, "calibration": 528, "validation": 672, "test": 672, "guard": 0},
             "viking_village_128k": {"train": 1944, "calibration": 216, "validation": 276, "test": 276, "guard": 0},
             "bigcity_128k": {"train": 11580, "calibration": 1284, "validation": 1608, "test": 1608, "guard": 0},
+            "bigcity_64k": {"train": 11580, "calibration": 1284, "validation": 1608, "test": 1608, "guard": 0},
+            "sponza_64k": {"train": 4800, "calibration": 528, "validation": 672, "test": 672, "guard": 0},
+            "viking_village_64k": {"train": 1944, "calibration": 216, "validation": 276, "test": 276, "guard": 0},
         }
         for scene, config in SCENES.items():
             with self.subTest(scene=scene):
@@ -82,11 +93,18 @@ class ConnectedSahPreprocessingTests(unittest.TestCase):
                 self.assertIn("write_slm_scene.mjs", convert_text)
                 self.assertIn(str(SCENES[scene]["source"]), convert_text)
                 self.assertIn(str(SCENES[scene]["assets"]), convert_text)
-                self.assertEqual(convert[convert.index("--target-unit-kib") + 1], "128")
+                self.assertEqual(
+                    convert[convert.index("--target-unit-kib") + 1],
+                    str(SCENES[scene]["target_unit_kib"]),
+                )
                 for command in geometry_commands(scene):
                     self.assertEqual(command[command.index("--points-per-glb") + 1], str(POINTS_PER_GLB))
                 self.assertIn("prepare_fixed_geometry_features.py", " ".join(geometry_commands(scene)[1]))
                 self.assertEqual(geometry_commands(scene)[1][geometry_commands(scene)[1].index("--device") + 1], "cuda")
+        bigcity_64k = stage_commands("bigcity_64k", "convert")[0][1]
+        self.assertEqual(bigcity_64k[bigcity_64k.index("--max-components-per-unit") + 1], "128")
+        viking_64k = stage_commands("viking_village_64k", "convert")[0][1]
+        self.assertEqual(viking_64k[viking_64k.index("--max-components-per-unit") + 1], "128")
 
     def test_color_id_command_uses_existing_plan_and_formal_wrapper(self) -> None:
         command = stage_commands("bigcity_128k", "color-id")[0][1]

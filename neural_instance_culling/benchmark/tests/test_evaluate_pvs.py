@@ -189,7 +189,7 @@ class PvsV4EvaluatorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             evaluator._frozen_threshold(checkpoint, summary, allow_unsafe=False)
 
-    def test_exact_calibration_is_checkpoint_specific_and_safe(self) -> None:
+    def test_exact_calibration_is_checkpoint_specific_and_confidence_qualified(self) -> None:
         checkpoint = Path("/tmp/member/last.pt")
         selected = {
             "threshold": 0.5945902,
@@ -202,25 +202,32 @@ class PvsV4EvaluatorTests(unittest.TestCase):
             "split": "calibration",
             "checkpoint": str(checkpoint),
             "predictionRule": "score >= threshold",
-            "status": "safe",
-            "selection": {"threshold": selected["threshold"]},
+            "status": "confidence_target_met",
+            "selection": {
+                "threshold": selected["threshold"],
+                "confidenceTargetMet": True,
+            },
             "selected": selected,
             "testRead": False,
         }
         threshold, source = evaluator._exact_frozen_threshold(checkpoint, summary)
         self.assertAlmostEqual(threshold, selected["threshold"])
         self.assertEqual(source["protocol"], "checkpoint_specific_exact_calibration")
-        self.assertTrue(source["safeWorkpoint"])
+        self.assertTrue(source["meanTargetMet"])
+        self.assertTrue(source["confidenceTargetMet"])
 
         wrong = copy.deepcopy(summary)
         wrong["checkpoint"] = "/tmp/member/other.pt"
         with self.assertRaisesRegex(ValueError, "different checkpoint"):
             evaluator._exact_frozen_threshold(checkpoint, wrong)
 
-        unsafe = copy.deepcopy(summary)
-        unsafe["selected"]["aggregateWeightedRecallLowerConfidenceBound"] = 0.99
-        with self.assertRaisesRegex(ValueError, "safety gate"):
-            evaluator._exact_frozen_threshold(checkpoint, unsafe)
+        mean_only = copy.deepcopy(summary)
+        mean_only["status"] = "mean_target_met"
+        mean_only["selection"]["confidenceTargetMet"] = False
+        mean_only["selected"]["aggregateWeightedRecallLowerConfidenceBound"] = 0.989
+        _threshold, mean_source = evaluator._exact_frozen_threshold(checkpoint, mean_only)
+        self.assertTrue(mean_source["meanTargetMet"])
+        self.assertFalse(mean_source["confidenceTargetMet"])
 
     def test_v4_evaluator_rejects_a_legacy_checkpoint_before_asset_access(self) -> None:
         args = argparse.Namespace()
@@ -248,6 +255,7 @@ class PvsV4EvaluatorTests(unittest.TestCase):
         }
         args = argparse.Namespace(
             recalibration_bootstrap_replicates=123,
+            recalibration_weighted_recall_floor=0.991,
             poses_per_batch=2,
             seed=20260801,
         )
@@ -260,12 +268,7 @@ class PvsV4EvaluatorTests(unittest.TestCase):
             mock.patch.object(
                 evaluator,
                 "select_aggregate_weighted_cull_workpoint",
-                return_value=selected,
-            ),
-            mock.patch.object(
-                evaluator,
-                "threshold_grid",
-                return_value=np.asarray([0.001, 0.0125], dtype=np.float32),
+                side_effect=[selected],
             ),
         ):
             payload = evaluator._diagnostic_recalibration(
@@ -285,10 +288,15 @@ class PvsV4EvaluatorTests(unittest.TestCase):
         validation_call = evaluate.call_args_list[1]
         self.assertIs(calibration_call.args[1], calibration_split)
         self.assertEqual(calibration_call.kwargs["bootstrap_replicates"], 123)
+        self.assertIsNone(calibration_call.kwargs["thresholds"])
+        self.assertEqual(calibration_call.kwargs["target_weighted_recall"], 0.991)
         self.assertIs(validation_call.args[1], validation_split)
         self.assertEqual(validation_call.kwargs["bootstrap_replicates"], 123)
         self.assertEqual(validation_call.kwargs["thresholds"].tolist(), [np.float32(0.0125)])
-        self.assertEqual(payload["selectedSafe"]["threshold"], 0.0125)
+        self.assertEqual(payload["selectedRetained"]["threshold"], 0.0125)
+        self.assertTrue(payload["confidenceTargetMet"])
+        self.assertTrue(payload["validationQualification"]["meanTargetMet"])
+        self.assertEqual(payload["targetWeightedRecall"], 0.991)
         self.assertEqual(
             payload["validationAtSelectedThreshold"][
                 "aggregateWeightedRecallLowerConfidenceBound"

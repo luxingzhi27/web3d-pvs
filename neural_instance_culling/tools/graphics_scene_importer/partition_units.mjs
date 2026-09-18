@@ -632,6 +632,7 @@ async function partitionComponentGroups(
   componentData,
   componentOrder,
   targetBytes,
+  maxComponentsPerUnit,
   remapper,
   emit,
 ) {
@@ -661,7 +662,7 @@ async function partitionComponentGroups(
       const component = order[index];
       triangleCount += connected.componentOffsets[component + 1] - connected.componentOffsets[component];
     }
-    if (triangleCount <= MAX_GEOMETRY_PROBE_TRIANGLES) {
+    if (order.length <= maxComponentsPerUnit && triangleCount <= MAX_GEOMETRY_PROBE_TRIANGLES) {
       const sourceTriangleIds = sourceTrianglesForComponents(
         order,
         connected.componentOffsets,
@@ -699,6 +700,9 @@ async function partitionComponentGroups(
 
 export async function partitionRenderable(renderable, options = {}) {
   const targetBytes = positiveInteger(options.targetBytes ?? TARGET_UNIT_BYTES, 'targetBytes');
+  const maxComponentsPerUnit = options.maxComponentsPerUnit == null
+    ? Infinity
+    : positiveInteger(options.maxComponentsPerUnit, 'maxComponentsPerUnit');
   if (!renderable || renderable.indices.length % 3 !== 0) throw new Error('renderable must contain triangle indices');
   if (renderable.positions.length % 3 !== 0) throw new Error('renderable positions must contain xyz triples');
   const connected = unionFindComponents(renderable);
@@ -725,6 +729,7 @@ export async function partitionRenderable(renderable, options = {}) {
     componentData,
     componentOrder,
     targetBytes,
+    maxComponentsPerUnit,
     remapper,
     emit,
   );
@@ -733,6 +738,9 @@ export async function partitionRenderable(renderable, options = {}) {
 
 export async function partitionScene(scene, options = {}) {
   const targetBytes = positiveInteger(options.targetBytes ?? TARGET_UNIT_BYTES, 'targetBytes');
+  const maxComponentsPerUnit = options.maxComponentsPerUnit == null
+    ? null
+    : positiveInteger(options.maxComponentsPerUnit, 'maxComponentsPerUnit');
   const allRenderables = [...(scene.renderables || [])];
   const blendExcluded = allRenderables
     .filter((item) => item.material?.alphaMode === 'BLEND')
@@ -760,6 +768,7 @@ export async function partitionScene(scene, options = {}) {
     let renderableComponentCount = 0;
     const parts = await partitionRenderable(renderables[renderableIndex], {
       targetBytes,
+      maxComponentsPerUnit,
       onPart: options.onUnit
         ? async (part) => {
           renderableComponentCount = part.sourceComponentCount;
@@ -768,6 +777,7 @@ export async function partitionScene(scene, options = {}) {
             unitId: unitCount,
             sourceRenderableIndex: renderableIndex,
             targetUnitBytes: targetBytes,
+            maxComponentsPerUnit,
           };
           if (unit.oversize) {
             oversizeUnitCount += 1;
@@ -794,6 +804,7 @@ export async function partitionScene(scene, options = {}) {
           unitId: unitCount,
           sourceRenderableIndex: renderableIndex,
           targetUnitBytes: targetBytes,
+          maxComponentsPerUnit,
         };
         if (unit.oversize) {
           oversizeUnitCount += 1;
@@ -821,6 +832,7 @@ export async function partitionScene(scene, options = {}) {
       binCount: SAH_BIN_COUNT,
       maxGeometryProbeTriangles: MAX_GEOMETRY_PROBE_TRIANGLES,
       targetUnitBytes: targetBytes,
+      maxComponentsPerUnit,
       componentCount,
       packedMultiComponentUnitCount,
       packedComponentCount,

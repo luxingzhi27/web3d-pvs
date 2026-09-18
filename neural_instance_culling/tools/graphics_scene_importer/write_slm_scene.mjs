@@ -341,6 +341,9 @@ function unitRecord(unit, writeResult, relativePath) {
 export async function writeSlmScene(scene, outputAssets, options = {}) {
   const resolvedOutput = path.resolve(outputAssets);
   const targetUnitBytes = Number(options.targetBytes ?? TARGET_UNIT_BYTES);
+  const maxComponentsPerUnit = options.maxComponentsPerUnit == null
+    ? null
+    : Number(options.maxComponentsPerUnit);
   const sceneBounds = sceneBoundsOrEmpty(scene.sceneBounds);
   const sceneName = options.sceneName || path.basename(scene.source?.filePath || 'graphics_scene').replace(/\.(gltf|glb)$/i, '');
   prepareOutput(resolvedOutput, Boolean(options.overwrite));
@@ -356,6 +359,7 @@ export async function writeSlmScene(scene, outputAssets, options = {}) {
   const unitRecords = [];
   const conversion = await partitionScene(scene, {
     targetBytes: targetUnitBytes,
+    maxComponentsPerUnit,
     retainUnits: false,
     onUnit: async (unit) => {
       const relativePath = `task-0/glb/LOD0/sub_${unit.unitId}.glb`;
@@ -411,6 +415,7 @@ export async function writeSlmScene(scene, outputAssets, options = {}) {
     sceneName,
     source: scene.source,
     targetUnitBytes,
+    maxComponentsPerUnit,
     partitionSchema: PARTITION_SCHEMA,
     componentCount: conversion.componentCount,
     partition: conversion.partition,
@@ -440,6 +445,7 @@ export async function writeSlmScene(scene, outputAssets, options = {}) {
       partitionSchema: PARTITION_SCHEMA,
       componentCount: conversion.componentCount,
       targetUnitBytes,
+      maxComponentsPerUnit,
       renderableUnitSemantics: 'shared-vertex connected components packed by deterministic 16-bin SAH to the encoded geometry target; oversized components split internally',
       bounds: { center: sceneBounds.center, size: sceneBounds.size },
     },
@@ -493,13 +499,14 @@ export async function writeSlmScene(scene, outputAssets, options = {}) {
 export const buildSlmScene = writeSlmScene;
 
 function parseArgs(argv) {
-  const values = { overwrite: false, targetBytes: TARGET_UNIT_BYTES };
+  const values = { overwrite: false, targetBytes: TARGET_UNIT_BYTES, maxComponentsPerUnit: null };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--input') values.input = argv[++index];
     else if (argument === '--output-assets') values.outputAssets = argv[++index];
     else if (argument === '--scene-name') values.sceneName = argv[++index];
     else if (argument === '--target-unit-kib') values.targetBytes = Number(argv[++index]) * 1024;
+    else if (argument === '--max-components-per-unit') values.maxComponentsPerUnit = Number(argv[++index]);
     else if (argument === '--overwrite') values.overwrite = true;
     else if (argument === '--help') values.help = true;
     else throw new Error(`unknown argument: ${argument}`);
@@ -510,7 +517,7 @@ function parseArgs(argv) {
 export async function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   if (args.help) {
-    console.log('Usage: node write_slm_scene.mjs --input scene.gltf|scene.glb --output-assets DIR [--target-unit-kib 128] [--overwrite]');
+    console.log('Usage: node write_slm_scene.mjs --input scene.gltf|scene.glb --output-assets DIR [--target-unit-kib 128] [--max-components-per-unit 128] [--overwrite]');
     return;
   }
   if (!args.input || !args.outputAssets) throw new Error('--input and --output-assets are required');

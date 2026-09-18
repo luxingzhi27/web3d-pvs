@@ -12,6 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 EXPERIMENT = "pvs_v4_standard_graphics_connected_sah_128k_v1"
 SEEDS = (20260801, 20260802, 20260803)
+DEFAULT_SCENES = ("sponza_128k", "viking_village_128k", "bigcity_128k")
 
 TARGET_UNIT_KIB = 128
 POINTS_PER_GLB = 1024
@@ -95,15 +96,24 @@ _DEPTH_SHARD_COUNTS = {
 }
 
 
-def _scene_config(scene: str) -> dict[str, object]:
-    scene_root = OUTPUT_ROOT / scene
+def _scene_config(
+    scene: str,
+    *,
+    source_scene: str | None = None,
+    output_root: Path = OUTPUT_ROOT,
+    target_unit_kib: int = TARGET_UNIT_KIB,
+    max_components_per_unit: int | None = None,
+    experiment: str = EXPERIMENT,
+) -> dict[str, object]:
+    source_scene = source_scene or scene
+    scene_root = output_root / scene
     assets = scene_root / "assets"
     dataset = scene_root / "pose_csr"
     depth_root = scene_root / "depth_manifest"
-    split_counts = dict(_SPLIT_COUNTS[scene])
+    split_counts = dict(_SPLIT_COUNTS[source_scene])
     return {
         "scene": scene,
-        "source": _SOURCE_FILES[scene],
+        "source": _SOURCE_FILES[source_scene],
         "scene_root": scene_root,
         "assets": assets,
         "conversion_manifest": assets / "conversionManifest.json",
@@ -115,7 +125,7 @@ def _scene_config(scene: str) -> dict[str, object]:
         "glb_points_meta": scene_root / "glb_points_1024_meta.json",
         "geometry": scene_root / "instance_geo_features_fp16.bin",
         "geometry_meta": scene_root / "instance_geo_features_fp16.json",
-        "pose_plan": SAMPLING_V2_ROOT / scene / "viewcell_pose_plan.jsonl",
+        "pose_plan": SAMPLING_V2_ROOT / source_scene / "viewcell_pose_plan.jsonl",
         "color_id": scene_root / "color_id",
         "dataset": dataset,
         "source_render_manifest": scene_root / "source_render_manifest.json",
@@ -128,13 +138,41 @@ def _scene_config(scene: str) -> dict[str, object]:
         # ``splits`` follows the existing Full-runner convention.  Both names
         # describe the same fixed split contract; neither is inferred at run time.
         "splits": dict(split_counts),
-        "depth_shard_count": _DEPTH_SHARD_COUNTS[scene],
+        "depth_shard_count": _DEPTH_SHARD_COUNTS[source_scene],
         "color_id_shard_count": 16,
         "color_id_parallel": 4,
+        "target_unit_kib": target_unit_kib,
+        "max_components_per_unit": max_components_per_unit,
+        "experiment": experiment,
+        "dataset_experiment": f"{scene}_connected_sah_{target_unit_kib}k_fov66_sampling_v2",
     }
 
 
 SCENES = {
     scene: _scene_config(scene)
-    for scene in ("sponza_128k", "viking_village_128k", "bigcity_128k")
+    for scene in DEFAULT_SCENES
 }
+SCENES["bigcity_64k"] = _scene_config(
+    "bigcity_64k",
+    source_scene="bigcity_128k",
+    output_root=DATASET_OUT / "standard_graphics_connected_sah_64k_v1",
+    target_unit_kib=64,
+    max_components_per_unit=128,
+    experiment="pvs_v4_bigcity_connected_sah_64k_v1",
+)
+SCENES["sponza_64k"] = _scene_config(
+    "sponza_64k",
+    source_scene="sponza_128k",
+    output_root=DATASET_OUT / "standard_graphics_connected_sah_64k_v1",
+    target_unit_kib=64,
+    max_components_per_unit=64,
+    experiment="pvs_v4_sponza_connected_sah_64k_v1",
+)
+SCENES["viking_village_64k"] = _scene_config(
+    "viking_village_64k",
+    source_scene="viking_village_128k",
+    output_root=DATASET_OUT / "standard_graphics_connected_sah_64k_v1",
+    target_unit_kib=64,
+    max_components_per_unit=128,
+    experiment="pvs_v4_viking_connected_sah_64k_v1",
+)

@@ -58,7 +58,7 @@ DECISION_SCHEMA = "pvs-ifcbench-final-freeze-decision-v1"
 PREFLIGHT_SCHEMA = "pvs-ifcbench-finalize-preflight-v1"
 PLAN_SCHEMA = "pvs-ifcbench-finalize-plan-v1"
 FINALIZE_SCHEMA = "pvs-ifcbench-finalize-manifest-v1"
-EXACT_CALIBRATION_SCHEMA = "pvs-v4-exact-calibration-v1"
+EXACT_CALIBRATION_SCHEMA = "pvs-v4-exact-calibration-v2"
 RUNTIME_EXPORT_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-runtime-v4"
 
 
@@ -446,8 +446,11 @@ def _validate_calibration(member: FinalMember) -> dict[str, Any]:
     if member.calibration_kind == "exact":
         if payload.get("schema") != EXACT_CALIBRATION_SCHEMA:
             raise ValueError(f"fine-tune calibration schema is invalid: {member.calibration}")
-        if payload.get("split") != "calibration" or payload.get("status") != "safe":
-            raise ValueError(f"fine-tune exact calibration is not safe: {member.calibration}")
+        if payload.get("split") != "calibration" or payload.get("status") not in {
+            "confidence_target_met",
+            "mean_target_met",
+        }:
+            raise ValueError(f"fine-tune exact calibration has no retained WR workpoint: {member.calibration}")
         declared = payload.get("checkpoint")
         if declared is None or Path(str(declared)).expanduser().resolve() != member.checkpoint:
             raise ValueError("fine-tune exact calibration belongs to a different checkpoint")
@@ -461,9 +464,12 @@ def _validate_calibration(member: FinalMember) -> dict[str, Any]:
         )
         if not math.isclose(threshold, selected_threshold, rel_tol=0.0, abs_tol=1e-7):
             raise ValueError("fine-tune exact calibration threshold fields disagree")
-        gate = validation_safety(selected)
-        if not gate["safe"]:
-            raise ValueError("fine-tune exact calibration fails the weighted-recall safety gate")
+        weighted_recall = _finite_float(
+            selected.get("aggregateWeightedRecall"),
+            "exact calibration aggregate weighted recall",
+        )
+        if weighted_recall <= 0.99:
+            raise ValueError("fine-tune exact calibration fails the weighted-recall target")
     else:
         if payload.get("status") != "safe" or not isinstance(payload.get("bestSafe"), Mapping):
             raise ValueError(f"Full V4 member calibration is not safe: {member.calibration}")

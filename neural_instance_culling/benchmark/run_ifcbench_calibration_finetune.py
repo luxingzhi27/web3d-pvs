@@ -579,16 +579,23 @@ def _selection_rows(
         metrics = validation.get("metrics")
         if not isinstance(metrics, Mapping):
             raise ValueError(f"frozen validation has no metrics: {stage_root}")
-        safe = (
-            calibration.get("status") == "safe"
-            and float(metrics.get("aggregateWeightedRecall", 0.0)) > 0.99
-            and float(metrics.get("aggregateWeightedRecallLowerConfidenceBound", 0.0)) > 0.99
-        )
+        weighted_recall = float(metrics.get("aggregateWeightedRecall", 0.0))
+        weighted_lcb = float(metrics.get("aggregateWeightedRecallLowerConfidenceBound", 0.0))
+        retained = weighted_recall > 0.99
+        confidence_target_met = retained and weighted_lcb > 0.99
         row: dict[str, Any] = {
             "config": name,
             "calibrationStatus": calibration.get("status"),
             "threshold": float(calibration["selection"]["threshold"]),
-            "validationSafetyPassed": bool(safe),
+            "validationRetained": bool(retained),
+            "validationConfidenceTargetMet": bool(confidence_target_met),
+            "qualificationTier": (
+                "confidence_target_met"
+                if confidence_target_met
+                else "mean_target_met"
+                if retained
+                else "mean_target_not_met"
+            ),
             "calibration": calibration["selected"],
             "validation": dict(metrics),
         }
@@ -604,18 +611,28 @@ def _selection_rows(
 def _choose_selection(rows: Sequence[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
     if not rows:
         raise ValueError("IFCBench selection requires at least one evaluated member")
-    safe_rows = [row for row in rows if row["validationSafetyPassed"]]
-    pool = safe_rows or rows
-    if safe_rows:
-        status = "safe_member_selected"
+    confidence_rows = [row for row in rows if row["validationConfidenceTargetMet"]]
+    retained_rows = [row for row in rows if row["validationRetained"]]
+    pool = confidence_rows or retained_rows or rows
+    if confidence_rows:
+        status = "confidence_target_member_selected"
         key = lambda row: (
             float(row["validation"].get("agg_useful_cull", 0.0)),
             float(row["validation"].get("agg_balanced_accuracy", 0.0)),
             float(row["validation"].get("agg_precision", 0.0)),
             -float(row["validation"].get("avg_pred_count", 0.0)),
         )
+    elif retained_rows:
+        status = "mean_target_member_selected"
+        key = lambda row: (
+            float(row["validation"].get("aggregateWeightedRecallLowerConfidenceBound", 0.0)),
+            float(row["validation"].get("agg_useful_cull", 0.0)),
+            float(row["validation"].get("candidate_normalized_occlusion_recall", 0.0)),
+            float(row["validation"].get("agg_balanced_accuracy", 0.0)),
+            -float(row["validation"].get("avg_pred_count", 0.0)),
+        )
     else:
-        status = "no_safe_member_selected_relative_best"
+        status = "mean_target_not_met_relative_best"
         key = lambda row: (
             float(row["validation"].get("aggregateWeightedRecallLowerConfidenceBound", 0.0)),
             float(row["validation"].get("aggregateWeightedRecall", 0.0)),

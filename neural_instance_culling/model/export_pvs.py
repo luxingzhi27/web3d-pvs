@@ -31,7 +31,7 @@ MODEL_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-envelope-v
 CHECKPOINT_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-checkpoint-v4"
 TRAINING_PROTOCOL_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-training-v4"
 CALIBRATION_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-calibration-v4"
-EXACT_CALIBRATION_SCHEMA = "pvs-v4-exact-calibration-v1"
+EXACT_CALIBRATION_SCHEMA = "pvs-v4-exact-calibration-v2"
 EXPORT_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-runtime-v4"
 QUERY_WEIGHTS_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-query-weights-v4"
 
@@ -1164,8 +1164,9 @@ def _resolve_exact_threshold(
         raise ValueError("external calibration belongs to a different checkpoint")
     if calibration.get("predictionRule") != "score >= threshold":
         raise ValueError("external calibration prediction rule is invalid")
-    if calibration.get("status") != "safe":
-        raise ValueError("external calibration has no safe workpoint")
+    qualification_tier = str(calibration.get("status", ""))
+    if qualification_tier not in {"confidence_target_met", "mean_target_met"}:
+        raise ValueError("external calibration has no retained mean-WR workpoint")
     selection = _as_mapping(
         calibration.get("selection"), "exact calibration.selection"
     )
@@ -1178,11 +1179,11 @@ def _resolve_exact_threshold(
     lower_bound = _threshold_value(
         selected, "aggregateWeightedRecallLowerConfidenceBound"
     )
-    if (
-        weighted_recall <= TARGET_WEIGHTED_RECALL
-        or lower_bound <= MINIMUM_WEIGHTED_RECALL_LCB
-    ):
-        raise ValueError("external calibration workpoint fails the weighted-recall safety gate")
+    if weighted_recall <= TARGET_WEIGHTED_RECALL:
+        raise ValueError("external calibration workpoint fails the weighted-recall target")
+    confidence_target_met = lower_bound > MINIMUM_WEIGHTED_RECALL_LCB
+    if bool(selection.get("confidenceTargetMet")) != confidence_target_met:
+        raise ValueError("external calibration confidence-target metadata disagrees with its LCB")
     if (
         requested is not None
         and abs(_finite_float(requested, "--threshold") - threshold) > 1e-7
@@ -1196,8 +1197,11 @@ def _resolve_exact_threshold(
         "minimumWeightedRecallLowerConfidenceBound": MINIMUM_WEIGHTED_RECALL_LCB,
         "weightedRecallField": "aggregateWeightedRecall",
         "weightedRecallLowerConfidenceBoundField": "aggregateWeightedRecallLowerConfidenceBound",
-        "safe": True,
-        "status": "safe",
+        "qualificationTier": qualification_tier,
+        "meanTargetMet": True,
+        "confidenceTargetMet": confidence_target_met,
+        "retained": True,
+        "safe": confidence_target_met,
         "selected": _compact_workpoint(selected),
         "testEvaluationCount": 0,
     }
@@ -1567,8 +1571,16 @@ def _build_model_meta(
         "calibrationFrozenThreshold": float(threshold),
         "calibration": dict(threshold_info),
         "safety": {
-            "status": "safe" if bool(threshold_info["safe"]) else "unsafe_diagnostic",
+            "status": threshold_info.get(
+                "qualificationTier",
+                "confidence_target_met" if bool(threshold_info["safe"]) else "mean_target_not_met",
+            ),
             "safe": bool(threshold_info["safe"]),
+            "retained": bool(threshold_info.get("retained", threshold_info["safe"])),
+            "meanTargetMet": bool(threshold_info.get("meanTargetMet", threshold_info["safe"])),
+            "confidenceTargetMet": bool(
+                threshold_info.get("confidenceTargetMet", threshold_info["safe"])
+            ),
             "source": threshold_info["source"],
         },
         "provenance": {

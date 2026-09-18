@@ -1,0 +1,415 @@
+# PVS V5 泛化模型统一架构与实验规范
+
+日期：2026-09-18  
+状态：设计冻结前规范，不是性能报告  
+方法工作名：GCOF-PVS V5
+
+## 1. 设计结论
+
+V5 不继承 V4 的逐项修补路线。模型只完成一条链路：共享网络把新场景的局部几何和纯几何
+遮挡邻域编译为紧凑方向场，浏览器查询该场并输出一个实例分数。训练以“视觉安全约束下减少
+冗余保留”为单一任务目标。
+
+V5 采用两份根目录设计稿中的下列内容：
+
+- 局部表面几何编码，不复用含场景归一化位置的旧 96D 特征；
+- 纯几何方向关系图，不读取可见标签或 train-observed relation；
+- 单层关系编译器、固定低阶方向基和解析 survival field；
+- 对圆盘和定向盒都适用的 9 点区域查询；
+- 召回约束下的 GT 归一化冗余目标。
+
+V5 删除下列 V4 机制：
+
+- scene ID、instance embedding 和可学习 per-instance residual；
+- 多层 local/structural 图传播；
+- learned direction basis、spectral moment 和 boundary summary；
+- utility/download 独立任务头；
+- recall guard、CVaR、tail mining、margin curriculum 和关系辅助分类；
+- 依赖目标场景 train 分位数的深度归一化。
+
+模型输出一个连续分数。实例 PVS 使用冻结阈值，GLB 调度对同一资源的候选实例取最大分数。
+V5 不为下载排序再训练一套不相关模型。
+
+## 2. “训练一次即可用于新场景”的严格含义
+
+最终部署模型只训练一次。新场景允许执行确定性的几何预处理，包括局部表面采样、AABB
+关系构图以及共享模型前向编译；不允许使用该场景可见标签更新网络权重或实例表。
+
+把 HKUST、IFCBench、Sponza、Viking Village 和 Big City 全部加入训练，只能证明同一共享模型
+覆盖五个已知场景，不能证明未见场景泛化。论文使用三套互不混淆的协议：
+
+| 协议 | 模型训练数据 | 用途 |
+|---|---|---|
+| Shared in-domain | 五个真实场景 train + 合成训练集 | 架构选择、消融和已知场景效果 |
+| 五折 LOSO | 合成训练集 + 四个真实 source scene | 评价第五个完整未见场景 |
+| Universal final | 合成训练集 + 五个真实场景 train | 最终发布的一份通用权重 |
+
+论文还应增加一个从未参与结构选择和 LOSO 训练的新公开场景作为 blind holdout。优先选择
+Robot Lab 或 Industrial Set v3.0。Universal final 冻结后才转换该场景、生成评价 GT 并读取
+结果。没有 blind holdout 时，论文只声明“五场景 LOSO 跨场景迁移”，不声明开放世界泛化。
+
+## 3. 训练数据
+
+### 3.1 五个现有真实场景
+
+训练使用以下注册版本，每个场景只保留一个正式单位协议：
+
+| 场景 | 单位来源 | 训练角色 |
+|---|---|---|
+| HKUST | 原生 BIM 构件单位 | 大型室外 BIM/校园 |
+| IFCBench/Metropolis | 当前正式实例单位 | 大型合成 BIM 城市 |
+| Sponza 64 KiB | Connected-SAH streaming units | 室内图形学场景 |
+| Viking Village 64 KiB | Connected-SAH streaming units | 室外村落 |
+| Big City 64 KiB | Connected-SAH streaming units | 高密度城市 |
+
+Viking 128 KiB 只用于分割粒度对照，不作为第六个独立训练场景，避免同一几何重复进入训练并
+抬高样本量。所有真实场景继续使用各自冻结的 train/calibration/validation/test 身份。训练器
+不能按 pose 随机重划整个数据集。
+
+每个 source scene 提供四类资产：
+
+1. 真实变换后的局部表面点和法向；
+2. AABB 与纯几何 proxy relation；
+3. train pose 的 candidate、visible label 和原始 visible weight；
+4. 只由 source train 几何生成的外部首次命中 probe。
+
+LOSO held-out scene 只允许读取前两类资产来生成运行时表。其 calibration/test 标签只由对应
+评价模式读取，probe 不得进入 source-only 训练。
+
+### 3.2 合成训练集
+
+五个真实场景不足以覆盖新场景分布。V5 增加 120 个程序化场景，按生成器 seed 划分，不能按
+pose 划分：
+
+```text
+96 synthetic train scenes
+12 synthetic validation scenes
+12 synthetic diagnostic scenes
+```
+
+生成器固定五类结构，每类 24 个场景：
+
+- 房间、门洞和长走廊；
+- 多楼校园、庭院和连廊；
+- 城市街谷、密集街区和高低建筑混合；
+- 工业管线、设备、梁柱和多层平台；
+- 大量重复构件与非重复网格混合的杂乱场景。
+
+每个场景包含 256 至 4096 个 renderable units。生成器随机化尺度、密度、层数、通道宽度、
+遮挡深度、单位大小分布和重复率，但不提供 scene ID 或语义类别给模型。几何来源使用程序化
+primitive 和许可清楚、与 blind holdout 无关的 mesh bank。LOSO fold 不能从 held-out scene
+抽取 mesh 或统计量扩充合成集。
+
+合成场景使用与真实场景相同的 candidate、Color-ID、区域 GT 和 probe 生成器。view-cell 同时
+覆盖圆盘和定向盒，尺寸范围在生成器配置中固定。单位粒度按 32/64/128 KiB 三档生成，用于学习
+对 streaming granularity 的鲁棒性；正式真实场景仍按上一节的唯一版本评价。
+
+### 3.3 场景平衡与增强
+
+每个 optimizer step 只处理一个 scene。真实场景按固定 round-robin 轮转，两个真实 scene step
+后插入一个 synthetic scene step；synthetic scene 在 96 个训练场景中均匀选择。这样大城市
+不会因 candidate observation 更多而淹没小场景。
+
+每个真实 source scene 接收 36,000 次更新。synthetic pool 的更新数固定为真实更新总数的一半：
+
+```text
+四 source LOSO fold: 4 x 36,000 real + 72,000 synthetic = 216,000 updates
+Universal final:      5 x 36,000 real + 90,000 synthetic = 270,000 updates
+```
+
+每步从当前 scene 均匀采样 4 个 candidate 非空 pose，保留 GT=0 的纯负 pose，并使用全部候选；
+同时采样 8192 个该 scene 的 field probe observation。主训练不使用 ambiguity hard sampling。
+
+训练对整个 scene、相机和几何同步应用固定序列的全局 yaw 旋转，标签不变，用于减少世界朝向
+记忆。等比例缩放和平移只做一致性测试，不作为扩大样本数量的手段。
+
+## 4. V5 模型架构
+
+### 4.1 共享局部几何编码器
+
+每个 unit 按真实实例变换和实际世界三角形面积固定采样 256 个表面点。输入为以 AABB 中心和
+半对角线归一化的局部 xyz、单位法向以及三个尺寸比例。网络为：
+
+```text
+point: 6 -> 32 -> 64 -> 64, SiLU
+pool: max(64) || mean(64)
+unit: 131 -> 64 -> 32, tanh
+output: z_i in R^32
+```
+
+编码器不使用 BatchNorm、scene bounds、世界中心、实例编号或场景编号。服务器为新场景离线
+生成 `z_i`，浏览器不运行点云编码器。
+
+### 4.2 纯几何方向关系图
+
+使用正二十面体 12 个顶点作为固定方向 anchor。对每个 target-anchor，根据 AABB 正交投影
+重叠和前后深度区间选取最多 K=8 个 potential occluder。排序只使用投影覆盖和 target-relative
+depth gap。
+
+每条边为 8D scale-free feature：相对方向 3D、相对距离、半径比、target/source 投影覆盖比和
+相对 depth gap。构图 schema 必须写入 `usesVisibilityLabels=false`；V5 Full 拒绝读取旧
+train-observed relation。
+
+### 4.3 单层遮挡场编译器
+
+```text
+[z_target(32), z_source(32), edge(8)]
+    -> 72 -> 64 -> 32 edge message
+    -> masked attention within target-anchor
+    -> h_ik
+```
+
+聚合器同时保留 `log1p(neighbor_count)` 和覆盖和，避免 softmax 抹掉邻域数量。七参数 anchor
+响应为：
+
+```text
+base:  [z_i, anchor] -> 35 -> 32 -> 7
+delta: [h_ik, count, overlap_sum, anchor] -> 37 -> 32 -> 7
+q_ik = base + has_neighbor * delta
+```
+
+12x7 响应通过固定一阶方向基 `[1,x,y,z]` 的伪逆投影为 `C_i in R^(4x7)`。投影矩阵是 buffer，
+不是 Parameter。
+
+### 4.4 解析外部命中场
+
+`C_i` 表示面积均匀表面探针沿查询方向在给定距离内未命中其他 unit 的概率分布。距离采用：
+
+$$t=\log(1+d/r_i).$$
+
+七个参数产生无命中质量和两个截断 logistic survival 分量。实现必须满足 `S(0)=1`、固定方向
+随距离不增，并在 PyTorch、WebGPU 和 WASM 中使用相同参数变换。该场是最终可见性的中间
+统计，不宣称等于有限物体的真实可见概率。
+
+field probe 只在 source train scene 生成。每个 unit 使用 16 个面积均匀表面起点、12 个 anchor
+加 24 个固定 Fibonacci 方向，并记录首次外部命中距离。新场景部署不生成 probe。
+
+### 4.5 区域查询
+
+圆盘使用中心和 8 个等角圆周点；定向盒使用中心和 8 个角点。支持点来自数据 manifest，不能
+把 IFCBench 的盒状区域改称圆盘。九次查询共享同一个 `C_i`，压缩为：
+
+```text
+S_center, S_max, S_mean, S_min
+```
+
+最终 query geometry 为 16D，包括世界与相机坐标方向、相对距离和角尺度、三个区域半轴、
+FOV、区域类型、near 和 far。最终头为：
+
+```text
+z_i(32) + field_stats(4) + query_geometry(16)
+    -> 52 -> 32 -> 1 visibility logit
+```
+
+浏览器运行时没有图传播。每个 unit 下发 32D FP16 `z_i`、4x7 FP16 `C_i`、AABB 和 resource ID，
+理论主体约 148 B/unit；正式数字从导出文件实测。
+
+## 5. 统一损失
+
+### 5.1 优化问题
+
+V5 只包含一个任务优化问题和一个表示监督。对 source scene `s`，用 source train 统计：
+
+- `G_s`：可见 unit occurrence 总数；
+- `W_s`：原始 visible weight 总和。
+
+定义 `h_keep(l)=softplus(l)/ln(2)`、`h_miss(l)=softplus(-l)/ln(2)`：
+
+$$J_{extra,s}=\frac{1}{G_s}\sum_{y=0}h_{keep}(\ell),$$
+
+$$R_{count,s}=\frac{1}{G_s}\sum_{y=1}h_{miss}(\ell),$$
+
+$$R_{visual,s}=\frac{1}{W_s}\sum_{y=1}w\,h_{miss}(\ell).$$
+
+训练目标为：
+
+$$\min_\theta\frac{1}{|S|}\sum_s[J_{extra,s}+0.25L_{field,s}]$$
+
+约束：
+
+$$R_{count,s}\le0.02,\qquad R_{visual,s}\le0.01.$$
+
+视觉约束对应当前论文的主要安全目标；较松的普通实例约束只防止模型通过集中漏掉大量小单元
+换取漂亮的 weighted recall。它不替代 weighted recall，也不升级为新的校准硬门。
+
+每个 source scene 维护两个非负拉格朗日乘子，模型参数下降、乘子按预算违例投影上升。乘子只
+读取 source train 风险，不进入网络、不导出，也不由 held-out scene 估计。
+
+### 5.2 唯一的表示监督
+
+`L_field` 是外部首次命中 observation 的 event/right-censor NLL。系数固定为 0.25。它定义
+中间场的物理含义，不承担最终 PVS safety。只有附录敏感性允许比较 0.125/0.5，不根据单场景
+validation CNOR 选择权重。
+
+### 5.3 明确删除的损失项
+
+V5 Full 没有下列项：
+
+```text
+pose-balanced BCE
+recall guard
+pose CVaR
+hard positive/negative tail
+pairwise margin
+relation classification/depth ranking
+per-instance calibration regularization
+loss warmup/ramp curriculum
+```
+
+任务层的全部代码应能写成：
+
+```python
+loss = (risk.extra
+        + dual_count * risk.miss_count
+        + dual_visual * risk.miss_visual
+        + 0.25 * field_nll)
+```
+
+### 5.4 校准
+
+当前论文主工作点保持不变：在 calibration 上选择满足 weighted recall `>0.99` 且单侧 95%
+bootstrap LCB `>0.99` 的最高分数变化点。没有 LCB 合格点但平均 weighted recall `>0.99` 的
+成员保留为 mean-target 结果，不伪装为严格安全成员。
+
+普通实例 recall、FN/GT 和 Bad Cull 必须报告，但不作为新的 99% 硬门。这样训练中的 count
+constraint 负责避免结构性小实例崩溃，校准仍只承担论文既定的视觉安全职责。
+
+LOSO 同时报告：
+
+- `source_global`：阈值只来自各 source calibration，目标场景零标签；
+- `target_calibrated`：权重冻结，只用目标 calibration 选一个标量阈值。
+
+## 6. 训练实现
+
+优化器使用 AdamW，初始学习率 `2e-4`、weight decay `1e-5`，按 optimizer step cosine 降到 0，
+全局梯度范数裁剪为 5。训练固定走到最后一次更新，不按 validation 挑 epoch。
+
+几何编码、关系编译、field NLL 和最终 PVS loss 端到端更新。大场景使用精确梯度重计算：先对
+当前 step 涉及的唯一 unit 生成无图 `z_cache`，下游分块累计 `z_leaf.grad`，再按几何 chunk
+重算编码器并回传。减小 chunk 只能改变显存，不得改变 pose batch、候选、损失分母或更新数。
+
+checkpoint 保存共享模型、优化器、scheduler、每个 source 的两个乘子、数据流 RNG 和每个
+source 的更新次数。训练与恢复都拒绝未知 schema、旧 V4 loss 字段和 target label 权限错误。
+
+## 7. 精简消融
+
+正文只保留 Full 加三个因果对照。消融不按实现模块逐项删除，而是分别检验论文的三条核心
+主张：场景关系、结构化遮挡场和约束目标。所有变体在 Universal shared in-domain 协议上训练
+三种子，使用相同五场景/合成数据序列、更新数、量化和校准协议。
+
+| ID | 受控表示或目标 | 论文问题 |
+|---|---|---|
+| FULL | 完整 V5 | 最终方法 |
+| GEOMETRY_FIELD | 共享 MLP 只从 `z_i` 生成相同 4x7 场；无邻域输入，其他均同 Full | 新场景中目标自身几何是否足以替代场景遮挡关系 |
+| GENERIC_RELATION_28 | 使用相同 proxy graph 和关系编译器，但输出同容量 28D 通用 latent；无解析 field/probe NLL | 收益来自关系信息和容量，还是具有方向/距离语义的结构化场 |
+| PBCE_OBJECTIVE | 架构、field probe 和数据完全同 Full，只把约束任务目标换成 pose-balanced BCE | 直接优化安全约束下冗余是否优于普通分类训练 |
+
+`GENERIC_RELATION_28` 的运行时 latent 与 Full 的 4x7 场同为 28 个 FP16 数。它把 12 个 anchor
+token 通过共享投影压成 28D，并将 `z_i + latent + query16` 送入容量匹配的小头。匹配只计算
+实际参与 forward 的参数，目标误差不超过 5%。该对照仍可零样本编译新场景，不使用自由实例表。
+
+Full 结果在所有表中复用。旧 V4、Keep-All、AABB-query MLP 和 HZB 属于 baseline，不混进
+消融矩阵。Free per-instance field、residual、SH 阶数、K 和支持点数量都不进入正文核心消融。
+若 reviewer 或实现诊断需要，SH0/SH2 只作为附录单种子资产敏感性，不参与方法选择。
+
+训练规模：正文消融 4 配置 x 3 seeds，共 12 个共享模型。
+
+## 8. 泛化实验
+
+五折 LOSO 只训练三种模型：
+
+```text
+GEOMETRY_FIELD
+GENERIC_RELATION_28
+FULL
+```
+
+每种模型执行 5 folds x 3 seeds，共 45 个训练。每个 fold 的 held-out scene 完全不参与参数、
+对偶乘子、source normalizer、synthetic mesh bank 或阈值训练。每个模型同时输出 source_global
+和 target_calibrated 两个结果，不重复训练。
+
+Universal final 直接复用正文消融中的 FULL 三种子。架构和 seed 选择规则冻结后，导出一份
+主发布权重，并在 blind holdout 上只执行几何编译和推理。
+
+V5 核心训练总数为：
+
+```text
+12 main ablation models
+45 LOSO models
+= 57 models
+```
+
+这 57 个模型覆盖三个核心方法主张与跨场景泛化；不执行两份草案中 156 个模型的完整矩阵。
+
+## 9. 论文结果表
+
+### 9.1 Shared in-domain
+
+五场景分别报告三种子 mean ± sample std：
+
+- weighted recall 与 LCB；
+- ordinary recall、FN/GT 和 Bad Cull；
+- CNOR、Useful Cull、FP/GT 和 predicted/GT；
+- pose PR-AUC、正样本比例和 AP lift；
+- GLB bytes reduction 与图像 miss/PER。
+
+### 9.2 LOSO
+
+每个 held-out scene 报 source_global 和 target_calibrated。跨场景均值按 scene 等权，不能混池
+所有 observation。source_global 未达到安全目标时保留原阈值和失败结果，不能用目标标签补救。
+
+### 9.3 系统
+
+报告实际 runtime asset bytes、bytes/unit、server compile time、WebGPU/WASM p50/p95、候选规模
+拟合以及 streaming Bytes@95/99。HZB 使用相同区域协议，资产驻留成本单独列出。
+
+## 10. 执行顺序
+
+1. 冻结当前 V4 和正在完成的 V4 pilot，不再增加 V4 损失配置。
+2. 构建 V5 local-surface、proxy graph 和 external-hit probe schema，并完成权限测试。
+3. 实现共享模型、约束风险、对偶更新、梯度重计算和 CPU 数值测试。
+4. 用五个真实场景的小子集完成一个 shared seed smoke，验证 loss、显存和跨场景 batch。
+5. 跑 FULL、GEOMETRY_FIELD、GENERIC_RELATION_28、PBCE_OBJECTIVE 的单 seed 开发训练；只读
+   calibration/validation。
+6. 若 FULL 没有相对三个对照改善平均安全—紧致前沿，先检查 proxy graph recall 和 field NLL，
+   不增加新的 loss 项。
+7. 架构冻结后完成 12 个正文消融模型。
+8. 完成 45 个 LOSO 模型，再训练/复用 Universal final。
+9. 最后读取 frozen test、blind holdout，并执行图像、HZB、runtime 和 streaming 实验。
+
+## 11. 采用条件与论文主张
+
+V5 成为论文主线至少需要满足：
+
+- Shared Full 在五场景平均安全—紧致前沿上不弱于 scene-specific V4；
+- FULL 稳定优于 GEOMETRY_FIELD，证明纯几何关系提供可迁移场景上下文；
+- FULL 稳定优于同容量 GENERIC_RELATION_28，证明结构化方向场不只是 28D 通用 latent；
+- FULL 在同一架构下优于 PBCE_OBJECTIVE，证明约束目标改善安全—紧致折中；
+- LOSO FULL 在多数 held-out scene 上优于 GEOMETRY_FIELD 和 GENERIC_RELATION_28；
+- target-calibrated 不更新权重即可恢复合格工作点；
+- blind holdout 不依赖场景微调即可产生非零有效剔除。
+
+论文应使用“cross-scene transfer over heterogeneous scenes”或“geometry-compiled shared model”。
+除非 blind holdout 和更多外部场景支持，不使用“universal visibility model”。
+
+方法主张收敛为：服务器用共享、场景无关的网络把纯几何潜在遮挡邻域编译成紧凑方向场；浏览器
+在渲染几何到达前查询该场；训练在视觉安全与基本实例覆盖约束下直接减少冗余 PVS。局部几何
+编码、attention、低阶方向基和拉格朗日更新本身都不是独立创新点。
+
+## 12. 代码边界
+
+新实现使用独立 V5 namespace：
+
+```text
+neural_instance_culling/model/v5/
+neural_instance_culling/dataset/v5/
+neural_instance_culling/benchmark/v5/
+```
+
+V5 入口拒绝 V4 的 scene-normalized 96D、train-observed relation、instance residual 和旧 loss
+schedule。开发阶段 V4 保留为冻结 baseline；V5 通过采用条件后，前端默认资产一次性切换到 V5，
+不增加双默认路径或兼容开关。
+
+设计来源：根目录《面向泛化的紧凑遮挡场PVS_新架构与实验设计.md》和
+《GCOF-PVS_V6.1_召回约束版完整规范.md》。本规范对两份草案作出训练数据、约束强度、消融
+规模和泛化评价方面的最终取舍。

@@ -160,6 +160,39 @@ class TrainPvsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "course total steps"):
             _validate_args(args)
 
+    def test_checkpoint_blend_override_must_lie_in_unit_interval(self) -> None:
+        args = parse_args([
+            "--dataset-dir", ".",
+            "--relation-dir", ".",
+            "--runtime-meta", "runtime.json",
+            "--initial-geo-features", "geometry.bin",
+            "--glb-index", "glb.json",
+            "--glb-root", ".",
+            "--output-dir", "out",
+            "--experiment-name", "blend_override_test",
+            "--variant", "full_integrated_visibility_mainline",
+            "--init-checkpoint", "source.pt",
+            "--init-instance-calibration-blend", "1.1",
+        ])
+        with self.assertRaisesRegex(ValueError, "must lie in"):
+            _validate_args(args)
+
+    def test_calibration_floor_can_be_stricter_than_validation_gate(self) -> None:
+        args = parse_args([
+            "--dataset-dir", ".",
+            "--relation-dir", ".",
+            "--runtime-meta", "runtime.json",
+            "--initial-geo-features", "geometry.bin",
+            "--glb-index", "glb.json",
+            "--glb-root", ".",
+            "--output-dir", "out",
+            "--experiment-name", "calibration_margin_test",
+            "--variant", "full_integrated_visibility_mainline",
+            "--calibration-weighted-recall-floor", "0.997",
+        ])
+        _validate_args(args)
+        self.assertEqual(args.calibration_weighted_recall_floor, 0.997)
+
     def test_test_split_is_rejected_before_dataset_access(self) -> None:
         with self.assertRaisesRegex(ValueError, "test is forbidden"):
             _resolve_split(mock.Mock(), "test", "validation")

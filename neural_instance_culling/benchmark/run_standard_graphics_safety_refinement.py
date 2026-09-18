@@ -268,6 +268,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("plan", "preflight", "pilot", "summarize", "final"))
     parser.add_argument("--gpu-slots", type=int, nargs="+", default=[1, 1, 1])
+    parser.add_argument("--scenes", nargs="+", choices=SCENES, default=list(SCENES))
     args = parser.parse_args()
     if not args.gpu_slots:
         parser.error("at least one GPU slot is required")
@@ -275,7 +276,7 @@ def main() -> None:
     if args.mode == "plan":
         payload = {
             "experiment": EXPERIMENT,
-            "scenes": list(SCENES),
+            "scenes": list(args.scenes),
             "configs": [config.__dict__ for config in LOSS_CONFIGS],
             "pilotSteps": 1800,
             "finalSteps": 3600,
@@ -283,7 +284,7 @@ def main() -> None:
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
-    for scene in SCENES:
+    for scene in args.scenes:
         base_preflight(scene)
         if not PILOT_SOURCE[scene].is_file():
             raise FileNotFoundError(PILOT_SOURCE[scene])
@@ -293,7 +294,7 @@ def main() -> None:
     if args.mode == "pilot":
         jobs = []
         for config in LOSS_CONFIGS:
-            for scene in SCENES:
+            for scene in args.scenes:
                 output = pilot_member(scene, config)
                 if not completed(output):
                     jobs.append((
@@ -307,7 +308,7 @@ def main() -> None:
         return
 
     jobs = []
-    for scene in SCENES:
+    for scene in args.scenes:
         config = selected_config(scene)
         for seed in SEEDS:
             source = source_for_final(scene, seed)

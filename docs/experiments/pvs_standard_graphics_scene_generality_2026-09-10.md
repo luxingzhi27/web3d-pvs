@@ -313,6 +313,27 @@ train/calibration/validation，不读取 test。每个 pilot 从随机初始化�
 第一阶段完成前不启动 AABB MLP、HZB 或 test；这些基线必须使用最终冻结的 Big City 单位、
 候选、GT 和 split。
 
+2026-09-16，六项第一阶段 pilot 已全部完成。唯一通过 validation 安全门的是 K24、
+`lr=5e-5`、25% 纯负视点的 P5：`WR=0.994473`、`LCB=0.991721`，但其
+`CNOR=0.053696`、Useful Cull `0.009193`，平均预测 `824.98/834.38`，实质上接近
+Keep-All。其余配置均未通过安全门，最高的非安全 CNOR 也没有形成安全工作点。因此汇总文件
+`pilot_selection.json` 明确给出 `partitionRebuildRequired=true`，按预登记规则进入第二阶段，
+不把 P5 当作论文合格结果，也不读取 test。
+
+第二阶段正式数据键为 `bigcity_64k`，输出到
+`dataset/out/standard_graphics_connected_sah_64k_v1/bigcity_64k`。通用 Connected-SAH
+分割器新增显式 `maxComponentsPerUnit`，转换命令固定使用 `64 KiB` 与最多 `128` 个源连通片；
+转换清单和 preflight 同时记录并校验这两个字段。该变体复用冻结的 Big City V2 view-cell
+pose plan 与 split 数量，但因单位 ID 改变，GLB、1024 点、96D 特征、硬件 Color-ID、
+Pose CSR、train-only depth 和 relation 全部重新生成。默认预处理场景仍只有原三个 128 KiB
+场景，`bigcity_64k` 必须显式指定，避免覆盖现有资产。
+
+2026-09-16，Big City 64 KiB 的 64 个 train-only 深度分片与 64 份 NVIDIA Vulkan 硬件
+证据全部完成，两个 stderr 均为空；K=8 关系 CSR 和生存观测随后生成成功。正式 Full
+实验名为 `pvs_v4_bigcity_connected_sah_64k_full_v1`，入口
+`benchmark/run_bigcity_64k_full.py`，三种子各自从头执行固定 `40 x 900` Full V4 协议。
+该实验不复用 128 KiB 模型名，不读取 test；Full 冻结前不启动 Big City AABB/HZB。
+
 ## 13. Sponza 与 Viking 安全性损失微调
 
 日期：2026-09-16。实验名为 `pvs_v4_standard_graphics_safety_refinement_v1`。Sponza 三种子
@@ -336,7 +357,438 @@ R1 只降低过强的困难尾部分离；R2 再增强加权召回和最差 pose
 同一配置的 `4 x 900` refinement 和 10,000 次 calibration bootstrap，作为正式三种子候选。
 Viking 原始三种子必须先完成，不能用未完成 checkpoint 进入正式 refinement。
 
-## 14. 引用边界
+2026-09-16，六个 pilot 已按登记矩阵全部完成，且均未读取 test。Sponza 的 R1/R2/R3
+validation `weighted recall LCB / CNOR` 分别为 `0.982012 / 0.610289`、
+`0.982096 / 0.611349`、`0.980356 / 0.625331`；三者均未过严格安全门，因此按诊断池的
+LCB 优先规则选择 R2 进入正式三种子 refinement。Viking 的对应结果为
+`0.987277 / 0.879463`、`0.987265 / 0.878485`、`0.987308 / 0.887478`，同样没有安全
+成员，按 LCB、weighted recall、CNOR 的既定顺序选择 R3。这里的“选择”只表示下一阶段
+相对最优配置，不表示论文安全结论；正式三种子仍须独立通过 `LCB > 0.99`。
+
+正式 runner 支持用 `--scenes` 分阶段执行。Sponza 的原始三种子已经完成，可先在空闲 GPU
+上运行；Viking 必须等待三个原始长训成员均生成最终 calibration summary 后再运行，防止
+从未冻结的中途 checkpoint 启动 refinement。默认不传 `--scenes` 时仍覆盖两个场景。
+
+Sponza R2 正式三种子已于 2026-09-16 使用 GPU 1 启动，配置为 `4 x 900`、fresh AdamW、
+`lr=1e-5` 和 10,000 次 calibration bootstrap。Viking 仍等待原始三种子完成后再启动。
+
+同日，Sponza 正式 refinement 已完成。seed01/02/03 的 validation
+`weighted recall LCB / CNOR / Useful Cull` 分别为
+`0.984861 / 0.438623 / 0.414399`、`0.982582 / 0.461547 / 0.408474`、
+`0.981572 / 0.615240 / 0.553772`，三个成员状态均为
+`no_qualified_safety_workpoint`，且 `testRead=false`。R2 对 seed01 的安全性有改善，但没有达到
+严格 `LCB > 0.99`；因此 Sponza 当前仍没有可进入冻结 test 的安全模型。该结果保留为正式
+负结果，下一步不继续围绕相同损失权重堆叠微调，待 Viking 与 Big City 主线完成后统一决定
+是否调整 Sponza 数据/单位协议。
+
+Viking 原始 40 epoch 三种子随后全部完成。seed01/02 的 validation
+`LCB / CNOR` 为 `0.991276 / 0.867268`、`0.990626 / 0.846276`，均通过安全门；seed03
+为 `0.986638 / 0.837853`，未通过。R3 正式 refinement 已在 GPU 1/2/3 各启动一个种子：
+seed01/02 从各自 `best_safe.pt` 继续，seed03 从 `best_diagnostic.pt` 继续，均为 `4 x 900`
+和 10,000 次 calibration bootstrap，test 保持关闭。
+
+Viking R3 正式 refinement 随后完成，seed01/02/03 的 validation
+`LCB / CNOR / Useful Cull` 分别为 `0.987469 / 0.881627 / 0.700522`、
+`0.984181 / 0.849112 / 0.668840`、`0.988815 / 0.847689 / 0.658310`，三个成员均未过
+安全门。微调没有改善原始安全模型，因此最终保留原始 seed01/02 的 `best_safe.pt`；原始
+seed03 作为未过门的三种子诊断成员保留。R3 不覆盖原始结果，也不触发 test 读取。
+
+Viking 后续目标同时要求 validation `LCB > 0.99` 和 `CNOR >= 0.80`。seed01/02 原始安全
+checkpoint 已满足该目标；seed03 checkpoint rescue 为
+`WR/LCB/CNOR=0.992659/0.987740/0.806078`，剔除合格但安全不足。专项实验
+`pvs_v4_viking_seed03_safe_cnor_refinement_v1` 从该 checkpoint 比较 calibration margin
+`0.995/0.997`，使用 `lr=1e-6`、16 pose/batch、75% 困难 pose，并保留 `0.15` 尾部分离与
+`0.005` 负尾比例。只有同时满足安全门和 CNOR 目标的成员才可替换 seed03；test 保持关闭。
+
+## 14. Sponza 与 Viking checkpoint 安全补救
+
+日期：2026-09-16。实验名为 `pvs_v4_standard_graphics_checkpoint_rescue_v1`，入口为
+`benchmark/run_standard_graphics_checkpoint_rescue.py`。上一轮 R2/R3 说明继续以
+`lr=1e-5` 增加普通召回损失会造成安全排序漂移。本轮只处理尚未达标的 Sponza 三种子和
+Viking seed03，不重训已安全的 Viking seed01/02，不读取 test。
+
+Sponza 的另一个具体问题是上一轮从早期最佳诊断 checkpoint 初始化。seed01/02 的来源
+checkpoint 位于实例校准课程早期，逐实例残差融合系数仍接近零；checkpoint 续训会继承该
+系数，因此上一轮 refinement 实际没有获得完整的逐单元校准能力。本轮改从已有长训中
+融合系数已接近 `1` 且 validation LCB 相对最好的 checkpoint 初始化：seed01 epoch24、
+seed02 epoch12、seed03 epoch16。Viking seed03 从原始 epoch32 最优诊断点初始化。四个来源
+均为 `testRead=false`。
+
+两项短续训配置均使用 `8 poses/batch`、50% train-only 困难 pose、较低的生存场/关系辅助
+权重和完整启用的召回保护课程：
+
+| 配置 | LR | 召回保护/目标 | 最差 pose 比例/权重 | 尾部分离 | 正尾质量 | 负尾比例 |
+|---|---:|---:|---:|---:|---:|---:|
+| guarded | `2e-6` | `0.75 / 0.997` | `0.35 / 0.75` | `0.15` | `0.01` | `0.005` |
+| tail-protected | `5e-6` | `1.00 / 0.998` | `0.50 / 1.00` | `0.10` | `0.02` | `0.0025` |
+
+扫描固定为 `2 x 450` updates 和 2,000 次 calibration bootstrap。Sponza 用同一配置覆盖三个
+种子，先比较安全种子数，再比较最差/平均 LCB、WR、CNOR 和 Useful Cull；Viking 只选择
+seed03 配置。即使扫描没有安全成员也选择相对最优配置，随后完成 `4 x 450`、10,000 次
+bootstrap 的正式续训。正式成员仍须独立通过 validation `WR > 0.99` 且 `LCB > 0.99`；
+未过门时保留为诊断结果，不打开 test。
+
+同日，两项扫描的 8 个登记成员全部完成。Sponza 的 guarded 配置三种子 validation
+`WR LCB / CNOR` 为 `0.985681 / 0.598150`、`0.978377 / 0.633747`、
+`0.984378 / 0.575611`；tail-protected 对应为 `0.983799 / 0.633778`、
+`0.978148 / 0.636481`、`0.982935 / 0.588948`。两项均无安全成员，按预登记的最差/平均
+LCB 优先规则选择 guarded。Viking seed03 的 guarded 与 tail-protected LCB 分别为
+`0.986755`、`0.987683`，后者的 `WR/CNOR/Useful Cull` 为
+`0.992693/0.812336/0.614368`，因此选择 tail-protected。正式续训已按选择启动；扫描结果
+只用于 validation 配置选择，不读取 test。
+
+checkpoint rescue 的 Sponza 正式三种子随后完成，`WR LCB / CNOR` 为
+`0.985783 / 0.596611`、`0.978539 / 0.631816`、`0.984479 / 0.576166`，仍无安全成员。
+进一步检查确认：早期最佳诊断 checkpoint 的实例校准融合系数为零，而原续训入口会固定
+继承该值。训练器因此新增显式 `--init-instance-calibration-blend`，仅用于 checkpoint 续训
+并同时记录来源值和生效值，默认行为不变。
+
+下一轮独立实验为 `pvs_v4_sponza_recall_first_refinement_v1`。三个种子从各自原始
+`best_diagnostic.pt` 初始化并将融合系数设为 `1`，比较 `lr=1e-6/2e-6` 两项召回优先配置；
+两项均使用 16 pose/batch、75% train-only 困难 pose、召回目标 `0.999`，降低尾部分离和
+负尾压力。扫描为 `2 x 450`，三种子统一选择后正式续训为 `4 x 450`；validation 只用于
+配置选择，test 保持关闭。
+
+该扫描六个成员已完成。`lr=1e-6` 三种子 validation LCB 为
+`0.989492/0.986695/0.984990`，`lr=2e-6` 为
+`0.989683/0.986649/0.985206`；均未过安全门。按预登记的最差 LCB 优先规则选择
+`lr=2e-6` 完成三种子 `4 x 450` 正式续训。Viking checkpoint rescue 的 seed03 正式结果
+为 `WR/LCB/CNOR=0.992659/0.987740/0.806078`，仍未过门；Viking 继续保留原始 seed01/02
+安全 checkpoint，test 不读取。
+
+Sponza recall-first 正式三种子随后完成。seed01 的
+`WR/LCB/CNOR=0.992162/0.990110/0.422597`，成为首个严格安全成员；seed02/03 的 LCB 为
+`0.986583/0.984718`，仍未过门。三者 calibration LCB 只有
+`0.990995/0.990142/0.990190`，说明最高安全阈值缺少跨 split 余量。
+
+下一阶段 `pvs_v4_sponza_calibration_margin_refinement_v1` 将 calibration 阈值选择目标与最终
+validation 安全门分离：前者扫描 `0.995/0.997`，后者继续固定为 `0.99`。扫描只使用尚未
+达标的 seed02/03，各从 recall-first 最佳诊断 checkpoint 用 `lr=5e-7` 继续 `2 x 300`；
+按安全成员数、最差 LCB、Useful Cull 和 CNOR 选择统一 margin 后，再对三个种子执行
+`2 x 450` 与 10,000 次 bootstrap。具体阈值仍只由 calibration 冻结，validation 不反向
+搜索阈值，test 保持关闭。
+
+margin 选择规则补充为：先最大化安全成员数；若某个配置使全部登记种子安全，则在全安全池
+中按平均 Useful Cull、CNOR、最差 LCB 排序。LCB 超过安全门后的额外余量不能优先于实际
+剔除收益，避免选择接近 Keep-All 的工作点。
+
+`0.995/0.997` margin 扫描完成后，seed02 的 validation LCB 为
+`0.988343/0.988829`，seed03 为 `0.986687/0.989019`；两项均未过门，但更严格 margin
+持续提高安全性。扩展实验 `pvs_v4_sponza_calibration_margin_extension_v1` 因此固定比较
+`0.999/0.9995`，其余 checkpoint、训练和选择协议不变。原 margin 扫描完整保留，不用扩展
+结果覆盖旧含义。
+
+扩展扫描四项均通过 validation 安全门。`0.999` 的 seed02/03
+`WR/LCB/CNOR` 为 `0.995417/0.991439/0.200793`、
+`0.997859/0.996548/0.420289`；`0.9995` 虽有更高 LCB，但 CNOR 降至
+`0.125575/0.386284`。按全安全池最大化 Useful Cull/CNOR 的规则选择 `0.999`。
+
+`0.999` 正式三种子 `2 x 450`、10,000 次 bootstrap 已完成，seed01/02/03 的 validation
+`WR / LCB / CNOR / Useful Cull` 分别为
+`0.999158 / 0.998847 / 0.176069 / 0.192766`、
+`0.995422 / 0.991499 / 0.195047 / 0.171581`、
+`0.997860 / 0.996592 / 0.418873 / 0.368343`。三个成员均为 `safe` 且
+`testRead=false`。该结果只保留为安全诊断：其 CNOR 明显低于论文所需的安全—剔除折中，
+不作为 Sponza 最终冻结模型。
+
+Sponza 下一阶段改用 `sponza_64k`：目标压缩单位 `64 KiB`、每单位最多 64 个源连通片，
+复用同一 view-cell pose plan、中心级随机 split、32 subpose GT 和 66 度候选协议，但重新
+生成 GLB、1024 点、96D 特征、Color-ID、Pose CSR、train-only 深度与 K=8 关系。目标不是
+靠更低阈值过门，而是在 validation `LCB > 0.99` 时达到 `CNOR >= 0.80`；若仍达不到，必须
+分析单位粒度与表征上限，不能把 margin-only 结果写成最终主结果。
+
+2026-09-16，`sponza_64k` 预处理已经完成。转换得到 303 个独立 renderable units；1024 点、
+96D 几何特征、16 个硬件 Color-ID 分片、Pose CSR、32 个 train-only 三角形深度分片及其
+NVIDIA Vulkan 证据、K=8 关系 CSR 均生成成功，相关 stderr 为空。训练 preflight 确认 split
+为 `4800 train / 528 calibration / 672 validation / 672 test`，test 尚未读取；两步 smoke
+通过并产生安全 checkpoint。正式实验使用
+`pvs_v4_sponza_connected_sah_64k_full_v1`，三种子均从头执行固定 `40 x 900` 协议，正式
+验收同时要求 validation `weighted recall LCB > 0.99` 和 `CNOR >= 0.80`。seed01 已在 GPU0
+启动，seed02/03 在 Viking 短程微调释放 GPU 后继续。
+
+Viking seed03 的 `0.995/0.997` calibration margin 扫描已完整结束。两项 validation LCB
+分别为 `0.999517/0.999981`，但 CNOR 只有 `0.596124/0.421267`，说明过强安全裕量通过
+降低阈值换取了近 Keep-All 的结果，均不进入 final。随后对原始
+`WR/LCB/CNOR=0.992659/0.987740/0.806078` checkpoint 做不改权重的精确分数变化点审计：
+
+| Calibration floor | Validation LCB | Validation CNOR | Avg pred |
+|---:|---:|---:|---:|
+| 0.9905 | 0.988065 | 0.795412 | 180.64 |
+| 0.9910 | 0.988542 | 0.778917 | 193.49 |
+| 0.9915 | 0.989015 | 0.757935 | 210.46 |
+| 0.9920 | 0.989207 | 0.746278 | 219.03 |
+
+该审计只用 calibration 冻结阈值并在 validation 回放，不读取 test。结果证明现有排序没有
+同时满足 `LCB > 0.99` 和 `CNOR >= 0.80` 的阈值交集，不能继续靠调低阈值补救。专项实验
+`pvs_v4_viking_seed03_tail_separation_refinement_v1` 因此从原始高 CNOR checkpoint 出发，
+固定 calibration floor `0.99`，将全局召回保护降到 `0.10`、共享困难尾部分离提高到 `1.0`，
+比较 `2e-7/5e-7` 两个小学习率；目标是抬高低分重要正例并压低高分负例，而不是整体抬高
+可见概率。只有双门槛同时通过时才运行正式 10,000 次 bootstrap 成员。
+
+首轮尾部分离扫描完成后，`2e-7/5e-7` 的 validation `LCB / CNOR` 分别为
+`0.987468 / 0.819580` 和 `0.987316 / 0.826272`。两项都提高了剔除能力，但安全尾部没有
+改善，因此不进入 final。登记扫描扩展为两个中间折中点：`balanced_guard050` 使用召回保护
+`0.50`、目标 `0.997`、尾部分离 `0.30`；`balanced_guard080` 使用召回保护 `0.80`、目标
+`0.998`、尾部分离 `0.25`。两项均使用 `lr=2e-7`，用于定位召回优先导致 CNOR 塌缩与分离
+优先导致 LCB 不足之间的可行区间，test 仍关闭。
+
+中间保护扫描的 `0.50/0.80` 两项最终 `LCB / CNOR` 为
+`0.987379 / 0.822950` 与 `0.987437 / 0.821748`，仍未改变安全尾部，故不进入 final。逐 pose
+回放进一步定位到：validation pose `1401/1402/1403` 位于同一中心，只漏掉 unit `1639`，
+该单元权重分别为 `344598/249844/134223`，模型分数为 `0.6884/0.6849/0.6854`，略低于
+冻结阈值 `0.7018`。unit `1639` 在 train 中可见 801 次且最大权重为 `1,000,000`；这不是
+未见实例，而是空间遮挡边界上的高视觉风险尾部。
+
+逐 pose 回放说明安全尾部主要受少数高权重可见单元影响。这类误差作为模型局限和定性案例
+报告。Viking 的预测集合严格由 Full V4 分数与 calibration 阈值决定，统一运行契约仍是
+`66° AABB 候选 -> Full V4 分数 -> calibration 冻结阈值 -> 60° 渲染过滤`。
+
+sampling-v2 的纯模型按 2026-09-17 新资格规则重新冻结 calibration 阈值：优先满足
+`WR/LCB > 0.99`；validation LCB 未达目标但平均 WR 达标的成员仍保留。结果为：
+
+| Seed | WR | WR LCB | CNOR | Useful Cull | Avg pred | Qualification |
+|---:|---:|---:|---:|---:|---:|---|
+| 20260801 | 0.992606 | 0.991289 | 0.866635 | 0.693639 | 89.51 | LCB 目标达成 |
+| 20260802 | 0.992468 | 0.990656 | 0.846497 | 0.668437 | 107.47 | LCB 目标达成 |
+| 20260803 | 0.992705 | 0.987887 | 0.804466 | 0.608423 | 173.20 | 平均 WR 达标 |
+
+seed03 的三处高权重漏检会显著拉低单侧置信下界，但不应被解释为模型整体没有剔除能力：
+三个种子的 validation WR 和 CNOR 均超过 `0.99/0.80`，seed01/02 还达到 LCB 目标。
+
+模型、阈值和 split 冻结后，三个纯 Full V4 成员在 sampling-v2 的同一 276-pose test 上得到：
+
+| Seed | WR | WR LCB | CNOR | Useful Cull | Bad Cull | Pose PR-AUC | Avg pred |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 20260801 | 0.992563 | 0.991133 | 0.839233 | 0.672193 | 0.128270 | 0.891669 | 111.76 |
+| 20260802 | 0.993848 | 0.992719 | 0.816053 | 0.645458 | 0.119556 | 0.875141 | 131.62 |
+| 20260803 | 0.994121 | 0.992392 | 0.782926 | 0.601489 | 0.071351 | 0.830266 | 183.24 |
+| mean | 0.993511 | 0.992081 | 0.812737 | 0.639713 | 0.106392 | 0.865692 | 142.21 |
+
+三个 test 成员的平均 WR 和 LCB 都超过 `0.99`；seed03 test CNOR 为 `0.782926`，三种子
+均值为 `0.812737`。正式产物位于
+`benchmark/out/paper_results/pvs_v4_recall_target_policy_v1/viking_village_128k`，包含每个
+seed 的 calibration、validation、test、逐 pose sidecar 和日志。
+
+## 15. 三个标准场景统一为 64 KiB 分割粒度
+
+日期：2026-09-17。
+
+为避免正文主表中 Sponza、Big City 使用 `64 KiB` 而 Viking Village 使用 `128 KiB`，新增
+`viking_village_64k`。三个场景的跨场景控制变量统一为 meshopt 压缩后目标单位大小
+`64 KiB`；Connected-SAH 仍以源 primitive/material 内的连通片为原子，超过目标的连通几何
+继续内部切分。`maxComponentsPerUnit` 只是限制单个资源聚合过多微小碎片的结构保护，不替代
+也不改变 `64 KiB` 这一正式分割粒度。Viking 与 Big City 均取 128，Sponza 取 64；论文场景
+统计表同时报告实际单位数和实际压缩字节分布，不能只报告名义目标。
+
+Viking 64 KiB 复用已冻结 sampling-v2 的 `viewcell_pose_plan.jsonl` 和
+`1944 train / 216 calibration / 276 validation / 276 test` 划分；不改变相机中心、方向、
+32 个 subpose、66/60 度 FOV 或 GT 并集语义。单位改变后，GLB、1024 点几何输入、96D 固定
+几何特征、Color-ID、Pose CSR、train-only 深度层和 K=8 关系表必须全部重建，不能复用
+128 KiB 的单位级资产。
+
+预处理入口：
+
+```bash
+conda run -n slm_pvs python neural_instance_culling/benchmark/run_standard_graphics_connected_sah_preprocessing.py \
+  convert --scenes viking_village_64k
+```
+
+之后依次执行 `geometry`、`color-id`、`pose-csr`、`depth-manifest`、`shards` 和 `relation`。
+Color-ID 与深度分片继续执行 NVIDIA Vulkan 硬件门。正式模型实验名为
+`pvs_v4_viking_connected_sah_64k_full_v1`，入口为
+`benchmark/run_viking_64k_full.py`，三个种子均从头训练 `40 x 900`，训练和阈值冻结期间不读取
+test。选择时优先以 validation 平均 WR 与 LCB 达到 `0.99`、CNOR 达到 `0.80` 为目标；平均
+WR 大于 `0.99` 但 LCB 或 CNOR 未达目标的成员仍保留并如实报告，不以 CNOR 单项提前终止。
+最终标准场景主表使用三个 64 KiB 版本；Viking 128 KiB 结果降为分割粒度对照，不能与 64 KiB
+主表混写成同一控制条件。
+
+同日该流水线已经完整执行。转换得到 3,132 个 renderable units，相比 128 KiB 版本的 1,763
+个单位更细；141,456 个源连通片全部进入 Connected-SAH，几何分区清单的 oversize unit 为
+0。单位 GLB 文件总计 99,751,512 bytes，均值 31,849 bytes、median 34,184 bytes、p95
+63,032 bytes；最大 GLB 文件 68,076 bytes，包含容器开销，因此实际文件字节分布与清单中的
+64 KiB 压缩几何目标必须分别报告。
+
+3,132 个单位的 1024 点表全部成功解码，无 fallback 或空几何；固定几何特征为
+`[3132, 96] FP16`。16 个 Color-ID 分片全部满足 `formalReady=true`、NVIDIA Vulkan 硬件门和
+同窗口 GPU 证据，随后生成 2,712 个 view-cell 的 Pose CSR。16 个 train-only 深度分片覆盖
+17,496 个代表子视点，全部返回 `formalReady=true`；K=8 关系表只读取 train split，最终训练
+preflight 再次确认 `[3132,96]`、K=8 与 `1944/216/276/276`，且 `testRead=false`。
+
+两步 smoke 在 GPU0 通过并生成安全 checkpoint，stderr 为空。正式 seed20260801 已在
+`tmux:pvs_viking64_seed01` 上用 GPU0 启动；seed20260802 等待 Big City seed03 释放 GPU3，
+seed20260803 等待 Viking seed01 完成后使用 GPU0，两项均已登记为独立 tmux 队列。正式输出
+目录为 `model/out/pvs_v4_viking_connected_sah_64k_full_v1`，日志位于同名 paper-results
+目录；三个成员均从头训练，不复用 128 KiB checkpoint。
+
+### 15.1 Sponza 与 Big City 64 KiB 定向微调
+
+日期：2026-09-17。实验名为 `pvs_v4_standard_graphics_64k_targeted_refinement_v1`，入口为
+`benchmark/run_standard_graphics_64k_targeted_refinement.py`。Viking 64 KiB 尚未完成，不进入
+本轮参数设计，也不因中间结果提前微调。
+
+Sponza 64 KiB 不是相对 128 KiB 的整体退化：128 KiB 三成员的最佳 CNOR 为 `0.571935`，
+64 KiB seed02/03 在 epoch36 已分别达到 `0.619564/0.608013`；其中 seed03 的
+`WR/LCB=0.992093/0.989818`，主要缺口是少量安全尾部，而不是剔除能力不足。seed01 的冻结
+安全工作点 CNOR 只有 `0.403419`，说明不能再次使用强召回或 calibration margin 把预测推向
+Keep-All。因此 Sponza pilot 固定从 seed03 完整长训后的 `best_diagnostic.pt` 出发：S0 使用
+`lr=1e-6` 的温和安全尾部保护；S1 使用 `lr=2e-6` 和更强困难正负边界分离。两项均不重采样
+纯负 pose，因为 Sponza train 中不存在 `candidate>0 && GT=0` 的 view-cell。
+
+Big City 64 KiB 相比 128 KiB 已将 CNOR 从约 `0.21-0.30` 提高到当前约 `0.30-0.47`，但
+WR/LCB 与剔除效果仍没有形成合格交集。其 train split 有 1,157 个候选非空纯负 view-cell，
+占 train 的 `9.99%`，默认 ambiguity-balanced 采样没有充分利用这类直接剔除监督。Big City
+pilot 固定从 seed01 完整长训后的 `best_diagnostic.pt` 出发：B0 每个 16-pose batch 目标含
+12.5% 纯负 pose，B1 提高到 25%；两项同时提高高权重正例保护、最差 pose CVaR 和困难负例
+边界分离，避免纯负增强以牺牲安全为代价。第一阶段保持 K=8，禁止 runtime-head reset；历史
+head reset 已产生 WR=1、Useful Cull=0 的 Keep-All 结果。只有两项 K=8 pilot 都无法改善
+安全与 CNOR 折中，才登记 K=16 第二阶段。
+
+| Scene | 配置 | LR | 困难 pose | 纯负 pose | 召回保护 | 目标 WR | CVaR 权重 | 边界分离 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| Sponza | S0 温和安全桥接 | `1e-6` | 50% | 0% | 0.40 | 0.995 | 0.35 | 0.40 |
+| Sponza | S1 尾部分离桥接 | `2e-6` | 65% | 0% | 0.35 | 0.993 | 0.30 | 0.60 |
+| Big City | B0 平衡纯负 12.5% | `2e-6` | 50% | 12.5% | 0.55 | 0.995 | 0.50 | 0.55 |
+| Big City | B1 保护纯负 25% | `2e-6` | 50% | 25% | 0.70 | 0.997 | 0.65 | 0.65 |
+
+四项 pilot 必须全部完成 `2 x 450`，不能由中间结果提前取消。两场景原始三种子
+`calibration_ready_summary.json` 全部存在前，preflight 必须失败，防止用未冻结 checkpoint
+启动微调。资格先分为 `confidence_target_met`、`mean_target_met` 与
+`mean_target_not_met`；LCB 是优先置信目标而非硬否决门，CNOR 在同一资格层内用于选优而非
+单独硬门。每场景选定配置后，从各自三个原始 checkpoint 执行 `4 x 450` 正式微调；test、
+AABB、HZB 和图像评价继续关闭，直到模型与阈值冻结。
+
+扫描已登记到 `tmux:pvs_64k_sponza_bigcity_refinement_queue`：队列每 10 分钟检查上述四个尚未
+完成的 Full summary，全部存在后依次执行 preflight、四项 scan 和 validation 汇总；不会自动
+启动三种子 final，必须先审阅完整 pilot 结果和选择文件。
+
+选择池必须包含 `control_no_refinement`，即代表种子的原始冻结 checkpoint。2026-09-17，
+Sponza 两项 pilot 已完成：S0 的 `WR/LCB/CNOR=0.995359/0.993925/0.393599`，S1 为
+`0.995390/0.993859/0.382034`；原始 seed03 最终冻结结果为
+`0.992341/0.990114/0.594584`。两项微调虽然增加安全余量，却显著损失剔除能力，因此 Sponza
+选择 `control_no_refinement`，不进入三种子 final 微调。该结论也说明不能把更高 LCB 单独
+解释为更好的 PVS 工作点。
+
+Big City 第一轮 B0/B1 已完成。原始 seed01 的 `WR/LCB/CNOR` 为
+`0.988996/0.987694/0.486438`；B0 为 `0.989218/0.987424/0.434592`，没有改善安全且损失
+剔除；B1 为 `0.991188/0.989210/0.386395`，达到平均 WR 保留门但召回保护过强。B1 暂不
+扩展到三种子。第二轮增加 B2/B3，两项都从原始 seed01 重新开始，使用 `lr=1e-6`、召回保护
+`0.62`、目标 WR `0.996`、CVaR 权重 `0.55`，并把困难边界分离提高到 `0.80`、困难负例比例
+提高到 `0.07`；二者只比较 12.5% 与 25% 纯负 pose。目标是在保持平均 WR 大于 `0.99` 时
+将 CNOR 恢复到约 `0.45`，仍不改 K=8。
+
+B2/B3 最终 `WR/LCB/CNOR` 为 `0.988133/0.986475/0.454071` 与
+`0.989109/0.987311/0.412262`，更强边界分离恢复了部分 CNOR，但两项平均 WR 都未达到
+`0.99`。calibration 审计确认 B0-B3 均使用精确 float32 变化点，且 calibration LCB 已压在
+`0.990000x` 的最高安全点，不能通过重新选阈值解决。
+
+因此按登记条件进入单因素 K=16 第二阶段。K=16 只重建 train-only 关系表，不改变单位、GT、
+split 或模型架构；其截断 cell 从 K=8 的 `131,657/176,628` 降到
+`94,546/176,628`，关系保留质量 q01/q05 从 `0.4443/0.5906` 提高到
+`0.6429/0.7960`。B4 完全复用 B1 的损失、学习率、困难 pose 和 25% 纯负 pose 配置，只把
+关系 K 从 8 改为 16，用于隔离关系容量是否是 Big City 的剩余瓶颈。
+
+B4 得到 `WR/LCB/CNOR=0.991182/0.989200/0.388683`，与 K=8 B1 的
+`0.991188/0.989210/0.386395` 基本相同；关系容量不是当前主要瓶颈，K=16 不进入主线。最后
+登记一个 B5 插值点：保持 25% 纯负 pose，使用 `lr=1.5e-6`、召回保护 `0.67`、目标 WR
+`0.9965`、CVaR 权重 `0.60`、边界分离 `0.72`。B5 用于检验 B1 与 B3 之间是否存在平均
+WR 达标且 CNOR 更高的窄区间；若不能优于 B1，则停止继续扫描并保留 B1 的平均 WR 工作点，
+不再增加 K 或堆叠损失权重。
+
+B5 最终为 `WR/LCB/CNOR=0.988642/0.986817/0.436463`，没有达到平均 WR。完整扫描至此停止。
+B4 相对 B1 的 CNOR/Useful Cull 只提高 `0.002288/0.002486`，属于实际等价；同资格层内若
+高 K 对 CNOR 和 Useful Cull 的提升都不足 `0.01`，选择规则优先 K=8。因此 Big City 最终
+选择 B1 `b1_guarded_neg25`，并从三个原始 Full checkpoint 执行 `4 x 450` 正式微调；B4
+只作为关系容量负结果保留。
+
+Big City B1 三种子正式微调已于 2026-09-17 完成，stderr 均为空，且全过程保持
+`testRead=false`：
+
+| Seed | 原始 WR / LCB / CNOR | B1 WR | B1 LCB | B1 CNOR | B1 Useful Cull | B1 Bad Cull | 资格层 |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 20260801 | `0.988996 / 0.987694 / 0.486438` | 0.991214 | 0.989288 | 0.387687 | 0.410047 | 0.014443 | mean target met |
+| 20260802 | `0.988260 / 0.986372 / 0.394600` | 0.991295 | 0.988604 | 0.346361 | 0.332753 | 0.004330 | mean target met |
+| 20260803 | `0.987914 / 0.986410 / 0.302162` | 0.987449 | 0.985961 | 0.261445 | 0.259950 | 0.024451 | mean target not met |
+
+B1 把 seed01/02 提升到平均 WR 大于 `0.99` 的第二资格层，但三个种子都未达到 LCB 目标；
+同时 seed01/02 的 CNOR 分别下降 `0.098751/0.048239`，seed03 的安全与剔除均未改善。三种子
+B1 平均 `WR/LCB/CNOR/Useful Cull=0.989986/0.987951/0.331831/0.334250`，相对原始 Full
+三种子平均 `0.988390/0.986825/0.394400/0.428559`，表现为小幅增加加权安全、明显减少实际
+剔除。因而 B1 不能作为统一主线替换三个原始 Full checkpoint；按资格分层记录时可保留
+seed01/02 的平均 WR 工作点，seed03 继续保留原始 Full。该结果终止 Big City 64 KiB 的损失
+权重扫描：继续增加召回保护预计只会进一步压低 CNOR，而 K=16 已证明关系容量不是瓶颈。
+正式 test 仍保持关闭，待最终 checkpoint 选择与论文报告规则统一冻结后再读取一次。
+
+### 15.2 Viking 64 KiB 定向微调
+
+Viking 64 KiB 三种子从头长训已于 2026-09-17 完成，均为严格安全成员，且未读取 test：
+
+| Seed | WR | WR LCB | CNOR | Useful Cull | Bad Cull | Pose Recall | Avg pred |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 20260801 | 0.994775 | 0.991956 | 0.746930 | 0.620034 | 0.084277 | 0.785759 | 286.11 |
+| 20260802 | 0.997703 | 0.994952 | 0.546569 | 0.410887 | 0.002228 | 0.961597 | 567.88 |
+| 20260803 | 0.999511 | 0.998869 | 0.499540 | 0.361610 | 0.001329 | 0.969112 | 616.43 |
+| mean | 0.997330 | 0.995259 | 0.597680 | 0.464177 | 0.029278 | 0.905489 | 490.14 |
+
+seed01 证明当前表示可以达到较高 CNOR，但其普通 pose recall 和 Bad Cull 明显弱于另外两个
+种子；seed02/03 的均匀实例覆盖较健康，却保留了过多负例。Viking train split 不存在
+`candidate>0 && GT=0` 的 view-cell，因此不使用 Big City 的纯负 pose 重采样。微调仅在
+seed03 这个安全余量最大、CNOR 最低的代表成员上先运行两个 `2 x 450` pilot，均从
+`best_diagnostic.pt` 初始化：
+
+| 配置 | LR | 困难 pose | 召回保护 | 目标 WR | CVaR 权重 | 边界分离 | 困难负例比例 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| V0 平衡分离 | `1e-6` | 65% | 0.25 | 0.992 | 0.25 | 0.60 | 5% |
+| V1 强分离 | `1e-6` | 75% | 0.20 | 0.990 | 0.20 | 0.90 | 7% |
+
+两项都不重置运行时头、不改变单位、关系 K、split 或 calibration 规则，也不读取 test。控制组
+`control_no_refinement` 必须进入选择池；仍先按 `confidence_target_met / mean_target_met /
+mean_target_not_met` 分层，再在同层比较 CNOR、Useful Cull、LCB 与 WR，并同时审阅普通 pose
+recall、Bad Cull 和平均保留数。pilot 必须完整结束后才能决定是否把同一配置扩展到三种子；
+不允许根据中间 epoch 提前取消，也不以固定 `CNOR=0.80` 单项否决结果。
+
+V0/V1 已在无竞争的 GPU0 上顺序完整结束，stderr 均为空。此前 GPU1/2 的未完成启动因同机
+其他用户训练造成严重算力争用而中止；当时只生成 run manifest，没有 checkpoint，正式结果
+全部来自随后从源 checkpoint 重新开始的完整运行。
+
+| 配置 | WR | WR LCB | CNOR | Useful Cull | Bad Cull | Pose Recall | Avg pred |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| control | 0.999511 | 0.998869 | 0.499540 | 0.361610 | 0.001329 | 0.969112 | 616.43 |
+| V0 平衡分离 | 0.999937 | 0.999909 | 0.372079 | 0.262970 | 0.000962 | 0.978371 | 712.23 |
+| V1 强分离 | 0.999945 | 0.999922 | 0.360749 | 0.254852 | 0.000880 | 0.979412 | 720.16 |
+
+三项都处于严格安全层，但 V0/V1 通过保留更多实例换取额外安全余量，CNOR 分别下降
+`0.127461/0.138791`，Useful Cull 也下降 `0.098640/0.106758`。因此选择
+`control_no_refinement`，不启动 Viking 三种子正式微调。该结果说明当前瓶颈不能靠短程增加
+边界分离或调整召回损失权重解决；继续同类扫描只会增加 validation 调参自由度。Viking 64 KiB
+正文模型保持原始 Full 三种子，后续直接进入冻结 test、AABB/HZB 和图像/运行时评价。
+
+### 15.3 三场景视觉效用损失再平衡
+
+日期：2026-09-18。上一轮 Sponza 安全桥接、Big City 纯负增强和 Viking 尾部分离都表明，
+单纯提高召回保护或困难边界权重会增加平均保留数并压低 CNOR。当前 pose-balanced BCE 对正例
+使用压缩后的视觉权重，但最低权重固定为 `0.25`；因此即使一个可见单元像素贡献很低，它仍
+至少获得最高权重正例四分之一的训练权重。这与论文的 weighted recall 安全目标不完全一致，
+也是模型在安全阈值下趋向保留大量低效用单元的一个可检验原因。
+
+本轮不改变 Full V4 架构、单位、关系 K、split、候选、GT 或校准规则，只调整现有综合损失：
+
+| 配置 | 正例最低权重 | 权重幂 | 召回保护 | 目标 WR | 边界分离 | Survival / Relation |
+|---|---:|---:|---:|---:|---:|---:|
+| U0 视觉效用 | 0.05 | 1.0 | 0.25 | 0.992 | 0.30 | 0.10 / 0.05 |
+| U1 视觉效用剔除 | 0.01 | 1.0 | 0.20 | 0.990 | 0.45 | 0.05 / 0.02 |
+
+降低正例最低权重只影响逐 pose BCE；正式 weighted recall guard 仍按原始 `visible_weights`
+保护高视觉效用正例。降低 continuation 阶段的 survival/relation 辅助权重用于减少已收敛离线
+表征漂移，让短程更新集中在可见性排序。Sponza 与 Viking 从各自 Full seed03、Big City
+从已达到平均 WR 的 B1 seed01 出发。Big City 的 U0/U1 分别保留
+12.5%/25% 合法纯负 pose；另外两个场景没有纯负 pose，不启用该采样。
+
+三个场景各两项 pilot 均固定为 `2 x 450`、`lr=5e-7`，必须完整运行且不读取 test。选择池
+继续包含控制组及已有合法 pilot，先按安全资格层分组，再比较 CNOR、Useful Cull、LCB、WR、
+Bad Cull、普通 pose recall 与平均保留数。若 U0/U1 都不能在同一资格层提高 CNOR，本轮停止
+损失权重扫描，不能继续用更多 validation 配置追逐结果。
+
+## 16. 引用边界
 
 - Wang et al., NeuralPVS: Learned Estimation of Potentially Visible Sets, SIGGRAPH Asia 2025。
 - Greene et al., Hierarchical Z-Buffer Visibility。

@@ -25,6 +25,7 @@ try:
         DEPTH_HEIGHT,
         DEPTH_MAX_LAYERS,
         DEPTH_WIDTH,
+        DEFAULT_SCENES,
         EXPERIMENT,
         FRONTEND_RENDER_FOV_Y_DEG,
         MODEL_FOV_Y_DEG,
@@ -45,6 +46,7 @@ except ImportError:  # direct ``python path/to/script.py`` invocation
         DEPTH_HEIGHT,
         DEPTH_MAX_LAYERS,
         DEPTH_WIDTH,
+        DEFAULT_SCENES,
         EXPERIMENT,
         FRONTEND_RENDER_FOV_Y_DEG,
         MODEL_FOV_Y_DEG,
@@ -98,7 +100,8 @@ def _python(script: Path) -> list[str]:
 
 def convert_command(scene: str) -> list[str]:
     """Return the deterministic source-to-Connected-SAH conversion command."""
-    return [
+    config = SCENES[scene]
+    command = [
         "node",
         str(CONVERTER),
         "--input",
@@ -106,9 +109,12 @@ def convert_command(scene: str) -> list[str]:
         "--output-assets",
         str(_path(scene, "assets")),
         "--target-unit-kib",
-        str(TARGET_UNIT_KIB),
+        str(config["target_unit_kib"]),
         "--overwrite",
     ]
+    if config["max_components_per_unit"] is not None:
+        command.extend(["--max-components-per-unit", str(config["max_components_per_unit"])])
+    return command
 
 
 def geometry_commands(scene: str) -> list[list[str]]:
@@ -202,7 +208,7 @@ def pose_csr_command(scene: str) -> list[str]:
         "--runtime-meta",
         str(_path(scene, "runtime_meta")),
         "--experiment",
-        f"{scene}_connected_sah_128k_fov66_sampling_v2",
+        str(SCENES[scene]["dataset_experiment"]),
         "--source-sampler",
         "three_color_id",
         "--default-fov-y",
@@ -370,8 +376,11 @@ def _validate_connected_assets(scene: str) -> None:
         raise ValueError(f"{scene} conversion manifest is not Connected-SAH: {manifest_path}")
     if manifest.get("partitionSchema") != CONNECTED_PARTITION_SCHEMA:
         raise ValueError(f"{scene} conversion manifest has the wrong partition schema")
-    if int(manifest.get("targetUnitBytes", -1)) != TARGET_UNIT_KIB * 1024:
+    config = SCENES[scene]
+    if int(manifest.get("targetUnitBytes", -1)) != int(config["target_unit_kib"]) * 1024:
         raise ValueError(f"{scene} conversion manifest has the wrong unit target")
+    if manifest.get("maxComponentsPerUnit") != config["max_components_per_unit"]:
+        raise ValueError(f"{scene} conversion manifest has the wrong component cap")
     unit_count = int(manifest.get("unitCount", -1))
     if unit_count <= 0:
         raise ValueError(f"{scene} conversion manifest has no renderable units")
@@ -391,7 +400,7 @@ def preflight(scene: str, mode: str) -> dict[str, Any]:
     config = SCENES[scene]
     return {
         "schema": "standard-graphics-connected-sah-preprocessing-preflight-v1",
-        "experiment": EXPERIMENT,
+        "experiment": str(config["experiment"]),
         "scene": scene,
         "mode": mode,
         "source": str(_path(scene, "source")),
@@ -408,6 +417,8 @@ def preflight(scene: str, mode: str) -> dict[str, Any]:
         "representativeSubposesPerViewcell": REPRESENTATIVE_SUBPOSES_PER_VIEWCELL,
         "relationK": RELATION_K,
         "pointsPerGlb": POINTS_PER_GLB,
+        "targetUnitKiB": int(config["target_unit_kib"]),
+        "maxComponentsPerUnit": config["max_components_per_unit"],
         "seeds": list(SEEDS),
         "testRead": False,
     }
@@ -422,7 +433,7 @@ def write_source_render_manifest(scene: str) -> Path:
     bindings = build_instance_binding_preflight(runtime, index_path, assets)
     payload = {
         "schema": "standard-graphics-connected-sah-source-render-manifest-v1",
-        "experiment": EXPERIMENT,
+        "experiment": str(SCENES[scene]["experiment"]),
         "scene": scene,
         "assetsDir": str(assets.resolve()),
         "glbIndex": str(index_path.resolve()),
@@ -450,7 +461,7 @@ def _write_command_record(
 ) -> None:
     payload: dict[str, Any] = {
         "schema": "standard-graphics-connected-sah-command-log-v1",
-        "experiment": EXPERIMENT,
+        "experiment": str(SCENES[scene]["experiment"]),
         "scene": scene,
         "stage": stage,
         "command": command,
@@ -544,7 +555,7 @@ def main() -> None:
     parser.add_argument("mode", choices=MODES)
     parser.add_argument(
         "--scenes",
-        default=",".join(SCENES),
+        default=",".join(DEFAULT_SCENES),
         help="comma-separated registered scene keys",
     )
     parser.add_argument("--color-parallel", type=int, default=None)

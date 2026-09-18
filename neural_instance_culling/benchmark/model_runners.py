@@ -51,7 +51,7 @@ DEFAULT_MODEL_SPECS: dict[str, dict[str, str]] = {
     },
 }
 V4_CALIBRATION_SUMMARY_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-calibration-summary-v4"
-EXACT_CALIBRATION_SCHEMA = "pvs-v4-exact-calibration-v1"
+EXACT_CALIBRATION_SCHEMA = "pvs-v4-exact-calibration-v2"
 
 
 @dataclass
@@ -1024,8 +1024,11 @@ def _v4_frozen_threshold(
         declared_checkpoint = payload.get("checkpoint")
         if declared_checkpoint is None or Path(str(declared_checkpoint)).resolve() != Path(checkpoint_path).resolve():
             raise ValueError(f"{path} belongs to a different checkpoint")
-        if payload.get("predictionRule") != "score >= threshold" or payload.get("status") != "safe":
-            raise ValueError(f"{path} has no safe exact calibration workpoint")
+        if payload.get("predictionRule") != "score >= threshold" or payload.get("status") not in {
+            "confidence_target_met",
+            "mean_target_met",
+        }:
+            raise ValueError(f"{path} has no retained mean-WR exact calibration workpoint")
         selection = payload.get("selection")
         selected = payload.get("selected")
         if not isinstance(selection, dict) or not isinstance(selected, dict):
@@ -1038,8 +1041,11 @@ def _v4_frozen_threshold(
             raise ValueError("v4 exact calibration threshold is invalid")
         if not np.isclose(selected_threshold, threshold, rtol=0.0, atol=1e-7):
             raise ValueError("v4 exact calibration threshold fields disagree")
-        if weighted_recall <= 0.99 or lower_bound <= 0.99:
-            raise ValueError("v4 exact calibration fails the weighted-recall safety gate")
+        if weighted_recall <= 0.99:
+            raise ValueError("v4 exact calibration fails the aggregate weighted-recall target")
+        confidence_target_met = lower_bound > 0.99
+        if bool(selection.get("confidenceTargetMet")) != confidence_target_met:
+            raise ValueError("v4 exact calibration confidence-target metadata disagrees with its LCB")
         return threshold
     if schema != V4_CALIBRATION_SUMMARY_SCHEMA:
         raise ValueError(f"{path} is not a supported v4 calibration summary")

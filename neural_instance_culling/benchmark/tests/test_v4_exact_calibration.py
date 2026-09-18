@@ -21,7 +21,7 @@ from v4_exact_calibration import (  # noqa: E402
 )
 from neural_instance_culling.model.common.exact_calibration import (  # noqa: E402
     FixedPoseBootstrap,
-    select_highest_safe_score_change_point,
+    select_highest_recall_target_score_change_point,
 )
 
 
@@ -67,7 +67,7 @@ class V4ExactCalibrationTest(unittest.TestCase):
             bootstrap, valid_rows, gt_mass, metadata = _fixed_bootstrap(
                 sidecar, Path(temporary) / "bootstrap.bin", replicates=8, seed=7
             )
-            selection = select_highest_safe_score_change_point(
+            selection = select_highest_recall_target_score_change_point(
                 np.asarray(sidecar.scores),
                 np.asarray(sidecar.labels),
                 np.asarray(sidecar.weights),
@@ -85,12 +85,12 @@ class V4ExactCalibrationTest(unittest.TestCase):
                 sidecar, selection["threshold"], bootstrap, valid_rows, gt_mass
             )
         self.assertEqual(metadata["schema"], BOOTSTRAP_SCHEMA)
-        self.assertEqual(selection["status"], "safe")
+        self.assertEqual(selection["status"], "confidence_target_met")
         self.assertEqual(selection["candidateCount"], 5)
         self.assertEqual(selection["allScoreChangePointCount"], 5)
         self.assertAlmostEqual(selection["threshold"], 0.7, places=6)
         self.assertAlmostEqual(selection["nextHigherThreshold"], 0.8, places=6)
-        self.assertFalse(selection["nextHigherSafety"]["safe"])
+        self.assertFalse(selection["nextHigherSafety"]["meanTargetMet"])
         self.assertEqual(row["thresholdIsScoreChangePoint"], True)
         self.assertAlmostEqual(row["aggregateWeightedRecall"], 1.0)
         self.assertAlmostEqual(row["aggregateWeightedRecallLowerConfidenceBound"], 1.0)

@@ -9,9 +9,9 @@
 - 不允许用旧实验名称复用新含义。例如同一个目录名不能先表示 PointNet++ 原始版，后又表示高召回版。
 - 不允许把失败实验伪装成当前主线；失败实验可以记录，但不能污染默认 runner、README 或前端默认资产。
 - 不允许用 sample-level 二分类指标替代 pose-level 集合指标作为主结论。
-- 当前主要验收目标是：以 `weighted recall` 及其置信下界作为画面安全主门，在安全约束下最大化有效剔除和资源节省。普通 pose recall 必须报告，用于诊断均匀实例覆盖，但不能单独否决或证明画面安全；除非实验协议另有登记，不得把 pose recall `0.95` 当作 weighted recall 的替代门。满足 weighted recall 安全约束后，优先比较 `useful cull = TN / candidate`、候选归一化遮挡召回率 `CNOR`、`bad cull = FN / candidate`、平均预测数量、GLB 字节削减和前端延迟。普通 precision、F1、逐实例 accuracy 和 balanced accuracy 必须报告，但不能单独作为主结论。
-- `precision` 受候选集合中的正负样本比例影响：在真正率和假正率相同的情况下，加入更多不可见候选仍会增加 FP 并降低 precision。因此跨候选规模、跨场景或跨候选生成策略比较时，必须同时报告平均候选数、GT/候选比例、specificity、instance accuracy 和 balanced accuracy。普通 accuracy 可能被大量 TN 抬高；`balanced accuracy = (recall + specificity) / 2` 对正负样本比例更稳健，是安全门之后的重要分类参考，不能只在附录中出现。
-- 新优化模型必须区分“安全工作点”和“分布健康诊断”。安全工作点只由 checkpoint 自己的 calibration 阈值是否满足 weighted recall 及其置信下界决定；固定概率边界 `0.5` 或 `[0.4, 0.6]` 不能作为额外硬门。低阈值必须结合正负尾部、阈值扰动和校准误差解释；禁止用 bias、temperature 或其他后处理把阈值移动到中间后伪装成模型效果提升。
+- 当前主要验收目标是：calibration 选择阈值时优先达到 aggregate `weighted recall > 0.99` 且其单侧 95% LCB `> 0.99`；LCB 是置信度目标和评价指标，不是模型结果的硬否决门。若不存在同时达成两者的工作点，则选择 aggregate weighted recall 仍 `> 0.99` 的最高阈值并保留该模型，明确标注为“平均 WR 达标、LCB 目标未达”。只有平均 WR 也未达到 `0.99` 时才降为诊断结果。普通 pose recall 必须报告，用于诊断均匀实例覆盖，但不能单独否决或证明画面安全。保留结果之间优先比较 `useful cull = TN / candidate`、候选归一化遮挡召回率 `CNOR`、`bad cull = FN / candidate`、平均预测数量、GLB 字节削减和前端延迟。普通 precision、F1、逐实例 accuracy 和 balanced accuracy 必须报告，但不能单独作为主结论。
+- `precision` 受候选集合中的正负样本比例影响：在真正率和假正率相同的情况下，加入更多不可见候选仍会增加 FP 并降低 precision。因此跨候选规模、跨场景或跨候选生成策略比较时，必须同时报告平均候选数、GT/候选比例、specificity、instance accuracy 和 balanced accuracy。普通 accuracy 可能被大量 TN 抬高；`balanced accuracy = (recall + specificity) / 2` 对正负样本比例更稳健，是平均 WR 达标后的重要分类参考，不能只在附录中出现。
+- 新优化模型必须区分“LCB 目标达成”“平均 WR 目标达成”和“平均 WR 未达成”三个层级。阈值只由 checkpoint 自己的 calibration 冻结；固定概率边界 `0.5` 或 `[0.4, 0.6]` 不能作为额外硬门。低阈值必须结合正负尾部、阈值扰动和校准误差解释；禁止用 bias、temperature 或其他后处理把阈值移动到中间后伪装成模型效果提升。
 - 不允许把 `recall_high` 当作额外变体后缀来逃避主目标；每个正式 PVS 实验默认就必须按高召回目标训练和选 checkpoint。若一个模型需要降低召回才能得到好看的 F1，它不能作为合格主线版本。历史路径或旧 benchmark 中出现的 PointNet / Triplane / dynamic-pool 命名只作为已删除旧实验理解，不能作为当前默认路径。
 - 向用户解释模型、训练流程或前端推理时，必须优先使用可读的中文概念和数据流描述；内部类名、函数名、变量名只能作为定位参考放在括号中，不能用一串代码英文名代替解释。每个新名词都要说明“它输入什么、输出什么、为什么需要它”。
 - 发现当前安全口径、代码实现或文档结论错误时，必须直接修正主线并删除错误的旧代码、旧文档和旧结果；不得增加兼容开关、双重默认路径、别名脚本或“旧逻辑仍可用”的过渡层。只有明确标注且仍有复现实验价值的原始数据或模型权重可以保留。
@@ -90,8 +90,8 @@ conda run -n slm_pvs python slm2viewer/scripts/verify_v4_frontend_parity.py \
 - 主实验固定使用 `5926 train / 659 calibration / 730 validation / 684 test`；旧 684 test 不变。每个 checkpoint 只用自己的 calibration 冻结阈值，validation 比较配置，test 在模型和阈值全部冻结后读取一次。
 - 已完成完整模型与六个核心消融的三种子 `40 epoch × 900 step` 从头长训。正式评价入口是 `neural_instance_culling/benchmark/evaluate_pvs.py` 和 `summarize_core_ablation.py`，当前结论见 `docs/evaluation/pvs_mainline_core_ablation_paper_analysis_2026-08-28.md`。
 - 本阶段暂不把 `bad cull` 置信区间上界作为路线否决条件，但仍必须报告 `bad cull`、漏检数量和图像级漏检指标；不得用减少预测数量掩盖画面风险。
-- 画面安全主门仍是每个 checkpoint 在 calibration 上冻结的 `weighted recall > 0.99` 及其单侧 95% 置信下界大于 `0.99`。普通 pose recall 只作诊断。
-- 安全阈值的位置只作分布健康诊断，不作固定 `p=0.5` 硬门。必须同时记录安全阈值区间、阈值扰动稳定性、正样本加权 q01/q005、负样本 q99/q99.5、logit 间隔、Brier/ECE 和可靠性图；低阈值本身不能否决模型，因为 bias 或温度缩放可以移动概率阈值而不改变排序。不得用这种后处理伪装模型改进，主线资格仍由 calibration 的 weighted recall 安全门，以及同一安全门下的 precision、accuracy、balanced accuracy、specificity、useful cull、图像和资源指标共同决定。
+- calibration 阈值选择首先寻找 `weighted recall > 0.99` 且单侧 95% LCB `> 0.99` 的最高阈值；若不存在，则退到 `weighted recall > 0.99` 的最高阈值。LCB 必须报告但不再单独否决平均 WR 已达标的模型。普通 pose recall 只作诊断。
+- 阈值的位置只作分布健康诊断，不作固定 `p=0.5` 硬门。必须同时记录阈值区间、阈值扰动稳定性、正样本加权 q01/q005、负样本 q99/q99.5、logit 间隔、Brier/ECE 和可靠性图；低阈值本身不能否决模型，因为 bias 或温度缩放可以移动概率阈值而不改变排序。不得用这种后处理伪装模型改进；结果层级由 calibration 的平均 weighted recall 和 LCB 分别记录，并联合 precision、accuracy、balanced accuracy、specificity、useful cull、图像和资源指标解释。
 - 如果启用按最差 pose 加权的锚点风险项，训练批次必须包含至少两个 pose；单 pose 批次只能报告普通锚点项，不能宣称完成尾部风险约束。关系系数反向传播的显存峰值必须单独记录，不能为了尾部统计扩大到超出单卡预算。
 - 旧 M4-M12、OWRB 和方向代理路线只存在于 Git 历史，不得恢复为默认入口或在当前论文材料中继续引用。
 

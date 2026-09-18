@@ -379,6 +379,7 @@ def _evaluate(
     collect_score_stats: bool = False,
     instance_to_glb: np.ndarray | None = None,
     glb_bytes: np.ndarray | None = None,
+    target_weighted_recall: float = WEIGHTED_RECALL_FLOOR,
 ) -> list[dict[str, Any]]:
     batch, steps = _evaluation_batch_limits(max_poses, poses_per_batch)
     return evaluate_thresholds(
@@ -389,6 +390,7 @@ def _evaluate(
         bootstrap_replicates=bootstrap_replicates,
         collect_score_stats=collect_score_stats,
         instance_to_glb=instance_to_glb, glb_bytes=glb_bytes,
+        target_weighted_recall=target_weighted_recall,
     )
 
 
@@ -404,11 +406,14 @@ def _diagnostic_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     ))
 
 
-def _calibration_workpoints(rows: list[dict[str, Any]]):
+def _calibration_workpoints(
+    rows: list[dict[str, Any]],
+    target_weighted_recall: float = WEIGHTED_RECALL_FLOOR,
+):
     safe = select_aggregate_weighted_cull_workpoint(
         rows,
-        target_weighted_recall=WEIGHTED_RECALL_FLOOR,
-        minimum_lower_confidence_bound=WEIGHTED_RECALL_FLOOR,
+        target_weighted_recall=target_weighted_recall,
+        minimum_lower_confidence_bound=target_weighted_recall,
     )
     diagnostic = _diagnostic_row(rows)
     # Validation is a replay of a frozen safe calibration threshold.  An
@@ -706,6 +711,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="initialize model parameters from one V4 checkpoint and create a fresh AdamW",
     )
     parser.add_argument(
+        "--init-instance-calibration-blend",
+        type=float,
+        default=None,
+        help="override the inherited instance-calibration blend for checkpoint continuation",
+    )
+    parser.add_argument(
         "--reset-runtime-heads",
         action="store_true",
         help="reinitialize the runtime query trunk and task heads after loading a checkpoint",
@@ -752,6 +763,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--snapshot-every", type=int, default=4)
     parser.add_argument("--max-eval-poses", type=int, default=0)
     parser.add_argument("--calibration-bootstrap-replicates", type=int, default=10_000)
+    parser.add_argument(
+        "--calibration-weighted-recall-floor",
+        type=float,
+        default=WEIGHTED_RECALL_FLOOR,
+        help="calibration-only WR and LCB floor; validation safety remains fixed at 0.99",
+    )
     parser.add_argument("--seed", type=int, default=20260801)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--learning-rate", type=float, default=2e-4)
@@ -817,8 +834,14 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("training counts must be positive")
     if args.training_course_total_steps < 0:
         raise ValueError("training course total steps must be zero or positive")
+    if args.init_instance_calibration_blend is not None and not (
+        0.0 <= args.init_instance_calibration_blend <= 1.0
+    ):
+        raise ValueError("init instance calibration blend must lie in [0, 1]")
     if args.eval_every <= 0 or args.calibration_bootstrap_replicates <= 0:
         raise ValueError("evaluation cadence and bootstrap count must be positive")
+    if not 0.0 < args.calibration_weighted_recall_floor < 1.0:
+        raise ValueError("calibration weighted recall floor must lie strictly between zero and one")
     if args.occlusion_representation == "survival":
         if args.relation_source not in {"bounded_hierarchical", "geometry_only"}:
             raise ValueError("survival requires a relation source")
@@ -891,6 +914,8 @@ def main(argv: list[str] | None = None) -> None:
     _validate_args(args)
     if args.reset_runtime_heads and args.init_checkpoint is None:
         raise ValueError("--reset-runtime-heads requires --init-checkpoint")
+    if args.init_instance_calibration_blend is not None and args.init_checkpoint is None:
+        raise ValueError("--init-instance-calibration-blend requires --init-checkpoint")
     _prepare_output(args.output_dir)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -982,6 +1007,14 @@ def main(argv: list[str] | None = None) -> None:
     }
     if args.init_checkpoint is not None:
         initialization = _initialize_model_from_checkpoint(model, args.init_checkpoint)
+        source_blend = float(initialization["inheritedInstanceCalibrationBlend"])
+        effective_blend = (
+            source_blend
+            if args.init_instance_calibration_blend is None
+            else float(args.init_instance_calibration_blend)
+        )
+        initialization["sourceInstanceCalibrationBlend"] = source_blend
+        initialization["effectiveInstanceCalibrationBlend"] = effective_blend
     if args.reset_runtime_heads:
         model.reset_runtime_heads()
         initialization["runtimeHeadsReset"] = True
@@ -990,7 +1023,7 @@ def main(argv: list[str] | None = None) -> None:
     model.set_instance_calibration_reliability(torch.from_numpy(reliability).to(device))
     if args.init_checkpoint is not None:
         model.set_instance_calibration_blend(
-            float(initialization["inheritedInstanceCalibrationBlend"])
+            float(initialization["effectiveInstanceCalibrationBlend"])
         )
     geometry = geometry.to(device)
     relation_tensors = {
@@ -1072,6 +1105,10 @@ def main(argv: list[str] | None = None) -> None:
                 "tailSeparationEffectiveWeight",
             ],
         },
+        "calibration": {
+            "selectionWeightedRecallFloor": float(args.calibration_weighted_recall_floor),
+            "validationSafetyFloor": WEIGHTED_RECALL_FLOOR,
+        },
         "occlusionRepresentation": dict(model.config["occlusionRepresentation"]),
         "candidateUnion": False,
         "testRead": False,
@@ -1128,7 +1165,7 @@ def main(argv: list[str] | None = None) -> None:
                 continue
             global_step += 1
             blend = (
-                float(initialization["inheritedInstanceCalibrationBlend"])
+                float(initialization["effectiveInstanceCalibrationBlend"])
                 if args.init_checkpoint is not None
                 else _calibration_blend(
                     global_step - 1, course_total_steps,
@@ -1322,8 +1359,12 @@ def main(argv: list[str] | None = None) -> None:
                 poses_per_batch=args.poses_per_batch, max_poses=args.max_eval_poses,
                 bootstrap_replicates=args.calibration_bootstrap_replicates,
                 collect_score_stats=True,
+                target_weighted_recall=args.calibration_weighted_recall_floor,
             )
-            selected, diagnostic, frozen = _calibration_workpoints(calibration_rows)
+            selected, diagnostic, frozen = _calibration_workpoints(
+                calibration_rows,
+                target_weighted_recall=args.calibration_weighted_recall_floor,
+            )
             if frozen is not None:
                 validation_rows = _evaluate(
                     model, validation_split, runtime, world_aabbs, device,
@@ -1344,8 +1385,9 @@ def main(argv: list[str] | None = None) -> None:
                 "thresholdSource": EXACT_THRESHOLD_SOURCE,
                 "predictionRule": "score >= threshold",
                 "selectionRule": (
-                    "highest float32 score change-point with aggregateWeightedRecall > 0.99 "
-                    "and fixed-pose bootstrap one-sided 95% LCB > 0.99"
+                    "highest float32 score change-point with aggregateWeightedRecall and "
+                    "fixed-pose bootstrap one-sided 95% LCB both above "
+                    f"{args.calibration_weighted_recall_floor}"
                 ),
                 "testRead": False,
             }
@@ -1436,6 +1478,9 @@ def main(argv: list[str] | None = None) -> None:
         "primarySafetyMetric": "aggregateWeightedRecall",
         "weightedRecallFloor": WEIGHTED_RECALL_FLOOR,
         "weightedRecallLowerConfidenceBoundFloor": WEIGHTED_RECALL_FLOOR,
+        "calibrationSelectionWeightedRecallFloor": float(
+            args.calibration_weighted_recall_floor
+        ),
         "bestSafe": best_safe,
         "bestDiagnostic": best_diagnostic,
         "calibration": best_safe_calibration or best_diagnostic_calibration,
@@ -1444,7 +1489,10 @@ def main(argv: list[str] | None = None) -> None:
         "diagnosticCheckpoint": str(args.output_dir / "best_diagnostic.pt") if best_diagnostic else None,
         "initialization": protocol["initialization"],
         "optimizerState": _optimizer_state_metadata(args, optimizer, global_step, protocol["initialization"]),
-        "selectionRule": aggregate_weighted_cull_selection_rule(0.99, 0.99),
+        "selectionRule": aggregate_weighted_cull_selection_rule(
+            args.calibration_weighted_recall_floor,
+            args.calibration_weighted_recall_floor,
+        ),
         "testRead": False,
     }
     _write_json(args.output_dir / "calibration_ready_summary.json", calibration_summary)

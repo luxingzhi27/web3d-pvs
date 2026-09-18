@@ -179,11 +179,11 @@ class FinalizeIfcbenchMainlineTests(unittest.TestCase):
                 (result_root / "exact_calibration.json").write_text(
                     json.dumps(
                         {
-                            "schema": "pvs-v4-exact-calibration-v1",
+                            "schema": "pvs-v4-exact-calibration-v2",
                             "split": "calibration",
                             "checkpoint": str(checkpoint),
-                            "status": "safe",
-                            "selection": {"threshold": 0.7},
+                            "status": "confidence_target_met",
+                            "selection": {"threshold": 0.7, "confidenceTargetMet": True},
                             "selected": {
                                 "threshold": 0.7,
                                 "aggregateWeightedRecall": 0.995,

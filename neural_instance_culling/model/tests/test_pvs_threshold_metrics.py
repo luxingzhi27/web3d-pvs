@@ -127,8 +127,10 @@ class ExactThresholdMetricsTest(unittest.TestCase):
             collect_pose_stats=True,
             bootstrap_replicates=8,
             collect_score_stats=True,
+            target_weighted_recall=0.997,
         )
         self.assertEqual(rows[0]["thresholdSelection"]["thresholdDtype"], "float32")
+        self.assertEqual(rows[0]["thresholdSelection"]["targetWeightedRecall"], 0.997)
 
 
 if __name__ == "__main__":

@@ -23,13 +23,13 @@ class ExactCalibrationThresholdTests(unittest.TestCase):
             checkpoint.write_bytes(b"checkpoint")
             calibration = root / "exact_calibration.json"
             calibration.write_text(json.dumps({
-                "schema": "pvs-v4-exact-calibration-v1",
+                "schema": "pvs-v4-exact-calibration-v2",
                 "split": "calibration",
                 "testRead": False,
                 "checkpoint": str(checkpoint),
                 "predictionRule": "score >= threshold",
-                "status": "safe",
-                "selection": {"threshold": 0.625},
+                "status": "confidence_target_met",
+                "selection": {"threshold": 0.625, "confidenceTargetMet": True},
                 "selected": {
                     "threshold": 0.625,
                     "aggregateWeightedRecall": 0.995,
@@ -41,20 +41,20 @@ class ExactCalibrationThresholdTests(unittest.TestCase):
                 0.625,
             )
 
-    def test_exact_calibration_must_match_checkpoint_and_safety_gate(self) -> None:
+    def test_exact_calibration_must_match_checkpoint_and_mean_wr_target(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             checkpoint = root / "last.pt"
             checkpoint.write_bytes(b"checkpoint")
             calibration = root / "exact_calibration.json"
             payload = {
-                "schema": "pvs-v4-exact-calibration-v1",
+                "schema": "pvs-v4-exact-calibration-v2",
                 "split": "calibration",
                 "testRead": False,
                 "checkpoint": str(root / "other.pt"),
                 "predictionRule": "score >= threshold",
-                "status": "safe",
-                "selection": {"threshold": 0.625},
+                "status": "confidence_target_met",
+                "selection": {"threshold": 0.625, "confidenceTargetMet": True},
                 "selected": {
                     "threshold": 0.625,
                     "aggregateWeightedRecall": 0.995,
@@ -65,9 +65,14 @@ class ExactCalibrationThresholdTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "different checkpoint"):
                 _v4_frozen_threshold({}, checkpoint, calibration)
             payload["checkpoint"] = str(checkpoint)
-            payload["selected"]["aggregateWeightedRecallLowerConfidenceBound"] = 0.99
+            payload["status"] = "mean_target_met"
+            payload["selection"]["confidenceTargetMet"] = False
+            payload["selected"]["aggregateWeightedRecallLowerConfidenceBound"] = 0.989
             calibration.write_text(json.dumps(payload), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "safety gate"):
+            self.assertEqual(_v4_frozen_threshold({}, checkpoint, calibration), 0.625)
+            payload["selected"]["aggregateWeightedRecall"] = 0.99
+            calibration.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "weighted-recall target"):
                 _v4_frozen_threshold({}, checkpoint, calibration)
 
 

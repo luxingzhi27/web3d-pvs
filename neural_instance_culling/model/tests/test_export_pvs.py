@@ -785,12 +785,15 @@ class BoundedRelationSurvivalMomentExportTest(unittest.TestCase):
             calibration_path.write_text(
                 json.dumps(
                     {
-                        "schema": "pvs-v4-exact-calibration-v1",
+                        "schema": "pvs-v4-exact-calibration-v2",
                         "split": "calibration",
                         "checkpoint": str(checkpoint_path),
                         "predictionRule": "score >= threshold",
-                        "status": "safe",
-                        "selection": {"threshold": selected["threshold"]},
+                        "status": "confidence_target_met",
+                        "selection": {
+                            "threshold": selected["threshold"],
+                            "confidenceTargetMet": True,
+                        },
                         "selected": selected,
                         "testRead": False,
                     }

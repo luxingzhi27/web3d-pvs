@@ -39,7 +39,7 @@ from pvs_model import (  # noqa: E402
     SURVIVAL_PARAMETER_DIM,
     SURVIVAL_RANK,
 )
-from pvs_threshold_metrics import evaluate_thresholds, threshold_grid  # noqa: E402
+from pvs_threshold_metrics import evaluate_thresholds  # noqa: E402
 from pose_csr_dataset import PoseCSRDataset  # noqa: E402
 
 try:
@@ -52,7 +52,7 @@ CHECKPOINT_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-check
 REPLAY_SPLITS = ("train", "calibration", "validation", "test")
 TRAINING_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-training-v4"
 CALIBRATION_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-calibration-summary-v4"
-EXACT_CALIBRATION_SCHEMA = "pvs-v4-exact-calibration-v1"
+EXACT_CALIBRATION_SCHEMA = "pvs-v4-exact-calibration-v2"
 EVALUATION_SCHEMA = "pvs-bounded-relation-prior-instance-calibrated-moment-v4-evaluation-v1"
 REGISTERED_MAX_NORM_CYCLES = 8.0
 # Keep the schema names discoverable under the v4-specific vocabulary used by
@@ -384,8 +384,9 @@ def _exact_frozen_threshold(
         raise ValueError("exact calibration summary belongs to a different checkpoint")
     if calibration_summary.get("predictionRule") != "score >= threshold":
         raise ValueError("exact calibration prediction rule is invalid")
-    if calibration_summary.get("status") != "safe":
-        raise ValueError("exact calibration has no safe workpoint")
+    status = str(calibration_summary.get("status", ""))
+    if status not in {"confidence_target_met", "mean_target_met"}:
+        raise ValueError("exact calibration has no retained mean-WR workpoint")
     selection = calibration_summary.get("selection")
     selected = calibration_summary.get("selected")
     if not isinstance(selection, Mapping) or not isinstance(selected, Mapping):
@@ -400,15 +401,20 @@ def _exact_frozen_threshold(
         raise ValueError("exact calibration threshold is outside [0, 1]")
     if not np.isclose(selected_threshold, threshold, rtol=0.0, atol=1e-7):
         raise ValueError("exact calibration threshold fields disagree")
-    if weighted_recall <= 0.99 or lower_bound <= 0.99:
-        raise ValueError("exact calibration workpoint fails the weighted-recall safety gate")
+    if weighted_recall <= 0.99:
+        raise ValueError("exact calibration workpoint fails the aggregate weighted-recall target")
+    confidence_target_met = lower_bound > 0.99
+    if bool(selection.get("confidenceTargetMet")) != confidence_target_met:
+        raise ValueError("exact calibration confidence-target metadata disagrees with its LCB")
     return threshold, {
         "protocol": "checkpoint_specific_exact_calibration",
         "selectionSplit": "calibration",
         "selectedThreshold": threshold,
         "selectedFromTest": False,
         "testEvaluationCount": 0,
-        "safeWorkpoint": True,
+        "qualificationTier": status,
+        "meanTargetMet": True,
+        "confidenceTargetMet": confidence_target_met,
         "selection": _compact_threshold_selection(selected),
     }
 
@@ -697,6 +703,11 @@ def _diagnostic_recalibration(
     replicates = int(getattr(args, "recalibration_bootstrap_replicates", 2000))
     if replicates <= 0:
         raise ValueError("diagnostic recalibration bootstrap count must be positive")
+    target_weighted_recall = float(
+        getattr(args, "recalibration_weighted_recall_floor", 0.99)
+    )
+    if not 0.0 < target_weighted_recall < 1.0:
+        raise ValueError("diagnostic recalibration weighted-recall floor must be in (0, 1)")
     calibration_seed = int(args.seed)
     validation_seed_arg = getattr(args, "recalibration_validation_seed", None)
     validation_seed = (
@@ -716,7 +727,7 @@ def _diagnostic_recalibration(
         max_steps=None,
         max_candidates_per_pose=0,
         seed=calibration_seed,
-        thresholds=threshold_grid(),
+        thresholds=None,
         collect_pose_stats=True,
         allow_candidate_visible_union=False,
         bootstrap_replicates=replicates,
@@ -724,14 +735,20 @@ def _diagnostic_recalibration(
         collect_per_pose=False,
         instance_to_glb=instance_to_glb,
         glb_bytes=glb_bytes,
+        target_weighted_recall=target_weighted_recall,
     )
-    selected = select_aggregate_weighted_cull_workpoint(
+    confidence_qualified = select_aggregate_weighted_cull_workpoint(
         calibration_rows,
-        target_weighted_recall=0.99,
-        minimum_lower_confidence_bound=0.99,
+        target_weighted_recall=target_weighted_recall,
+        minimum_lower_confidence_bound=target_weighted_recall,
+    )
+    mean_qualified = confidence_qualified or select_aggregate_weighted_cull_workpoint(
+        calibration_rows,
+        target_weighted_recall=target_weighted_recall,
+        minimum_lower_confidence_bound=None,
     )
     diagnostic = _diagnostic_workpoint(calibration_rows)
-    chosen = selected if selected is not None else diagnostic
+    chosen = mean_qualified if mean_qualified is not None else diagnostic
     validation = None
     if chosen is not None:
         validation_rows = evaluate_thresholds(
@@ -755,13 +772,35 @@ def _diagnostic_recalibration(
         )
         validation = validation_rows[0] if validation_rows else None
     protocol = checkpoint.get("protocol")
+    validation_wr = float((validation or {}).get("aggregateWeightedRecall") or -1.0)
+    validation_lcb = float(
+        (validation or {}).get("aggregateWeightedRecallLowerConfidenceBound") or -1.0
+    )
+    validation_mean_target_met = validation_wr > target_weighted_recall
+    validation_confidence_target_met = (
+        validation_mean_target_met and validation_lcb > target_weighted_recall
+    )
+    status = (
+        "confidence_target_met"
+        if confidence_qualified is not None
+        else "mean_target_met"
+        if mean_qualified is not None
+        else "mean_target_not_met"
+    )
     return {
         "schema": DIAGNOSTIC_RECALIBRATION_SCHEMA,
-        "status": "safe" if selected is not None else "no_qualified_safety_workpoint",
+        "status": status,
         "checkpoint": str(checkpoint_path),
         "epoch": int(checkpoint.get("epoch", 0)),
         "seed": int(protocol.get("seed", args.seed)) if isinstance(protocol, Mapping) else int(args.seed),
-        "selectionRule": aggregate_weighted_cull_selection_rule(0.99, 0.99),
+        "selectionRule": (
+            aggregate_weighted_cull_selection_rule(
+                target_weighted_recall,
+                target_weighted_recall,
+            )
+            + "; if unavailable, retain the highest-cull workpoint with aggregate WR above target"
+        ),
+        "targetWeightedRecall": target_weighted_recall,
         "bootstrapReplicates": replicates,
         "bootstrapSeeds": {
             "calibration": calibration_seed,
@@ -769,7 +808,15 @@ def _diagnostic_recalibration(
         },
         "calibrationPoseCount": int(calibration_split.pose_indices.size),
         "validationPoseCount": int(validation_split.pose_indices.size),
-        "selectedSafe": _json_safe_metadata(selected),
+        "selectedRetained": _json_safe_metadata(mean_qualified),
+        "confidenceTargetMet": confidence_qualified is not None,
+        "meanTargetMet": mean_qualified is not None,
+        "validationQualification": {
+            "meanTargetMet": validation_mean_target_met,
+            "confidenceTargetMet": validation_confidence_target_met,
+            "weightedRecall": validation_wr,
+            "weightedRecallLowerConfidenceBound": validation_lcb,
+        },
         "diagnostic": _json_safe_metadata(diagnostic),
         "validationAtSelectedThreshold": _json_safe_metadata(validation),
         "calibrationThresholdRows": _json_safe_metadata(calibration_rows),
@@ -1239,6 +1286,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--scene-name", default="")
     parser.add_argument("--method-name", default="full_v4")
     parser.add_argument("--recalibration-bootstrap-replicates", type=int, default=2000)
+    parser.add_argument(
+        "--recalibration-weighted-recall-floor",
+        type=float,
+        default=0.99,
+        help="calibration-only WR and one-sided LCB floor for diagnostic recalibration",
+    )
     parser.add_argument("--recalibration-validation-seed", type=int, default=None)
     return parser.parse_args(argv)
 

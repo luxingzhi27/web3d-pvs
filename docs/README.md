@@ -1,6 +1,6 @@
 # NeuralStreamWeb3D 文档索引
 
-更新时间：2026-09-15
+更新时间：2026-09-18
 
 当前论文主线是 HKUST 与 Metropolis/IFCBench 两场景的 V4 实例级可见性模型：离线固定实例特征和遮挡生存系数，浏览器以 `66°` 后退视锥建立候选，以真实 `60°` 视锥完成显示过滤。两场景三种子正式 test 已完成，运行成员均按 validation 规则冻结。
 
@@ -15,6 +15,7 @@
 | [`evaluation/pvs_gt_convergence_2026-09-09.md`](evaluation/pvs_gt_convergence_2026-09-09.md) | 两场景现有 subpose 的 GT 并集收敛初检与 128 点补采样要求 |
 | [`evaluation/ifcbench_calibration_finetune_2026-09-09.md`](evaluation/ifcbench_calibration_finetune_2026-09-09.md) | IFCBench 精确校准、warm-start 微调扫描与三种子确认执行记录 |
 | [`evaluation/pvs_exact_recalibration_2026-09-15.md`](evaluation/pvs_exact_recalibration_2026-09-15.md) | HKUST/IFCBench 冻结 Full checkpoint 的 float32 精确阈值重校准与 validation 选择 |
+| [`evaluation/pvs_recall_target_policy_2026-09-17.md`](evaluation/pvs_recall_target_policy_2026-09-17.md) | LCB 优先目标、平均 WR 保留规则，以及 Viking sampling-v2 三种子正式 test 结果 |
 | [`evaluation/ifcbench_mainline_finalization_template.md`](evaluation/ifcbench_mainline_finalization_template.md) | IFCBench validation 决策、三种子冻结 test 与运行资产导出的最终记录模板 |
 | [`current/pvs_mainline_2026-08-23.md`](current/pvs_mainline_2026-08-23.md) | V4 模型结构、代码入口、主 split、当前工作点和 validation 摘要 |
 | [`experiments/pvs_mainline_training_2026-08-21.md`](experiments/pvs_mainline_training_2026-08-21.md) | 三种子 `40 × 900` 正式训练及六项核心消融协议 |
@@ -60,5 +61,6 @@
 | [`experiments/pvs_paper_experiments_2026-09-09.md`](experiments/pvs_paper_experiments_2026-09-09.md) | 论文核心实验、图表、IFCBench 微调和一周执行计划 |
 | [`experiments/pvs_third_scene_and_geometry_shell_hzb_baseline_2026-09-08.md`](experiments/pvs_third_scene_and_geometry_shell_hzb_baseline_2026-09-08.md) | 独立来源第三 BIM 场景选择与 Geometry-only shell HZB 基线计划 |
 | [`experiments/pvs_standard_graphics_scene_generality_2026-09-10.md`](experiments/pvs_standard_graphics_scene_generality_2026-09-10.md) | Sponza/Viking/Big City 等标准场景的一单位一资源转换、训练、Hi-Z 对比和 non-BIM 泛化方案 |
+| [`experiments/pvs_v5_generalizable_unified_architecture_2026-09-18.md`](experiments/pvs_v5_generalizable_unified_architecture_2026-09-18.md) | V5 共享泛化模型的训练数据、统一架构、约束损失、精简消融和 LOSO/最终部署协议 |
 | [`current/browser_instance_visibility_streaming_patent_application_2026-09-02.md`](current/browser_instance_visibility_streaming_patent_application_2026-09-02.md) | 浏览器区域可见性、资源调度和增量加载专利正文 |
 | [`current/browser_visibility_streaming_patent_figures_plan_2026-09-01.md`](current/browser_visibility_streaming_patent_figures_plan_2026-09-01.md) | 专利附图规划、参考标号、可编辑图源和导出规范 |

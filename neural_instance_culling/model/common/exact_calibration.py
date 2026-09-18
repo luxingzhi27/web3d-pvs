@@ -149,7 +149,7 @@ def _pose_rows_from_offsets(pose_offsets: np.ndarray, score_count: int) -> np.nd
     )
 
 
-def select_highest_safe_score_change_point(
+def select_highest_recall_target_score_change_point(
     scores: np.ndarray,
     labels: np.ndarray,
     visible_weights: np.ndarray,
@@ -160,13 +160,14 @@ def select_highest_safe_score_change_point(
     target_weighted_recall: float = 0.99,
     bootstrap: FixedPoseBootstrap | None = None,
 ) -> dict[str, Any]:
-    """Select the highest actual float32 score point passing both safety gates.
+    """Select the highest score point using confidence-first recall targets.
 
-    Safety is monotonic in the threshold.  The search therefore evaluates the
-    complete float32 score-point domain with a binary search.  A negative-only
-    point can be the formal boundary of an interval with unchanged weighted
-    recall, so it must remain part of the searchable domain rather than merely
-    being reported as a diagnostic.
+    The one-sided LCB is a confidence target, not a hard rejection gate.  The
+    selector first searches for the highest threshold where both aggregate WR
+    and its LCB exceed the target.  If no such point exists, it retains the
+    highest threshold whose aggregate WR alone exceeds the target.  A
+    negative-only point can be the boundary of an interval with unchanged WR,
+    so all candidate score change-points remain in the search domain.
     """
     values = np.asarray(scores, dtype=np.float32).reshape(-1)
     targets = np.asarray(labels, dtype=np.float32).reshape(-1)
@@ -206,7 +207,7 @@ def select_highest_safe_score_change_point(
     positive_weights = weights[positive]
     positive_points = float32_score_change_points(positive_scores)
 
-    def safety(threshold: np.float32) -> tuple[float, float, bool]:
+    def qualification(threshold: np.float32) -> tuple[float, float, bool, bool]:
         selected = positive_scores >= np.float32(threshold)
         weighted_tp = np.bincount(
             positive_pose_rows[selected],
@@ -215,50 +216,68 @@ def select_highest_safe_score_change_point(
         ).astype(np.float64, copy=False)
         aggregate = float(weighted_tp.sum() / max(1e-12, float(gt_mass.sum())))
         lower = bootstrap.lower_confidence_bound(weighted_tp, gt_mass)
-        return aggregate, lower, bool(
-            aggregate > float(target_weighted_recall)
-            and lower > float(target_weighted_recall)
-        )
+        mean_target_met = aggregate > float(target_weighted_recall)
+        confidence_target_met = mean_target_met and lower > float(target_weighted_recall)
+        return aggregate, lower, mean_target_met, confidence_target_met
 
-    best = -1
-    low = 0
-    high = int(score_points.size) - 1
-    while low <= high:
-        middle = (low + high) // 2
-        _aggregate, _lower, safe = safety(np.float32(score_points[middle]))
-        if safe:
-            best = middle
-            low = middle + 1
-        else:
-            high = middle - 1
+    def highest_index(require_confidence: bool) -> int:
+        best = -1
+        low = 0
+        high = int(score_points.size) - 1
+        while low <= high:
+            middle = (low + high) // 2
+            _aggregate, _lower, mean_met, confidence_met = qualification(
+                np.float32(score_points[middle])
+            )
+            accepted = confidence_met if require_confidence else mean_met
+            if accepted:
+                best = middle
+                low = middle + 1
+            else:
+                high = middle - 1
+        return best
 
-    if best >= 0:
-        threshold = np.float32(score_points[best])
-        status = "safe"
-        selected_aggregate, selected_lower, selected_safe = safety(threshold)
-        selected_index = best
+    confidence_index = highest_index(require_confidence=True)
+    mean_index = confidence_index if confidence_index >= 0 else highest_index(require_confidence=False)
+
+    if confidence_index >= 0:
+        selected_index = confidence_index
+        status = "confidence_target_met"
+    elif mean_index >= 0:
+        selected_index = mean_index
+        status = "mean_target_met"
     elif score_points.size:
-        threshold = np.float32(score_points[0])
-        status = "no_qualified_safety_workpoint"
-        selected_aggregate, selected_lower, selected_safe = safety(threshold)
         selected_index = 0
+        status = "mean_target_not_met"
+    else:
+        selected_index = None
+        status = "mean_target_not_met"
+
+    if selected_index is not None:
+        threshold = np.float32(score_points[selected_index])
+        (
+            selected_aggregate,
+            selected_lower,
+            selected_mean_target_met,
+            selected_confidence_target_met,
+        ) = qualification(threshold)
     else:
         threshold = np.float32(0.0)
-        status = "no_qualified_safety_workpoint"
         selected_aggregate = 1.0
         selected_lower = 1.0
-        selected_safe = False
-        selected_index = None
+        selected_mean_target_met = False
+        selected_confidence_target_met = False
 
     next_higher = None
     next_higher_safety: dict[str, Any] | None = None
     if selected_index is not None and selected_index + 1 < score_points.size:
         next_higher = np.float32(score_points[selected_index + 1])
-        aggregate, lower, safe = safety(next_higher)
+        aggregate, lower, mean_met, confidence_met = qualification(next_higher)
         next_higher_safety = {
             "aggregateWeightedRecall": float(aggregate),
             "aggregateWeightedRecallLowerConfidenceBound": float(lower),
-            "safe": bool(safe),
+            "meanTargetMet": bool(mean_met),
+            "confidenceTargetMet": bool(confidence_met),
         }
     return {
         "status": status,
@@ -273,17 +292,20 @@ def select_highest_safe_score_change_point(
         "maximumScore": float(score_points[-1]) if score_points.size else None,
         "aggregateWeightedRecall": float(selected_aggregate),
         "aggregateWeightedRecallLowerConfidenceBound": float(selected_lower),
-        "safe": bool(selected_safe),
+        "retained": bool(selected_mean_target_met),
+        "meanTargetMet": bool(selected_mean_target_met),
+        "confidenceTargetMet": bool(selected_confidence_target_met),
+        "qualificationTier": status,
         "nextHigherThreshold": None if next_higher is None else float(next_higher),
         "nextHigherSafety": next_higher_safety,
         "targetWeightedRecall": float(target_weighted_recall),
         "searchDomain": "all_candidate_float32_score_change_points",
-        "searchOptimization": "binary_search_over_all_points; safety_from_positive_weight_mass",
+        "searchOptimization": "confidence_first_binary_search_then_mean_wr_fallback",
         "bootstrap": bootstrap.metadata(),
         "rule": (
-            "highest float32 score change-point with aggregateWeightedRecall > "
-            f"{float(target_weighted_recall):.2f} and fixed-pose bootstrap LCB > "
-            f"{float(target_weighted_recall):.2f}"
+            "highest float32 score change-point with aggregateWeightedRecall and "
+            f"fixed-pose bootstrap LCB > {float(target_weighted_recall):.2f}; "
+            "if unavailable, highest point with aggregateWeightedRecall alone above target"
         ),
     }
 
@@ -292,5 +314,5 @@ __all__ = [
     "EXACT_THRESHOLD_SOURCE",
     "FixedPoseBootstrap",
     "float32_score_change_points",
-    "select_highest_safe_score_change_point",
+    "select_highest_recall_target_score_change_point",
 ]

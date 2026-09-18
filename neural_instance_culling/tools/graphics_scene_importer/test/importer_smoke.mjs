@@ -141,6 +141,14 @@ try {
   assert.equal(disconnected.units[0].oversizedComponentSplit, false);
   assert.ok(disconnected.units[0].compression.encodedGeometryBytes <= 512);
 
+  const componentCapped = await partitionScene(
+    { renderables: [disconnectedRenderable] },
+    { targetBytes: 512, maxComponentsPerUnit: 1 },
+  );
+  assert.equal(componentCapped.units.length, 2);
+  assert.ok(componentCapped.units.every((unit) => unit.componentCount === 1));
+  assert.equal(componentCapped.partition.maxComponentsPerUnit, 1);
+
   const separatePrimitives = await partitionScene({
     renderables: [
       disconnectedRenderable,

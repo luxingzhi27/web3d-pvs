@@ -7,7 +7,7 @@ import numpy as np
 from neural_instance_culling.model.common.exact_calibration import (
     FixedPoseBootstrap,
     float32_score_change_points,
-    select_highest_safe_score_change_point,
+    select_highest_recall_target_score_change_point,
 )
 
 
@@ -42,7 +42,7 @@ class ExactCalibrationTest(unittest.TestCase):
         scores = np.asarray([0.6, 0.7, 0.8], dtype=np.float32)
         labels = np.asarray([1.0, 1.0, 0.0], dtype=np.float32)
         weights = np.asarray([1.0, 1.0, 0.0], dtype=np.float32)
-        selection = select_highest_safe_score_change_point(
+        selection = select_highest_recall_target_score_change_point(
             scores,
             labels,
             weights,
@@ -53,7 +53,7 @@ class ExactCalibrationTest(unittest.TestCase):
             # positive safety target is supplied by the production caller.
             target_weighted_recall=-0.01,
         )
-        self.assertEqual(selection["status"], "safe")
+        self.assertEqual(selection["status"], "confidence_target_met")
         self.assertEqual(selection["threshold"], float(np.float32(0.8)))
         self.assertEqual(selection["selectedCandidateIndex"], 2)
         self.assertEqual(selection["allScoreChangePointCount"], 3)
@@ -63,7 +63,7 @@ class ExactCalibrationTest(unittest.TestCase):
         scores = np.asarray([0.9, 0.8, 0.7, 0.1], dtype=np.float32)
         labels = np.asarray([1.0, 0.0, 1.0, 0.0], dtype=np.float32)
         weights = np.asarray([1.0, 0.0, 1.0, 0.0], dtype=np.float32)
-        selection = select_highest_safe_score_change_point(
+        selection = select_highest_recall_target_score_change_point(
             scores,
             labels,
             weights,
@@ -73,7 +73,7 @@ class ExactCalibrationTest(unittest.TestCase):
         )
         self.assertEqual(selection["threshold"], np.float32(0.7))
         self.assertEqual(selection["nextHigherThreshold"], np.float32(0.8))
-        self.assertEqual(selection["nextHigherSafety"]["safe"], False)
+        self.assertEqual(selection["nextHigherSafety"]["meanTargetMet"], False)
 
 
 if __name__ == "__main__":

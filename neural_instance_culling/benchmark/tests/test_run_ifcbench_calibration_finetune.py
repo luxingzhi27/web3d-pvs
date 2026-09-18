@@ -74,19 +74,19 @@ class IfcbenchCalibrationFinetuneRunnerTests(unittest.TestCase):
         lcb: float,
         useful_cull: float,
         predicted: float,
-        calibration_status: str = "safe",
+        calibration_status: str = "confidence_target_met",
     ) -> None:
         stage = root / "scan" / config
         calibration = {
-            "schema": "pvs-v4-exact-calibration-v1",
+            "schema": "pvs-v4-exact-calibration-v2",
             "checkpoint": f"/models/scan/{config}/last.pt",
             "status": calibration_status,
-            "selection": {"threshold": 0.25},
+            "selection": {"threshold": 0.25, "confidenceTargetMet": True},
             "selected": {"threshold": 0.25, "aggregateWeightedRecall": weighted_recall},
             "testRead": False,
         }
         validation = {
-            "schema": "pvs-v4-frozen-threshold-validation-v1",
+            "schema": "pvs-v4-frozen-threshold-validation-v2",
             "metrics": _validation_metrics(
                 weighted_recall=weighted_recall,
                 lcb=lcb,
@@ -174,7 +174,7 @@ class IfcbenchCalibrationFinetuneRunnerTests(unittest.TestCase):
             )
             safe = refine_selection_payload(root)
             self.assertEqual(safe["selectedConfig"], configs[1])
-            self.assertEqual(safe["selectionStatus"], "safe_member_selected")
+            self.assertEqual(safe["selectionStatus"], "confidence_target_member_selected")
             self.assertEqual(len(safe["rows"]), 3)
             self.assertFalse(safe["testRead"])
 
@@ -187,7 +187,7 @@ class IfcbenchCalibrationFinetuneRunnerTests(unittest.TestCase):
 
         self.assertEqual(fallback["selectedConfig"], configs[1])
         self.assertEqual(
-            fallback["selectionStatus"], "no_safe_member_selected_relative_best"
+            fallback["selectionStatus"], "mean_target_member_selected"
         )
         self.assertTrue(fallback["selectedConfig"])
 
