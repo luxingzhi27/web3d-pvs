@@ -283,6 +283,10 @@ class ColumnarScoreBundleTests(unittest.TestCase):
             )
             geometry_payload = json.loads(geometry_manifest.read_text(encoding="utf-8"))
             self.assertEqual(geometry_payload["schema"], COMPILED_GEOMETRY_SCHEMA)
+            self.assertGreater(geometry_payload["outputBytes"], 0)
+            self.assertGreaterEqual(geometry_payload["compileTiming"]["geometryEncodeSeconds"], 0.0)
+            self.assertGreaterEqual(geometry_payload["compileTiming"]["relationFieldCompileSeconds"], 0.0)
+            self.assertGreaterEqual(geometry_payload["compileTiming"]["totalSeconds"], 0.0)
             compiled = load_compiled_geometry(root / "geometry", expected_scene="fixture", expected_variant="FULL")
             validation_sidecar = infer_split(
                 checkpoint,

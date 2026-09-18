@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import shutil
 import struct
+import time
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -285,6 +286,7 @@ def compile_geometry(
     overwrite: bool = False,
 ) -> Path:
     """Compile z and field/latent for one scene in bounded GPU chunks."""
+    started = time.perf_counter()
     if geometry_chunk_size <= 0:
         raise ValueError("geometry_chunk_size must be positive")
     output = Path(output_dir).resolve()
@@ -303,6 +305,9 @@ def compile_geometry(
     requested_device = torch.device(device) if device is not None else next(checkpoint.model.parameters()).device
     model = checkpoint.model.to(requested_device)
     valid_ids = np.flatnonzero(valid_mask).astype(np.int64, copy=False)
+    if requested_device.type == "cuda":
+        torch.cuda.synchronize(requested_device)
+    geometry_started = time.perf_counter()
     with torch.inference_mode():
         for start in range(0, valid_ids.size, int(geometry_chunk_size)):
             ids = valid_ids[start : start + int(geometry_chunk_size)]
@@ -310,7 +315,13 @@ def compile_geometry(
             ratios = torch.from_numpy(np.asarray(assets["ratios"][ids], dtype=np.float32)).to(requested_device)
             geometry[ids] = model.encode_geometry(points, ratios).cpu().numpy().astype(np.float32, copy=False)
     geometry.flush()
+    if requested_device.type == "cuda":
+        torch.cuda.synchronize(requested_device)
+    geometry_seconds = time.perf_counter() - geometry_started
     geometry_table = torch.from_numpy(np.asarray(geometry, dtype=np.float32)).to(requested_device)
+    if requested_device.type == "cuda":
+        torch.cuda.synchronize(requested_device)
+    relation_started = time.perf_counter()
     with torch.inference_mode():
         for start in range(0, valid_ids.size, int(geometry_chunk_size)):
             ids = valid_ids[start : start + int(geometry_chunk_size)]
@@ -322,7 +333,11 @@ def compile_geometry(
             values = compiled[target_name].cpu().numpy().astype(np.float32, copy=False)
             target[ids] = values
     target.flush()
+    if requested_device.type == "cuda":
+        torch.cuda.synchronize(requested_device)
+    relation_seconds = time.perf_counter() - relation_started
     del geometry_table
+    output_bytes = int(geometry_path.stat().st_size + target_path.stat().st_size)
     manifest = {
         "schema": COMPILED_GEOMETRY_SCHEMA,
         "version": 1,
@@ -343,6 +358,13 @@ def compile_geometry(
             target_name: list(target_shape),
         },
         "dtypes": {"geometry": "<f4", target_name: "<f4"},
+        "compileTiming": {
+            "geometryEncodeSeconds": float(geometry_seconds),
+            "relationFieldCompileSeconds": float(relation_seconds),
+            "totalSeconds": float(time.perf_counter() - started),
+            "device": str(requested_device),
+        },
+        "outputBytes": output_bytes,
         "runtimeReady": True,
     }
     write_bundle_manifest(output / "manifest.json", manifest)
