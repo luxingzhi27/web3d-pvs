@@ -31,6 +31,7 @@ SURFACE_MAGIC = b"GPV5"
 class SceneRiskDenominators:
     pose_count: int
     eligible_pose_count: int
+    candidate_occurrences: int
     visible_occurrences: int
     visible_weight_sum: float
 
@@ -268,10 +269,13 @@ class V5SceneTrainingData:
 
     def _compute_train_denominators(self) -> SceneRiskDenominators:
         occurrences = 0
+        candidate_occurrences = 0
         weight_sum = 0.0
         indices = np.asarray(self.train_split.pose_indices, dtype=np.int64)
         eligible = indices[self.dataset.candidate_counts[indices] > 0]
         for pose_id in indices.tolist():
+            candidate_ids = np.asarray(self.dataset.candidate_slice(int(pose_id)), dtype=np.int64)
+            candidate_occurrences += int(np.count_nonzero(self.valid_unit_mask[candidate_ids]))
             visible_ids, weights = self.dataset.visible_slice(int(pose_id))
             visible_ids = np.asarray(visible_ids, dtype=np.int64)
             if self.degenerate_unit_ids.size and visible_ids.size and bool(
@@ -284,10 +288,12 @@ class V5SceneTrainingData:
             weight_sum += float(np.asarray(weights, dtype=np.float64).sum())
         if occurrences <= 0 or weight_sum <= 0:
             raise ValueError(f"{self.scene_id} train split has no positive supervision")
+        if candidate_occurrences < occurrences:
+            raise ValueError(f"{self.scene_id} train candidates contain fewer rows than visible GT")
         if eligible.size <= 0:
             raise ValueError(f"{self.scene_id} train split has no candidate-nonempty poses")
         return SceneRiskDenominators(
-            int(indices.size), int(eligible.size), occurrences, weight_sum
+            int(indices.size), int(eligible.size), candidate_occurrences, occurrences, weight_sum
         )
 
     def sample_pose_batch(self, rng: np.random.Generator, pose_count: int = 4) -> PoseBatch:

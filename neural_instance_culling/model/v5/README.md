@@ -21,7 +21,9 @@ conda run --no-capture-output -n slm_pvs \
 ```
 
 该命令不读取 calibration、validation 或 test；任何 surface/relation/probe/region/CSR shape 或
-权限错误都会在长训前失败。
+权限错误都会在长训前失败。每个场景还报告 `initialRiskExtraAtZeroLogit`；它精确等于 train
+候选负样本 occurrence 与可见 occurrence 的比值，用于量化零初始化时 extra risk 相对两个
+初始值为 1 的 miss risk 有多大。
 
 ## 入口
 

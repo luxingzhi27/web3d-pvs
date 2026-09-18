@@ -25,6 +25,14 @@ class _DatasetFixture:
         }
         return rows[int(pose_id)]
 
+    def candidate_slice(self, pose_id: int):
+        rows = {
+            0: np.asarray([0, 1, 2, 3], dtype=np.uint32),
+            1: np.zeros((0,), dtype=np.uint32),
+            2: np.asarray([0, 1], dtype=np.uint32),
+        }
+        return rows[int(pose_id)]
+
 
 class TrainingDataContractTests(unittest.TestCase):
     def _scene(self) -> V5SceneTrainingData:
@@ -33,12 +41,14 @@ class TrainingDataContractTests(unittest.TestCase):
         scene.dataset = _DatasetFixture()
         scene.train_split = SimpleNamespace(pose_indices=np.asarray([0, 1, 2], dtype=np.int64))
         scene.degenerate_unit_ids = np.zeros((0,), dtype=np.int64)
+        scene.valid_unit_mask = np.ones((4,), dtype=bool)
         return scene
 
     def test_denominators_record_the_actual_pose_sampling_population(self) -> None:
         denominators = self._scene()._compute_train_denominators()
         self.assertEqual(denominators.pose_count, 3)
         self.assertEqual(denominators.eligible_pose_count, 2)
+        self.assertEqual(denominators.candidate_occurrences, 6)
         self.assertEqual(denominators.visible_occurrences, 2)
         self.assertEqual(denominators.visible_weight_sum, 5.0)
 

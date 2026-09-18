@@ -771,6 +771,14 @@ def preflight_training_assets(
             "candidateEmptyPoseCount": int(
                 scene.denominators.pose_count - scene.denominators.eligible_pose_count
             ),
+            "trainCandidateOccurrences": int(scene.denominators.candidate_occurrences),
+            "trainVisibleOccurrences": int(scene.denominators.visible_occurrences),
+            "initialRiskExtraAtZeroLogit": float(
+                (scene.denominators.candidate_occurrences - scene.denominators.visible_occurrences)
+                / scene.denominators.visible_occurrences
+            ),
+            "initialRiskCountAtZeroLogit": 1.0,
+            "initialRiskVisualAtZeroLogit": 1.0,
             "sampleCandidateCount": int(pose.candidate_ids.size),
             "sampleVisibleCount": int(np.count_nonzero(pose.targets)),
             "sampleProbeCount": int(probe.unit_ids.size),

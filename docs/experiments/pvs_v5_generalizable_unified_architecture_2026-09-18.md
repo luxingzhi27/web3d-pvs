@@ -338,6 +338,10 @@ update 和 synthetic family-local update，纵轴绘制 `J_extra`、`R_count`、
 两个 miss risk 急升而 dual 长期接近零。若所有学习率组合都出现该模式，再登记并比较 dual 初值
 或短暂约束预热；在观察到轨迹前不向正式目标加入 warmup、bias 修正或额外 loss。
 
+正式 preflight 逐场景报告零 logit 的解析初值：`J_extra=N_neg/N_pos`、`R_count=1`、
+`R_visual=1`，并同时记录 train candidate/visible occurrence。该结果用于解释不同 prevalence
+场景的初始梯度尺度，但不替代 pilot 的实际参数轨迹。
+
 若参数扫描结果不好，可以在上述两个学习率轴的相邻数量级内追加一次最多 4 个成员的局部扫描，
 但不得改变损失项、数据权限或评价顺序。参数冻结后，正文 15 个消融和 45 个 LOSO 模型全部从头
 训练，不从 pilot checkpoint 微调。后续允许的“微调”仅指对同一冻结架构和数据协议调整已登记的
