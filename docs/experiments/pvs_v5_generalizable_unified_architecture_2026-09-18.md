@@ -193,8 +193,23 @@ field probe 只在 source train scene 生成。每个 unit 使用 16 个面积�
 S_center, S_max, S_mean, S_min
 ```
 
-最终 query geometry 为 16D，包括世界与相机坐标方向、相对距离和角尺度、三个区域半轴、
-FOV、区域类型、near 和 far。最终头为：
+最终 query geometry 严格按以下顺序构造 16D，训练、PyTorch 导出、WebGPU 和 WASM 不得各自
+重新定义：
+
+| 维度 | 内容 |
+|---|---|
+| 0–2 | unit 中心指向区域中心的世界方向单位向量 |
+| 3–5 | 区域中心指向 unit 的方向在相机 right/up/forward 基中的分量 |
+| 6 | `log(1 + d/r_i)` |
+| 7 | `r_i/(d+r_i)` |
+| 8–10 | 三个区域半轴长度除以 `d+r_i+max(half_axes)`；圆盘为 `(R,0,R)` |
+| 11–12 | `tan(FOV_x/2), tan(FOV_y/2)` |
+| 13 | 区域类型：圆盘 0、定向盒 1 |
+| 14 | `near/(d+r_i)` |
+| 15 | `log(1+far/(d+r_i))` |
+
+`near/far` 来自真实采样或运行相机配置；历史 CSR 未逐 pose 保存 clip plane 时，场景注册表必须
+显式登记该批 GT 的 Color-ID 相机默认值，不能在训练器中静默填另一个常数。最终头为：
 
 ```text
 z_i(32) + field_stats(4) + query_geometry(16)
@@ -284,6 +299,36 @@ LOSO 同时报告：
 优化器使用 AdamW，初始学习率 `2e-4`、weight decay `1e-5`，按 optimizer step cosine 降到 0，
 全局梯度范数裁剪为 5。训练固定走到最后一次更新，不按 validation 挑 epoch。
 
+### 6.1 正式长训前参数扫描
+
+正文训练前只扫描优化动力学，不扫描模型容量、关系 K、方向基阶数、支持点数或 loss 组成，避免
+把架构搜索伪装成消融。扫描固定使用 FULL、一个开发 seed、五个真实场景 train 和全部 96 个
+synthetic train scene；calibration 只选阈值，validation 只选参数，test 始终不可读。
+
+第一阶段执行 6 个 `12,000 update` 的从头 pilot：
+
+```text
+model learning rate: 1e-4, 2e-4, 4e-4
+dual learning rate:  1e-3, 3e-3
+weight decay:        1e-5 fixed
+field coefficient:  0.25 fixed
+```
+
+所有成员使用相同 scene/pose/synthetic RNG 序列、余弦调度、零初始化非负乘子和相同 bootstrap
+设置。快速扫描始终保留相对最优的两个配置，不能因没有成员达到严格安全门而取消后续确认。
+两个候选各自从头执行 `36,000 update` 单 seed 确认；最终参数按以下词典序冻结：
+
+1. validation 上达到 strict LCB 工作点的场景数；
+2. validation 上达到 mean-target 工作点的场景数；
+3. 五场景等权的 weighted recall LCB；
+4. 在安全层级相同的前提下，五场景等权 CNOR、Useful Cull；
+5. 五场景等权 predicted/GT，越低越优。
+
+若参数扫描结果不好，可以在上述两个学习率轴的相邻数量级内追加一次最多 4 个成员的局部扫描，
+但不得改变损失项、数据权限或评价顺序。参数冻结后，正文 12 个消融和 45 个 LOSO 模型全部从头
+训练，不从 pilot checkpoint 微调。后续允许的“微调”仅指对同一冻结架构和数据协议调整已登记的
+优化器参数并重新从头训练；不得按单个目标场景标签更新 universal/LOSO 权重。
+
 几何编码、关系编译、field NLL 和最终 PVS loss 端到端更新。大场景使用精确梯度重计算：先对
 当前 step 涉及的唯一 unit 生成无图 `z_cache`，下游分块累计 `z_leaf.grad`，再按几何 chunk
 重算编码器并回传。减小 chunk 只能改变显存，不得改变 pose batch、候选、损失分母或更新数。
@@ -369,13 +414,14 @@ V5 核心训练总数为：
 2. 构建 V5 local-surface、proxy graph 和 external-hit probe schema，并完成权限测试。
 3. 实现共享模型、约束风险、对偶更新、梯度重计算和 CPU 数值测试。
 4. 用五个真实场景的小子集完成一个 shared seed smoke，验证 loss、显存和跨场景 batch。
-5. 跑 FULL、GEOMETRY_FIELD、GENERIC_RELATION_28、PBCE_OBJECTIVE 的单 seed 开发训练；只读
+5. 按 6.1 节完成 FULL 参数扫描和双候选确认，冻结优化器参数。
+6. 跑 FULL、GEOMETRY_FIELD、GENERIC_RELATION_28、PBCE_OBJECTIVE 的单 seed 开发训练；只读
    calibration/validation。
-6. 若 FULL 没有相对三个对照改善平均安全—紧致前沿，先检查 proxy graph recall 和 field NLL，
+7. 若 FULL 没有相对三个对照改善平均安全—紧致前沿，先检查 proxy graph recall 和 field NLL，
    不增加新的 loss 项。
-7. 架构冻结后完成 12 个正文消融模型。
-8. 完成 45 个 LOSO 模型，再训练/复用 Universal final。
-9. 最后读取 frozen test、blind holdout，并执行图像、HZB、runtime 和 streaming 实验。
+8. 架构冻结后完成 12 个正文消融模型。
+9. 完成 45 个 LOSO 模型，再训练/复用 Universal final。
+10. 最后读取 frozen test、blind holdout，并执行图像、HZB、runtime 和 streaming 实验。
 
 ## 11. 采用条件与论文主张
 
@@ -413,3 +459,38 @@ schedule。开发阶段 V4 保留为冻结 baseline；V5 通过采用条件后�
 设计来源：根目录《面向泛化的紧凑遮挡场PVS_新架构与实验设计.md》和
 《GCOF-PVS_V6.1_召回约束版完整规范.md》。本规范对两份草案作出训练数据、约束强度、消融
 规模和泛化评价方面的最终取舍。
+
+## 13. 真实 external-hit probe 生成器（2026-09-18）
+
+本次实现把 7.3 的场监督从旧 JSONL 记录落实为真实三角形射线资产。生成器读取已有
+`[unit,256,6]` 表面点二进制，每个 unit 固定取前 16 个点；方向固定为 12 个正二十面体方向
+加 24 个 Fibonacci 方向。GLB 经现有 Three.js loader 解码后保留世界三角形和 unit 归属，再用
+`three-mesh-bvh` 查询最近外部三角形；射线起点沿方向偏移 `1e-5*r`，距离仍从原始表面点计量，
+当前 unit 的全部三角形都会被跳过，超过 `1024*r` 的结果用 `hitDistances=NaN` 表示右删失。
+正式 Color-ID 协议的 `DoubleSide` 规则用于 BVH 射线查询，源材质的透明度字段不会被误当成
+Color-ID 的可见性规则。
+
+修改文件：
+
+- `neural_instance_culling/dataset/v5/generate_external_hit_probes.mjs`
+- `neural_instance_culling/dataset/v5/test_generate_external_hit_probes.mjs`
+- `neural_instance_culling/dataset/v5/schemas.py`（允许并严格校验列式 v1 manifest）
+- `neural_instance_culling/package.json`、`package-lock.json`（加入 `three-mesh-bvh`）
+
+输出目录固定暴露 `unitIds`、`directions`、`hitDistances`、`maxDistances`、`startIds`、
+`directionIds` 六个小端无头二进制列，行序为 `[unit][directionId][startId]`，每个 unit 576 行。
+manifest 保留 `parallel_external_hit_current_status-v1`、source-train 权限字段、13 个距离比和
+列 dtype/shape；训练器均匀抽取 ray 后即时展开距离事件，不生成每条 ray 的 13 份 JSON 记录。
+生成器支持无哈希进度恢复、连续分片和按 unit ID 合并。
+
+验证命令：
+
+```bash
+node neural_instance_culling/dataset/v5/test_generate_external_hit_probes.mjs
+node --check neural_instance_culling/dataset/v5/generate_external_hit_probes.mjs
+python -m py_compile neural_instance_culling/dataset/v5/schemas.py
+```
+
+测试覆盖两个真实 GLB 盒子、反向面 DoubleSide 命中、当前 unit 全部跳过、1024 倍尺度右删失、
+六列 shape/dtype、逆序分片合并和完整输出恢复。画面安全指标、剔除效率指标和前端延迟尚未在
+本生成器任务中实现，需由后续训练与 benchmark 读取列式资产后报告。

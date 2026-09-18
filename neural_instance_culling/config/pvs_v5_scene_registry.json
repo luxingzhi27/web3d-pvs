@@ -1,0 +1,138 @@
+{
+  "schema": "pvs-v5-scene-registry-v1",
+  "experiment": "gcof_pvs_v5_generalizable_unified_v1",
+  "surfacePointsPerUnit": 256,
+  "relationAnchors": 12,
+  "relationTopK": 8,
+  "candidateFovYDeg": 66.0,
+  "renderFovYDeg": 60.0,
+  "trainingPermissions": {
+    "sourceSceneAllowedSplits": [
+      "train",
+      "calibration",
+      "validation"
+    ],
+    "heldOutSceneGeometryOnly": true,
+    "heldOutSceneLabelsAllowedForTraining": false,
+    "heldOutSceneProbesAllowedForTraining": false,
+    "testAllowedForSelection": false
+  },
+  "compiledOutputRoot": "neural_instance_culling/dataset/out/pvs_v5_geometry_compilation_v1",
+  "scenes": [
+    {
+      "id": "hkust",
+      "displayName": "HKUST",
+      "family": "bim-campus",
+      "poseDataset": "neural_instance_culling/dataset/out/pose_csr_hkust_v3_main_stratified_calibration_fov66_v1",
+      "assetsDir": "hkust-v3/assets",
+      "runtimeMeta": "hkust-v3/assets/runtimeVisibilityMeta.json",
+      "glbIndex": "hkust-v3/assets/glbIndex.json",
+      "viewCell": {
+        "shape": "horizontal_disk",
+        "halfExtentM": [2.0, 2.0, 0.0]
+      },
+      "cameraClipM": [0.01, 1000000.0],
+      "splitCounts": {
+        "train": 5926,
+        "calibration": 659,
+        "validation": 730,
+        "test": 684
+      }
+    },
+    {
+      "id": "ifcbench_metropolis",
+      "displayName": "IFCBench/Metropolis",
+      "family": "bim-city",
+      "poseDataset": "neural_instance_culling/dataset/out/pose_csr_ifcbench_fantasy_metropolis_main_stratified_calibration_fov66_v1",
+      "assetsDir": "ifcbench_fantasy_metropolis_instanced_v2/assets",
+      "runtimeMeta": "ifcbench_fantasy_metropolis_instanced_v2/assets/runtimeVisibilityMeta.json",
+      "glbIndex": "ifcbench_fantasy_metropolis_instanced_v2/assets/glbIndex.json",
+      "viewCell": {
+        "shape": "camera_aligned_box",
+        "halfExtentM": [2.5, 2.5, 1.0]
+      },
+      "cameraClipM": [0.01, 1000000.0],
+      "splitCounts": {
+        "train": 19647,
+        "calibration": 2183,
+        "validation": 2712,
+        "test": 2710
+      }
+    },
+    {
+      "id": "sponza_64k",
+      "displayName": "Sponza 64 KiB",
+      "family": "graphics-indoor",
+      "poseDataset": "neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/sponza_64k/pose_csr",
+      "assetsDir": "neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/sponza_64k/assets",
+      "runtimeMeta": "neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/sponza_64k/assets/runtimeVisibilityMeta.json",
+      "glbIndex": "neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/sponza_64k/assets/glbIndex.json",
+      "viewCell": {
+        "shape": "horizontal_disk",
+        "halfExtentM": [0.75, 0.75, 0.0]
+      },
+      "cameraClipM": [0.01, 1000000.0],
+      "splitCounts": {
+        "train": 4800,
+        "calibration": 528,
+        "validation": 672,
+        "test": 672
+      }
+    },
+    {
+      "id": "viking_village_64k",
+      "displayName": "Viking Village 64 KiB",
+      "family": "graphics-outdoor",
+      "poseDataset": "neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/viking_village_64k/pose_csr",
+      "assetsDir": "neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/viking_village_64k/assets",
+      "runtimeMeta": "neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/viking_village_64k/assets/runtimeVisibilityMeta.json",
+      "glbIndex": "neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/viking_village_64k/assets/glbIndex.json",
+      "viewCell": {
+        "shape": "horizontal_disk",
+        "halfExtentM": [0.75, 0.75, 0.0]
+      },
+      "cameraClipM": [0.01, 1000000.0],
+      "splitCounts": {
+        "train": 1944,
+        "calibration": 216,
+        "validation": 276,
+        "test": 276
+      }
+    },
+    {
+      "id": "big_city_64k",
+      "displayName": "Big City 64 KiB",
+      "family": "graphics-city",
+      "poseDataset": "neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/bigcity_64k/pose_csr",
+      "assetsDir": "neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/bigcity_64k/assets",
+      "runtimeMeta": "neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/bigcity_64k/assets/runtimeVisibilityMeta.json",
+      "glbIndex": "neural_instance_culling/dataset/out/standard_graphics_connected_sah_64k_v1/bigcity_64k/assets/glbIndex.json",
+      "viewCell": {
+        "shape": "horizontal_disk",
+        "halfExtentM": [0.75, 0.75, 0.0]
+      },
+      "cameraClipM": [0.01, 1000000.0],
+      "splitCounts": {
+        "train": 11580,
+        "calibration": 1284,
+        "validation": 1608,
+        "test": 1608
+      }
+    }
+  ],
+  "synthetic": {
+    "sceneCount": 120,
+    "trainSceneCount": 96,
+    "validationSceneCount": 12,
+    "diagnosticSceneCount": 12,
+    "sceneFamilies": [
+      "room-corridor",
+      "campus-courtyard",
+      "urban-canyon",
+      "industrial-platform",
+      "mixed-repetition-clutter"
+    ],
+    "unitsPerScene": [256, 4096],
+    "targetUnitKiB": [32, 64, 128]
+  }
+}
