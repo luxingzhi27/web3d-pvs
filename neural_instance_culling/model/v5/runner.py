@@ -50,7 +50,7 @@ from neural_instance_culling.dataset.v5.synthetic_scene_manifest import (
     generate_synthetic_scene_manifest,
 )
 from neural_instance_culling.model.v5.core import GCOFPVSV5
-from neural_instance_culling.model.v5.losses import SceneDualState
+from neural_instance_culling.model.v5.losses import DualGroupState
 from neural_instance_culling.model.v5.schedule import (
     balanced_step_schedule,
     parameter_scan_matrix,
@@ -63,7 +63,7 @@ from neural_instance_culling.model.v5.train import (
 from neural_instance_culling.model.v5.training_data import V5SceneTrainingData
 
 
-RUN_SCHEMA = "gcof-pvs-v5-formal-training-run-v1"
+RUN_SCHEMA = "gcof-pvs-v5-formal-training-run-v2"
 SCAN_SCHEMA = "gcof-pvs-v5-parameter-scan-matrix-v1"
 RNG_SCHEMA = "gcof-pvs-v5-rng-state-v1"
 DEFAULT_SYNTHETIC_BASE_SEED = 20260918
@@ -83,6 +83,8 @@ class TrainingSceneSpec:
 
     scene_id: str
     source_kind: str
+    dual_group_id: str
+    synthetic_family: str | None
     pose_dataset: Path
     runtime_meta: Path
     compiled_dir: Path
@@ -95,6 +97,8 @@ class TrainingSceneSpec:
         return {
             "sceneId": self.scene_id,
             "sourceKind": self.source_kind,
+            "dualGroupId": self.dual_group_id,
+            "syntheticFamily": self.synthetic_family,
             "poseDataset": str(self.pose_dataset),
             "runtimeMeta": str(self.runtime_meta),
             "compiledDir": str(self.compiled_dir),
@@ -129,6 +133,8 @@ def _real_scene_specs(
         spec = TrainingSceneSpec(
             scene_id=scene_id,
             source_kind="real",
+            dual_group_id=scene_id,
+            synthetic_family=None,
             pose_dataset=REPO_ROOT / str(entry["poseDataset"]),
             runtime_meta=REPO_ROOT / str(entry["runtimeMeta"]),
             compiled_dir=compiled_root / scene_id,
@@ -156,10 +162,13 @@ def _synthetic_scene_specs(
         if str(entry["split"]) != "train":
             continue
         scene_id = str(entry["sceneId"])
+        family = str(entry["structureFamily"])
         scene_root = root / scene_id
         spec = TrainingSceneSpec(
             scene_id=scene_id,
             source_kind="synthetic",
+            dual_group_id=f"synthetic_family:{family}",
+            synthetic_family=family,
             pose_dataset=scene_root / "pose_csr",
             runtime_meta=scene_root / "runtimeVisibilityMeta.json",
             compiled_dir=scene_root / "compiled",
@@ -395,6 +404,7 @@ def _resume_contract(config: Mapping[str, Any]) -> dict[str, Any]:
         "totalUpdates", "realUpdatesPerScene", "scheduleSeed",
         "poseCount", "probeCount", "geometryChunkSize", "sourceSceneIds",
         "probeSampling", "probeObservationsPerUnit",
+        "dualGrouping", "dualGroupByScene",
     )
     return {key: config.get(key) for key in keys}
 
@@ -496,6 +506,8 @@ def train_run(
         raise ValueError("train_run received both total_updates and real_updates_per_scene")
     schedule_seed = int(seed) + 0x5EED
     scene_ids = tuple(spec.scene_id for spec in specs)
+    dual_group_by_scene = {spec.scene_id: spec.dual_group_id for spec in specs}
+    dual_group_ids = tuple(dict.fromkeys(dual_group_by_scene.values()))
     config: dict[str, Any] = {
         "schema": RUN_SCHEMA,
         "protocol": str(protocol),
@@ -519,6 +531,9 @@ def train_run(
         "sourceSceneIds": list(scene_ids),
         "realSceneIds": list(real_ids),
         "syntheticSceneIds": list(synthetic_ids),
+        "dualGrouping": "real_scene_and_synthetic_family_v1",
+        "dualGroupIds": list(dual_group_ids),
+        "dualGroupByScene": dual_group_by_scene,
         "labelSplitsRead": ["train"],
         "selectionSplitsRead": [],
         "testRead": False,
@@ -560,7 +575,7 @@ def train_run(
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=int(total), eta_min=0.0
     )
-    dual_state = SceneDualState(scene_ids, dual_learning_rate, device="cpu")
+    dual_state = DualGroupState(dual_group_ids, dual_learning_rate, device="cpu")
     scene_updates = {scene_id: 0 for scene_id in scene_ids}
     global_step = 0
     if resume_payload is not None:
@@ -580,6 +595,10 @@ def train_run(
         scene_updates = saved_updates
         restore_rng_states(payload["rngStates"], data_rng)
         logger.info("resumed checkpoint=%s at global_step=%d", Path(resume), global_step)
+
+    dual_group_updates = {group_id: 0 for group_id in dual_group_ids}
+    for scene_id, update_count in scene_updates.items():
+        dual_group_updates[dual_group_by_scene[scene_id]] += int(update_count)
 
     require_probe = variant not in {"GENERIC_RELATION_28", "FULL_NO_FIELD_NLL"}
     store = _SceneDataStore(specs, policy, require_probe=require_probe)
@@ -621,6 +640,7 @@ def train_run(
                 probe_batch=probe_batch,
                 optimizer=optimizer,
                 dual_state=dual_state,
+                dual_group_id=dual_group_by_scene[assignment.scene_id],
                 device=device_obj,
                 quarter_turns=assignment.yaw_quarter_turns,
                 geometry_chunk_size=geometry_chunk_size,
@@ -628,11 +648,14 @@ def train_run(
                 scheduler=scheduler,
             )
             scene_updates[assignment.scene_id] += 1
+            dual_group_updates[result.dual_group_id] += 1
             global_step += 1
             row = {
                 "globalStep": global_step,
                 "sceneId": result.scene_id,
                 "sourceKind": assignment.source_kind,
+                "dualGroupId": result.dual_group_id,
+                "dualGroupUpdate": dual_group_updates[result.dual_group_id],
                 "sceneUpdate": scene_updates[assignment.scene_id],
                 "yawQuarterTurns": assignment.yaw_quarter_turns,
                 "loss": result.loss,
@@ -652,9 +675,10 @@ def train_run(
             if global_step % log_every == 0 or global_step == 1:
                 elapsed = max(time.monotonic() - started, 1e-6)
                 logger.info(
-                    "step=%d/%d scene=%s loss=%.6g field=%.6g risk_count=%.6g risk_visual=%.6g lr=%.4g %.2f step/s",
-                    global_step, total, result.scene_id, result.loss, result.loss_field,
-                    result.risk_count, result.risk_visual, optimizer.param_groups[0]["lr"],
+                    "step=%d/%d scene=%s dual_group=%s loss=%.6g field=%.6g risk_extra=%.6g risk_count=%.6g risk_visual=%.6g lambda_count=%.6g lambda_visual=%.6g lr=%.4g %.2f step/s",
+                    global_step, total, result.scene_id, result.dual_group_id,
+                    result.loss, result.loss_field, result.risk_extra, result.risk_count, result.risk_visual,
+                    result.lambda_count, result.lambda_visual, optimizer.param_groups[0]["lr"],
                     global_step / elapsed,
                 )
             if global_step % checkpoint_every == 0:
@@ -738,6 +762,8 @@ def preflight_training_assets(
         rows.append({
             "sceneId": spec.scene_id,
             "sourceKind": spec.source_kind,
+            "dualGroupId": spec.dual_group_id,
+            "syntheticFamily": spec.synthetic_family,
             "numUnits": scene.num_units,
             "validUnits": int(np.count_nonzero(scene.valid_unit_mask)),
             "trainPoseCount": int(scene.train_split.pose_indices.size),

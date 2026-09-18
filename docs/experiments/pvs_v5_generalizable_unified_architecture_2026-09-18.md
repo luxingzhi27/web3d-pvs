@@ -253,8 +253,10 @@ $$R_{count,s}\le0.02,\qquad R_{visual,s}\le0.01.$$
 视觉约束对应当前论文的主要安全目标；较松的普通实例约束只防止模型通过集中漏掉大量小单元
 换取漂亮的 weighted recall。它不替代 weighted recall，也不升级为新的校准硬门。
 
-每个 source scene 维护两个非负拉格朗日乘子，模型参数下降、乘子按预算违例投影上升。乘子只
-读取 source train 风险，不进入网络、不导出，也不由 held-out scene 估计。
+五个真实 source scene 各自维护两个非负拉格朗日乘子；96 个 synthetic train scene 不再各自
+维护稀疏更新的乘子，而是按五个固定结构 family 共享五组乘子。模型参数下降、乘子按所在约束组
+的预算违例投影上升。这样每个 synthetic family 可累计约 18k 次 dual 更新，而不是每个合成场景
+只有约 938 次。乘子只读取 source train 风险，不进入网络、不导出，也不由 held-out scene 估计。
 
 ### 5.2 唯一的表示监督
 
@@ -330,6 +332,12 @@ field coefficient:  0.25 fixed
 4. 在安全层级相同的前提下，五场景等权 CNOR、Useful Cull；
 5. 五场景等权 predicted/GT，越低越优。
 
+pilot 还必须输出训练动力学图，不作为提前取消既定矩阵的门控：横轴分别使用 real scene-local
+update 和 synthetic family-local update，纵轴绘制 `J_extra`、`R_count`、`R_visual`、
+`lambda_count`、`lambda_visual`。重点检查前 2k–5k update 内是否出现 `J_extra` 快速下降、
+两个 miss risk 急升而 dual 长期接近零。若所有学习率组合都出现该模式，再登记并比较 dual 初值
+或短暂约束预热；在观察到轨迹前不向正式目标加入 warmup、bias 修正或额外 loss。
+
 若参数扫描结果不好，可以在上述两个学习率轴的相邻数量级内追加一次最多 4 个成员的局部扫描，
 但不得改变损失项、数据权限或评价顺序。参数冻结后，正文 15 个消融和 45 个 LOSO 模型全部从头
 训练，不从 pilot checkpoint 微调。后续允许的“微调”仅指对同一冻结架构和数据协议调整已登记的
@@ -339,8 +347,9 @@ field coefficient:  0.25 fixed
 当前 step 涉及的唯一 unit 生成无图 `z_cache`，下游分块累计 `z_leaf.grad`，再按几何 chunk
 重算编码器并回传。减小 chunk 只能改变显存，不得改变 pose batch、候选、损失分母或更新数。
 
-checkpoint 保存共享模型、优化器、scheduler、每个 source 的两个乘子、数据流 RNG 和每个
-source 的更新次数。训练与恢复都拒绝未知 schema、旧 V4 loss 字段和 target label 权限错误。
+checkpoint 保存共享模型、优化器、scheduler、五个真实场景与五个 synthetic family 的乘子、
+场景到 dual group 的固定映射、数据流 RNG 和每个 source 的更新次数。训练与恢复都拒绝未知
+schema、旧的逐 synthetic-scene dual 状态、旧 V4 loss 字段和 target label 权限错误。
 
 ## 7. 精简消融
 
@@ -396,7 +405,7 @@ V5 核心训练总数为：
 = 60 models
 ```
 
-这 57 个模型覆盖三个核心方法主张与跨场景泛化；不执行两份草案中 156 个模型的完整矩阵。
+这 60 个模型覆盖四个核心方法主张与跨场景泛化；不执行两份草案中 156 个模型的完整矩阵。
 
 ## 9. 论文结果表
 
@@ -631,3 +640,5 @@ conda run --no-capture-output -n slm_pvs \
 当前 Python compiled artifact 仍是 FP32，V5 WebGPU/WASM query kernel 尚未实现。这两项属于正式
 runtime 实验前的系统任务：完成 FP16 导出、PyTorch FP32 对 FP16 安全重放和浏览器 parity 后，
 才能报告 148 B/unit 或 WebGPU/WASM 硬件延迟；此前只报告 Python FP32 实际字节和耗时。
+compiled manifest 固定写 `pythonInferenceReady=true`、`browserRuntimeReady=false`，不再使用含义
+不明确的 `runtimeReady`。

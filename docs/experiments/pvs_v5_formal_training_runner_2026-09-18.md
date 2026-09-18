@@ -15,15 +15,17 @@
 
 | 文件 | 内容 |
 |---|---|
-| `neural_instance_culling/model/v5/runner.py` | 正式 CLI、shared/LOSO source 目录、固定 schedule、AdamW+cosine、dual LR、日志、checkpoint、pilot/confirmation 矩阵 |
+| `neural_instance_culling/model/v5/runner.py` | 正式 CLI、shared/LOSO source 目录、固定 schedule、真实场景/合成 family dual、日志、checkpoint、pilot/confirmation 矩阵 |
 | `neural_instance_culling/model/v5/train.py` | `PBCE_OBJECTIVE` 不再推进约束目标的对偶变量；它只保留 Full 表示和 field supervision |
 | `neural_instance_culling/model/v5/training_data.py` | 支持合成场景 manifest 中逐 pose 的 disk/oriented-box 九点区域，保持 16D query 布局一致 |
 | `neural_instance_culling/model/v5/tests/test_v5_runner.py` | LOSO 权限、扫描矩阵、更新预算和 RNG 恢复测试 |
-| `neural_instance_culling/model/v5/README.md` | 当前入口和恢复协议 |
+| `neural_instance_culling/model/v5/analyze_training_dynamics.py` | 按 dual-group local update 汇总风险、乘子 CSV/JSON 和正式轨迹图 |
+| `neural_instance_culling/model/v5/README.md` | 当前入口、dual 分组和恢复协议 |
 | `neural_instance_culling/dataset/v5/generate_synthetic_datasets.py` | 将合成 probe manifest 固定写为 `external_hit_probe_manifest.json`，与唯一 loader schema 对齐 |
 | `neural_instance_culling/dataset/v5/tests/test_generate_synthetic_datasets.py` | 更新合成 probe manifest 断言 |
 
-没有修改表面采样算法，也没有重建或修改 HKUST/IFCBench 数据。
+表面采样和 PoseCSR/Color-ID GT 不变；relation manifest 与 external-hit probe 按统一 anchor 顺序
+和 target-centered depth 契约重建。
 
 ## 训练权限与场景协议
 
@@ -49,6 +51,10 @@ testRead: false
 一个 synthetic step，synthetic scene 由固定 seed 洗牌后均匀轮转。全局 yaw 旋转沿用
 `train_step` 的四个固定 quarter-turn。
 
+dual 不再按 101 个 source scene 分散维护。五个真实场景各自一组，96 个 synthetic train scene
+按五个 `structureFamily` 共享五组，合计 10 组。这样 synthetic 约 90,000 次更新会在五个 family
+内累积，而不是让每个 seed-level scene 的乘子只得到约 938 次更新。
+
 优化器为 AdamW，默认：
 
 ```text
@@ -63,6 +69,10 @@ gradient norm       = 5
 四 source LOSO 为 216,000 更新。pilot 使用总计 12,000 更新，confirmation 使用总计 36,000
 更新。参数扫描只改变 model LR `{1e-4, 2e-4, 4e-4}` 和 dual LR `{1e-3, 3e-3}`，weight decay、
 field coefficient、架构和数据权限固定。
+
+pilot 除 validation 结果外还必须检查前 2k–5k dual-group update 的 `riskExtra`、`riskCount`、
+`riskVisual`、`lambdaCount`、`lambdaVisual`。若出现 extra risk 快速下降、miss risk 上升且乘子
+长期接近零，才登记 dual 初值或短约束预热实验；不得在观察轨迹前继续增加损失项。
 
 ## 参数扫描输出
 
@@ -89,7 +99,8 @@ conda run --no-capture-output -n slm_pvs \
 model state
 AdamW state
 Cosine scheduler state
-per-source lambda_count/lambda_visual
+five real-scene plus five synthetic-family lambda_count/lambda_visual
+scene-to-dual-group mapping
 global step
 per-source scene update counts
 Python/NumPy/data/PyTorch/CUDA RNG state
@@ -106,10 +117,10 @@ scene update count 与 assignment 一致。数据 RNG 从 checkpoint 恢复，�
 本轮没有启动任何长训练。已通过：
 
 ```text
-V5 model tests       27 passed
-V5 benchmark tests   19 passed
+V5 model tests       32 passed
+V5 benchmark tests   20 passed
 registry tests        2 passed
-dataset tests         18 passed
+dataset tests         19 passed
 runner tests           6 passed
 ```
 

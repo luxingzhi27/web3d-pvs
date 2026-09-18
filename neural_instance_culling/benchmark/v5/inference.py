@@ -362,7 +362,8 @@ def compile_geometry(
             "device": str(requested_device),
         },
         "outputBytes": output_bytes,
-        "runtimeReady": True,
+        "pythonInferenceReady": True,
+        "browserRuntimeReady": False,
     }
     write_bundle_manifest(output / "manifest.json", manifest)
     return output / "manifest.json"

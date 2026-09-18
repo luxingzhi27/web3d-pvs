@@ -16,7 +16,7 @@ from v5.losses import (  # noqa: E402
     COUNT_BUDGET,
     FIELD_NLL_WEIGHT,
     VISUAL_BUDGET,
-    SceneDualState,
+    DualGroupState,
     constrained_pose_risks,
     external_hit_censor_survival,
     external_hit_event_density,
@@ -67,7 +67,7 @@ class ConstrainedRiskTests(unittest.TestCase):
         self.assertTrue(torch.allclose(selected.miss_visual, expected_visual))
 
 
-class SceneDualStateTests(unittest.TestCase):
+class DualGroupStateTests(unittest.TestCase):
     def test_loss_update_and_checkpoint_state(self) -> None:
         logits = torch.tensor([[-1.0, 0.5]], requires_grad=True)
         risks = constrained_pose_risks(
@@ -78,18 +78,18 @@ class SceneDualStateTests(unittest.TestCase):
             G_s=2.0,
             W_s=2.0,
         )
-        state = SceneDualState(["scene"], dual_lr=2.0, device="cpu")
+        state = DualGroupState(["group"], dual_lr=2.0, device="cpu")
         state.lambda_count[0] = 0.3
         state.lambda_visual[0] = 0.4
         field = torch.tensor(0.7, requires_grad=True)
-        loss = state.loss("scene", risks, field)
+        loss = state.loss("group", risks, field)
         expected = risks.extra + 0.3 * risks.miss_count + 0.4 * risks.miss_visual + FIELD_NLL_WEIGHT * field
         self.assertTrue(torch.allclose(loss, expected))
         loss.backward()
         self.assertIsNotNone(logits.grad)
         self.assertIsNotNone(field.grad)
 
-        state.update("scene", risks)
+        state.update("group", risks)
         self.assertAlmostEqual(
             float(state.lambda_count[0]),
             max(0.0, 0.3 + 2.0 * (float(risks.miss_count) - COUNT_BUDGET)),
@@ -99,11 +99,15 @@ class SceneDualStateTests(unittest.TestCase):
             max(0.0, 0.4 + 2.0 * (float(risks.miss_visual) - VISUAL_BUDGET)),
         )
         checkpoint = state.state_dict()
-        restored = SceneDualState(["scene"], dual_lr=0.1)
+        restored = DualGroupState(["group"], dual_lr=0.1)
         restored.load_state_dict(checkpoint)
         self.assertTrue(torch.equal(restored.lambda_count, state.lambda_count))
         self.assertTrue(torch.equal(restored.lambda_visual, state.lambda_visual))
         self.assertEqual(restored.dual_lr, state.dual_lr)
+        legacy = dict(checkpoint)
+        legacy["schema"] = "gcof-pvs-v5-dual-state-v1"
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            restored.load_state_dict(legacy)
 
 
 class CurrentStatusFieldTests(unittest.TestCase):

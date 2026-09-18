@@ -23,7 +23,7 @@ from neural_instance_culling.model.v5.runner import (
     seed_everything,
 )
 from neural_instance_culling.model.v5.core import GCOFPVSV5
-from neural_instance_culling.model.v5.losses import SceneDualState
+from neural_instance_culling.model.v5.losses import DualGroupState
 from neural_instance_culling.model.v5.train import checkpoint_payload
 
 
@@ -68,6 +68,11 @@ class V5RunnerPlanTests(unittest.TestCase):
         self.assertNotIn("sponza_64k", policy.to_manifest()["sourceTrainSceneIds"])
         self.assertFalse(policy.to_manifest()["allowHeldOutVisibilityLabels"])
         self.assertFalse(policy.to_manifest()["allowHeldOutExternalHitProbe"])
+        real = [spec for spec in specs if spec.source_kind == "real"]
+        synthetic = [spec for spec in specs if spec.source_kind == "synthetic"]
+        self.assertTrue(all(spec.dual_group_id == spec.scene_id for spec in real))
+        self.assertEqual(len({spec.dual_group_id for spec in synthetic}), 5)
+        self.assertTrue(all(spec.dual_group_id.startswith("synthetic_family:") for spec in synthetic))
 
     def test_scan_matrix_has_six_pilots_and_two_explicit_confirmations(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -117,7 +122,7 @@ class V5RunnerPlanTests(unittest.TestCase):
         model = GCOFPVSV5("FULL")
         optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-5)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=2)
-        dual = SceneDualState(["scene"], dual_lr=3e-3)
+        dual = DualGroupState(["scene"], dual_lr=3e-3)
         config = {
             "schema": RUN_SCHEMA,
             "protocol": "shared",
@@ -138,6 +143,8 @@ class V5RunnerPlanTests(unittest.TestCase):
             "probeUnitsPerStep": 512,
             "geometryChunkSize": 512,
             "sourceSceneIds": ["scene"],
+            "dualGrouping": "real_scene_and_synthetic_family_v1",
+            "dualGroupByScene": {"scene": "scene"},
         }
         rng = np.random.default_rng(17)
         payload = checkpoint_payload(

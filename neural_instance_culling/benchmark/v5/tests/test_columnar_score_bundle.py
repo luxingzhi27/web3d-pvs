@@ -283,6 +283,9 @@ class ColumnarScoreBundleTests(unittest.TestCase):
             self.assertGreaterEqual(geometry_payload["compileTiming"]["geometryEncodeSeconds"], 0.0)
             self.assertGreaterEqual(geometry_payload["compileTiming"]["relationFieldCompileSeconds"], 0.0)
             self.assertGreaterEqual(geometry_payload["compileTiming"]["totalSeconds"], 0.0)
+            self.assertTrue(geometry_payload["pythonInferenceReady"])
+            self.assertFalse(geometry_payload["browserRuntimeReady"])
+            self.assertNotIn("runtimeReady", geometry_payload)
             compiled = load_compiled_geometry(root / "geometry", expected_scene="fixture", expected_variant="FULL")
             validation_sidecar = infer_split(
                 checkpoint,

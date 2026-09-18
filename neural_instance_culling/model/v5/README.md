@@ -73,6 +73,19 @@ real scene 36,000 次更新，再使用其一半数量的 synthetic 更新，共
 source LOSO fold 共 216,000 次。参数扫描的 pilot 和 confirmation 分别是总计
 12,000 与 36,000 次更新。
 
+约束乘子按“真实场景独立、合成结构 family 共享”组织：五个真实场景各一组，96 个 synthetic
+train scene 按五个 `structureFamily` 共享五组。`train_metrics.jsonl` 每步记录 `dualGroupId`、
+`dualGroupUpdate`、三项风险和两个乘子，用于检查训练早期是否出现过度剔除后再迟滞恢复。
+
+pilot 完成后生成正式动力学 CSV、摘要和图：
+
+```bash
+conda run --no-capture-output -n slm_pvs \
+  python -m neural_instance_culling.model.v5.analyze_training_dynamics \
+  --metrics <pilot-run>/train_metrics.jsonl \
+  --output-dir <pilot-run>/training_dynamics --bin-width 100
+```
+
 ## 恢复与输出
 
 每个 run 目录写入：

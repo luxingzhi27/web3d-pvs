@@ -25,7 +25,7 @@ VISUAL_BUDGET = 0.01
 FIELD_NLL_WEIGHT = 0.25
 DISTANCE_GRID_COUNT = 13
 EXTERNAL_HIT_SCHEMA = "parallel_external_hit_target_depth_current_status-v2"
-DUAL_STATE_SCHEMA = "gcof-pvs-v5-dual-state-v1"
+DUAL_STATE_SCHEMA = "gcof-pvs-v5-dual-group-state-v2"
 _LN2 = math.log(2.0)
 
 
@@ -177,12 +177,12 @@ def constrained_pose_risks(
     return risks
 
 
-class SceneDualState:
-    """Two projected non-negative multipliers for every source scene."""
+class DualGroupState:
+    """Two projected multipliers for each registered constraint group."""
 
     def __init__(
         self,
-        scene_ids: Sequence[Hashable],
+        dual_group_ids: Sequence[Hashable],
         dual_lr: float,
         count_budget: float = COUNT_BUDGET,
         visual_budget: float = VISUAL_BUDGET,
@@ -198,20 +198,20 @@ class SceneDualState:
         self.count_budget = float(count_budget)
         self.visual_budget = float(visual_budget)
         self.device = torch.device("cpu" if device is None else device)
-        self.scene_ids = tuple(scene_ids)
-        if len(set(self.scene_ids)) != len(self.scene_ids):
-            raise ValueError("scene_ids must be unique")
-        self._scene_index = {scene_id: index for index, scene_id in enumerate(self.scene_ids)}
+        self.group_ids = tuple(dual_group_ids)
+        if len(set(self.group_ids)) != len(self.group_ids):
+            raise ValueError("dual_group_ids must be unique")
+        self._group_index = {group_id: index for index, group_id in enumerate(self.group_ids)}
         self.lambda_count = torch.zeros(
-            len(self.scene_ids), dtype=torch.float64, device=self.device
+            len(self.group_ids), dtype=torch.float64, device=self.device
         )
         self.lambda_visual = torch.zeros_like(self.lambda_count)
 
-    def _index(self, scene_id: Hashable) -> int:
+    def _index(self, group_id: Hashable) -> int:
         try:
-            return self._scene_index[scene_id]
+            return self._group_index[group_id]
         except KeyError as exc:
-            raise KeyError(f"unknown V5 source scene: {scene_id!r}") from exc
+            raise KeyError(f"unknown V5 dual group: {group_id!r}") from exc
 
     @staticmethod
     def _risk(risks: Any, *names: str) -> torch.Tensor:
@@ -226,12 +226,12 @@ class SceneDualState:
 
     def loss(
         self,
-        scene_id: Hashable,
+        group_id: Hashable,
         risks: ConstrainedPoseRisks,
         field_nll: torch.Tensor | float,
     ) -> torch.Tensor:
         """Return the exact Full loss for one scene and one optimizer step."""
-        index = self._index(scene_id)
+        index = self._index(group_id)
         extra = self._risk(risks, "extra", "J_extra")
         miss_count = self._risk(risks, "miss_count", "R_count")
         miss_visual = self._risk(risks, "miss_visual", "R_visual")
@@ -258,11 +258,11 @@ class SceneDualState:
 
     def update(
         self,
-        scene_id: Hashable,
+        group_id: Hashable,
         risks: ConstrainedPoseRisks,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply projected ascent using detached ``R_count``/``R_visual``."""
-        index = self._index(scene_id)
+        index = self._index(group_id)
         miss_count = self._risk(risks, "miss_count", "R_count")
         miss_visual = self._risk(risks, "miss_visual", "R_visual")
         count_value = float(miss_count.detach().item())
@@ -288,8 +288,8 @@ class SceneDualState:
         """Return checkpointable state without model gradients or device ties."""
         return {
             "schema": DUAL_STATE_SCHEMA,
-            "version": 1,
-            "scene_ids": list(self.scene_ids),
+            "version": 2,
+            "dual_group_ids": list(self.group_ids),
             "lambda_count": self.lambda_count.detach().cpu().clone(),
             "lambda_visual": self.lambda_visual.detach().cpu().clone(),
             "dual_lr": self.dual_lr,
@@ -300,15 +300,15 @@ class SceneDualState:
     def load_state_dict(self, state: Mapping[str, Any], strict: bool = True) -> None:
         if not isinstance(state, Mapping) or state.get("schema") != DUAL_STATE_SCHEMA:
             raise ValueError("unsupported V5 dual checkpoint schema")
-        if int(state.get("version", -1)) != 1:
+        if int(state.get("version", -1)) != 2:
             raise ValueError("unsupported V5 dual checkpoint version")
-        scene_ids = tuple(state.get("scene_ids", ()))
-        if strict and scene_ids != self.scene_ids:
-            raise ValueError("dual checkpoint scenes do not match current scene_ids")
+        group_ids = tuple(state.get("dual_group_ids", ()))
+        if strict and group_ids != self.group_ids:
+            raise ValueError("dual checkpoint groups do not match current dual_group_ids")
         count = torch.as_tensor(state.get("lambda_count"), dtype=torch.float64).reshape(-1)
         visual = torch.as_tensor(state.get("lambda_visual"), dtype=torch.float64).reshape(-1)
-        if count.numel() != len(scene_ids) or visual.numel() != len(scene_ids):
-            raise ValueError("dual checkpoint multipliers do not match scene_ids")
+        if count.numel() != len(group_ids) or visual.numel() != len(group_ids):
+            raise ValueError("dual checkpoint multipliers do not match dual_group_ids")
         if not bool(torch.isfinite(count).all() and torch.isfinite(visual).all()):
             raise ValueError("dual checkpoint multipliers are non-finite")
         if bool((count < 0.0).any()) or bool((visual < 0.0).any()):
@@ -321,12 +321,12 @@ class SceneDualState:
         if not math.isfinite(dual_lr) or dual_lr <= 0.0:
             raise ValueError("dual checkpoint dual_lr is invalid")
         if not strict:
-            self.scene_ids = scene_ids
-            self._scene_index = {scene_id: index for index, scene_id in enumerate(scene_ids)}
-            self.lambda_count = torch.zeros(len(scene_ids), dtype=torch.float64, device=self.device)
+            self.group_ids = group_ids
+            self._group_index = {group_id: index for index, group_id in enumerate(group_ids)}
+            self.lambda_count = torch.zeros(len(group_ids), dtype=torch.float64, device=self.device)
             self.lambda_visual = torch.zeros_like(self.lambda_count)
-        if len(scene_ids) != len(self.scene_ids):
-            raise ValueError("dual checkpoint scene count disagrees")
+        if len(group_ids) != len(self.group_ids):
+            raise ValueError("dual checkpoint group count disagrees")
         self.dual_lr = dual_lr
         with torch.no_grad():
             self.lambda_count.copy_(count.to(self.device))
@@ -697,7 +697,7 @@ __all__ = [
     "FIELD_NLL_WEIGHT",
     "VISUAL_BUDGET",
     "ConstrainedPoseRisks",
-    "SceneDualState",
+    "DualGroupState",
     "constrained_pose_risks",
     "external_hit_censor_survival",
     "external_hit_event_density",

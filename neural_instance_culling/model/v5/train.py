@@ -12,7 +12,7 @@ import torch
 
 from .core import GCOFPVSV5
 from .losses import (
-    SceneDualState,
+    DualGroupState,
     constrained_pose_risks,
     external_hit_nll,
     pbce_objective,
@@ -20,12 +20,13 @@ from .losses import (
 from .training_data import PoseBatch, ProbeBatch, V5SceneTrainingData
 
 
-CHECKPOINT_SCHEMA = "gcof-pvs-v5-training-checkpoint-v1"
+CHECKPOINT_SCHEMA = "gcof-pvs-v5-training-checkpoint-v2"
 
 
 @dataclass(frozen=True)
 class TrainStepResult:
     scene_id: str
+    dual_group_id: str
     loss: float
     loss_field: float
     risk_extra: float
@@ -147,7 +148,8 @@ def train_step(
     pose_batch: PoseBatch,
     probe_batch: ProbeBatch | None,
     optimizer: torch.optim.Optimizer,
-    dual_state: SceneDualState,
+    dual_state: DualGroupState,
+    dual_group_id: str,
     device: torch.device,
     quarter_turns: int,
     geometry_chunk_size: int = 512,
@@ -258,7 +260,7 @@ def train_step(
             field_loss,
         )
     else:
-        loss = dual_state.loss(scene.scene_id, risks, field_loss)
+        loss = dual_state.loss(dual_group_id, risks, field_loss)
 
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
@@ -282,10 +284,11 @@ def train_step(
     # Full representation and field supervision, but deliberately does not
     # optimize the constrained objective or advance its dual variables.
     if objective_name != "PBCE_OBJECTIVE":
-        dual_state.update(scene.scene_id, risks)
-    lambda_index = dual_state.scene_ids.index(scene.scene_id)
+        dual_state.update(dual_group_id, risks)
+    lambda_index = dual_state.group_ids.index(dual_group_id)
     return TrainStepResult(
         scene_id=scene.scene_id,
+        dual_group_id=str(dual_group_id),
         loss=float(loss.detach().item()),
         loss_field=float(field_loss.detach().item()),
         risk_extra=float(risks.extra.detach().item()),
@@ -304,7 +307,7 @@ def checkpoint_payload(
     model: GCOFPVSV5,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
-    dual_state: SceneDualState,
+    dual_state: DualGroupState,
     global_step: int,
     scene_updates: Mapping[str, int],
     rng_states: Mapping[str, Any],
