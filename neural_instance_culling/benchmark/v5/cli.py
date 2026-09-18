@@ -10,6 +10,7 @@ from .evaluation import evaluate_loso_matrix, evaluate_shared_matrix, evaluate_s
 from .inference import export_score_bundle
 from .scan_selection import read_json, select_scan_candidates, summarize_single_shared_run
 from .summary import summarize_loso, summarize_shared, write_summary
+from .streaming_export import export_streaming_score_sidecar
 
 
 def _add_evaluate_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -53,12 +54,26 @@ def _add_scan_parsers(subparsers: argparse._SubParsersAction) -> None:
     select.add_argument("--output", type=Path, required=True)
 
 
+def _add_streaming_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "export-streaming", help="convert one V5 scene to the cold-cache streaming score contract"
+    )
+    parser.add_argument("--bundle", type=Path, required=True)
+    parser.add_argument("--evaluation-summary", type=Path, required=True)
+    parser.add_argument("--scene", required=True)
+    parser.add_argument("--split", choices=("validation", "test"), required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--final-test", action="store_true")
+    parser.add_argument("--overwrite", action="store_true")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     _add_evaluate_parser(subparsers)
     _add_export_parser(subparsers)
     _add_scan_parsers(subparsers)
+    _add_streaming_parser(subparsers)
     return parser.parse_args(argv)
 
 
@@ -148,6 +163,21 @@ def main(argv: list[str] | None = None) -> None:
         _export(args)
     elif args.command == "evaluate-run":
         _evaluate_run(args)
+    elif args.command == "export-streaming":
+        manifest = export_streaming_score_sidecar(
+            bundle_manifest=args.bundle,
+            evaluation_summary=args.evaluation_summary,
+            scene=args.scene,
+            split=args.split,
+            output_dir=args.output_dir,
+            final_test=bool(args.final_test),
+            overwrite=bool(args.overwrite),
+        )
+        print(json.dumps({
+            "manifest": str(manifest),
+            "split": args.split,
+            "testRead": args.split == "test",
+        }, ensure_ascii=False))
     else:
         _select_scan(args)
 

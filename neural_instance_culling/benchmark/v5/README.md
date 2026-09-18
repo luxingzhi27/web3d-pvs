@@ -126,6 +126,20 @@ python -m neural_instance_culling.benchmark.v5.cli select-scan \
 selector 严格按 strict-LCB scene 数、mean-target scene 数、五场景等权 WR LCB、CNOR、
 Useful Cull、较低 predicted/GT 的登记顺序排序，只接受 calibration-selected validation 结果。
 
+把冻结 V5 validation/test logits 转成现有 cold-cache streaming 模拟器读取的连续概率 sidecar：
+
+```bash
+python -m neural_instance_culling.benchmark.v5.cli export-streaming \
+  --bundle <v5-bundle/manifest.json> \
+  --evaluation-summary <matching-validation-or-test-summary.json> \
+  --scene <scene-id> --split validation \
+  --output-dir <streaming-score-dir>
+```
+
+正式 test 追加 `--final-test`。该入口只从同一 `variant/seed/scene/split` 的评价行读取 calibration
+冻结 logit 阈值；实例 logits 和阈值统一经 sigmoid 转为概率。V5 排除的非渲染占位仅为保持原始
+PoseCSR 对齐而填入概率 0，并在 manifest 中显式登记。
+
 ## 测试
 
 ```bash

@@ -38,6 +38,10 @@ from neural_instance_culling.benchmark.v5.score_bundle import (
     FrozenPoseCSR,
     SceneScores,
 )
+from neural_instance_culling.benchmark.v5.streaming_export import (
+    _expand_to_frozen_candidates,
+    export_streaming_score_sidecar,
+)
 from neural_instance_culling.model.pose_csr_dataset import DIRECTIONAL_POSE_DTYPE
 from neural_instance_culling.model.v5.core import GCOFPVSV5
 from neural_instance_culling.model.v5.train import CHECKPOINT_SCHEMA
@@ -163,6 +167,22 @@ def _checkpoint(path: Path) -> Path:
 
 
 class ColumnarScoreBundleTests(unittest.TestCase):
+    def test_streaming_expansion_fills_only_declared_non_renderable_units(self) -> None:
+        probabilities = _expand_to_frozen_candidates(
+            np.asarray([0, 1, 2], dtype=np.uint32),
+            np.asarray([0, 2], dtype=np.uint32),
+            np.asarray([0.0, np.log(3.0)], dtype=np.float32),
+            (1,),
+        )
+        self.assertTrue(np.allclose(probabilities, [0.5, 0.0, 0.75]))
+        with self.assertRaises(ValueError):
+            _expand_to_frozen_candidates(
+                np.asarray([0, 1, 2], dtype=np.uint32),
+                np.asarray([0, 2], dtype=np.uint32),
+                np.asarray([0.0, 1.0], dtype=np.float32),
+                (),
+            )
+
     def test_parameter_scan_uses_registered_lexicographic_order(self) -> None:
         def summary(name: str, strict: int, cnor: float) -> dict:
             rows = []
@@ -317,6 +337,43 @@ class ColumnarScoreBundleTests(unittest.TestCase):
                 )
             bundle = V5Run.from_manifest(bundle_manifest)
             self.assertEqual(bundle.records("fixture", "validation").__class__.__name__, "_PoseScoreStream")
+            evaluation_summary = root / "validation_summary.json"
+            evaluation_summary.write_text(
+                json.dumps({
+                    "rows": [{
+                        "protocol": "shared",
+                        "variant": "FULL",
+                        "seed": 3,
+                        "scene": "fixture",
+                        "split": "validation",
+                        "threshold_mode": "target_calibrated",
+                        "threshold": 0.0,
+                        "qualification": "mean_target",
+                        "selection_split": "calibration",
+                        "selection_test_read": False,
+                        "test_read": False,
+                    }]
+                }),
+                encoding="utf-8",
+            )
+            streaming_manifest = export_streaming_score_sidecar(
+                bundle_manifest=bundle_manifest,
+                evaluation_summary=evaluation_summary,
+                scene="fixture",
+                split="validation",
+                output_dir=root / "streaming",
+            )
+            self.assertTrue(streaming_manifest.is_file())
+            streaming_meta = json.loads(streaming_manifest.read_text(encoding="utf-8"))
+            streaming_scores = np.load(root / "streaming/scores.npz", allow_pickle=False)
+            self.assertEqual(streaming_meta["thresholds"]["full"], 0.5)
+            self.assertEqual(streaming_meta["thresholdSources"]["full"], "checkpoint calibration")
+            self.assertEqual(streaming_scores["pose_ids"].tolist(), [2])
+            self.assertEqual(streaming_scores["pose_offsets"].tolist(), [0, 2])
+            self.assertEqual(streaming_scores["candidate_ids"].tolist(), [0, 1])
+            self.assertEqual(streaming_scores["full"].shape, (2,))
+            self.assertTrue(np.all(streaming_scores["full"] >= 0.0))
+            self.assertTrue(np.all(streaming_scores["full"] <= 1.0))
 
     def test_sidecar_is_float32_only_and_rejects_pose_csr_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
