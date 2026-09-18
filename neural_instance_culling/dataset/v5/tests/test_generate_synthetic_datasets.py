@@ -17,6 +17,7 @@ from neural_instance_culling.dataset.v5.generate_synthetic_datasets import (
     build_viewcells,
     expand_probe_distance_grid,
     generate_scene_dataset,
+    load_complete_scene_output,
     raycast_primitive_hits,
     select_catalog_scene_ids,
 )
@@ -159,6 +160,9 @@ class SyntheticDatasetGeneratorTest(unittest.TestCase):
                 render_height=9,
                 allow_small_scene=True,
             )
+            resumed = load_complete_scene_output(entry, root)
+            self.assertIsNotNone(resumed)
+            self.assertEqual(resumed["sceneId"], manifest["sceneId"])
             scene_root = root / "synthetic_test_scene"
             self.assertEqual(manifest["viewCells"]["count"], 4)
             self.assertEqual(set(manifest["viewCells"]["shapes"]), {"disk", "oriented_box"})

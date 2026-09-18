@@ -2017,6 +2017,50 @@ def generate_scene_dataset(
     return output_manifest
 
 
+def load_complete_scene_output(
+    scene_entry: Mapping[str, Any],
+    output_root: str | Path,
+) -> dict[str, Any] | None:
+    """Return a complete matching scene output, or ``None`` when absent."""
+
+    scene_id = str(scene_entry["sceneId"])
+    scene_root = Path(output_root) / scene_id
+    manifest_path = scene_root / "scene_manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"existing synthetic scene manifest is invalid: {manifest_path}") from exc
+    expected = {
+        "schema": SCENE_OUTPUT_SCHEMA,
+        "version": 1,
+        "sceneId": scene_id,
+        "seedSplit": str(scene_entry["split"]),
+        "unitCount": int(scene_entry["unitCount"]),
+        "streamingGranularityKiB": int(scene_entry["streamingGranularityKiB"]),
+    }
+    if not isinstance(manifest, Mapping) or any(manifest.get(key) != value for key, value in expected.items()):
+        raise ValueError(f"existing synthetic scene identity disagrees with catalog: {manifest_path}")
+    required = [
+        scene_root / "runtimeVisibilityMeta.json",
+        scene_root / "glbIndex.json",
+        scene_root / "pose_csr/dataset_meta.json",
+        scene_root / "compiled/surface/surface_manifest.json",
+        scene_root / "compiled/relation/relation_manifest.json",
+        scene_root / "compiled/compiled_manifest.json",
+    ]
+    if str(scene_entry["split"]) == "train":
+        required.append(scene_root / "compiled/probes/external_hit_probe_manifest.json")
+    missing = [str(path) for path in required if not path.is_file()]
+    if missing:
+        raise ValueError(
+            f"existing synthetic scene {scene_id} is incomplete despite its final manifest: "
+            + ", ".join(missing)
+        )
+    return dict(manifest)
+
+
 def build_dataset_manifest(
     catalog: Mapping[str, Any],
     *,
@@ -2134,6 +2178,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--render-height", type=int, default=DEFAULT_RENDER_HEIGHT)
     parser.add_argument("--scene-shard-index", type=int)
     parser.add_argument("--scene-shard-count", type=int)
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="validate and skip scenes that already have a complete matching final manifest",
+    )
     return parser.parse_args(argv)
 
 
@@ -2184,6 +2233,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     args.output_root.mkdir(parents=True, exist_ok=True)
     generated: list[str] = []
     for scene_id in selected:
+        if args.skip_existing and load_complete_scene_output(entries[scene_id], args.output_root) is not None:
+            print(f"skip complete {scene_id}", flush=True)
+            generated.append(scene_id)
+            continue
         print(f"generate {scene_id} device={device}", flush=True)
         generate_scene_dataset(
             entries[scene_id],
