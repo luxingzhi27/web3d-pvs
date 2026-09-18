@@ -108,6 +108,17 @@ candidate occurrence 除以 visible occurrence；`R_count(0)` 与 `R_visual(0)` 
 个 candidate-empty train pose，风险逆采样因子必须使用 eligible pose 数。该表只确认 pilot 必须
 检查早期动力学，不直接决定改变目标归一化、dual 初值或增加 warmup。
 
+全量 shared preflight 随后通过，共打开 5 个真实场景和 96 个 synthetic train scene，未读取
+calibration/validation/test。synthetic 的 `J_extra(0)` 分布为：最小 0.376、中位数 3.039、
+p95 13.595、最大 36.323、均值 4.788。五个 family 的均值分别为：城市街谷 3.594、工业管线
+与设备 9.087、校园庭院 2.460、重复/唯一混合杂物 6.966、房间走廊 1.930。工业 family 的最大值
+达到 36.323，因此 family-shared dual 和前期轨迹检查均为正式 pilot 的必要部分。
+
+使用正式 pose/probe batch 的 30-step shared smoke 通过，日志实际出现 10 个 dual group，
+synthetic 同 family 的 `dualGroupUpdate` 和乘子跨场景连续累积；checkpoint/run schema 为 v2。
+动力学工具成功输出 CSV、JSON 和 PNG。该 smoke 的余弦周期仅 30 step，不作为模型效果或
+收敛结论。
+
 ## Checkpoint 与日志
 
 `checkpoint_last.pt` 及 step checkpoint 保存：
