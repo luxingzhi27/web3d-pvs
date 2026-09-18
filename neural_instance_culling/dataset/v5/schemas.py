@@ -383,6 +383,8 @@ def validate_probe_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
             or scene_num_units < value["numUnits"]
         ):
             raise SchemaError("columnar probe sceneNumUnits is invalid")
+        if scene_num_units is not None and any(unit_id >= scene_num_units for unit_id in unit_ids):
+            raise SchemaError("columnar probe unitId exceeds sceneNumUnits")
         if "shard" in value:
             shard = _require_mapping(value["shard"], "probe shard")
             _require_exact_keys(shard, {"index", "count", "selectedUnitIds", "complete"}, name="probe shard")

@@ -17,6 +17,7 @@ from .schemas import EXTERNAL_HIT_PROBE_SCHEMA, validate_probe_manifest
 SURFACE_STARTS_PER_UNIT = 16
 DIRECTIONS_PER_UNIT = 36
 RAYS_PER_UNIT = SURFACE_STARTS_PER_UNIT * DIRECTIONS_PER_UNIT
+PROBE_OBSERVATIONS_PER_UNIT = 16
 PROBE_DISTANCE_RATIOS = np.asarray(
     [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
     dtype=np.float32,
@@ -160,10 +161,65 @@ def sample_current_status_observations(
     }
 
 
+def sample_grouped_current_status_observations(
+    table: ExternalHitProbeTable,
+    rng: np.random.Generator,
+    *,
+    unit_count: int,
+    observations_per_unit: int = PROBE_OBSERVATIONS_PER_UNIT,
+) -> dict[str, np.ndarray]:
+    """Sample an equal number of unbiased ray-distance pairs per sampled unit.
+
+    Every probe unit owns the same 576-ray block, so uniform unit sampling
+    followed by uniform within-block sampling has the same observation
+    marginal as uniform full-table row sampling.  Grouping observations keeps
+    the field batch at its formal size while bounding the number of geometry
+    rows that need to be encoded by one optimizer step.
+    """
+
+    if unit_count <= 0 or observations_per_unit <= 0:
+        raise ValueError("probe unit and per-unit observation counts must be positive")
+    if table.row_count % RAYS_PER_UNIT:
+        raise ValueError("probe table rows do not form complete per-unit ray blocks")
+    probe_unit_count = table.row_count // RAYS_PER_UNIT
+    if probe_unit_count <= 0:
+        raise ValueError("probe table contains no units")
+    block_ids = rng.choice(
+        probe_unit_count,
+        size=unit_count,
+        replace=probe_unit_count < unit_count,
+    ).astype(np.int64, copy=False)
+    offsets = rng.integers(
+        0,
+        RAYS_PER_UNIT,
+        size=(unit_count, observations_per_unit),
+        dtype=np.int64,
+    )
+    rows = (block_ids[:, None] * RAYS_PER_UNIT + offsets).reshape(-1)
+    ratio_ids = rng.integers(
+        0,
+        PROBE_DISTANCE_RATIOS.size,
+        size=rows.size,
+        dtype=np.int64,
+    )
+    max_distance = np.asarray(table.max_distances[rows], dtype=np.float32)
+    radius = max_distance / np.float32(1024.0)
+    distance = radius * PROBE_DISTANCE_RATIOS[ratio_ids]
+    hit = np.asarray(table.hit_distances[rows], dtype=np.float32)
+    events = np.isfinite(hit) & (hit <= distance)
+    return {
+        "unit_ids": np.asarray(table.unit_ids[rows], dtype=np.int64),
+        "directions": np.asarray(table.directions[rows], dtype=np.float32),
+        "distances": distance.astype(np.float32, copy=False),
+        "events": events.astype(np.float32),
+    }
+
+
 __all__ = [
     "DIRECTIONS_PER_UNIT",
     "ExternalHitProbeTable",
     "PROBE_DISTANCE_RATIOS",
+    "PROBE_OBSERVATIONS_PER_UNIT",
     "RAYS_PER_UNIT",
     "SURFACE_STARTS_PER_UNIT",
     "fibonacci_sphere_directions",
@@ -171,4 +227,5 @@ __all__ = [
     "load_probe_table",
     "make_probe_manifest",
     "sample_current_status_observations",
+    "sample_grouped_current_status_observations",
 ]

@@ -133,6 +133,9 @@ class V5RunnerPlanTests(unittest.TestCase):
             "scheduleSeed": 0,
             "poseCount": 4,
             "probeCount": 8192,
+            "probeSampling": "uniform_unit_grouped_ray_distance_v1",
+            "probeObservationsPerUnit": 16,
+            "probeUnitsPerStep": 512,
             "geometryChunkSize": 512,
             "sourceSceneIds": ["scene"],
         }

@@ -348,13 +348,34 @@ try {
   });
   assert.equal(shard0.manifest.numUnits, 1);
   assert.equal(shard1.manifest.numUnits, 1);
+  // Simulate a scene ID space with one degenerate placeholder.  Complete
+  // shards cover the valid units [0,2], while sceneNumUnits remains three.
+  for (const shard of [shard0, shard1]) {
+    shard.manifest.sceneNumUnits = 3;
+  }
+  shard1.manifest.unitIds = [2];
+  shard1.manifest.shard.selectedUnitIds = [2];
+  fs.writeFileSync(
+    path.join(shard1.outputDir, shard1.manifest.files.unitIds),
+    Buffer.from(new Uint32Array(16 * 36).fill(2).buffer),
+  );
+  for (const shard of [shard0, shard1]) {
+    fs.writeFileSync(
+      shard.manifestPath,
+      `${JSON.stringify(shard.manifest, null, 2)}\n`,
+      'utf8',
+    );
+  }
   const merged = mergeExternalHitProbeShards({
     shardDirs: [shard1.outputDir, shard0.outputDir],
     outputDir: path.join(root, 'merged'),
   });
   const mergedAsset = readColumnarProbeAsset(merged.outputDir, merged.manifest);
+  assert.equal(merged.manifest.numUnits, 2);
+  assert.equal(merged.manifest.sceneNumUnits, 3);
+  assert.deepEqual(merged.manifest.unitIds, [0, 2]);
   assert.deepEqual(Array.from(mergedAsset.values.unitIds.slice(0, 16 * 36)), new Array(16 * 36).fill(0));
-  assert.deepEqual(Array.from(mergedAsset.values.unitIds.slice(16 * 36)), new Array(16 * 36).fill(1));
+  assert.deepEqual(Array.from(mergedAsset.values.unitIds.slice(16 * 36)), new Array(16 * 36).fill(2));
   assert.deepEqual(
     Array.from(mergedAsset.values.hitDistances),
     Array.from(fullAsset.values.hitDistances),

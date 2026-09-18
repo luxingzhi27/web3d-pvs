@@ -118,7 +118,11 @@ Universal final:      5 x 36,000 real + 90,000 synthetic = 270,000 updates
 ```
 
 每步从当前 scene 均匀采样 4 个 candidate 非空 pose，保留 GT=0 的纯负 pose，并使用全部候选；
-同时采样 8192 个该 scene 的 field probe observation。主训练不使用 ambiguity hard sampling。
+同时采样 8192 个该 scene 的 field probe observation。实现固定先均匀抽取 512 个 probe unit，
+再从每个 unit 的 576 条 ray 与 13 个距离档位中均匀抽取 16 个 observation。由于每个有效 unit
+拥有相同数量的 ray，该分组抽样与全表逐 observation 均匀抽样具有相同边缘分布，同时将每步
+因 field 监督引入的唯一几何 unit 上界固定为 512；它不减少监督数量，也不做 event balancing
+或困难样本挖掘。主训练不使用 ambiguity hard sampling。
 
 训练对整个 scene、相机和几何同步应用固定序列的全局 yaw 旋转，标签不变，用于减少世界朝向
 记忆。等比例缩放和平移只做一致性测试，不作为扩大样本数量的手段。

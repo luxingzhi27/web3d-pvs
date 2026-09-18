@@ -13,8 +13,9 @@ import torch
 
 from neural_instance_culling.dataset.v5.build_external_hit_probes import (
     ExternalHitProbeTable,
+    PROBE_OBSERVATIONS_PER_UNIT,
     load_probe_table,
-    sample_current_status_observations,
+    sample_grouped_current_status_observations,
 )
 from neural_instance_culling.dataset.v5.permissions import FoldAccessPolicy
 from neural_instance_culling.model.common.runtime_meta import load_runtime_meta
@@ -376,22 +377,21 @@ class V5SceneTrainingData:
     ) -> ProbeBatch:
         if self.probe_table is None:
             raise ValueError(f"{self.scene_id} has no authorized external-hit probe table")
-        chunks: dict[str, list[np.ndarray]] = {
-            "unit_ids": [], "directions": [], "distances": [], "events": []
-        }
-        accepted = 0
-        while accepted < observation_count:
-            values = sample_current_status_observations(
-                self.probe_table, rng, count=observation_count - accepted
+        if observation_count <= 0 or observation_count % PROBE_OBSERVATIONS_PER_UNIT:
+            raise ValueError(
+                f"probe observation count must be a positive multiple of "
+                f"{PROBE_OBSERVATIONS_PER_UNIT}"
             )
-            valid = self.valid_unit_mask[values["unit_ids"]]
-            for key in chunks:
-                chunks[key].append(values[key][valid])
-            accepted += int(np.count_nonzero(valid))
-        values = {
-            key: np.concatenate(parts, axis=0)[:observation_count]
-            for key, parts in chunks.items()
-        }
+        values = sample_grouped_current_status_observations(
+            self.probe_table,
+            rng,
+            unit_count=observation_count // PROBE_OBSERVATIONS_PER_UNIT,
+            observations_per_unit=PROBE_OBSERVATIONS_PER_UNIT,
+        )
+        if not bool(self.valid_unit_mask[values["unit_ids"]].all()):
+            raise ValueError(
+                f"{self.scene_id} probe table contains a degenerate or excluded unit"
+            )
         return ProbeBatch(
             unit_ids=values["unit_ids"],
             directions=values["directions"],

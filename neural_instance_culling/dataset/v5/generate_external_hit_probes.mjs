@@ -888,6 +888,7 @@ export function validateProbeManifest(manifest) {
     && value <= UINT32_MAX && (index === 0 || value > manifest.unitIds[index - 1])), 'probe unitIds must be sorted and unique');
   if (manifest.sceneNumUnits !== undefined) {
     assert(Number.isInteger(manifest.sceneNumUnits) && manifest.sceneNumUnits >= manifest.numUnits, 'probe sceneNumUnits is invalid');
+    assert(manifest.unitIds.every((value) => value < manifest.sceneNumUnits), 'probe unit ID exceeds sceneNumUnits');
   }
   assert(manifest.storage === 'columnar_memmap_little_endian_v1', 'probe storage is invalid');
   assert(manifest.eventEncoding === 'finite_hit_distance_is_event', 'probe event encoding is invalid');
@@ -1410,12 +1411,27 @@ export function mergeExternalHitProbeShards({ shardDirs, outputDir, manifestPath
     ...readManifestForDirectory(path.resolve(directory)),
   }));
   const first = shards[0].manifest;
+  const shardCount = first.shard?.count;
+  assert(Number.isInteger(shardCount) && shardCount === shards.length, 'merge requires every declared shard');
+  const shardIndices = new Set();
   for (const shard of shards) {
     const manifest = shard.manifest;
     assert(manifest.schema === first.schema && manifest.sceneId === first.sceneId, 'shards disagree on scene');
     assert(manifest.distanceRatios.join(',') === first.distanceRatios.join(','), 'shards disagree on distance grid');
     assert(manifest.storage === first.storage, 'shards disagree on storage');
     assert(manifest.rowCount === manifest.numUnits * RAYS_PER_UNIT, 'shard rowCount is invalid');
+    assert(manifest.sceneNumUnits === first.sceneNumUnits, 'shards disagree on scene unit count');
+    assert(manifest.shard?.count === shardCount, 'shards disagree on shard count');
+    assert(Number.isInteger(manifest.shard?.index), 'shard index is missing');
+    assert(!shardIndices.has(manifest.shard.index), `duplicate shard index ${manifest.shard.index}`);
+    assert(sameStringArray(
+      (manifest.shard.selectedUnitIds || []).map(String),
+      manifest.unitIds.map(String),
+    ), 'shard selectedUnitIds disagree with unitIds');
+    shardIndices.add(manifest.shard.index);
+  }
+  for (let index = 0; index < shardCount; index += 1) {
+    assert(shardIndices.has(index), `missing shard index ${index}`);
   }
   const unitBlocks = new Map();
   const unitIdsInOrder = [];
@@ -1434,9 +1450,6 @@ export function mergeExternalHitProbeShards({ shardDirs, outputDir, manifestPath
   }
   unitIdsInOrder.sort((left, right) => left - right);
   assert(unitIdsInOrder.length > 0, 'shards contain no units');
-  if (first.sceneNumUnits !== undefined) {
-    assert(unitIdsInOrder.length === first.sceneNumUnits, 'shards do not cover every scene unit');
-  }
   const targetDir = path.resolve(outputDir);
   const targetManifestPath = path.resolve(manifestPath || path.join(targetDir, 'external_hit_probe_manifest.json'));
   const targetManifest = makeProbeManifest({

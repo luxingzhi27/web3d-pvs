@@ -43,6 +43,9 @@ from neural_instance_culling.dataset.v5.permissions import (
     make_loso_training_policy,
     make_universal_training_policy,
 )
+from neural_instance_culling.dataset.v5.build_external_hit_probes import (
+    PROBE_OBSERVATIONS_PER_UNIT,
+)
 from neural_instance_culling.dataset.v5.synthetic_scene_manifest import (
     generate_synthetic_scene_manifest,
 )
@@ -391,6 +394,7 @@ def _resume_contract(config: Mapping[str, Any]) -> dict[str, Any]:
         "modelLearningRate", "dualLearningRate", "weightDecay",
         "totalUpdates", "realUpdatesPerScene", "scheduleSeed",
         "poseCount", "probeCount", "geometryChunkSize", "sourceSceneIds",
+        "probeSampling", "probeObservationsPerUnit",
     )
     return {key: config.get(key) for key in keys}
 
@@ -461,6 +465,10 @@ def train_run(
         raise ValueError("PBCE_OBJECTIVE is a shared ablation only")
     if checkpoint_every <= 0 or log_every <= 0 or pose_count <= 0 or probe_count <= 0:
         raise ValueError("checkpoint/log/pose/probe counts must be positive")
+    if probe_count % PROBE_OBSERVATIONS_PER_UNIT:
+        raise ValueError(
+            f"probe_count must be a multiple of {PROBE_OBSERVATIONS_PER_UNIT}"
+        )
     if model_learning_rate <= 0.0 or dual_learning_rate <= 0.0 or weight_decay < 0.0:
         raise ValueError("optimizer parameters are invalid")
     device_obj = torch.device(device)
@@ -502,6 +510,9 @@ def train_run(
         "scheduleSeed": schedule_seed,
         "poseCount": int(pose_count),
         "probeCount": int(probe_count),
+        "probeSampling": "uniform_unit_grouped_ray_distance_v1",
+        "probeObservationsPerUnit": PROBE_OBSERVATIONS_PER_UNIT,
+        "probeUnitsPerStep": int(probe_count) // PROBE_OBSERVATIONS_PER_UNIT,
         "geometryChunkSize": int(geometry_chunk_size),
         "sourceSceneIds": list(scene_ids),
         "realSceneIds": list(real_ids),

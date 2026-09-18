@@ -10,6 +10,7 @@ import numpy as np
 from neural_instance_culling.dataset.v5.build_external_hit_probes import (
     make_probe_manifest,
     load_probe_table,
+    sample_grouped_current_status_observations,
     sample_current_status_observations,
 )
 from neural_instance_culling.dataset.v5.permissions import (
@@ -40,6 +41,14 @@ class ExternalHitProbePermissionTest(unittest.TestCase):
             table = load_probe_table(root, policy=policy)
             sampled = sample_current_status_observations(table, np.random.default_rng(7), count=32)
             self.assertEqual(sampled["unit_ids"].shape, (32,))
+            grouped = sample_grouped_current_status_observations(
+                table,
+                np.random.default_rng(7),
+                unit_count=3,
+                observations_per_unit=16,
+            )
+            self.assertEqual(grouped["unit_ids"].shape, (48,))
+            self.assertEqual(np.unique(grouped["unit_ids"]).tolist(), [0])
             held_out_manifest = dict(manifest)
             held_out_manifest["sceneId"] = "held_out_scene"
             (root / "external_hit_probe_manifest.json").write_text(
