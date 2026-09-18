@@ -91,6 +91,23 @@ conda run --no-capture-output -n slm_pvs \
 `evaluate-run` 生成五场景结果，最后由 `select-scan` 执行登记的词典序。pilot 固定选两名进入
 36k confirmation；confirmation 用相同 selector 选出一组优化器参数。该链路没有 test 入口。
 
+### 零 logit 风险尺度预检
+
+2026-09-18 仅遍历五个真实场景 train split，得到以下解析初值。`J_extra(0)` 是 train negative
+candidate occurrence 除以 visible occurrence；`R_count(0)` 与 `R_visual(0)` 均为 1。
+
+| 场景 | Train pose | Eligible pose | Candidate occurrence | Visible occurrence | J_extra(0) |
+|---|---:|---:|---:|---:|---:|
+| HKUST | 5,926 | 5,926 | 30,225,797 | 641,983 | 46.081927 |
+| IFCBench/Metropolis | 19,647 | 19,491 | 196,664,373 | 18,735,362 | 9.496961 |
+| Sponza 64K | 4,800 | 4,800 | 425,237 | 66,657 | 5.379480 |
+| Viking Village 64K | 1,944 | 1,944 | 1,854,657 | 365,477 | 4.074620 |
+| Big City 64K | 11,580 | 10,141 | 25,452,553 | 3,734,437 | 5.815633 |
+
+这说明 HKUST 的训练早期 extra-risk 梯度尺度尤其大；同时 IFCBench 有 156 个、Big City 有 1,439
+个 candidate-empty train pose，风险逆采样因子必须使用 eligible pose 数。该表只确认 pilot 必须
+检查早期动力学，不直接决定改变目标归一化、dual 初值或增加 warmup。
+
 ## Checkpoint 与日志
 
 `checkpoint_last.pt` 及 step checkpoint 保存：
